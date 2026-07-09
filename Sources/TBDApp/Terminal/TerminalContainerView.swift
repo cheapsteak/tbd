@@ -189,15 +189,6 @@ struct SingleWorktreeView: View {
 
                 Divider()
 
-                // Thin banner when the active tab's terminal has a scheduled
-                // auto-resume: the wide "⏳ resumes ..." text used to live in
-                // the tab label (inflating tab width), now shown here once
-                // per active tab instead of per background tab.
-                if let resumeAt = activeTabTerminal?.pendingResumeAt {
-                    ScheduledResumeBanner(resumeAt: resumeAt)
-                    Divider()
-                }
-
                 // Thin header while a blocking pre-session hook runs and the
                 // user is watching it: the worktree is still `.creating`, so
                 // explain why no agent terminal exists yet.
@@ -209,11 +200,21 @@ struct SingleWorktreeView: View {
                 // Split layout view for the active tab's layout. Publish its
                 // measured size to MainAreaSizeKey so the daemon-side tmux
                 // resize matches the actual SwiftTerm pane area (tab bar +
-                // divider above are excluded).
+                // divider above and the resume banner below are excluded).
                 layoutContent(worktree: worktree)
                     .background(GeometryReader { geometry in
                         Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
                     })
+
+                // Thin footer when the active tab's terminal has a scheduled
+                // auto-resume: the wide "⏳ resumes ..." text used to live in
+                // the tab label (inflating tab width), now shown here at the
+                // bottom of the pane once per active tab instead of per
+                // background tab.
+                if let resumeAt = activeTabTerminal?.pendingResumeAt {
+                    Divider()
+                    ScheduledResumeBanner(resumeAt: resumeAt)
+                }
             }
             .sheet(isPresented: $showAccountPicker) {
                 AccountPickerSheet { profileID in
@@ -315,10 +316,11 @@ struct SingleWorktreeView: View {
 
 // MARK: - ScheduledResumeBanner
 
-/// Slim header bar shown when the active tab's terminal has a scheduled
-/// auto-resume (session limit hit, TBD will type "continue" at `resumeAt`).
-/// Replaces the wide per-tab label text that used to inflate tab width;
-/// background tabs still signal via a bare "⏳" glyph in the tab label.
+/// Slim footer bar shown at the bottom of the pane when the active tab's
+/// terminal has a scheduled auto-resume (session limit hit, TBD will type
+/// "continue" at `resumeAt`). Replaces the wide per-tab label text that used
+/// to inflate tab width; background tabs still signal via a bare "⏳" glyph
+/// in the tab label.
 private struct ScheduledResumeBanner: View {
     let resumeAt: Date
 
