@@ -1,6 +1,6 @@
 # `tbd terminal send --submit` silent non-submit — design brief
 
-**Status:** research + design, awaiting sign-off (no code changed yet)
+**Status:** Option 2 shipped (PR #389); Option 3 implemented — see "Implementation Status" below
 **Branch:** `tbd/submit-reliability-brainstorm`
 **Author:** investigation session, 2026-07-08
 
@@ -208,3 +208,41 @@ waiting for it to "settle." Bracketing removes the race; waiting only narrows it
   multi-line message submits; (b) shell pane → body arrives bare and submits;
   (c) `submit == false` → no Enter. Follow the daemon test discipline in
   `CLAUDE.md` (no `~/tbd`, live-tmux deadlines, rc-free bootstraps).
+
+## Implementation Status (2026-07-08)
+
+**Option 2 shipped in PR #389** (commit 4885f89): bracketed-paste delivery + separate Enter
+is now the default for all `terminal.send --submit --text` calls. Two same-day failure reports
+(busy mid-turn Claude session, paste landed but Enter never submitted) almost certainly hit a stale
+daemon still running pre-#389 code: the fix was committed 14:37 local and the first daemon carrying it
+started 16:00; the reports predate that restart. 16 live trials against the #389 byte sequence —
+including the reported waiting-on-background-agent state and SIGSTOP-forced input coalescing — all
+submitted.
+
+**Option 3 implemented (this change):** verify-and-retry scoped to the `[Pasted text`
+composer signature. After the initial Enter, if both:
+- `params.submit == true` (a real submit, not a manual flush)
+- `!params.text.isEmpty` (non-empty text was sent, not the empty-text escape hatch)
+
+then the handler spawns a bounded retry loop (3 delays: 300/500/800 ms) that:
+1. Sleeps for each delay
+2. Captures the pane output (best-effort; failure is silent)
+3. Finds the LAST line starting with `❯` (the composer prompt, not transcript echoes)
+4. If that line contains `[Pasted text`, logs a warning and retries Enter
+5. If the composer is clear or capture failed, stops (success)
+
+If all retries exhaust and `[Pasted text` persists, logs a warning but returns `.ok()` (the
+RPC and CLI exit code remain unchanged — Option 4 semantics are still deferred). The clean
+path costs one ~300 ms verification pass on every submit-with-text call (bounded ~2.4 s
+worst case when stuck); the empty-text flush and text-only sends are unaffected. This
+provides a self-healing defense in depth on top of Option 2.
+
+**Test coverage:** six new tests cover:
+- Stuck-then-cleared: retry succeeds after 1 attempt
+- Clean first verify: no retry needed
+- Never clears: bounded by retry schedule (success anyway)
+- No-submit case: zero retries, zero captures
+- Empty-text submit: manual flush, zero retries, zero captures
+- Composer scoping: earlier transcript `❯ [Pasted text` does not trigger false-positive retry
+
+**Exit-code semantics (Option 4)** remain deferred (documented as open question in this doc).

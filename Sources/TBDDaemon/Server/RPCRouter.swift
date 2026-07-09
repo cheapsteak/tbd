@@ -71,6 +71,9 @@ public final class RPCRouter: Sendable {
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
+    /// Delays between attempts to verify a terminal send's submit. Default schedule
+    /// for production; tests inject shorter delays to avoid multi-second test runs.
+    let submitVerifyDelays: [Duration]
 
     public init(
         db: TBDDatabase,
@@ -86,7 +89,8 @@ public final class RPCRouter: Sendable {
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator()
+        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
+        submitVerifyDelays: [Duration] = [.milliseconds(300), .milliseconds(500), .milliseconds(800)]
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -95,6 +99,7 @@ public final class RPCRouter: Sendable {
         self.startTime = startTime
         self.subscriptions = subscriptions
         self.prManager = prManager
+        self.submitVerifyDelays = submitVerifyDelays
         let resolvedModelProfileResolver = modelProfileResolver ?? ModelProfileResolver(
             profiles: db.modelProfiles,
             repos: db.repos,
