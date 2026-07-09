@@ -73,6 +73,12 @@ Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.a
 
 This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in the dedicated `lint` CI job and the pre-push git hook, both invoking a Homebrew-installed `swiftlint --strict` directly. To lint manually: `swiftlint --strict`. Prerequisite: `brew install swiftlint`. See `.swiftlint.yml`.
 
+### No TUI screen-scraping
+
+Never infer an agent's state by parsing its rendered terminal screen — tmux `capture-pane` text, composer glyphs like `❯`, placeholder or status strings. Screen text is a display surface, not an API: scraping breaks *silently* when the TUI changes copy or rendering, couples TBD to one agent version, and sits at the wrong layer. Get agent state from machine interfaces instead: Claude Code hooks, transcript JSONL, tmux control-mode events, process exit codes, or TBD's own DB/RPC state. (Cautionary tale: PR #398 verified submits by scanning the composer line for `[Pasted text` — it defended an unreachable state and was removed as dead code.)
+
+Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui_scraping_literals`, `capture_pane_allowlist`), which run in the `lint` CI job and the pre-push hook. Three sanctioned scrapers predate this rule and are excluded with comments (interactive `/login` driving, the pending-input hibernation rail, the embedded Nightwatch babysitter) — they should eventually migrate off screen text. Adding a **new** exclusion requires a compelling justification in the PR description; the PR review gate treats unjustified additions as High severity.
+
 ### Changing the PR-review merge gate
 `claude-review` is a required check on `main`, produced by `.github/workflows/claude-code-review.yml`. Before touching that workflow or its `claude-review-hooks/`, read [`docs/pr-review-gate.md`](docs/pr-review-gate.md). Two traps it documents: the workflow runs on `pull_request_target` and **must** pass `github_token` (the OIDC app-token exchange 401s on that trigger), and changing the workflow's *trigger event* requires a one-time **admin merge** (such a PR matches neither the old nor new event, so no review runs and the required check never reports).
 
