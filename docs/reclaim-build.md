@@ -13,6 +13,14 @@ The script itself only reclaims disk from **active, idle** worktrees:
 
 Worktrees with a running `swift-*` build process are never touched. Archived worktrees are already reclaimed by `git worktree remove`.
 
+### Claude agent worktrees
+
+`isolation: "worktree"` subagents and Workflow runs make Claude Code create their own git worktrees under `<repo-root>/.claude/worktrees/agent-*` and `<repo-root>/.claude/worktrees/wf_*`. These are real git worktrees — visible in `git worktree list` — but they are **not** TBD-managed, so `tbd worktree list` never sees them and the reaper used to skip them entirely.
+
+They accumulate because Claude Code only auto-removes an agent worktree if it ends up unchanged; the moment an agent commits, the worktree persists (by design, so the commit/branch survives), and its gitignored `.build` persists with it. Nothing else ever cleans these up. One incident: 17 such worktrees, all idle 6+ days, had accumulated 36 GiB before being hand-deleted.
+
+The reaper now finds them too: for each repo root derived from the TBD worktree list (via `git -C <wt> rev-parse --path-format=absolute --git-common-dir`, deduped), it globs `<root>/.claude/worktrees/*/`, applies the same `Package.swift` gate, and feeds the results through the identical tier logic. They have no TBD session concept, so they're always treated as "no live session" — Tier 2 eligible on idleness alone. All the same safety rails (`has_active_build`, `RECLAIM_ACTIVE_GRACE`) still apply.
+
 ### Re-enabling background indexing
 A project-local `.sourcekit-lsp/config.json` takes precedence over user-global SourceKit-LSP config. To get cross-file LSP back on your machine without affecting the committed default: set `"backgroundIndexing": true` in the file locally, then run `git update-index --skip-worktree .sourcekit-lsp/config.json` so the flip is never committed. Alternatively, just delete the file locally.
 
@@ -34,6 +42,17 @@ scripts/reclaim-build.sh             # reclaim now
 
 ## Tuning
 `RECLAIM_T1_SECONDS` (default 21600) and `RECLAIM_T2_SECONDS` (default 172800) override the thresholds.
+
+## Env vars
+| Var | Default | Purpose |
+|---|---|---|
+| `RECLAIM_WT_JSON` | run `tbd worktree list --json` | Fixture file for the TBD worktree list (tests) |
+| `RECLAIM_PS_CMD` | `ps -axo pid,args` | Fixture command for the active-build-process scan (tests) |
+| `RECLAIM_T1_SECONDS` | `21600` (6h) | Tier-1 (`index-build/`) idle threshold |
+| `RECLAIM_T2_SECONDS` | `172800` (48h) | Tier-2 (whole `.build`) idle threshold |
+| `RECLAIM_ACTIVE_GRACE` | `600` (10m) | Skip a `.build` whose newest mtime is more recent than this, even if a `PLAN` was made |
+| `RECLAIM_NOW` | `date +%s` | Epoch seconds treated as "now" (tests) |
+| `RECLAIM_REPO_ROOTS` | derived from the TBD worktree list's git-common-dir | Newline-separated repo roots to scan for `.claude/worktrees/*` — overrides derivation entirely (tests, or to point at a repo TBD doesn't manage) |
 
 ## Future
 The ~4.6 GiB of compiled artifacts can only be de-duplicated across worktrees via SwiftPM compilation caching (LLVM CAS + prefix mapping) on the new Swift Build engine — currently an opt-in pitch. Track and pilot when it lands.
