@@ -137,7 +137,7 @@ extension RPCRouter {
     func handleWorktreeRerunPreSession(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeRerunPreSessionParams.self, from: paramsData)
         do {
-            try await lifecycle.rerunPreSessionHook(worktreeID: params.worktreeID)
+            try await lifecycle.rerunPreSessionHook(worktreeID: params.worktreeID, cols: params.cols, rows: params.rows)
             return .ok()
         } catch let error as RerunPreSessionError {
             return RPCResponse(error: error.description)

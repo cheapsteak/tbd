@@ -539,10 +539,10 @@ actor DaemonClient {
 
     /// Re-run the worktree's `preSession` hook in a fresh, non-focused tab.
     /// Returns as soon as the tab exists; the hook itself runs on in the daemon.
-    func rerunPreSessionHook(worktreeID: UUID) async throws {
+    func rerunPreSessionHook(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeRerunPreSession,
-            params: WorktreeRerunPreSessionParams(worktreeID: worktreeID)
+            params: WorktreeRerunPreSessionParams(worktreeID: worktreeID, cols: cols, rows: rows)
         )
     }
 

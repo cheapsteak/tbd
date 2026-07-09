@@ -291,7 +291,8 @@ extension AppState {
     /// an error on this call.
     func rerunPreSessionHook(worktreeID: UUID) async {
         do {
-            try await daemonClient.rerunPreSessionHook(worktreeID: worktreeID)
+            let size = mainAreaTerminalSize()
+            try await daemonClient.rerunPreSessionHook(worktreeID: worktreeID, cols: size.cols, rows: size.rows)
             logger.info("Re-running setup hook for worktree \(worktreeID, privacy: .public)")
         } catch {
             logger.error("Failed to re-run setup hook: \(error)")

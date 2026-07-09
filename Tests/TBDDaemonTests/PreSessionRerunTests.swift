@@ -103,6 +103,40 @@ struct PreSessionRerunTests {
         }
     }
 
+    @Test("RPC handler forwards params.cols/rows to the spawned window's resize-window")
+    func rpcForwardsColsAndRows() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (db, repoDir, worktree, _) = try await makeWorktreeFixture(status: .active)
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir, script: "#!/bin/sh\nexit 0\n")
+
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 2)
+        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true))
+        let params = try JSONEncoder().encode(
+            WorktreeRerunPreSessionParams(worktreeID: worktree.id, cols: 180, rows: 45)
+        )
+
+        let response = try await router.handleWorktreeRerunPreSession(params)
+        #expect(response.error == nil)
+
+        // createWindow's dry-run records the new-window shape (tmux new-window
+        // itself has no -x/-y), then issues an explicit resize-window to lock
+        // in the requested size — see TmuxManager.createWindow. That
+        // resize-window command is where cols/rows become observable, and
+        // going through the RPCRouter (not the lifecycle directly) is what
+        // proves handleWorktreeRerunPreSession actually forwards
+        // params.cols/params.rows instead of dropping them.
+        let resize = try #require(
+            recorder.snapshot().first { $0.contains("resize-window") }
+        )
+        #expect(resize.contains("-x"))
+        #expect(resize.contains("180"))
+        #expect(resize.contains("-y"))
+        #expect(resize.contains("45"))
+    }
+
     @Test("RPC surfaces the rejection message verbatim")
     func rpcReportsAlreadyRunning() async throws {
         let (_, cleanup) = isolateTBDHome()

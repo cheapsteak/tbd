@@ -843,9 +843,15 @@ public struct WorktreeArchiveParams: Codable, Sendable {
 /// Re-run the `preSession` hook for a worktree in a fresh, non-focused tab.
 public struct WorktreeRerunPreSessionParams: Codable, Sendable {
     public let worktreeID: UUID
+    /// Initial tmux window size in cells (see WorktreeCreateParams). Optional
+    /// so older app builds' JSON (no cols/rows) still decodes.
+    public let cols: Int?
+    public let rows: Int?
 
-    public init(worktreeID: UUID) {
+    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil) {
         self.worktreeID = worktreeID
+        self.cols = cols
+        self.rows = rows
     }
 }
 
