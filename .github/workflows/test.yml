@@ -55,9 +55,10 @@ jobs:
         # drives TmuxManager against a real tmux server on a unique socket.
         run: brew install tmux
 
-      # macos-26 arm64 runner defaults to Xcode 26.5 (Swift 6.2.x). Pinning to
-      # 26.6 (Swift 6.3.3) matches the local toolchain — keeps CI and local
-      # behavior consistent.
+      # macos-26 arm64 runner defaults to Xcode 26.5 (Swift 6.3.2). Pin 26.6
+      # (Swift 6.3.3) so the toolchain is deterministic rather than drifting
+      # with the image default, and matches the swift.org 6.3.3 toolchain
+      # used for local validation.
       - name: Select Xcode 26.6 (Swift 6.3.3)
         run: sudo xcode-select -s /Applications/Xcode_26.6.app
 
@@ -104,12 +105,12 @@ jobs:
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
           done
 
-      # `-j 2` caps parallel swift-frontend processes. The macos-26 runner
-      # has limited RAM (~7-14 GB) and Swift frontends each consume
-      # 1-2 GB on heavy SwiftUI / NIO code. With the default parallelism,
-      # the build OOMs late (~file 1260+/1356) and emits a bare
-      # `error: fatalError` with no diagnostic — different file every run.
-      # Capping parallelism trades wall-clock for stability.
+      # `-j 2` caps parallel swift-frontend processes on the ~7 GB runner.
+      # Historically (Swift 6.2, all-per-file builds) default parallelism
+      # OOMed late in the build with a bare `error: fatalError`. Under
+      # Swift 6.3 the two big modules build WMO in debug (~1.35 GB peak
+      # frontend RSS each, measured), so the cap is likely over-conservative
+      # now — kept as safety margin; candidate for re-validation.
       - name: Test
         run: swift test --parallel -j 2
 
