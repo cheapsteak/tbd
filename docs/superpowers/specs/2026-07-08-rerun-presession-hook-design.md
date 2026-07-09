@@ -226,3 +226,41 @@ Daemon + shared code change, so full `scripts/restart.sh` (relative, from the wo
 | `Sources/TBDApp/Sidebar/RowActionMenuActions.swift` | dispatch |
 | `Sources/TBDApp/Sidebar/SidebarContextMenu.swift` | resolve the hook when building Context |
 | `docs/worktree-hooks.md` | document the re-run action and the ephemeral tab |
+
+## Amendments (2026-07-08, during planning and implementation)
+
+This spec's plan and implementation diverged from the text above in five places. Each is recorded
+here with the reasoning, so the spec stays an accurate description of what shipped rather than what
+was originally proposed.
+
+a. **No shared teardown helper was extracted from `handleTerminalDelete`.** That handler also
+   cancels scheduled resumes, clears pending questions, cancels auto-login, and reclaims a
+   `ClaudeHookOverlay` — all Claude-session concerns that are no-ops for a `.shell` hook tab, and
+   several of which need `RPCRouter` state that the lifecycle does not hold. Extracting a shared
+   helper would have meant threading that state down into `WorktreeLifecycle` for no benefit.
+   Instead, `WorktreeLifecycle.closePreSessionTerminal` implements only the minimal teardown a hook
+   tab actually needs: kill the tmux window, delete the terminal and tab rows, and broadcast
+   `.terminalRemoved`.
+
+b. **The hook resolve for the menu item lives in `RowActionMenuActions.context()`, not
+   `SidebarContextMenu`.** `context()` is where every other field on `RowActionMenu.Context` is
+   already built from live `AppState`, so resolving `hasPreSessionHook` there keeps all of the
+   context's derivations in one place instead of splitting them across two files.
+
+c. **`spawnPreSessionTerminal` takes `repo: Repo?` instead of `repo: Repo`.** Scratch spaces have
+   no backing repo, so before this change they could never run a `preSession` hook at all — the
+   spawn path required a non-optional `Repo`. Making the parameter optional lets a scratch space
+   resolve and run its hook; `TBD_REPO_PATH` falls back to the worktree's own path when there is no
+   repo to point it at.
+
+d. **The teardown call sits inside the `do` block of `runPreSessionPhase3`, after the primary
+   terminal spawn succeeds — not after the `do`/`catch`.** If the primary spawn throws, the hook
+   tab is still the worktree's only tab; tearing it down at that point would leave the worktree
+   tab-less. This was discovered during implementation, via the
+   `dbErrorDuringRowCheckDoesNotTearDownPreSessionWindow` test, which failed against the original
+   placement.
+
+e. **`.paneKilled` on a manual re-run is logged, not surfaced as an error notification.** A user
+   closing the re-run's tab mid-hook is a legitimate cancel, not a failure worth interrupting them
+   about. On the create path `.paneKilled` remains an error notification, because there the agent
+   is about to start on a worktree whose setup never finished.
