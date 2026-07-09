@@ -575,6 +575,106 @@ struct PreSessionHookTests {
         #expect((try await db.terminals.get(id: spawn.terminalID) != nil) == (exitCode != 0))
     }
 
+    // MARK: - Reusable spawn (claimsFocus / optional repo)
+
+    @Test("claimsFocus: false appends the tab and leaves activeTabID alone")
+    func rerunSpawnDoesNotStealFocus() async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, repo) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let existing = UUID()
+        _ = try await db.terminals.create(
+            id: existing, worktreeID: worktree.id,
+            tmuxWindowID: "@99", tmuxPaneID: "%99",
+            label: TerminalLabel.claudeCode, kind: .claude
+        )
+        try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: [existing])
+        try await db.worktrees.setActiveTabID(worktreeID: worktree.id, tabID: existing)
+
+        let lifecycle = makeLifecycle(db: db, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.path,
+            claimsFocus: false
+        ))
+
+        let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+        #expect(order == [existing, spawn.terminalID])
+        #expect(try await db.worktrees.getActiveTabID(worktreeID: worktree.id) == existing)
+    }
+
+    @Test("claimsFocus: false broadcasts terminalCreated for the new tab")
+    func rerunSpawnBroadcastsTerminalCreated() async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, repo) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let collected = CollectedDeltas()
+        let subscriptions = StateSubscriptionManager()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                collected.append(delta)
+            }
+            return true
+        }
+        let lifecycle = makeLifecycle(db: db, subscriptions: subscriptions, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.path,
+            claimsFocus: false
+        ))
+
+        let snapshot = collected.snapshot()
+        #expect(snapshot.contains {
+            if case .terminalCreated(let d) = $0 {
+                return d.terminalID == spawn.terminalID && d.label == TerminalLabel.preSession
+            }
+            return false
+        })
+    }
+
+    @Test("claimsFocus: true (default) keeps the original single-tab behavior")
+    func defaultClaimsFocusStillClaimsTheTab() async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, repo) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let lifecycle = makeLifecycle(db: db, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.path
+        ))
+
+        let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+        #expect(order == [spawn.terminalID])
+        #expect(try await db.worktrees.getActiveTabID(worktreeID: worktree.id) == spawn.terminalID)
+    }
+
+    @Test("repo: nil resolves TBD_REPO_PATH to the worktree path")
+    func nilRepoFallsBackToWorktreePath() async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, _) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let recorder = RecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: nil, worktreePath: worktree.path
+        ))
+        #expect(try await db.terminals.get(id: spawn.terminalID) != nil)
+
+        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
+        let body = windowCalls.first?.last ?? ""
+        #expect(body.contains("export TBD_REPO_PATH='\(worktree.path)'"),
+                "with no repo, TBD_REPO_PATH must fall back to the worktree's own path")
+    }
+
     // MARK: - Wait outcome races (marker vs. dead pane / deadline)
 
     @Test func markerWinsWhenPaneDiesInSameIteration() async throws {

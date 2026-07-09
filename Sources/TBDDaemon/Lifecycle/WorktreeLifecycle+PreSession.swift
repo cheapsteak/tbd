@@ -90,14 +90,22 @@ extension WorktreeLifecycle {
 
     // MARK: - Phase 2b: spawn the pre-session terminal
 
-    /// Resolves the `preSession` hook and, if present, creates its terminal as
-    /// the FIRST window of the worktree's tmux session. Returns nil when no
-    /// hook resolves — callers then spawn the primary terminals directly
-    /// (today's behavior, unchanged).
+    /// Resolves the `preSession` hook and, if present, creates its terminal.
+    /// Returns nil when no hook resolves — callers then spawn the primary
+    /// terminals directly (today's behavior, unchanged).
+    ///
+    /// `claimsFocus` distinguishes the two callers. Create/revive spawn this
+    /// as the FIRST and only window, so they claim tab order and focus. A
+    /// manual re-run lands beside live agent tabs: it appends to the existing
+    /// order and leaves `activeTabID` untouched.
+    ///
+    /// `repo` is optional because scratch spaces have none. `TBD_REPO_PATH`
+    /// then falls back to the worktree's own path.
     func spawnPreSessionTerminal(
-        worktree: Worktree, repo: Repo,
+        worktree: Worktree, repo: Repo?,
         worktreePath: String,
-        cols: Int? = nil, rows: Int? = nil
+        cols: Int? = nil, rows: Int? = nil,
+        claimsFocus: Bool = true
     ) async throws -> PreSessionSpawn? {
         guard let hookPath = hooks.resolve(
             event: .preSession,
@@ -144,7 +152,7 @@ extension WorktreeLifecycle {
             "TBD_EVENT": HookEvent.preSession.rawValue,
             "TBD_WORKTREE_NAME": worktree.name,
             "TBD_WORKTREE_PATH": worktreePath,
-            "TBD_REPO_PATH": repo.path,
+            "TBD_REPO_PATH": repo?.path ?? worktreePath,
             "TBD_BRANCH": worktree.branch,
         ]
         let window = try await tmux.createWindow(
@@ -165,11 +173,30 @@ extension WorktreeLifecycle {
             label: TerminalLabel.preSession,
             kind: .shell
         )
-        // The pre-session terminal is the only tab until phase 3 runs.
-        try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: [terminalID])
-        try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: terminalID)
+        if claimsFocus {
+            // The pre-session terminal is the only tab until phase 3 runs.
+            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: [terminalID])
+            try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: terminalID)
+        } else {
+            // Manual re-run: append beside the live agent tabs, don't steal focus.
+            var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
+            order.append(terminalID)
+            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
+            // The create/revive path broadcasts terminalCreated for the primaries
+            // later in phase 3; the hook tab there arrives bundled with the
+            // worktree row. A re-run has no such follow-up broadcast, so the app
+            // needs this one to render the tab immediately.
+            subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: terminalID,
+                worktreeID: worktreeID,
+                label: TerminalLabel.preSession
+            )))
+        }
 
         // Kill the untracked initial window now that a real window exists.
+        // Only the focus-claiming (create/revive) path can have created it —
+        // `ensureServer` returns nil when the server already exists, so this
+        // stays correct for the re-run path without a `claimsFocus` check.
         if let initialWindowID {
             try? await tmux.killWindow(server: tmuxServer, windowID: initialWindowID)
         }
