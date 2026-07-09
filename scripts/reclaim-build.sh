@@ -13,6 +13,8 @@
 #   RECLAIM_T1_SECONDS  Tier-1 (index-build) idle threshold (default 21600 = 6h)
 #   RECLAIM_T2_SECONDS  Tier-2 (whole .build) idle threshold (default 172800 = 48h)
 #   RECLAIM_NOW         epoch seconds treated as "now"      (default: date +%s)
+#   RECLAIM_REPO_ROOTS  newline-separated repo roots to scan for .claude/worktrees/*
+#                       (default: derived from the TBD worktree list's git-common-dir)
 
 RECLAIM_T1_SECONDS="${RECLAIM_T1_SECONDS:-21600}"
 RECLAIM_T2_SECONDS="${RECLAIM_T2_SECONDS:-172800}"
@@ -43,6 +45,56 @@ has_active_build() {
 # list_worktrees_tsv -> "<path>\t<liveSessions>" for each active worktree
 list_worktrees_tsv() {
   _worktree_json | jq -r '.[] | select(.status == "active") | [.path, (.liveClaudeSessionCount // 0)] | @tsv'
+}
+
+# repo_root_for_worktree WORKTREE_PATH -> absolute repo root (parent of the
+# common .git dir), or nonzero exit if the worktree is gone / not a git dir.
+# A TBD worktree may have been deleted between listing and probing; callers
+# guard with `|| continue`.
+repo_root_for_worktree() {
+  local wt="$1" common_git
+  common_git="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$common_git" ]] || return 1
+  dirname "$common_git"
+}
+
+# repo_roots -> unique repo roots to scan for Claude agent worktrees.
+# RECLAIM_REPO_ROOTS (newline-separated), when set, is used INSTEAD of
+# deriving roots from the TBD worktree list — the test injection seam.
+repo_roots() {
+  if [[ -n "${RECLAIM_REPO_ROOTS:-}" ]]; then
+    printf '%s\n' "$RECLAIM_REPO_ROOTS"
+  else
+    local wt sessions root
+    while IFS=$'\t' read -r wt sessions; do
+      [[ -n "$wt" ]] || continue
+      root="$(repo_root_for_worktree "$wt")" || continue
+      [[ -n "$root" ]] || continue
+      printf '%s\n' "$root"
+    done < <(list_worktrees_tsv)
+  fi | grep -v '^[[:space:]]*$' | sort -u
+}
+
+# claude_agent_worktrees_tsv -> "<path>\t0" for each .claude/worktrees/*/ dir
+# under every repo root. These have no TBD session concept, so they're always
+# reported with 0 live sessions (Tier-2 eligible on idleness alone). The
+# Package.swift gate is applied by the caller, same as TBD worktrees.
+claude_agent_worktrees_tsv() {
+  local root d
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    for d in "$root"/.claude/worktrees/*/; do
+      [[ -d "$d" ]] || continue
+      printf '%s\t0\n' "${d%/}"
+    done
+  done < <(repo_roots)
+}
+
+# list_all_worktrees_tsv -> combined TBD + Claude-agent worktrees, deduped by
+# path (first occurrence wins, so a TBD-list session count beats the
+# Claude-agent default of 0 if the same path somehow appears in both).
+list_all_worktrees_tsv() {
+  { list_worktrees_tsv; claude_agent_worktrees_tsv; } | awk -F'\t' '!seen[$1]++'
 }
 
 # plan_worktree WORKTREE_PATH LIVE_SESSIONS -> one decision line (or nothing if no .build)
@@ -95,7 +147,7 @@ main() {
     [[ -n "$wt" ]] || continue
     [[ -f "$wt/Package.swift" ]] || continue   # only SwiftPM-package worktrees produce .build/index-build
     plan_worktree "$wt" "$sessions"
-  done < <(list_worktrees_tsv) | tee "$plan_file" >&2
+  done < <(list_all_worktrees_tsv) | tee "$plan_file" >&2
 
   if [[ "$dry" != "true" ]]; then
     local action tier path

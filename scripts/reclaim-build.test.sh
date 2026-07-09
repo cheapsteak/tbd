@@ -225,6 +225,81 @@ JSON
   rm -rf "$root"
 }
 
+test_repo_root_for_worktree_returns_parent_of_git_common_dir() {
+  local d; d="$(mktmpd)"
+  git init -q "$d"
+  # git canonicalizes symlinks (e.g. macOS /tmp -> /private/tmp) in its
+  # absolute-path output, so compare against the same resolution.
+  local expected; expected="$(cd "$d" && pwd -P)"
+  local out; out="$(repo_root_for_worktree "$d")"
+  assert_eq "repo root is parent of .git" "$expected" "$out"
+  rm -rf "$d"
+}
+
+test_repo_root_for_worktree_fails_for_non_git_dir() {
+  local d; d="$(mktmpd)"
+  local out rc=0
+  out="$(repo_root_for_worktree "$d")" || rc=$?
+  assert_eq "non-git dir yields nonzero exit" "1" "$rc"
+  assert_eq "non-git dir yields empty output" "" "$out"
+  rm -rf "$d"
+}
+
+test_claude_agent_worktree_tier2_reaped() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local agent="$root/.claude/worktrees/agent-abc123"
+  _mk_worktree "$agent" "$now" 200000 200000   # both stale -> tier2
+  local j="$root/wt.json"; printf '[]' > "$j"
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+    bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  assert_eq "claude agent worktree .build reaped (tier2)" "false" "$([[ -d "$agent/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_claude_agent_worktree_without_package_swift_skipped() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local agent="$root/.claude/worktrees/agent-nopkg"
+  mkdir -p "$agent/.build/arm64-apple-macosx/debug"
+  : > "$agent/.build/arm64-apple-macosx/debug/app.o"
+  touch_age "$agent/.build/arm64-apple-macosx/debug/app.o" "$now" 200000
+  # deliberately NO Package.swift
+  local j="$root/wt.json"; printf '[]' > "$j"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+    bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  assert_missing "non-swift claude agent worktree skipped entirely" "$out" "$agent"
+  rm -rf "$root"
+}
+
+test_claude_agent_worktree_fresh_build_skipped() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local agent="$root/.claude/worktrees/agent-fresh"
+  _mk_worktree "$agent" "$now" 60 60   # 1 min old — within grace, fresh
+  local j="$root/wt.json"; printf '[]' > "$j"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+    bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  assert_contains "fresh claude agent worktree skipped" "$out" "SKIP fresh $agent"
+  rm -rf "$root"
+}
+
+test_repo_roots_injection_dedups_against_tbd_list() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  # Same path enumerated via BOTH the TBD list and RECLAIM_REPO_ROOTS-derived
+  # .claude/worktrees glob — dedup must keep exactly one line, using the TBD
+  # list's (nonzero) session count so tier2 (needs sessions==0) is blocked.
+  local dup="$root/.claude/worktrees/dup-agent"
+  _mk_worktree "$dup" "$now" 200000 200000   # both stale -> tier2 if sessions==0
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$dup","status":"active","liveClaudeSessionCount":5}]
+JSON
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+    bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  local count; count="$(grep -c -- "$dup" <<<"$out")"
+  assert_eq "dup path processed exactly once" "1" "$count"
+  assert_contains "dup path uses TBD session count -> tier1 not tier2" "$out" "PLAN tier1 $dup"
+  rm -rf "$root"
+}
+
 test_plan_tier2_works_on_x86_64_triple() {
   local d; d="$(mktmpd)"; local now=2000000000
   mkdir -p "$d/.build/x86_64-apple-macosx/debug"
