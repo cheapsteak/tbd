@@ -656,7 +656,20 @@ public final class Daemon: Sendable {
             // 12e. Start daywatch runner (autonomous fleet babysitter loop).
             let skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"
             let executor = ProcessDaywatchExecutor(skillDir: skillDir)
-            let runner = DaywatchRunner(executor: executor)
+
+            // Phase A: Create desk session manager for visible worker
+            let deskSessionManager = DeskSessionManager(
+                db: database,
+                lifecycle: lifecycle,
+                modelProfileResolver: modelProfileResolver,
+                tmux: tmuxManager
+            )
+
+            let runner = DaywatchRunner(
+                executor: executor,
+                deskSessionManager: deskSessionManager,
+                interval: DaywatchRunner.defaultInterval
+            )
             self.daywatchRunner = runner
             rpcRouter.daywatchRunner = runner
             // Boot-reconcile: if nightwatch mode was persisted, restart the loop.

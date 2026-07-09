@@ -64,6 +64,10 @@ struct ContentView: View {
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
             }
+
+            // Nightwatch desk session status banner (Phase A visible worker)
+            NightwatchDeskStatusBanner()
+
             NavigationSplitView {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)

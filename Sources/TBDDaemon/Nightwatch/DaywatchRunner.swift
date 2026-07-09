@@ -101,27 +101,31 @@ public actor DaywatchRunner {
     // MARK: - Dependencies
 
     private let executor: DaywatchExecuting
+    private let deskSessionManager: DeskSessionManager?
     private let interval: TimeInterval
 
     // MARK: - State
 
     private var currentMode: NightwatchMode = .off
+    private var deskWorktreeID: UUID?
     private var loopTask: Task<Void, Never>?
 
     // MARK: - Init
 
     public init(
         executor: DaywatchExecuting,
+        deskSessionManager: DeskSessionManager? = nil,
         interval: TimeInterval = 15 * 60
     ) {
         self.executor = executor
+        self.deskSessionManager = deskSessionManager
         self.interval = interval
     }
 
     // MARK: - Public API
 
     /// Apply a mode change: start the loop for .daywatch/.nightwatch, stop for .off.
-    /// Idempotent.
+    /// Idempotent. Manages desk session lifecycle (ensure on start, close on stop).
     public func apply(mode: NightwatchMode) async {
         let wasRunning = currentMode != .off
         let shouldRun = mode != .off
@@ -130,23 +134,49 @@ public actor DaywatchRunner {
         currentMode = mode
 
         if shouldRun && !wasRunning {
-            // Start the loop
+            // Start the loop AND ensure desk session exists
+            do {
+                if let desker = deskSessionManager {
+                    let desk = try await desker.ensureDeskSession(mode: mode)
+                    deskWorktreeID = desk.id
+                }
+            } catch {
+                logger.error("Failed to ensure desk session on mode start: \(error.localizedDescription, privacy: .public)")
+            }
+
             loopTask = Task { [weak self] in
                 await self?.runLoop()
             }
             logger.info("Started daywatch runner in mode \(mode.rawValue, privacy: .public)")
         } else if !shouldRun && wasRunning {
-            // Stop the loop
+            // Stop the loop AND close desk session
             loopTask?.cancel()
             loopTask = nil
+
+            if let desker = deskSessionManager {
+                await desker.closeDeskSession()
+            }
+            deskWorktreeID = nil
+
             logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public))")
+        } else if shouldRun && wasRunning && previousMode != mode {
+            // Mode switch within running state (daywatch ↔ nightwatch)
+            // Ensure desk session exists (may reuse existing)
+            do {
+                if let desker = deskSessionManager {
+                    let desk = try await desker.ensureDeskSession(mode: mode)
+                    deskWorktreeID = desk.id
+                }
+            } catch {
+                logger.error("Failed to ensure desk session on mode switch: \(error.localizedDescription, privacy: .public)")
+            }
         }
         // else: no-op (already in desired state)
     }
 
     // MARK: - Testable single tick
 
-    /// Run one tick cycle: execute tick.py and conditionally wake the judge.
+    /// Run one tick cycle: execute tick.py and conditionally nudge the desk session.
     /// This method contains the core logic that the background loop drives repeatedly.
     /// - Parameter mode: If provided, use this mode instead of the actor's currentMode.
     ///   Useful for testing without starting the background loop.
@@ -156,11 +186,19 @@ public actor DaywatchRunner {
         // Run one tick
         let exitCode = await executor.runTick()
 
-        // If exit code is 10, judgment is queued — wake the judge
+        // If exit code is 10, judgment is queued — nudge the desk session
         if exitCode == 10 {
             let act = (effectiveMode == .nightwatch)
-            await executor.wakeJudge(act: act)
-            logger.debug("Tick queued judgment; woke judge (act=\(act))")
+
+            // Try new desk session nudge (Phase A)
+            if let desker = deskSessionManager,
+               let deskID = deskWorktreeID {
+                await desker.nudgeDeskSession(worktreeID: deskID, act: act)
+                logger.debug("Tick queued judgment; nudged desk session (act=\(act))")
+            } else {
+                // Fallback to old no-op (for backward compat during transition)
+                await executor.wakeJudge(act: act)
+            }
         } else if exitCode == 0 {
             logger.debug("Tick completed (no judgment queued)")
         } else {
