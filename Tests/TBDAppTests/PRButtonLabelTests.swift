@@ -39,40 +39,84 @@ struct PRButtonLabelTests {
         )
     }
 
-    // MARK: - bakedWidth (armed gate, both branches)
-
-    @Test("bakedWidth is the bare icon side when auto-archive is not armed")
-    func bakedWidthUnarmed() {
-        let label = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: false)
-        #expect(label.bakedWidth == PRButtonLabel.iconSide)
-    }
-
-    @Test("bakedWidth widens by gap + badge when auto-archive is armed")
-    func bakedWidthArmed() {
-        let label = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: true)
-        let expected = PRButtonLabel.iconSide + PRButtonLabel.badgeGap + PRButtonLabel.iconSide
-        #expect(label.bakedWidth == expected)
-        #expect(label.bakedWidth > PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: false).bakedWidth)
-    }
-
-    @Test("bakedWidth stays a single square for a queued PR even when armed")
-    func bakedWidthQueuedSuppressesArchiveBadge() {
-        // Queue mode supersedes the archivebox armed-badge: the bus is one
-        // full-color square with its position baked in, so the label must not
-        // reserve the extra gap+badge width.
-        let queuedArmed = PRButtonLabel(
-            prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 2),
-            isAutoArchiveArmed: true
+    private static func makeLabel(
+        prStatus: PRStatus? = nil,
+        isAutoArchiveArmed: Bool = false,
+        isAutoHibernateArmed: Bool = false
+    ) -> PRButtonLabel {
+        PRButtonLabel(
+            prStatus: prStatus ?? makeStatus(),
+            isAutoArchiveArmed: isAutoArchiveArmed,
+            isAutoHibernateArmed: isAutoHibernateArmed
         )
-        #expect(queuedArmed.isMergeQueued)
-        #expect(queuedArmed.bakedWidth == PRButtonLabel.iconSide)
+    }
+
+    // MARK: - bakedWidth (three-state: 0, 1, or 2 badges)
+
+    @Test("bakedWidth is the bare icon side when neither flag is armed")
+    func bakedWidthUnarmed() {
+        let label = Self.makeLabel()
+        // 12 (iconSide) with no badges.
+        #expect(label.bakedWidth == PRButtonLabel.iconSide)
+        #expect(label.bakedWidth == 12)
+        #expect(label.badgeCount == 0)
+    }
+
+    @Test("bakedWidth widens by one gap + badge when only auto-archive is armed")
+    func bakedWidthArchiveArmed() {
+        let label = Self.makeLabel(isAutoArchiveArmed: true)
+        // 12 + 1*(3 + 12) = 27
+        let expected = PRButtonLabel.iconSide + (PRButtonLabel.badgeGap + PRButtonLabel.iconSide)
+        #expect(label.bakedWidth == expected)
+        #expect(label.bakedWidth == 27)
+        #expect(label.badgeCount == 1)
+    }
+
+    @Test("bakedWidth widens by one gap + badge when only auto-hibernate is armed")
+    func bakedWidthHibernateArmed() {
+        let label = Self.makeLabel(isAutoHibernateArmed: true)
+        // 12 + 1*(3 + 12) = 27 — same single-badge width as archive-only.
+        let expected = PRButtonLabel.iconSide + (PRButtonLabel.badgeGap + PRButtonLabel.iconSide)
+        #expect(label.bakedWidth == expected)
+        #expect(label.bakedWidth == 27)
+        #expect(label.badgeCount == 1)
+    }
+
+    @Test("bakedWidth widens by two gaps + badges when both flags are armed")
+    func bakedWidthBothArmed() {
+        let label = Self.makeLabel(isAutoArchiveArmed: true, isAutoHibernateArmed: true)
+        // 12 + 2*(3 + 12) = 42
+        let expected = PRButtonLabel.iconSide + 2 * (PRButtonLabel.badgeGap + PRButtonLabel.iconSide)
+        #expect(label.bakedWidth == expected)
+        #expect(label.bakedWidth == 42)
+        #expect(label.badgeCount == 2)
+    }
+
+    @Test("bakedWidth stays a single square for a queued PR for every armed combination")
+    func bakedWidthQueuedSuppressesBothBadges() {
+        // Queue mode supersedes BOTH armed badges: the bus is one full-color
+        // square with its position baked in, so the label must not reserve any
+        // extra gap+badge width regardless of which flags are armed.
+        for archive in [false, true] {
+            for hibernate in [false, true] {
+                let label = Self.makeLabel(
+                    prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 2),
+                    isAutoArchiveArmed: archive,
+                    isAutoHibernateArmed: hibernate
+                )
+                #expect(label.isMergeQueued)
+                #expect(label.badgeCount == 0)
+                #expect(label.bakedWidth == PRButtonLabel.iconSide)
+            }
+        }
     }
 
     @Test("coloredIcon bakes a single square for a queued PR (bus, untinted)")
     func coloredIconQueuedIsSquare() throws {
-        let label = PRButtonLabel(
+        let label = Self.makeLabel(
             prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 3),
-            isAutoArchiveArmed: true
+            isAutoArchiveArmed: true,
+            isAutoHibernateArmed: true
         )
         let presentation = try #require(PRStatusPresentation.make(for: label.prStatus))
         let icon = try #require(label.coloredIcon(presentation, colorScheme: .light))
@@ -80,24 +124,55 @@ struct PRButtonLabelTests {
         #expect(icon.isTemplate == false)
     }
 
-    // MARK: - coloredIcon baked image size (armed gate, both branches)
+    // MARK: - coloredIcon baked image size (0, 1, 2 badges)
 
-    @Test("coloredIcon bakes a square image when not armed and a wide badge composite when armed")
+    @Test("coloredIcon baked image width matches the armed-badge count")
     func coloredIconSizeMatchesArmedState() throws {
-        let unarmed = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: false)
-        let armed = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: true)
         let presentation = PRStatusPresentation(glyph: .asset("git-merge"), colorSemantic: .merged)
 
-        let unarmedIcon = try #require(unarmed.coloredIcon(presentation, colorScheme: .light))
-        let armedIcon = try #require(armed.coloredIcon(presentation, colorScheme: .light))
+        let none = try #require(Self.makeLabel().coloredIcon(presentation, colorScheme: .light))
+        let archive = try #require(
+            Self.makeLabel(isAutoArchiveArmed: true).coloredIcon(presentation, colorScheme: .light))
+        let hibernate = try #require(
+            Self.makeLabel(isAutoHibernateArmed: true).coloredIcon(presentation, colorScheme: .light))
+        let both = try #require(
+            Self.makeLabel(isAutoArchiveArmed: true, isAutoHibernateArmed: true)
+                .coloredIcon(presentation, colorScheme: .light))
 
-        #expect(unarmedIcon.size == NSSize(width: PRButtonLabel.iconSide, height: PRButtonLabel.iconSide))
-        #expect(armedIcon.size == NSSize(
-            width: PRButtonLabel.iconSide + PRButtonLabel.badgeGap + PRButtonLabel.iconSide,
-            height: PRButtonLabel.iconSide
-        ))
-        #expect(unarmedIcon.isTemplate == false)
-        #expect(armedIcon.isTemplate == false)
+        let side = PRButtonLabel.iconSide
+        let step = PRButtonLabel.badgeGap + PRButtonLabel.iconSide
+        #expect(none.size == NSSize(width: side, height: side))
+        #expect(archive.size == NSSize(width: side + step, height: side))
+        #expect(hibernate.size == NSSize(width: side + step, height: side))
+        #expect(both.size == NSSize(width: side + 2 * step, height: side))
+        for icon in [none, archive, hibernate, both] {
+            #expect(icon.isTemplate == false)
+        }
+    }
+
+    // The baked-icon cache is keyed on BOTH armed flags. If hibernateArmed were
+    // omitted from the key, an armed/unarmed pair sharing the same asset name,
+    // colorSemantic, and colorScheme would render from the same cached bitmap
+    // and the moon.zzz badge would silently never appear. The cache key isn't
+    // reachable from tests, so assert the observable consequence: differing
+    // hibernateArmed yields differently-sized baked images.
+    @Test("coloredIcon width reflects hibernateArmed independently (cache-key guard)")
+    func coloredIconWidthDistinguishesHibernateArmed() throws {
+        let presentation = PRStatusPresentation(glyph: .asset("git-merge"), colorSemantic: .merged)
+
+        // archive fixed off: hibernate off → 1 square, hibernate on → 1 badge.
+        let hOff = try #require(Self.makeLabel().coloredIcon(presentation, colorScheme: .light))
+        let hOn = try #require(
+            Self.makeLabel(isAutoHibernateArmed: true).coloredIcon(presentation, colorScheme: .light))
+        #expect(hOff.size.width != hOn.size.width)
+
+        // archive fixed on: hibernate off → 1 badge, hibernate on → 2 badges.
+        let aOnly = try #require(
+            Self.makeLabel(isAutoArchiveArmed: true).coloredIcon(presentation, colorScheme: .light))
+        let aAndH = try #require(
+            Self.makeLabel(isAutoArchiveArmed: true, isAutoHibernateArmed: true)
+                .coloredIcon(presentation, colorScheme: .light))
+        #expect(aOnly.size.width != aAndH.size.width)
     }
 
     // MARK: - aspectFitRect (badge distortion fix)
