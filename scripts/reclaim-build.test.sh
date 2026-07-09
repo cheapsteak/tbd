@@ -189,6 +189,49 @@ test_write_plist_contains_label_interval_and_script() {
   rm -rf "$(dirname "$out")"
 }
 
+test_main_exclude_path_skips_only_that_worktree() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/excluded" b="$root/sibling"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2-eligible — but excluded
+  _mk_worktree "$b" "$now" 200000 200000   # tier2-eligible sibling, same run
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_EXCLUDE_PATH="$a" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "excluded worktree logged as skipped" "$out" "SKIP excluded $a"
+  assert_missing  "excluded worktree never planned"     "$out" "PLAN tier2 $a"
+  assert_contains "sibling still planned in same run"   "$out" "PLAN tier2 $b"
+  assert_eq "excluded .build survives"  "true"  "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  assert_eq "sibling .build reclaimed"  "false" "$([[ -d "$b/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_exclude_path_canonicalizes_variants() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/real"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2-eligible
+  ln -s "$a" "$root/link"                   # symlinked route to the same dir
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  # Exclude via a symlink AND a trailing slash — textually nothing like the
+  # listed path; only canonicalization of both sides can match them.
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_EXCLUDE_PATH="$root/link/" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "unnormalized exclude still skips"   "$out" "SKIP excluded $a"
+  assert_missing  "unnormalized exclude blocks plan"   "$out" "PLAN tier2 $a"
+  assert_eq "excluded .build survives symlink variant" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
 test_main_skips_worktree_without_package_swift() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/swift-wt" b="$root/nonswift-wt"
@@ -333,6 +376,11 @@ test_restart_sh_launches_reclaim_async_and_silent() {
   assert_contains "launch line merges stderr into the log" "$launch_line" '2>&1'
   assert_contains "launch line redirects stdin from /dev/null" "$launch_line" '< /dev/null'
   assert_contains "launch line is backgrounded" "$launch_line" '/dev/null &'
+  # Self-collision guard: the reclaim must never sweep the very worktree
+  # whose build it overlaps (a revived ≥48h-stale .build is tier2-eligible
+  # at plan time, before the new build has touched it).
+  # shellcheck disable=SC2016
+  assert_contains "launch line excludes its own worktree" "$launch_line" 'RECLAIM_EXCLUDE_PATH="$REPO_ROOT"'
 
   # Regression guard: a bare `disown` under restart.sh's set -e aborts the
   # whole restart if the reclaim job already finished and was reaped (and

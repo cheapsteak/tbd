@@ -29,9 +29,13 @@ done
 #
 # Every restart is a good moment to garbage-collect stale .build directories
 # across all worktrees (scripts/reclaim-build.sh) — it's already safe to run
-# at any time (skips active builds and anything touched <10 min ago), so kick
-# it off now, before the build below, so the two overlap instead of the
-# reclaim adding to wall-clock time. Fully async and fire-and-forget: never
+# at any time (skips active builds and anything touched <10 min ago), and
+# RECLAIM_EXCLUDE_PATH pins this worktree out of the sweep entirely, so the
+# reclaim can never race the swift build it overlaps (a ≥48h-stale .build
+# here — a revived dormant worktree — would otherwise be Tier-2 eligible at
+# plan time, before the new build has touched it). So kick it off now,
+# before the build below, so the two overlap instead of the reclaim adding
+# to wall-clock time. Fully async and fire-and-forget: never
 # blocks restart.sh, never fails it, and outlives this script (and the
 # terminal). nohup alone is sufficient detachment here: this shell is
 # non-interactive (job control / monitor mode is off, so the child is never
@@ -41,7 +45,7 @@ done
 # agent writes to. Opt out with TBD_SKIP_RECLAIM=1.
 RECLAIM_SCRIPT="$REPO_ROOT/scripts/reclaim-build.sh"
 if [ -z "${TBD_SKIP_RECLAIM:-}" ] && [ -x "$RECLAIM_SCRIPT" ]; then
-    nohup "$RECLAIM_SCRIPT" >> "$HOME/Library/Logs/tbd-reclaim-build.log" 2>&1 < /dev/null &
+    RECLAIM_EXCLUDE_PATH="$REPO_ROOT" nohup "$RECLAIM_SCRIPT" >> "$HOME/Library/Logs/tbd-reclaim-build.log" 2>&1 < /dev/null &
 fi
 
 # MARK: - Build
