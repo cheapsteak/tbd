@@ -132,6 +132,12 @@ struct ContentView: View {
                     .keyboardShortcut("]", modifiers: .command)
                 }
 
+                ToolbarItem(placement: .principal) {
+                    if let worktree = selectedWorktree {
+                        WorktreeTitleView(worktree: worktree)
+                    }
+                }
+
                 // macOS 26 fuses ADJACENT bare toolbar items onto one Liquid Glass
                 // capsule, and `ToolbarItemGroup` fuses on purpose. The reliable
                 // capsule BOUNDARY is `ControlGroup` (→ NSToolbarItemGroup): the PR
