@@ -175,9 +175,11 @@ struct RowActionMenuActions {
             Task { await appState.rerunPreSessionHook(worktreeID: wtID) }
 
         case .createPreSessionHook:
-            // TODO: wired up in a follow-on task — reveal the repo's
-            // pre-session hook editor so the user can author one.
-            break
+            // Regular rows always have a repo (isScratch IS repoID == nil), and
+            // the menu never offers this to a scratch row. Return rather than
+            // assert — a context menu is not a place to crash.
+            guard let repoID = worktree.repoID else { return }
+            appState.revealPreSessionHookEditor(repoID: repoID)
 
         case let .forkSession(terminalID, profileID):
             // Duplicate the conversation into a NEW tab on the SAME account —
