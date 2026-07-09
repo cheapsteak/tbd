@@ -102,5 +102,29 @@ struct PreSessionRerunTests {
             try await lifecycle.rerunPreSessionHook(worktreeID: ghost)
         }
     }
+
+    @Test("RPC surfaces the rejection message verbatim")
+    func rpcReportsAlreadyRunning() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (db, repoDir, worktree, _) = try await makeWorktreeFixture(status: .active)
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        // dryRun tmux never actually runs the hook, so no marker ever appears
+        // and the first run's detached wait stays in flight for the full
+        // `timeout: 2` — that IS the in-flight window this test needs.
+        try await installPreSessionHook(repoDir: repoDir, script: "#!/bin/sh\nexit 0\n")
+
+        let lifecycle = makeLifecycle(db: db, timeout: 2)
+        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true))
+        let params = try JSONEncoder().encode(
+            WorktreeRerunPreSessionParams(worktreeID: worktree.id)
+        )
+
+        let first = try await router.handleWorktreeRerunPreSession(params)
+        #expect(first.error == nil)
+
+        let second = try await router.handleWorktreeRerunPreSession(params)
+        #expect(second.error == "Setup hook is already running for this worktree.")
+    }
 }
 }

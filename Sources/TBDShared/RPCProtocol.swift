@@ -82,6 +82,7 @@ public enum RPCMethod {
     public static let worktreeCreate = "worktree.create"
     public static let worktreeList = "worktree.list"
     public static let worktreeArchive = "worktree.archive"
+    public static let worktreeRerunPreSession = "worktree.rerunPreSession"
     public static let worktreeRevive = "worktree.revive"
     public static let worktreeAdopt = "worktree.adopt"
     public static let worktreeRename = "worktree.rename"
@@ -836,6 +837,15 @@ public struct WorktreeArchiveParams: Codable, Sendable {
     public let force: Bool
     public init(worktreeID: UUID, force: Bool = false) {
         self.worktreeID = worktreeID; self.force = force
+    }
+}
+
+/// Re-run the `preSession` hook for a worktree in a fresh, non-focused tab.
+public struct WorktreeRerunPreSessionParams: Codable, Sendable {
+    public let worktreeID: UUID
+
+    public init(worktreeID: UUID) {
+        self.worktreeID = worktreeID
     }
 }
 
