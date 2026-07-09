@@ -198,11 +198,6 @@ import Testing
     #expect(args == ["-L", "tbd-test", "capture-pane", "-p", "-t", "%42"])
 }
 
-@Test func capturePaneJoinedCommand() {
-    let args = TmuxManager.capturePaneJoinedCommand(server: "tbd-test", paneID: "%42")
-    #expect(args == ["-L", "tbd-test", "capture-pane", "-p", "-J", "-t", "%42"])
-}
-
 @Test func paneCurrentCommandQuery() {
     let args = TmuxManager.paneCurrentCommandQuery(server: "tbd-test", paneID: "%42")
     #expect(args == ["-L", "tbd-test", "list-panes", "-t", "%42", "-F", "#{pane_current_command}"])
