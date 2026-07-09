@@ -134,6 +134,15 @@ final class AppState: ObservableObject {
     @Published var selectionOrder: [UUID] = [] {
         didSet { persistSelectionOrder() }
     }
+    /// A one-shot request to reveal a specific section of a repo's detail pane.
+    /// Set by `revealPreSessionHookEditor`, cleared by `RepoDetailView` once
+    /// applied so navigating back does not replay it.
+    enum RepoDetailReveal: Equatable {
+        case preSessionHook(repoID: UUID)
+    }
+
+    @Published var repoDetailReveal: RepoDetailReveal?
+
     /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
     @Published var selectedRepoID: UUID? = nil {
         didSet {

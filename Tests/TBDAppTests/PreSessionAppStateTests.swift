@@ -426,4 +426,32 @@ struct PreSessionAppStateTests {
             #expect(!state.showsPreSessionBanner(for: worktree))
         }
     }
+
+    // MARK: - Repo detail reveal
+
+    @Test("revealPreSessionHookEditor selects the repo and posts the reveal request")
+    func revealSelectsRepoAndPostsRequest() throws {
+        try withAppState { appState in
+            let repoID = UUID()
+            #expect(appState.repoDetailReveal == nil)
+
+            appState.revealPreSessionHookEditor(repoID: repoID)
+
+            #expect(appState.selectedRepoID == repoID)
+            #expect(appState.repoDetailReveal == .preSessionHook(repoID: repoID))
+            // selectRepo clears any worktree/scratch selection so ContentView
+            // swaps in RepoDetailView.
+            #expect(appState.selectedWorktreeIDs.isEmpty)
+            #expect(appState.selectedScratchSection == false)
+        }
+    }
+
+    @Test("a consumed reveal can be cleared so it is not replayed on navigate-back")
+    func revealIsClearable() throws {
+        try withAppState { appState in
+            appState.revealPreSessionHookEditor(repoID: UUID())
+            appState.repoDetailReveal = nil
+            #expect(appState.repoDetailReveal == nil)
+        }
+    }
 }
