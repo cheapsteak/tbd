@@ -30,7 +30,7 @@ final class HoverMenuModel: ObservableObject {
     private let openDelay: Duration
     private let closeGrace: Duration
 
-    init(openDelay: Duration = .milliseconds(200), closeGrace: Duration = .milliseconds(100)) {
+    init(openDelay: Duration = .milliseconds(400), closeGrace: Duration = .milliseconds(100)) {
         self.openDelay = openDelay
         self.closeGrace = closeGrace
     }
