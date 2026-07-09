@@ -419,16 +419,6 @@ public final class Daemon: Sendable {
             try? await database.audit.logAction(entry)
         }
 
-        // 7a. Wire auto-archive-on-merge: when a worktree's cached PR state
-        // transitions into `.merged`, the coordinator evaluates the effective
-        // setting and archives the worktree (no active children) in the
-        // background.
-        let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
-            db: database, lifecycle: lifecycle, subscriptions: subs)
-        await prManager.setOnMergedTransition { worktreeID, prNumber in
-            await autoArchiveCoordinator.handleMergedTransition(worktreeID: worktreeID, prNumber: prNumber)
-        }
-
         // 8. Initialize RPC router
         let rpcRouter = RPCRouter(
             db: database,
@@ -449,6 +439,30 @@ public final class Daemon: Sendable {
         await rpcRouter.hibernationCoordinator.setOnServerCreated { server in
             await controlModeBridge.enableIfGated(serverName: server)
         }
+
+        // 8a. Wire the merged-PR transition fan-out. When a worktree's cached PR
+        // state transitions into `.merged`, the dispatcher evaluates auto-archive
+        // (archive supersedes hibernate) and, if the worktree survives, auto-park
+        // its idle Claude sessions. `PRStatusManager.onMergedTransition` is a
+        // SINGLE callback, so the dispatcher owns both coordinators.
+        //
+        // ORDERING CONSTRAINT — do NOT move this earlier: the hibernate
+        // coordinator needs `rpcRouter.hibernationCoordinator`, which only exists
+        // after the RPCRouter is constructed above. It's safe here because the
+        // only thing that fires a merged transition is `PRStatusManager.fetchAll`
+        // / `refresh`, both reachable ONLY via the `pr.list` / `pr.refresh` RPC
+        // handlers — and the socket server that serves those doesn't start until
+        // step 9 below. So no merge can be observed between construction and here.
+        let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
+            db: database, lifecycle: lifecycle, subscriptions: subs)
+        let autoHibernateCoordinator = AutoHibernateOnMergeCoordinator(
+            db: database, hibernation: rpcRouter.hibernationCoordinator, subscriptions: subs)
+        let mergedTransitionDispatcher = MergedTransitionDispatcher(
+            archive: autoArchiveCoordinator, hibernate: autoHibernateCoordinator)
+        await prManager.setOnMergedTransition { worktreeID, prNumber in
+            await mergedTransitionDispatcher.handleMergedTransition(worktreeID: worktreeID, prNumber: prNumber)
+        }
+
         self.router = rpcRouter
 
         // Shared foreground gate: the app reports its active/inactive state via

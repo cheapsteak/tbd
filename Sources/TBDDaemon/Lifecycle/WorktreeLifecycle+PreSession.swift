@@ -344,6 +344,14 @@ extension WorktreeLifecycle {
                 } catch {
                     logger.warning("failed to disarm auto-archive for \(worktree.id, privacy: .public): \(error, privacy: .public)")
                 }
+                // Likewise disarm auto-hibernate-on-merge: a still-merged PR would
+                // otherwise immediately re-park the sessions in the worktree the
+                // user just deliberately revived.
+                do {
+                    try await db.worktrees.setAutoHibernateOnMerge(id: worktree.id, value: false)
+                } catch {
+                    logger.warning("failed to disarm auto-hibernate for \(worktree.id, privacy: .public): \(error, privacy: .public)")
+                }
             }
         } catch {
             logger.error("phase-3 status update failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
