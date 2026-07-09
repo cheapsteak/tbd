@@ -15,6 +15,10 @@ struct NotepadPopoverView: View {
     @State private var content: String = ""
     @State private var loadedContent: String = ""
     @State private var didLoad = false
+    /// The on-disk path that `content`/`loadedContent` were loaded from, so a
+    /// flush always writes back to the file the edit belongs to — even if
+    /// `scope` has since changed to a different worktree/repo.
+    @State private var loadedPath: String = ""
     @State private var saveTask: Task<Void, Never>?
     @FocusState private var editorFocused: Bool
 
@@ -48,9 +52,19 @@ struct NotepadPopoverView: View {
             debounceSave(newValue)
         }
         .task(id: scope.notesPath) {
-            let disk = store.read(at: scope.notesPath)
+            // Flush any pending edit for the previously-loaded scope before
+            // we overwrite `content` with the new scope's file. Without this,
+            // a scope change mid-debounce (e.g. Cmd+[ / Cmd+] while the
+            // popover is open) silently drops the unsaved edit.
+            saveTask?.cancel()
+            saveTask = nil
+            flushSave()
+
+            let path = scope.notesPath
+            let disk = store.read(at: path)
             content = disk
             loadedContent = disk
+            loadedPath = path
             didLoad = true
             try? await Task.sleep(for: .milliseconds(200))
             editorFocused = true
@@ -71,10 +85,11 @@ struct NotepadPopoverView: View {
         }
     }
 
-    /// Writes only when the user has actually modified the loaded content.
+    /// Writes only when the user has actually modified the loaded content, and
+    /// always to the path that content came from (`loadedPath`).
     private func flushSave() {
-        guard didLoad, content != loadedContent else { return }
-        store.write(content, to: scope.notesPath)
+        guard didLoad, !loadedPath.isEmpty, content != loadedContent else { return }
+        store.write(content, to: loadedPath)
         loadedContent = content
     }
 }
