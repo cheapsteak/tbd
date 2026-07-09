@@ -217,20 +217,25 @@ struct ContentView: View {
                             // split button otherwise accent-tints it); the icon keeps
                             // its baked status color via renderingMode(.original).
                             .tint(.primary)
-                            // Three-way: while child worktrees exist the daemon's
+                            // Build the tooltip as an ordered clause list so
+                            // "more options" is structurally guaranteed to land
+                            // last, whatever combination of arm states applies.
+                            // The archive clause keeps its three-way wording:
+                            // while child worktrees exist the daemon's
                             // AutoArchiveOnMergeCoordinator skips archiving (it
-                            // re-checks at merge time), so an armed-but-blocked
-                            // worktree must not promise "auto-archives on merge".
+                            // re-checks active children at merge time), so an
+                            // armed-but-blocked worktree must not promise
+                            // "auto-archives on merge".
                             .help({
-                                // Keep the three-way archive wording, then append
-                                // the hibernate clause when armed — clearer than a
-                                // combinatorial 6-way string.
-                                let base = armed && blocked
-                                    ? "Open PR #\(prStatus.number) · auto-archive armed (paused while child worktrees exist) · more options"
-                                    : armed
-                                        ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
-                                        : "Open PR #\(prStatus.number) · more options"
-                                return hibernateArmed ? base + " · auto-hibernates on merge" : base
+                                var clauses = ["Open PR #\(prStatus.number)"]
+                                if armed && blocked {
+                                    clauses.append("auto-archive armed (paused while child worktrees exist)")
+                                } else if armed {
+                                    clauses.append("auto-archives on merge")
+                                }
+                                if hibernateArmed { clauses.append("auto-hibernates on merge") }
+                                clauses.append("more options")
+                                return clauses.joined(separator: " · ")
                             }())
                             // AppKit materializes this split button's NSMenu and
                             // label ONCE; later SwiftUI re-evaluations of the
