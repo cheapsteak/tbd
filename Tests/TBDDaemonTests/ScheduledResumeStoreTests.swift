@@ -131,6 +131,42 @@ import Testing
         #expect(abs(terminal!.pendingResumeAt!.timeIntervalSince(newFireAt)) < 0.01)
     }
 
+    /// Parking cancels the scheduled auto-resume atomically with the park
+    /// write: `TerminalStore.setHibernated` is the choke point EVERY park site
+    /// flows through (performHibernate, the reconcile recovery park, the
+    /// recreate-window dead-window park), and it runs the same
+    /// `cancelPendingInTransaction` routine as an explicit user cancel. Wake
+    /// (`clearHibernated`) must NOT resurrect the cancelled row.
+    @Test func setHibernatedCancelsPendingAndWakeDoesNotResurrect() async throws {
+        let resume = makeResume()
+        _ = try await db.scheduledResumes.insertPending(resume)
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt != nil)
+
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        #expect(try await db.scheduledResumes.get(id: resume.id)?.status == .cancelled,
+                "parking must cancel the pending row — the Claude process is dead")
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil,
+                "the pendingResumeAt mirror must clear in the same write")
+
+        try await db.terminals.clearHibernated(id: terminalID)
+        #expect(try await db.scheduledResumes.get(id: resume.id)?.status == .cancelled,
+                "wake must not resurrect the cancelled resume")
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil)
+    }
+
+    /// The other branch of the park-time cancel: a terminal with NO pending
+    /// resume parks cleanly (the in-transaction cancel is a no-op, not an
+    /// error) and stays parked.
+    @Test func setHibernatedWithoutPendingResumeStillParks() async throws {
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let terminal = try await db.terminals.get(id: terminalID)
+        #expect(terminal?.hibernatedAt != nil)
+        #expect(terminal?.pendingResumeAt == nil)
+        #expect(try await db.scheduledResumes.all(terminalID: terminalID).isEmpty)
+    }
+
     @Test func cancelPendingByTerminal() async throws {
         let resume = makeResume()
         _ = try await db.scheduledResumes.insertPending(resume)

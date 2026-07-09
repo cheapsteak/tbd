@@ -324,6 +324,11 @@ public actor HibernationCoordinator {
         await verifyHibernationTookEffect(server: server, paneID: paneID, terminalID: terminal.id)
 
         do {
+            // setHibernated also cancels any scheduled auto-resume in the
+            // same write transaction (spec §Cancellation): parking kills the
+            // Claude process, so a pending "TBD types continue at ..." row
+            // must die with it. The actuator's fire-time `isParked` check is
+            // the backstop for a park that races an in-flight actuation.
             try await db.terminals.setHibernated(
                 id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot,
                 reason: reason, at: now()
@@ -331,10 +336,6 @@ public actor HibernationCoordinator {
         } catch {
             logger.warning("hibernate: failed to mark hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        // Hibernation = parking; a parked pane must not receive a scheduled
-        // auto-resume send (spec §Cancellation); fire-time eligibility
-        // re-checks are the backstop.
-        _ = try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)
         idleSince[terminal.id] = nil
         pendingKillSince[terminal.id] = nil
         // The delta must carry the just-captured snapshot and the park reason:

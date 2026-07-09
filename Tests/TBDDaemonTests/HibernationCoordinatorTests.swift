@@ -190,6 +190,39 @@ struct HibernationCoordinatorTests {
         #expect(after?.hibernatedAt != nil)
     }
 
+    // MARK: - Park cancels the scheduled auto-resume
+
+    /// A hibernated terminal must never carry a scheduled auto-resume — the
+    /// Claude process is dead, so a resume firing later would type "continue"
+    /// into a bare shell. The park write (`setHibernated`, reached here via
+    /// `performHibernate`) cancels the pending row and clears the
+    /// `pendingResumeAt` mirror atomically; wake does NOT resurrect it.
+    @Test func parkCancelsScheduledResumeAndWakeDoesNotResurrect() async throws {
+        let (db, worktreeID, terminalID) = try await setup(activityState: .idle)
+        let resume = ScheduledResume(
+            terminalID: terminalID, worktreeID: worktreeID,
+            claudeSessionID: "sess-1",
+            resetsAt: Date().addingTimeInterval(60),
+            fireAt: Date().addingTimeInterval(90),
+            limitType: "session", rawMessage: "You've hit your session limit")
+        _ = try await db.scheduledResumes.insertPending(resume)
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt != nil)
+
+        let coord = coordinator(db)
+        let parked = await coord.manualHibernate(terminalID: terminalID)
+        #expect(parked == .ok)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil,
+                "parking must cancel the pending scheduled resume")
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil,
+                "the pendingResumeAt mirror must clear with the park write")
+
+        let woke = await coord.wake(terminalID: terminalID)
+        #expect(woke == .ok)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil,
+                "wake must not resurrect the cancelled resume")
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil)
+    }
+
     // MARK: - Auto-off: manual park still works
 
     /// Manual "Hibernate now" must NOT consult `auto_hibernate_enabled`. With the

@@ -3,10 +3,12 @@ import Testing
 import TBDShared
 @testable import TBDApp
 
-/// The parked-pane footer banner + full-surface click-to-wake gate. Tests the
-/// two pure decisions — `HibernatedBannerModel.banner(for:)` (which footer
-/// banner, with the parked-beats-scheduled precedence) and
-/// `ParkedPaneWakeModel.showsWakeOverlay(for:)` (parked panes get the
+/// The parked-pane bottom-edge notice + full-surface click-to-wake gate.
+/// Tests the two pure decisions — `HibernatedBannerModel.banner(for:)`
+/// (parked → `.hibernatedOverlay`: the footer slot stays empty and a thin
+/// strip over the frozen pane's last row carries the reason-phrased message;
+/// live + scheduled → the `.scheduledResume` footer; parked beats scheduled)
+/// and `ParkedPaneWakeModel.showsWakeOverlay(for:)` (parked panes get the
 /// click-catching overlay, live panes never do) — without SwiftUI, in the
 /// same fixture style as `WakeOnFocusDecisionTests`.
 @Suite("Hibernated banner + parked-pane wake gate")
@@ -22,14 +24,17 @@ struct HibernatedBannerModelTests {
                  pendingResumeAt: pendingResumeAt)
     }
 
-    // MARK: - Hibernated message per park reason
+    // MARK: - Hibernated overlay message per park reason
+    //
+    // Parked → `.hibernatedOverlay(message:)`: no footer banner (the notice
+    // strip over the pane's bottom edge carries the message instead).
 
     /// Manual park ("Hibernate now") → plain "Hibernated" phrasing.
     @Test func manualParkMessage() {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: .manual)
         )
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Hibernated — click anywhere in the pane to resume"
         ))
     }
@@ -39,7 +44,7 @@ struct HibernatedBannerModelTests {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: .auto)
         )
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Hibernated while idle — click anywhere in the pane to resume"
         ))
     }
@@ -49,7 +54,7 @@ struct HibernatedBannerModelTests {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: .recovery)
         )
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Parked after a restart — click anywhere in the pane to resume"
         ))
     }
@@ -59,7 +64,7 @@ struct HibernatedBannerModelTests {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: .merged)
         )
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Hibernated after the PR merged — click anywhere in the pane to resume"
         ))
     }
@@ -69,23 +74,24 @@ struct HibernatedBannerModelTests {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: nil)
         )
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Hibernated while idle — click anywhere in the pane to resume"
         ))
     }
 
     /// A legacy-suspended row (`suspendedAt` only, never migrated) is parked
-    /// too — it gets the hibernated banner via `isParked`, not nothing.
+    /// too — it gets the hibernated overlay via `isParked`, not nothing.
     @Test func legacySuspendedRowGetsHibernatedBanner() {
         let banner = HibernatedBannerModel.banner(for: terminal(suspendedAt: Date()))
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Hibernated while idle — click anywhere in the pane to resume"
         ))
     }
 
     // MARK: - No banner / scheduled-resume branches
 
-    /// A live terminal with nothing scheduled → no footer banner at all.
+    /// A live terminal with nothing scheduled → no footer banner and no
+    /// overlay strip.
     @Test func liveTerminalShowsNoBanner() {
         #expect(HibernatedBannerModel.banner(for: terminal()) == nil)
     }
@@ -95,7 +101,8 @@ struct HibernatedBannerModelTests {
         #expect(HibernatedBannerModel.banner(for: nil) == nil)
     }
 
-    /// A live terminal with a scheduled auto-resume → the scheduled banner,
+    /// A live terminal with a scheduled auto-resume → the scheduled FOOTER
+    /// banner (the only banner that still occupies the footer slot),
     /// carrying the exact `resumeAt`.
     @Test func liveTerminalWithPendingResumeShowsScheduledBanner() {
         let resumeAt = Date(timeIntervalSince1970: 1_800_000_000)
@@ -103,16 +110,17 @@ struct HibernatedBannerModelTests {
         #expect(banner == .scheduledResume(resumeAt))
     }
 
-    /// Precedence: parked AND `pendingResumeAt` set (possible — #404 parks on
-    /// PR merge while limit-resume scheduling exists) → the PARKED banner
-    /// wins and the scheduled banner is NOT shown; "TBD types continue at..."
-    /// would be misleading for a session with nothing running.
+    /// Precedence: parked AND `pendingResumeAt` set (parking now cancels the
+    /// scheduled resume daemon-side, but the stale mirror is possible in the
+    /// delta-to-refetch window) → the PARKED overlay wins and the scheduled
+    /// footer is NOT shown; "TBD types continue at..." would be misleading
+    /// for a session with nothing running.
     @Test func parkedBeatsScheduledResume() {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: .merged,
                           pendingResumeAt: Date(timeIntervalSince1970: 1_800_000_000))
         )
-        #expect(banner == .hibernated(
+        #expect(banner == .hibernatedOverlay(
             message: "Hibernated after the PR merged — click anywhere in the pane to resume"
         ))
     }

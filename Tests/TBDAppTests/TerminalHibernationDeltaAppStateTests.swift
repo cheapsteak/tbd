@@ -45,6 +45,57 @@ struct TerminalHibernationDeltaAppStateTests {
         }
     }
 
+    /// Parking implies cancellation: the daemon's `setHibernated` cancels any
+    /// scheduled auto-resume in the same write, so a `hibernated == true`
+    /// delta must nil the cached row's `pendingResumeAt` mirror too —
+    /// otherwise the tab's ⏳ glyph and "Cancel Scheduled Resume" item keep
+    /// advertising a resume that won't happen for the delta-to-refetch window.
+    @Test func hibernateDelta_clearsPendingResumeAt() {
+        withState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            state.terminals = [worktreeID: [
+                Terminal(id: terminalID, worktreeID: worktreeID,
+                         tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude,
+                         pendingResumeAt: Date(timeIntervalSince1970: 1_800_000_000))
+            ]]
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: true, keepWarm: false,
+                suspendedSnapshot: nil, hibernateReason: .merged
+            )))
+
+            #expect(state.terminals[worktreeID]?[0].pendingResumeAt == nil,
+                    "parking cancels the scheduled resume — the cached mirror must clear with the flip")
+        }
+    }
+
+    /// A wake delta carries no scheduled-resume information, so it must leave
+    /// `pendingResumeAt` alone — the refetch is the source of truth for any
+    /// resume scheduled after the wake.
+    @Test func wakeDelta_leavesPendingResumeAtAlone() {
+        withState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            let resumeAt = Date(timeIntervalSince1970: 1_800_000_000)
+            state.terminals = [worktreeID: [
+                Terminal(id: terminalID, worktreeID: worktreeID,
+                         tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude,
+                         hibernatedAt: Date(), hibernateReason: .auto,
+                         pendingResumeAt: resumeAt)
+            ]]
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: false, keepWarm: false
+            )))
+
+            #expect(state.terminals[worktreeID]?[0].pendingResumeAt == resumeAt,
+                    "a wake delta says nothing about scheduled resumes — leave the mirror for the refetch")
+        }
+    }
+
     @Test func wakeDelta_clearsReasonAndParkFlag_keepsSnapshot() {
         withState { state in
             let worktreeID = UUID()
