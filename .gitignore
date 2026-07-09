@@ -21,6 +21,3 @@ docs/plans/
 
 # Mock harness screenshot artifacts
 artifacts/
-
-# Local SourceKit-LSP suppression config seeded by scripts/reclaim-build.sh (never commit)
-.sourcekit-lsp/

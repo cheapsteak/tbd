@@ -40,20 +40,6 @@ has_active_build() {
   _ps_lines | grep -Ei 'swift-build|swift-frontend|swiftc|swift-driver' | grep -Fq -- "$wt"
 }
 
-# ensure_lsp_config WORKTREE_PATH DRY -> seed backgroundIndexing:false if absent
-ensure_lsp_config() {
-  local wt="$1" dry="$2"
-  local cfg="$wt/.sourcekit-lsp/config.json"
-  if [[ -f "$cfg" ]]; then
-    echo "SKIP lsp-config-exists $wt"
-    return 0
-  fi
-  echo "SEED lsp-config $wt"
-  [[ "$dry" == "true" ]] && return 0
-  mkdir -p "$wt/.sourcekit-lsp"
-  printf '{\n  "backgroundIndexing": false\n}\n' > "$cfg"
-}
-
 # list_worktrees_tsv -> "<path>\t<liveSessions>" for each active worktree
 list_worktrees_tsv() {
   _worktree_json | jq -r '.[] | select(.status == "active") | [.path, (.liveClaudeSessionCount // 0)] | @tsv'
@@ -108,7 +94,6 @@ main() {
   while IFS=$'\t' read -r wt sessions; do
     [[ -n "$wt" ]] || continue
     [[ -f "$wt/Package.swift" ]] || continue   # only SwiftPM-package worktrees produce .build/index-build
-    ensure_lsp_config "$wt" "$dry"
     plan_worktree "$wt" "$sessions"
   done < <(list_worktrees_tsv) | tee "$plan_file" >&2
 
