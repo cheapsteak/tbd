@@ -57,6 +57,7 @@ extension RPCRouter {
             primaryAgentPreference: config.primaryAgentPreference,
             globalEnvOverrides: config.envOverrides,
             autoArchiveOnMergeDefault: config.autoArchiveOnMergeDefault,
+            autoHibernateOnMergeDefault: config.autoHibernateOnMergeDefault,
             nightwatchMode: config.nightwatchMode,
             autoResumeOnLimitReset: config.autoResumeOnLimitReset,
             autoResumeOnApiError: config.autoResumeOnApiError

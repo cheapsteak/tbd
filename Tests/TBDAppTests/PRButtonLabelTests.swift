@@ -23,6 +23,7 @@ struct PRButtonLabelTests {
         worktreeID: UUID,
         worktreeFound: Bool = true,
         armed: Bool = false,
+        hibernateArmed: Bool = false,
         blocked: Bool = false,
         prStatus: PRStatus,
         colorScheme: ColorScheme = .light
@@ -31,6 +32,7 @@ struct PRButtonLabelTests {
             worktreeID: worktreeID,
             worktreeFound: worktreeFound,
             armed: armed,
+            hibernateArmed: hibernateArmed,
             blocked: blocked,
             prStatus: prStatus,
             colorScheme: colorScheme
@@ -133,6 +135,18 @@ struct PRButtonLabelTests {
         let armed = Self.makeKey(worktreeID: worktreeID, armed: true, prStatus: status)
         let unarmed = Self.makeKey(worktreeID: worktreeID, armed: false, prStatus: status)
         #expect(armed != unarmed)
+    }
+
+    // Stale-checkmark regression guard: AppKit materializes the split-button
+    // NSMenu once, so the hibernate Toggle's checkmark would freeze at its
+    // first-render value unless hibernateArmed is part of the .id key.
+    @Test("id key differs between hibernate-armed and not, all else equal")
+    func idKeyDiffersByHibernateArmed() {
+        let worktreeID = UUID()
+        let status = Self.makeStatus()
+        let hibernateArmed = Self.makeKey(worktreeID: worktreeID, hibernateArmed: true, prStatus: status)
+        let notArmed = Self.makeKey(worktreeID: worktreeID, hibernateArmed: false, prStatus: status)
+        #expect(hibernateArmed != notArmed)
     }
 
     @Test("id key differs between PR states, PR numbers, and PR urls")

@@ -15,6 +15,14 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleConfigSetAutoHibernateDefault(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoHibernateDefaultParams.self, from: paramsData)
+        try await db.config.setAutoHibernateOnMergeDefault(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the session-limit auto-resume gate. Turning it OFF cancels only
     /// the session-limit pending resumes (`.limitOnly` scope) — the transient
     /// API-error toggle owns its own rows (spec: each toggle cancels only its

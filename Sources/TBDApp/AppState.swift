@@ -414,6 +414,9 @@ final class AppState: ObservableObject {
     /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
     /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
     @Published var autoArchiveOnMergeDefault: Bool = false
+    /// Global default for auto-hibernate-on-PR-merge. Loaded from the daemon
+    /// alongside `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
+    @Published var autoHibernateOnMergeDefault: Bool = false
     @Published var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.

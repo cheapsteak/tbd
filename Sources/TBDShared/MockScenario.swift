@@ -64,6 +64,7 @@ public struct MockScenario: Codable, Sendable {
         public var hasConflicts: Bool?
         public var prStatus: PRStatus?
         public var autoArchiveOnMerge: Bool?
+        public var autoHibernateOnMerge: Bool?
         /// `name` of another worktree in the SAME repo, listed EARLIER in the array.
         public var parentName: String?
         public var terminals: [TerminalSeed]?
@@ -71,7 +72,8 @@ public struct MockScenario: Codable, Sendable {
         public init(name: String, branch: String, displayName: String? = nil,
                     pathSuffix: String? = nil, status: WorktreeStatus? = nil,
                     hasConflicts: Bool? = nil, prStatus: PRStatus? = nil,
-                    autoArchiveOnMerge: Bool? = nil, parentName: String? = nil,
+                    autoArchiveOnMerge: Bool? = nil, autoHibernateOnMerge: Bool? = nil,
+                    parentName: String? = nil,
                     terminals: [TerminalSeed]? = nil) {
             self.name = name
             self.branch = branch
@@ -81,6 +83,7 @@ public struct MockScenario: Codable, Sendable {
             self.hasConflicts = hasConflicts
             self.prStatus = prStatus
             self.autoArchiveOnMerge = autoArchiveOnMerge
+            self.autoHibernateOnMerge = autoHibernateOnMerge
             self.parentName = parentName
             self.terminals = terminals
         }

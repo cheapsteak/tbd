@@ -32,6 +32,9 @@ extension AppState {
             if result.autoArchiveOnMergeDefault != autoArchiveOnMergeDefault {
                 autoArchiveOnMergeDefault = result.autoArchiveOnMergeDefault
             }
+            if result.autoHibernateOnMergeDefault != autoHibernateOnMergeDefault {
+                autoHibernateOnMergeDefault = result.autoHibernateOnMergeDefault
+            }
             if result.nightwatchMode != nightwatchMode {
                 nightwatchMode = result.nightwatchMode
             }
@@ -173,6 +176,17 @@ extension AppState {
             autoArchiveOnMergeDefault = enabled
         } catch {
             logger.error("Failed to set auto-archive default: \(error, privacy: .public)")
+            showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set the global default for auto-hibernate-on-PR-merge.
+    func setAutoHibernateOnMergeDefault(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setAutoHibernateOnMergeDefault(enabled)
+            autoHibernateOnMergeDefault = enabled
+        } catch {
+            logger.error("Failed to set auto-hibernate default: \(error, privacy: .public)")
             showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
         }
     }

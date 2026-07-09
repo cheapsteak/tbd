@@ -130,6 +130,9 @@ public struct MockSeeder: Sendable {
                 if let aam = wtSeed.autoArchiveOnMerge {
                     try await db.worktrees.setAutoArchiveOnMerge(id: wt.id, value: aam)
                 }
+                if let ahm = wtSeed.autoHibernateOnMerge {
+                    try await db.worktrees.setAutoHibernateOnMerge(id: wt.id, value: ahm)
+                }
             }
 
             for (termIdx, tSeed) in (wtSeed.terminals ?? []).enumerated() {

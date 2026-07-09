@@ -745,6 +745,22 @@ actor DaemonClient {
         )
     }
 
+    /// Set the per-worktree auto-hibernate-on-PR-merge override.
+    func setWorktreeAutoHibernate(id: UUID, enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetAutoHibernate,
+            params: WorktreeSetAutoHibernateParams(worktreeID: id, enabled: enabled)
+        )
+    }
+
+    /// Set the global default for auto-hibernate-on-PR-merge.
+    func setAutoHibernateOnMergeDefault(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoHibernateOnMergeDefault,
+            params: ConfigSetAutoHibernateDefaultParams(enabled: enabled)
+        )
+    }
+
     /// Set the global session-limit auto-resume gate.
     func setAutoResumeOnLimitReset(_ enabled: Bool) async throws {
         try await callVoidAsync(

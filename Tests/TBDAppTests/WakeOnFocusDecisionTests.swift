@@ -109,6 +109,20 @@ struct WakeOnFocusDecisionTests {
         #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == recovery)
     }
 
+    /// A merge-parked session (`hibernateReason == .merged`) still wakes on
+    /// focus: auto-hibernate-on-merge is system-initiated, not an explicit
+    /// user "Hibernate now", so navigating back to the worktree wakes it —
+    /// unlike a `.manual` park. Pins the design decision.
+    @Test func wakesMergedReasonParkedTerminalOnFocus() {
+        let state = AppState()
+        let wt = UUID()
+        let merged = UUID()
+        state.terminals[wt] = [parkedTerminal(merged, reason: .merged)]
+        focus(state, worktreeID: wt, terminalID: merged)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == merged)
+    }
+
     /// A legacy parked row with NO reason (pre-v46) still wakes on focus —
     /// the old behavior is preserved for rows the migration can't attribute.
     @Test func wakesLegacyNilReasonParkedTerminalOnFocus() {

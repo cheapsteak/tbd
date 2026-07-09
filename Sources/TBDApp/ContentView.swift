@@ -161,6 +161,7 @@ struct ContentView: View {
                    let prURL = URL(string: prStatus.url) {
                     let worktree = appState.findWorktree(id: worktreeID)
                     let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
+                    let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
                     let blocked = !appState.children(of: worktreeID).isEmpty
                     ToolbarItem(placement: .primaryAction) {
                         ControlGroup {
@@ -178,6 +179,21 @@ struct ContentView: View {
                                         }
                                     ))
                                     .disabled(blocked)
+                                    // Plain 2-state toggle bound to the EFFECTIVE
+                                    // value; the setter always writes explicit
+                                    // true/false (no UI path back to nil — the
+                                    // tri-state stays reachable via daemon/DB only,
+                                    // matching auto-archive). Deliberately NOT
+                                    // `.disabled(blocked)`: `blocked` is the
+                                    // archive-specific active-children rule, and the
+                                    // daemon's precedence lets an armed-but-blocked
+                                    // archive still hibernate.
+                                    Toggle("Auto-hibernate sessions on PR merge", isOn: Binding(
+                                        get: { hibernateArmed },
+                                        set: { newValue in
+                                            Task { await appState.setAutoHibernate(worktreeID: worktreeID, enabled: newValue) }
+                                        }
+                                    ))
                                 }
                             } label: {
                                 PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed)
@@ -205,28 +221,33 @@ struct ContentView: View {
                             // AutoArchiveOnMergeCoordinator skips archiving (it
                             // re-checks at merge time), so an armed-but-blocked
                             // worktree must not promise "auto-archives on merge".
-                            .help(
-                                armed && blocked
+                            .help({
+                                // Keep the three-way archive wording, then append
+                                // the hibernate clause when armed — clearer than a
+                                // combinatorial 6-way string.
+                                let base = armed && blocked
                                     ? "Open PR #\(prStatus.number) · auto-archive armed (paused while child worktrees exist) · more options"
                                     : armed
                                         ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
                                         : "Open PR #\(prStatus.number) · more options"
-                            )
+                                return hibernateArmed ? base + " · auto-hibernates on merge" : base
+                            }())
                             // AppKit materializes this split button's NSMenu and
                             // label ONCE; later SwiftUI re-evaluations of the
                             // Toggle checkmark and armed badge never reach the
                             // already-built NSMenuToolbarItem. Changing the id
                             // forces the item to be recreated, so the key must
                             // include EVERYTHING the label/menu render: worktree
-                            // + whether its row has loaded (gates the menu's only
-                            // item), armed + blocked (menu + help), the rendered
-                            // PRStatus fields (number, state, url — not reason,
-                            // which presentation ignores), and colorScheme
-                            // (baked icon colors).
+                            // + whether its row has loaded (gates the menu's
+                            // items), armed + hibernateArmed + blocked (menu +
+                            // help), the rendered PRStatus fields (number, state,
+                            // url — not reason, which presentation ignores), and
+                            // colorScheme (baked icon colors).
                             .id(PRButtonLabel.prSplitButtonID(
                                 worktreeID: worktreeID,
                                 worktreeFound: worktree != nil,
                                 armed: armed,
+                                hibernateArmed: hibernateArmed,
                                 blocked: blocked,
                                 prStatus: prStatus,
                                 colorScheme: colorScheme
@@ -429,9 +450,11 @@ struct PRButtonLabel: View {
     /// the split button's NSMenu and label ONCE, so the key must include
     /// EVERYTHING the label/menu render — anything omitted here can change in
     /// SwiftUI state without ever reaching the materialized AppKit item.
-    /// `worktreeFound` matters because the menu's only item (the auto-archive
-    /// Toggle) is gated on the worktree row having loaded: a menu materialized
-    /// before the row appears would otherwise stay permanently empty. The key
+    /// `worktreeFound` matters because the menu's items (the auto-archive and
+    /// auto-hibernate Toggles) are gated on the worktree row having loaded: a
+    /// menu materialized before the row appears would otherwise stay
+    /// permanently empty. `hibernateArmed` mirrors `armed`: without it the
+    /// hibernate Toggle's checkmark would freeze at its first-render value. The key
     /// contains exactly the `PRStatus` fields the label/menu/primaryAction
     /// consume: `number` (label text/help), `state` (icon via
     /// `PRStatusPresentation`), `url` (captured by `primaryAction`, so a
@@ -451,11 +474,12 @@ struct PRButtonLabel: View {
         worktreeID: UUID,
         worktreeFound: Bool,
         armed: Bool,
+        hibernateArmed: Bool,
         blocked: Bool,
         prStatus: PRStatus,
         colorScheme: ColorScheme
     ) -> String {
-        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(blocked)"
+        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
             + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
             + "-\(prStatus.mergeQueuePosition.map(String.init) ?? "nil")"
             + "-\(colorScheme)"
