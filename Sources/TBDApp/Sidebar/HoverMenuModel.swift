@@ -52,7 +52,7 @@ final class HoverMenuModel: ObservableObject {
     /// ⌥-click: open immediately, skipping the hover-intent delay.
     func openImmediately() {
         cancelTasks()
-        isOpen = true
+        setOpen(true)
     }
 
     /// A row was chosen, or the popover was dismissed by an outside click.
@@ -60,7 +60,17 @@ final class HoverMenuModel: ObservableObject {
         cancelTasks()
         isTriggerHovered = false
         overMenu = false
-        isOpen = false
+        setOpen(false)
+    }
+
+    /// Flip `isOpen` without the popover's present/dismiss animation — the menu
+    /// should snap in and out, not fade/scale. SwiftUI's `.popover` (AppKit
+    /// `NSPopover`) animates by default; a transaction with `disablesAnimations`
+    /// around the state change is the public lever to turn that off.
+    private func setOpen(_ value: Bool) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { isOpen = value }
     }
 
     /// Binding for `.popover(isPresented:)`. SwiftUI sets it false on an outside
@@ -86,7 +96,7 @@ final class HoverMenuModel: ObservableObject {
                 guard let self else { return }
                 if self.openTaskGeneration == generation { self.openTask = nil }
                 guard !Task.isCancelled, self.pointerInside else { return }
-                self.isOpen = true
+                self.setOpen(true)
             }
         } else {
             openTask?.cancel(); openTask = nil
@@ -98,7 +108,7 @@ final class HoverMenuModel: ObservableObject {
                 guard let self else { return }
                 if self.closeTaskGeneration == generation { self.closeTask = nil }
                 guard !Task.isCancelled, !self.pointerInside else { return }
-                self.isOpen = false
+                self.setOpen(false)
             }
         }
     }
