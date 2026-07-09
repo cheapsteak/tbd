@@ -21,6 +21,7 @@ enum RowActionMenu {
         case rename
         case openInFinder
         case copyPath
+        case copyBranch
         case archiveScratch
         case deleteScratch
         /// Manually hibernate all idle Claude sessions in this worktree.
@@ -107,6 +108,10 @@ enum RowActionMenu {
         /// Has at least one keep-warm-pinned Claude terminal (drives "Allow
         /// hibernation").
         var hasKeepWarmClaude: Bool
+        /// The global "Auto-hibernate idle Claude sessions" master switch is on.
+        /// Keep-warm (exempt-from-auto-hibernation) is meaningless when off, so
+        /// the toggle is hidden then.
+        var autoHibernateEnabled: Bool
         /// Has at least one non-archived child worktree (gates archive).
         var hasActiveChildren: Bool
         /// Worktree path is empty (main/creating rows hide Finder/Copy then).
@@ -133,6 +138,7 @@ enum RowActionMenu {
              hasHibernatedClaude: Bool = false,
              hasUnpinnedClaude: Bool = false,
              hasKeepWarmClaude: Bool = false,
+             autoHibernateEnabled: Bool = true,
              hasActiveChildren: Bool = false,
              pathIsEmpty: Bool = false,
              hasRepoID: Bool = true,
@@ -146,6 +152,7 @@ enum RowActionMenu {
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
             self.hasKeepWarmClaude = hasKeepWarmClaude
+            self.autoHibernateEnabled = autoHibernateEnabled
             self.hasActiveChildren = hasActiveChildren
             self.pathIsEmpty = pathIsEmpty
             self.hasRepoID = hasRepoID
@@ -227,12 +234,15 @@ enum RowActionMenu {
         }
         // Keep-warm toggle: offer "Keep warm" when any session is still
         // eligible for auto-hibernation, and "Allow hibernation" when any is
-        // pinned. (Both can appear if a worktree hosts a mix.)
-        if context.hasUnpinnedClaude {
-            actions.append(Action(kind: .toggleKeepWarm(enable: true), title: keepWarmLabel))
-        }
-        if context.hasKeepWarmClaude {
-            actions.append(Action(kind: .toggleKeepWarm(enable: false), title: allowHibernationLabel))
+        // pinned. (Both can appear if a worktree hosts a mix.) Meaningless
+        // when the global auto-hibernate switch is off, so hidden then.
+        if context.autoHibernateEnabled {
+            if context.hasUnpinnedClaude {
+                actions.append(Action(kind: .toggleKeepWarm(enable: true), title: keepWarmLabel))
+            }
+            if context.hasKeepWarmClaude {
+                actions.append(Action(kind: .toggleKeepWarm(enable: false), title: allowHibernationLabel))
+            }
         }
         return actions
     }
@@ -266,6 +276,20 @@ enum RowActionMenu {
         Array(sections.filter { !$0.isEmpty }.joined(separator: [Item.divider]))
     }
 
+    /// Filesystem section: Open in Finder, Copy Path, and Copy Branch Name (the
+    /// last only when the worktree has a branch to copy). Shared by all three
+    /// branches so they stay in lockstep.
+    private static func filesystemActions(context: Context) -> [Item] {
+        var items: [Item] = [
+            .action(Action(kind: .openInFinder, title: "Open in Finder")),
+            .action(Action(kind: .copyPath, title: "Copy Path")),
+        ]
+        if !context.branch.isEmpty {
+            items.append(.action(Action(kind: .copyBranch, title: "Copy Branch Name")))
+        }
+        return items
+    }
+
     private static func scratchItems(context: Context) -> [Item] {
         // Trailing section: Delete stays last among the actions; the
         // promote-hint caption sits beneath it as the menu's footnote.
@@ -288,22 +312,17 @@ enum RowActionMenu {
             // the regular branch.
             forkActions(context: context).map(Item.action),
             maintenanceActions(context: context).map(Item.action),
-            [
-                .action(Action(kind: .openInFinder, title: "Open in Finder")),
-                .action(Action(kind: .copyPath, title: "Copy Path")),
-            ],
+            filesystemActions(context: context),
             trailing,
         ])
     }
 
     private static func mainItems(context: Context) -> [Item] {
-        // Main / creating worktree: only Finder and Copy Path, and only when a
-        // path exists (no rename/archive).
+        // Main / creating worktree: only Finder and Copy Path (+ Copy Branch
+        // Name when applicable), and only when a path exists (no
+        // rename/archive).
         guard !context.pathIsEmpty else { return [] }
-        return [
-            .action(Action(kind: .openInFinder, title: "Open in Finder")),
-            .action(Action(kind: .copyPath, title: "Copy Path")),
-        ]
+        return filesystemActions(context: context)
     }
 
     private static func regularItems(context: Context) -> [Item] {
@@ -336,10 +355,7 @@ enum RowActionMenu {
             hibernationActions(context: context).map(Item.action),
             spawning,
             maintenanceActions(context: context).map(Item.action),
-            [
-                .action(Action(kind: .openInFinder, title: "Open in Finder")),
-                .action(Action(kind: .copyPath, title: "Copy Path")),
-            ],
+            filesystemActions(context: context),
         ])
     }
 }

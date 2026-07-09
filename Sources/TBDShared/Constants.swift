@@ -82,4 +82,35 @@ public enum TBDConstants {
     public static func hookPath(repoID: UUID, eventName: String) -> String {
         hookPath(repoID: repoID, eventName: eventName, environment: ProcessInfo.processInfo.environment)
     }
+
+    /// Base directory holding per-worktree config (e.g. scratch-worktree
+    /// notepads): `~/tbd/worktrees`. Honors TBD_HOME.
+    public static func worktreesDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("worktrees")
+    }
+    public static var worktreesDir: URL { worktreesDir(environment: ProcessInfo.processInfo.environment) }
+
+    /// Path to a repo's shared notepad file: `~/tbd/repos/<repoID>/notes.md`.
+    /// Shared by every worktree of the repo. Honors TBD_HOME.
+    public static func notesPath(repoID: UUID, environment: [String: String]) -> String {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent("notes.md")
+            .path
+    }
+    public static func notesPath(repoID: UUID) -> String {
+        notesPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Path to a scratch worktree's notepad file:
+    /// `~/tbd/worktrees/<worktreeID>/notes.md`. Honors TBD_HOME.
+    public static func notesPath(worktreeID: UUID, environment: [String: String]) -> String {
+        worktreesDir(environment: environment)
+            .appendingPathComponent(worktreeID.uuidString)
+            .appendingPathComponent("notes.md")
+            .path
+    }
+    public static func notesPath(worktreeID: UUID) -> String {
+        notesPath(worktreeID: worktreeID, environment: ProcessInfo.processInfo.environment)
+    }
 }

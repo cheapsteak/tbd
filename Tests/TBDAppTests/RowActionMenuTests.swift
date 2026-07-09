@@ -71,6 +71,7 @@ struct RowActionMenuRegularTests {
             .createPreSessionHook,
             .openInFinder,
             .copyPath,
+            .copyBranch,
         ])
         // Section boundaries: after archive, after the hibernation block,
         // after the fork/nested block, and after the maintenance item.
@@ -92,6 +93,7 @@ struct RowActionMenuRegularTests {
             .createPreSessionHook,
             .openInFinder,
             .copyPath,
+            .copyBranch,
         ])
         #expect(dividerIndices(items) == [2, 5, 7])
         expectWellFormedDividers(items)
@@ -439,5 +441,53 @@ struct RowActionMenuHibernationTests {
     @Test func hibernationActionsAppearInScratchToo() {
         let ctx = RowActionMenu.Context(hasHibernatedClaude: true, isScratch: true)
         #expect(kinds(RowActionMenu.items(context: ctx)).contains(.wakeHibernated))
+    }
+
+    @Test func keepWarmToggleAbsentWhenAutoHibernateDisabled() {
+        // Keep-warm is meaningless when the global auto-hibernate switch is
+        // off — both toggle directions must be hidden even with eligible
+        // sessions on both sides.
+        let ctx = RowActionMenu.Context(hasUnpinnedClaude: true,
+                                        hasKeepWarmClaude: true,
+                                        autoHibernateEnabled: false,
+                                        hasRepoID: true,
+                                        branch: "b")
+        let ks = kinds(RowActionMenu.items(context: ctx))
+        #expect(!ks.contains(.toggleKeepWarm(enable: true)))
+        #expect(!ks.contains(.toggleKeepWarm(enable: false)))
+    }
+
+    @Test func keepWarmTogglePresentWhenAutoHibernateEnabled() {
+        let ctx = RowActionMenu.Context(hasUnpinnedClaude: true,
+                                        hasKeepWarmClaude: true,
+                                        autoHibernateEnabled: true,
+                                        hasRepoID: true,
+                                        branch: "b")
+        let ks = kinds(RowActionMenu.items(context: ctx))
+        #expect(ks.contains(.toggleKeepWarm(enable: true)))
+        #expect(ks.contains(.toggleKeepWarm(enable: false)))
+    }
+}
+
+// MARK: - Copy branch name
+
+@Suite("RowActionMenu — copy branch")
+struct RowActionMenuCopyBranchTests {
+    @Test func copyBranchPresentWhenBranchNonEmpty() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "tbd/x")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.copyBranch))
+    }
+
+    @Test func copyBranchAbsentWhenBranchEmpty() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "")
+        #expect(!kinds(RowActionMenu.items(context: ctx)).contains(.copyBranch))
+    }
+
+    @Test func copyBranchAlsoAppearsInScratchAndMainWhenBranchPresent() {
+        let scratch = RowActionMenu.Context(isScratch: true, branch: "tbd/x")
+        #expect(kinds(RowActionMenu.items(context: scratch)).contains(.copyBranch))
+
+        let main = RowActionMenu.Context(pathIsEmpty: false, status: .main, branch: "main")
+        #expect(kinds(RowActionMenu.items(context: main)).contains(.copyBranch))
     }
 }

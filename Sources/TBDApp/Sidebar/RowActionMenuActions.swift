@@ -71,6 +71,7 @@ struct RowActionMenuActions {
             hasKeepWarmClaude: terminals.contains {
                 $0.isClaudeResumable && $0.keepWarm
             },
+            autoHibernateEnabled: appState.autoHibernateEnabled,
             hasActiveChildren: !appState.children(of: worktree.id).isEmpty,
             pathIsEmpty: worktree.path.isEmpty,
             hasRepoID: worktree.repoID != nil,
@@ -101,6 +102,10 @@ struct RowActionMenuActions {
         case .copyPath:
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(worktree.path, forType: .string)
+
+        case .copyBranch:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(worktree.branch, forType: .string)
 
         case .archiveScratch:
             let wtID = worktree.id

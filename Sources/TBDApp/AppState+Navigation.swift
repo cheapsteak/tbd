@@ -43,25 +43,6 @@ extension AppState {
         }
     }
 
-    /// Expand the containing repo (if collapsed) and set `pendingScrollToWorktreeID`
-    /// so the sidebar scrolls to reveal the currently selected worktree or repo.
-    /// Does NOT change selection.
-    @MainActor
-    func revealSelectionInSidebar() {
-        guard let target = Self.sidebarRevealTarget(
-            selectedWorktreeIDs: selectedWorktreeIDs,
-            worktrees: worktrees,
-            scratchWorktrees: scratchWorktrees,
-            selectedRepoID: selectedRepoID
-        ) else { return }
-
-        // If the target is a worktree, expand its containing repo before
-        // scrolling (a repo-ID target matches no worktree row, so this no-ops).
-        expandRepoContaining(worktreeID: target)
-
-        pendingScrollToWorktreeID = target
-    }
-
     /// Expand the repo containing `worktreeID` (if collapsed) so its row is
     /// part of the rendered sidebar list. Updates local state synchronously
     /// (List rerender + scroll), persists via RPC fire-and-forget. No-op for
