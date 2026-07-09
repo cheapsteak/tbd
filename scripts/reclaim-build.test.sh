@@ -309,5 +309,22 @@ test_plan_tier2_works_on_x86_64_triple() {
   rm -rf "$d"
 }
 
+# Static check (not a functional test — restart.sh builds/launches the real
+# app, so it can't be exercised here): confirm restart.sh still wires up the
+# opportunistic background reclaim launch it added in scripts/restart.sh —
+# async (nohup, backgrounded), silent (no bare invocation without redirects),
+# and gated on both the opt-out env var and the script actually being present.
+test_restart_sh_launches_reclaim_async_and_silent() {
+  local restart="$HERE/restart.sh"
+  local body; body="$(cat "$restart")"
+  # shellcheck disable=SC2016 # single-quoted on purpose: searching restart.sh
+  # for these literal, unexpanded strings, not expanding them ourselves.
+  assert_contains "restart.sh backgrounds reclaim-build.sh with nohup" "$body" 'nohup "$RECLAIM_SCRIPT"'
+  assert_contains "restart.sh redirects reclaim output to the shared log file" "$body" 'Library/Logs/tbd-reclaim-build.log'
+  assert_contains "restart.sh honors TBD_SKIP_RECLAIM opt-out" "$body" 'TBD_SKIP_RECLAIM'
+  # shellcheck disable=SC2016
+  assert_contains "restart.sh guards on reclaim script executability" "$body" '[ -x "$RECLAIM_SCRIPT" ]'
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL
