@@ -13,100 +13,10 @@ extension TBDHomeSerialized {
 struct PreSessionHookTests {
 
     // MARK: - Helpers
-
-    /// Creates a unique temp TBD_HOME and points the process at it.
-    /// Caller must call the returned cleanup closure (idempotent).
-    private func isolateTBDHome() -> (home: URL, cleanup: () -> Void) {
-        let home = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-presession-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        return (home, {
-            unsetenv("TBD_HOME")
-            try? FileManager.default.removeItem(at: home)
-        })
-    }
-
-    /// Writes an executable `.worktree-hooks/<name>` into the repo and
-    /// commits it so fresh worktree checkouts contain it.
-    @discardableResult
-    private func installHook(
-        named name: String, repoDir: URL, script: String = "#!/bin/sh\nexit 0\n"
-    ) async throws -> String {
-        let hooksDir = repoDir.appendingPathComponent(".worktree-hooks")
-        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
-        let hookPath = hooksDir.appendingPathComponent(name)
-        try script.write(to: hookPath, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755], ofItemAtPath: hookPath.path
-        )
-        try await shell("git add -A && git commit -m 'add \(name) hook'", at: repoDir)
-        return hookPath.path
-    }
-
-    @discardableResult
-    private func installPreSessionHook(
-        repoDir: URL, script: String = "#!/bin/sh\nexit 0\n"
-    ) async throws -> String {
-        try await installHook(named: "preSession", repoDir: repoDir, script: script)
-    }
-
-    private func makeLifecycle(
-        db: TBDDatabase,
-        recorder: RecordedCommands? = nil,
-        subscriptions: StateSubscriptionManager? = nil,
-        timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
-        windowIsDead: (@Sendable (String) -> Bool)? = nil,
-        listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil
-    ) -> WorktreeLifecycle {
-        var dryRunRecorder: (@Sendable ([String]) -> Void)?
-        if let recorder {
-            dryRunRecorder = { args in recorder.append(args) }
-        }
-        return WorktreeLifecycle(
-            db: db,
-            git: GitManager(),
-            tmux: TmuxManager(
-                dryRun: true,
-                dryRunRecorder: dryRunRecorder,
-                dryRunWindowIsDead: windowIsDead,
-                dryRunListWindows: listWindows
-            ),
-            hooks: HookResolver(),
-            subscriptions: subscriptions,
-            preSessionTimeout: timeout,
-            preSessionPollInterval: 0.05
-        )
-    }
-
-    /// Builds a DB + repo + worktree fixture whose `path` IS `repoDir` (no
-    /// real `git worktree add` checkout) — `HookResolver.resolve` only checks
-    /// the filesystem, so pointing the worktree row straight at the repo
-    /// checkout lets a hook installed into `repoDir` after this call still
-    /// resolve. Callers own `repoDir`'s parent temp dir
-    /// (`repoDir.deletingLastPathComponent()`) and must remove it.
-    private func makeWorktreeFixture(
-        status: WorktreeStatus = .creating
-    ) async throws -> (db: TBDDatabase, repoDir: URL, worktree: Worktree, repo: Repo) {
-        let (tempDir, repoDir) = try await createTestRepo()
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-        let worktree = try await db.worktrees.create(
-            repoID: repo.id, name: "fixture", branch: "tbd/fixture",
-            path: repoDir.path, tmuxServer: "tbd-test", status: status
-        )
-        return (db, repoDir, worktree, repo)
-    }
-
-    /// Writes the completion marker the wrapped hook command would write.
-    private func writeMarker(worktreeID: UUID, exitCode: Int) throws {
-        let path = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
-        try FileManager.default.createDirectory(
-            atPath: (path as NSString).deletingLastPathComponent,
-            withIntermediateDirectories: true
-        )
-        try "\(exitCode)\n".write(toFile: path, atomically: true, encoding: .utf8)
-    }
+    //
+    // isolateTBDHome / installHook / installPreSessionHook / makeLifecycle /
+    // makeWorktreeFixture / writeMarker / PreSessionRecordedCommands live in
+    // PreSessionTestSupport.swift, shared with PreSessionRerunTests.
 
     // MARK: - HookEvent + resolution
 
@@ -220,7 +130,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -270,7 +180,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installHook(named: "setup", repoDir: repoDir)
@@ -329,7 +239,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
@@ -662,7 +572,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
         try await installPreSessionHook(repoDir: repoDir)
 
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
             worktree: worktree, repo: nil, worktreePath: worktree.path
@@ -797,7 +707,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
@@ -834,7 +744,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
@@ -1173,7 +1083,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         // The tmux server reports the active agent window, the .creating
         // worktree's pre-session window, and one genuinely orphaned window.
         let lifecycle = makeLifecycle(db: db, recorder: recorder, listWindows: { _, _ in
@@ -1232,7 +1142,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder, listWindows: { _, _ in
             [(windowID: "@mock-pre", paneID: "%mock-pre")]
         })
@@ -1267,7 +1177,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = RecordedCommands()
+        let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder, listWindows: { _, _ in
             [(windowID: "@mock-pre", paneID: "%mock-pre")]
         })
@@ -1455,22 +1365,6 @@ struct PreSessionHookTests {
 private func hasProcessEnvFlag(_ args: [String], _ assignment: String) -> Bool {
     guard let index = args.firstIndex(of: assignment), index > 0 else { return false }
     return args[index - 1] == "-e"
-}
-
-/// Thread-safe collector for TmuxManager dryRun recorded args.
-private final class RecordedCommands: @unchecked Sendable {
-    private let lock = NSLock()
-    private var commands: [[String]] = []
-
-    func append(_ args: [String]) {
-        lock.lock(); defer { lock.unlock() }
-        commands.append(args)
-    }
-
-    func snapshot() -> [[String]] {
-        lock.lock(); defer { lock.unlock() }
-        return commands
-    }
 }
 
 /// Thread-safe collector for broadcast StateDeltas.
