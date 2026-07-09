@@ -202,8 +202,12 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             // ChannelHandlerContext access must be dispatched to the event loop.
             // Accessing context.channel off the event loop hits a NIO precondition.
             let subID = router.registerSubscription { deltaData in
-                let context = sendableCtx.context
-                context.eventLoop.execute {
+                // EventLoop is Sendable; .eventLoop is the one property NIO
+                // permits off-loop. Unwrap the context INSIDE the closure so
+                // all channel access stays on the loop.
+                let eventLoop = sendableCtx.context.eventLoop
+                eventLoop.execute {
+                    let context = sendableCtx.context
                     guard context.channel.isActive else { return }
                     guard let deltaString = String(data: deltaData, encoding: .utf8) else { return }
                     var outBuffer = context.channel.allocator.buffer(capacity: deltaString.utf8.count + 1)
@@ -217,8 +221,9 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
 
             // Clean up subscription when the channel closes.
             // Must access context.channel on the event loop.
-            let context = sendableCtx.context
-            context.eventLoop.execute {
+            let eventLoop = sendableCtx.context.eventLoop
+            eventLoop.execute {
+                let context = sendableCtx.context
                 context.channel.closeFuture.whenComplete { _ in
                     router.removeSubscription(id: subID)
                 }
@@ -228,7 +233,8 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             let ack = RPCResponse.ok()
             if let ackData = try? JSONEncoder().encode(ack),
                let ackString = String(data: ackData, encoding: .utf8) {
-                context.eventLoop.execute {
+                eventLoop.execute {
+                    let context = sendableCtx.context
                     guard context.channel.isActive else { return }
                     var outBuffer = context.channel.allocator.buffer(capacity: ackString.utf8.count + 1)
                     outBuffer.writeString(ackString)
@@ -268,8 +274,9 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             let responseData = try JSONEncoder().encode(response)
             guard let responseString = String(data: responseData, encoding: .utf8) else { return }
 
-            let context = wrappedCtx.context
-            context.eventLoop.execute {
+            let eventLoop = wrappedCtx.context.eventLoop
+            eventLoop.execute {
+                let context = wrappedCtx.context
                 guard context.channel.isActive else { return }
                 var outBuffer = context.channel.allocator.buffer(capacity: responseString.utf8.count + 1)
                 outBuffer.writeString(responseString)

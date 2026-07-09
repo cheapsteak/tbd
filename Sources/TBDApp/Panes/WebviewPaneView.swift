@@ -64,8 +64,11 @@ struct WebviewPaneView: NSViewRepresentable {
         }
 
         func observe(_ webView: WKWebView) {
-            urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak state] webView, _ in
-                let newURL = webView.url
+            // Read the URL from the change object (populated because we request
+            // `.new`, and also on the `.initial` callback) instead of touching
+            // the main-actor `webView.url` from this nonisolated KVO closure.
+            urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak state] _, change in
+                let newURL = change.newValue ?? nil
                 Task { @MainActor in state?.currentURL = newURL }
             }
         }

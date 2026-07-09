@@ -8,11 +8,19 @@ import SwiftUI
 @MainActor
 final class TranscriptCardAttachment: NSTextAttachment {
     let nodeID: String
-    let card: AnyView
+
+    /// The SwiftUI card, captured on the main actor at init and read by the
+    /// nonisolated `viewProvider` override below. Boxed in `_SendableBox`
+    /// because that override is nonisolated in the SDK even though TextKit
+    /// only calls it on the main thread — the box's runtime precondition
+    /// enforces the thread constraint the type system cannot express (the
+    /// same pattern `TranscriptCardViewProvider._card` uses). (#129)
+    private nonisolated let _card: _SendableBox<AnyView>
+    var card: AnyView { _card.mainThreadValue }
 
     init(nodeID: String, card: AnyView) {
         self.nodeID = nodeID
-        self.card = card
+        self._card = _SendableBox(card)
         super.init(data: nil, ofType: nil)
         allowsTextAttachmentView = true
     }
@@ -28,12 +36,14 @@ final class TranscriptCardAttachment: NSTextAttachment {
         // @MainActor state after construction (TextKit calls loadView on
         // the main thread, but Swift 6 can't verify that statically because
         // NSTextAttachmentViewProvider overrides are nonisolated in the SDK).
+        // The card comes out of `_card`, whose main-thread precondition
+        // enforces TextKit's main-thread delivery contract at runtime.
         let provider = TranscriptCardViewProvider(
             textAttachment: self,
             parentView: parentView,
             textLayoutManager: textContainer?.textLayoutManager,
             location: location,
-            card: card
+            card: _card.mainThreadValue
         )
         provider.tracksTextAttachmentViewBounds = true
         return provider

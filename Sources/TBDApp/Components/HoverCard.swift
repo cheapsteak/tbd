@@ -526,9 +526,12 @@ final class HoverCardController {
             context.duration = timing.fadeOutDuration
             panel.animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            guard let self, self.fadeGeneration == generation else { return }
-            panel.orderOut(nil)
-            panel.alphaValue = 1
+            // AppKit delivers this completion on the main thread.
+            MainActor.assumeIsolated {
+                guard let self, self.fadeGeneration == generation else { return }
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+            }
         }
     }
 }

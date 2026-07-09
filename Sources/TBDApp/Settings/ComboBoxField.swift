@@ -41,6 +41,7 @@ struct ComboBoxField: NSViewRepresentable {
         }
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSComboBoxDelegate {
         @Binding var text: String
         init(text: Binding<String>) { self._text = text }

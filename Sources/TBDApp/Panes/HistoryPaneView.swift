@@ -404,9 +404,10 @@ struct SessionTranscriptView: View {
                 }
                 .animation(.easeInOut(duration: 0.2), value: atBottom)
                 .onAppear {
+                    let count = messages.count
                     HangWatchdog.shared.recordContext { snap in
                         snap.focusedTerminalIDShort = nil
-                        snap.transcriptItemCount = messages.count
+                        snap.transcriptItemCount = count
                         snap.paneLabel = "history"
                     }
                 }
@@ -462,9 +463,10 @@ struct SessionTranscriptView: View {
                     }
                 }
                 .onAppear {
+                    let count = messages.count
                     HangWatchdog.shared.recordContext { snap in
                         snap.focusedTerminalIDShort = nil
-                        snap.transcriptItemCount = messages.count
+                        snap.transcriptItemCount = count
                         snap.paneLabel = "history"
                     }
                 }
