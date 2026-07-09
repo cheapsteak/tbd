@@ -206,14 +206,24 @@ struct SingleWorktreeView: View {
                         Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
                     })
 
-                // Thin footer when the active tab's terminal has a scheduled
-                // auto-resume: the wide "⏳ resumes ..." text used to live in
-                // the tab label (inflating tab width), now shown here at the
-                // bottom of the pane once per active tab instead of per
-                // background tab.
-                if let resumeAt = activeTabTerminal?.pendingResumeAt {
+                // Thin footer for the active tab's LIVE terminal (decision in
+                // HibernatedBannerModel.banner(for:)):
+                // - Scheduled auto-resume: the wide "⏳ resumes ..." text that
+                //   used to live in the tab label (inflating tab width), shown
+                //   here once per active tab instead of per background tab.
+                // - Parked (hibernated / legacy-suspended): NO footer at all —
+                //   the hibernate notice is composed INTO the frozen
+                //   snapshot's last rows at feed time (see
+                //   ParkedSnapshotComposer), which also wins
+                //   over scheduled-resume: a parked session's "TBD types
+                //   continue at ..." text would be misleading because nothing
+                //   is running to receive it.
+                switch HibernatedBannerModel.banner(for: activeTabTerminal) {
+                case .scheduledResume(let resumeAt)?:
                     Divider()
                     ScheduledResumeBanner(resumeAt: resumeAt)
+                case .hibernatedOverlay?, nil:
+                    EmptyView()
                 }
             }
             .sheet(isPresented: $showAccountPicker) {
@@ -311,6 +321,59 @@ struct SingleWorktreeView: View {
 
     private func closeTab(at index: Int) {
         appState.closeTab(worktreeID: worktreeID, index: index)
+    }
+}
+
+// MARK: - HibernatedBannerModel
+
+/// Pure decision behind the pane's bottom edge: which presentation (if any)
+/// the active tab's terminal gets, and the exact hibernated phrasing per
+/// `hibernateReason`. Extracted from the view so each branch — including the
+/// parked-beats-scheduled precedence — is unit-testable without SwiftUI (same
+/// pattern as `TabParkMenuModel` / `terminalIDToWakeOnFocus`).
+enum HibernatedBannerModel {
+    enum Banner: Equatable {
+        /// Terminal is parked (hibernated or legacy-suspended) → the footer
+        /// slot stays EMPTY; the hibernate notice is composed into the frozen
+        /// snapshot's last rows instead (see `ParkedSnapshotComposer` and the
+        /// `parkedNoticeMessage` wiring in PanePlaceholder), carrying this
+        /// reason-phrased message.
+        case hibernatedOverlay(message: String)
+        /// Terminal has a scheduled auto-resume → the "⏳ resumes ..." footer.
+        case scheduledResume(Date)
+    }
+
+    /// nil = neither footer nor overlay strip. Precedence: a parked terminal
+    /// gets ONLY the hibernated overlay even when `pendingResumeAt` is also
+    /// set (a stale mirror is possible in the delta-to-refetch window even
+    /// though parking now cancels the scheduled resume): the scheduled text
+    /// promises TBD will type "continue", but nothing is running in a parked
+    /// session to receive it.
+    static func banner(for terminal: Terminal?) -> Banner? {
+        guard let terminal else { return nil }
+        if terminal.isParked {
+            return .hibernatedOverlay(message: message(for: terminal.hibernateReason))
+        }
+        if let resumeAt = terminal.pendingResumeAt {
+            return .scheduledResume(resumeAt)
+        }
+        return nil
+    }
+
+    /// One-line phrasing per park reason. nil (legacy pre-v46 rows) reads the
+    /// same as `.auto` — the reason the migration can't attribute is almost
+    /// always the idle sweep.
+    static func message(for reason: HibernateReason?) -> String {
+        switch reason {
+        case .manual:
+            return "Hibernated — click anywhere in the pane to resume"
+        case .recovery:
+            return "Parked after a restart — click anywhere in the pane to resume"
+        case .merged:
+            return "Hibernated after the PR merged — click anywhere in the pane to resume"
+        case .auto, nil:
+            return "Hibernated while idle — click anywhere in the pane to resume"
+        }
     }
 }
 

@@ -1120,6 +1120,12 @@ final class AppState: ObservableObject {
             // (nil from an older daemon — same blank-pane behavior as before).
             terminals[delta.worktreeID]?[idx].suspendedSnapshot = delta.suspendedSnapshot
             terminals[delta.worktreeID]?[idx].hibernateReason = delta.hibernateReason
+            // Parking implies cancellation: the daemon's setHibernated cancels
+            // any scheduled auto-resume in the same write, so nil the mirror
+            // here too — otherwise the tab's ⏳ glyph / "Cancel Scheduled
+            // Resume" item keep advertising a resume that won't happen for
+            // the delta-to-refetch window. No delta field needed.
+            terminals[delta.worktreeID]?[idx].pendingResumeAt = nil
         } else {
             // Woken: clear the reason, keep the snapshot (clearHibernated
             // semantics — reconnect backdrop, overwritten on the next park).

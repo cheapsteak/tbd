@@ -317,6 +317,15 @@ public struct TerminalStore: Sendable {
     /// crash-recovery reconcile) — see `HibernateReason`. It is stamped
     /// unconditionally (a re-park overwrites any stale reason); `nil` keeps
     /// legacy semantics (the row is still eligible for wake-on-focus).
+    ///
+    /// This is the choke point EVERY park site flows through
+    /// (`HibernationCoordinator.performHibernate`, the reconcile recovery park,
+    /// and `handleTerminalRecreateWindow`'s dead-window park), so it also
+    /// cancels any scheduled auto-resume in the same write transaction: a
+    /// parked session's Claude process is dead — a resume firing later would
+    /// type "continue" into a bare shell — and `pendingResumeAt` must not
+    /// keep advertising a resume that will never happen. Wake
+    /// (`clearHibernated`) deliberately does NOT resurrect the cancelled row.
     public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, reason: HibernateReason? = nil, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -330,6 +339,10 @@ public struct TerminalStore: Sendable {
             }
             record.activityState = TerminalActivityState.idle.rawValue
             try record.update(db)
+            // AFTER record.update: the routine nils pendingResumeAt via raw
+            // SQL, and an update of the (stale-fetched) record afterward
+            // would write the old value back.
+            try ScheduledResumeStore.cancelPendingInTransaction(db, terminalID: id.uuidString)
         }
     }
 

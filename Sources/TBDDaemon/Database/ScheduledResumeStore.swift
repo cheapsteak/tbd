@@ -184,18 +184,30 @@ public struct ScheduledResumeStore: Sendable {
     @discardableResult
     public func cancelPending(terminalID: UUID) async throws -> Bool {
         try await writer.write { db in
-            guard var record = try ScheduledResumeRecord
-                .filter(Column("terminalID") == terminalID.uuidString)
-                .filter(Column("status") == ScheduledResumeStatus.pending.rawValue)
-                .fetchOne(db)
-            else { return false }
-            record.status = ScheduledResumeStatus.cancelled.rawValue
-            try record.update(db)
-            try db.execute(
-                sql: "UPDATE terminal SET pendingResumeAt = NULL WHERE id = ?",
-                arguments: [terminalID.uuidString])
-            return true
+            try Self.cancelPendingInTransaction(db, terminalID: terminalID.uuidString)
         }
+    }
+
+    /// The single cancellation routine, usable inside an ALREADY-OPEN write
+    /// transaction: flips the terminal's pending row to `.cancelled` and nils
+    /// the `terminal.pendingResumeAt` mirror in the same transaction. Shared
+    /// by `cancelPending` above and `TerminalStore.setHibernated` — parking a
+    /// session cancels its scheduled auto-resume atomically with the park
+    /// write (the Claude process is dead; a resume firing later would hit a
+    /// bare shell). Returns true when a pending row existed.
+    @discardableResult
+    static func cancelPendingInTransaction(_ db: Database, terminalID: String) throws -> Bool {
+        guard var record = try ScheduledResumeRecord
+            .filter(Column("terminalID") == terminalID)
+            .filter(Column("status") == ScheduledResumeStatus.pending.rawValue)
+            .fetchOne(db)
+        else { return false }
+        record.status = ScheduledResumeStatus.cancelled.rawValue
+        try record.update(db)
+        try db.execute(
+            sql: "UPDATE terminal SET pendingResumeAt = NULL WHERE id = ?",
+            arguments: [terminalID])
+        return true
     }
 
     /// Cancel pending rows matching `scope` (global toggle switched off). Returns count.
