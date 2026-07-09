@@ -816,6 +816,23 @@ public final class TBDDatabase: Sendable {
                 table: "terminal", column: "hibernateReason", type: .text)
         }
 
+        // Per-worktree auto-hibernate-on-PR-merge override (sibling of
+        // v32_worktree_auto_archive). NULLABLE with NO default — tri-state:
+        // NULL = follow the global default (`config.auto_hibernate_on_merge_default`),
+        // `true`/`false` = explicit user override. Set only by user action.
+        migrator.registerMigration("v48_worktree_auto_hibernate") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "autoHibernateOnMerge", type: .boolean)
+        }
+
+        // Global default for auto-hibernate-on-PR-merge (sibling of
+        // v33_config_auto_archive_default). Defaults false so existing rows
+        // decode to "feature OFF".
+        migrator.registerMigration("v49_config_auto_hibernate_default") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_hibernate_on_merge_default",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }

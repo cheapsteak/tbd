@@ -27,6 +27,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var activeTabID: String?
     var parentWorktreeID: String?
     var autoArchiveOnMerge: Bool?
+    var autoHibernateOnMerge: Bool?
     var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
     var promotedToRepoID: String?  // set only on promoted scratch rows
 
@@ -52,6 +53,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.activeTabID = nil  // new worktrees start with no stored selection
         self.parentWorktreeID = wt.parentWorktreeID?.uuidString
         self.autoArchiveOnMerge = wt.autoArchiveOnMerge
+        self.autoHibernateOnMerge = wt.autoHibernateOnMerge
         self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
     }
@@ -107,6 +109,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             archivedHeadSHA: archivedHeadSHA,
             parentWorktreeID: parentWorktreeID.flatMap { UUID(uuidString: $0) },
             autoArchiveOnMerge: autoArchiveOnMerge,
+            autoHibernateOnMerge: autoHibernateOnMerge,
             promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
             prStatus: pr
         )
@@ -783,6 +786,17 @@ public struct WorktreeStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE worktree SET autoArchiveOnMerge = ? WHERE id = ?",
+                arguments: [value, id.uuidString]
+            )
+        }
+    }
+
+    /// Set or clear the per-worktree auto-hibernate-on-merge override.
+    /// `nil` means follow the global default; `true`/`false` override it.
+    public func setAutoHibernateOnMerge(id: UUID, value: Bool?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET autoHibernateOnMerge = ? WHERE id = ?",
                 arguments: [value, id.uuidString]
             )
         }
