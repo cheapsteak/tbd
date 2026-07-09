@@ -4,14 +4,14 @@ import TBDShared
 /// Replaces the static "TBD" window title in the toolbar. Shows the selected
 /// worktree's display name (14 pt) followed by its repo name (11 pt, secondary),
 /// then a notes button that toggles the repo/worktree notepad popover.
+///
+/// `repoName` is passed in (not read from the environment) so this view has no
+/// `@EnvironmentObject` dependency inside the `.principal` toolbar item —
+/// matching the `PRButtonLabel` convention for toolbar-hosted views.
 struct WorktreeTitleView: View {
     let worktree: Worktree
-    @EnvironmentObject var appState: AppState
+    let repoName: String?
     @State private var showNotes = false
-
-    private var repoName: String? {
-        worktree.repoID.flatMap { appState.repoName(for: $0) }
-    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {

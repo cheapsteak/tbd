@@ -134,7 +134,10 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .principal) {
                     if let worktree = selectedWorktree {
-                        WorktreeTitleView(worktree: worktree)
+                        WorktreeTitleView(
+                            worktree: worktree,
+                            repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
+                        )
                     }
                 }
 

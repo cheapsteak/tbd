@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let notesLogger = Logger(subsystem: "com.tbd.app", category: "notes")
 
 /// Identifies where a worktree's notepad content is stored on disk.
 /// Repo-backed worktrees share one notepad per repo; scratch worktrees
@@ -37,13 +40,20 @@ struct NotesFileStore {
 
     /// Writes `content` verbatim to `path`. Empty/whitespace-only content
     /// deletes the file. Creates intermediate directories; writes atomically.
+    /// Failures are logged (not surfaced) — mirrors the hooks storage pattern.
     func write(_ content: String, to path: String) {
-        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try? FileManager.default.removeItem(atPath: path)
-            return
+        do {
+            if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if FileManager.default.fileExists(atPath: path) {
+                    try FileManager.default.removeItem(atPath: path)
+                }
+                return
+            }
+            let dir = (path as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try content.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            notesLogger.debug("notepad write failed at \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        let dir = (path as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        try? content.write(toFile: path, atomically: true, encoding: .utf8)
     }
 }
