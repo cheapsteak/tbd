@@ -61,33 +61,6 @@ test_has_active_build_false_when_swift_proc_other_worktree() {
   fi
 }
 
-test_ensure_lsp_config_seeds_when_absent() {
-  local wt; wt="$(mktmpd)"
-  local out; out="$(ensure_lsp_config "$wt" false)"
-  assert_contains "seeds when absent (output)" "$out" "SEED lsp-config"
-  assert_eq "config file written" "true" "$([[ -f "$wt/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
-  assert_contains "config disables bg indexing" "$(cat "$wt/.sourcekit-lsp/config.json")" '"backgroundIndexing": false'
-  rm -rf "$wt"
-}
-
-test_ensure_lsp_config_dry_run_writes_nothing() {
-  local wt; wt="$(mktmpd)"
-  local out; out="$(ensure_lsp_config "$wt" true)"
-  assert_contains "dry-run still reports SEED" "$out" "SEED lsp-config"
-  assert_eq "dry-run writes no file" "false" "$([[ -f "$wt/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
-  rm -rf "$wt"
-}
-
-test_ensure_lsp_config_noop_when_present() {
-  local wt; wt="$(mktmpd)"
-  mkdir -p "$wt/.sourcekit-lsp"
-  printf '{ "someOtherKey": true }\n' > "$wt/.sourcekit-lsp/config.json"
-  local out; out="$(ensure_lsp_config "$wt" false)"
-  assert_contains "no-op when present (output)" "$out" "SKIP lsp-config-exists"
-  assert_contains "existing config untouched" "$(cat "$wt/.sourcekit-lsp/config.json")" '"someOtherKey": true'
-  rm -rf "$wt"
-}
-
 # helper: build a fake worktree with index-build + debug build files aged relative to NOW
 _mk_worktree() { # dir now index_age debug_age
   local d="$1" now="$2" iage="$3" dage="$4"
@@ -180,11 +153,10 @@ JSON
   assert_contains "dry-run plans tier1 for b" "$out" "PLAN tier1 $b"
   assert_eq "dry-run keeps a/.build" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
   assert_eq "dry-run keeps b/index-build" "true" "$([[ -d "$b/.build/index-build" ]] && echo true || echo false)"
-  assert_eq "dry-run seeds no lsp config" "false" "$([[ -f "$a/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
   rm -rf "$root"
 }
 
-test_main_real_run_reclaims_and_seeds() {
+test_main_real_run_reclaims() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/active-a" b="$root/active-b"
   _mk_worktree "$a" "$now" 200000 200000   # tier2 -> whole .build deleted
@@ -200,8 +172,6 @@ JSON
   assert_eq "tier2 removed a/.build"          "false" "$([[ -d "$a/.build" ]] && echo true || echo false)"
   assert_eq "tier1 removed b/index-build"     "false" "$([[ -d "$b/.build/index-build" ]] && echo true || echo false)"
   assert_eq "tier1 kept b debug build"        "true"  "$([[ -d "$b/.build/arm64-apple-macosx" ]] && echo true || echo false)"
-  assert_eq "seeded lsp config in a"          "true"  "$([[ -f "$a/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
-  assert_eq "seeded lsp config in b"          "true"  "$([[ -f "$b/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
   rm -rf "$root"
 }
 
