@@ -26,8 +26,9 @@ struct ControlModeInputRouterTests {
     /// Poll until `recorder` has at least `count` writes, or fail on timeout
     /// (shared `waitFor`, which keeps the post-deadline re-check this suite
     /// needed under parallel-suite load).
+    @discardableResult
     private func waitForWrites(_ recorder: LineRecorder, count: Int,
-                               sourceLocation: SourceLocation = #_sourceLocation) async throws {
+                               sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
         try await waitFor("\(count) stream writes", sourceLocation: sourceLocation) {
             recorder.writes.count >= count
         }
@@ -128,7 +129,7 @@ struct ControlModeInputRouterTests {
         router.enqueuePaste(header: header, bytes: Data(repeating: 0x50, count: 8 * 1024))  // large "P…"
         router.enqueue(header: header, bytes: Data([0x42]))                       // "B"
 
-        try await waitForWrites(recorder, count: 4)
+        try #require(await waitForWrites(recorder, count: 4))
         let writes = recorder.writes
         #expect(writes.count == 4)
         // send-keys A, then load-buffer + paste-buffer -p, then send-keys B.

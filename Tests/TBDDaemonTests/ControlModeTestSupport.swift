@@ -40,16 +40,22 @@ func makeFakeClient() -> (TmuxControlCommandClient, LineRecorder) {
 /// source location after `deadline`. A final post-deadline re-check absorbs
 /// sleep slices that overshoot the deadline AFTER the condition became true
 /// (observed live as `timedOut(got: N, want: N)` at loadavg ~40).
+///
+/// Returns whether the condition was met (false on timeout) so callers that
+/// index into results afterwards can abort via `#require` instead of trapping
+/// out of range; count/equality-checking callers may ignore the result.
+@discardableResult
 func waitFor(
     _ what: String, deadline: Duration = ciSafeDeadline,
     sourceLocation: SourceLocation = #_sourceLocation,
     _ condition: @Sendable () async -> Bool
-) async throws {
+) async throws -> Bool {
     let end = ContinuousClock.now + deadline
     while ContinuousClock.now < end {
-        if await condition() { return }
+        if await condition() { return true }
         try await Task.sleep(for: .milliseconds(10))
     }
-    if await condition() { return }
+    if await condition() { return true }
     Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
+    return false
 }

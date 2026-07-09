@@ -34,15 +34,17 @@ struct ControlModeInputHealthTests {
     /// Poll until `recorder` has at least `count` health events (shared
     /// `waitFor`, which keeps the post-deadline re-check this suite needed
     /// under parallel-suite load).
+    @discardableResult
     private func waitForEvents(_ recorder: HealthRecorder, count: Int,
-                               sourceLocation: SourceLocation = #_sourceLocation) async throws {
+                               sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
         try await waitFor("\(count) health events", sourceLocation: sourceLocation) {
             recorder.events.count >= count
         }
     }
 
+    @discardableResult
     private func waitForWrites(_ recorder: LineRecorder, count: Int,
-                               sourceLocation: SourceLocation = #_sourceLocation) async throws {
+                               sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
         try await waitFor("\(count) stream writes", sourceLocation: sourceLocation) {
             recorder.writes.count >= count
         }
@@ -102,7 +104,7 @@ struct ControlModeInputHealthTests {
         for _ in 0..<3 { router.enqueue(header: header, bytes: Data([0x41])) }
         router.enqueue(header: header, bytes: Data([0xff]))
 
-        try await waitForEvents(health, count: 2)
+        try #require(await waitForEvents(health, count: 2))
         let events = health.events
         #expect(events.count == 2)
         #expect(events[0].healthy == false)
