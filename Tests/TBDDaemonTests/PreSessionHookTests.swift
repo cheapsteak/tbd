@@ -79,6 +79,25 @@ struct PreSessionHookTests {
         )
     }
 
+    /// Builds a DB + repo + worktree fixture whose `path` IS `repoDir` (no
+    /// real `git worktree add` checkout) — `HookResolver.resolve` only checks
+    /// the filesystem, so pointing the worktree row straight at the repo
+    /// checkout lets a hook installed into `repoDir` after this call still
+    /// resolve. Callers own `repoDir`'s parent temp dir
+    /// (`repoDir.deletingLastPathComponent()`) and must remove it.
+    private func makeWorktreeFixture(
+        status: WorktreeStatus = .creating
+    ) async throws -> (db: TBDDatabase, repoDir: URL, worktree: Worktree, repo: Repo) {
+        let (tempDir, repoDir) = try await createTestRepo()
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "fixture", branch: "tbd/fixture",
+            path: repoDir.path, tmuxServer: "tbd-test", status: status
+        )
+        return (db, repoDir, worktree, repo)
+    }
+
     /// Writes the completion marker the wrapped hook command would write.
     private func writeMarker(worktreeID: UUID, exitCode: Int) throws {
         let path = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
@@ -364,12 +383,15 @@ struct PreSessionHookTests {
         await phase3.value
 
         terminals = try await db.terminals.list(worktreeID: pending.id)
-        #expect(terminals.count == 3)
+        // Exit 0 closes the pre-session tab: only the two primaries remain.
+        #expect(terminals.count == 2)
+        #expect(try await db.terminals.get(id: pre.id) == nil,
+                "a clean hook run must delete its own terminal row")
         let claude = try #require(terminals.first { $0.label == "Claude Code" })
         let setup = try #require(terminals.first { $0.label == "setup" })
         #expect(try await db.worktrees.getTabOrder(worktreeID: pending.id)
-                == [claude.id, pre.id, setup.id],
-                "tab order must be [claude, preSession, setup]")
+                == [claude.id, setup.id],
+                "tab order must be [claude, setup] once the pre-session tab is closed")
         #expect(try await db.worktrees.getActiveTabID(worktreeID: pending.id) == claude.id)
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
         // Exit 0 → no notification.
@@ -465,6 +487,92 @@ struct PreSessionHookTests {
         // No marker may remain after a timeout outcome.
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: pending.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
+    }
+
+    // MARK: - Ephemeral hook tab: close on success, keep on failure
+
+    @Test("exit 0 closes the pre-session tab and broadcasts terminalRemoved")
+    func successfulHookClosesItsTab() async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, repo) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let subscriptions = StateSubscriptionManager()
+        let lifecycle = makeLifecycle(db: db, subscriptions: subscriptions, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.path
+        ))
+        // tmux is dry-run, so the hook never really runs. Stand in for its
+        // clean exit. Must come AFTER the spawn, which deletes any stale
+        // marker for this worktree ID.
+        try writeMarker(worktreeID: worktree.id, exitCode: 0)
+
+        await lifecycle.runPreSessionPhase3(
+            preSession: spawn, worktree: worktree, repo: repo,
+            worktreePath: worktree.path, skipClaude: true,
+            completionAction: .markActive
+        )
+
+        #expect(try await db.terminals.get(id: spawn.terminalID) == nil)
+        let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+        #expect(!order.contains(spawn.terminalID))
+    }
+
+    @Test("non-zero exit keeps the pre-session tab and records an error notification")
+    func failingHookKeepsItsTab() async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, repo) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let lifecycle = makeLifecycle(db: db, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.path
+        ))
+        try writeMarker(worktreeID: worktree.id, exitCode: 3)
+
+        await lifecycle.runPreSessionPhase3(
+            preSession: spawn, worktree: worktree, repo: repo,
+            worktreePath: worktree.path, skipClaude: true,
+            completionAction: .markActive
+        )
+
+        #expect(try await db.terminals.get(id: spawn.terminalID) != nil)
+        let notifications = try await db.notifications.unread(worktreeID: worktree.id)
+        #expect(notifications.contains { $0.type == .error })
+    }
+
+    @Test("create path still spawns primaries and marks active on both outcomes",
+          arguments: [0, 7])
+    func primariesSpawnRegardlessOfOutcome(exitCode: Int) async throws {
+        let (_, cleanupHome) = isolateTBDHome()
+        defer { cleanupHome() }
+        let (db, repoDir, worktree, repo) = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let lifecycle = makeLifecycle(db: db, timeout: 2)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.path
+        ))
+        try writeMarker(worktreeID: worktree.id, exitCode: exitCode)
+
+        await lifecycle.runPreSessionPhase3(
+            preSession: spawn, worktree: worktree, repo: repo,
+            worktreePath: worktree.path, skipClaude: true,
+            completionAction: .markActive
+        )
+
+        let refreshed = try #require(try await db.worktrees.get(id: worktree.id))
+        #expect(refreshed.status == .active)
+        let terminals = try await db.terminals.list(worktreeID: worktree.id)
+        // Primaries spawn either way.
+        #expect(terminals.contains { $0.label != TerminalLabel.preSession })
+        // And the hook tab's survival tracks the exit code exactly.
+        #expect((try await db.terminals.get(id: spawn.terminalID) != nil) == (exitCode != 0))
     }
 
     // MARK: - Wait outcome races (marker vs. dead pane / deadline)
@@ -646,9 +754,12 @@ struct PreSessionHookTests {
         // not the deleted-row teardown that kills the live pre-session
         // window of a perfectly valid worktree. (The spawn attempt itself
         // then fails on the closed DB and is logged/swallowed — what matters
-        // here is which branch the guard took.)
+        // here is which branch the guard took.) A non-zero exit keeps the
+        // hook "failed", so the separate close-on-success path (which would
+        // also kill this window, for an unrelated reason) never fires and
+        // can't be confused with the deleted-row teardown this test targets.
         try db.writerForTests.close()
-        try writeMarker(worktreeID: pending.id, exitCode: 0)
+        try writeMarker(worktreeID: pending.id, exitCode: 1)
         await phase3.value
 
         let kills = recorder.snapshot().filter { $0.contains("kill-window") }
@@ -758,8 +869,9 @@ struct PreSessionHookTests {
         #expect(revived?.archivedClaudeSessions == ["aaaa-session"],
                 "skipClaude revive must preserve archived sessions for a later revive")
         terminals = try await db.terminals.list(worktreeID: wt.id)
-        #expect(terminals.count == 3)
-        #expect(terminals.contains { $0.label == "pre-session" })
+        // Exit 0 closes the pre-session tab: only the two primaries remain.
+        #expect(terminals.count == 2)
+        #expect(!terminals.contains { $0.label == "pre-session" })
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
     }
@@ -890,10 +1002,13 @@ struct PreSessionHookTests {
         #expect(after?.archivedAt == nil)
         #expect(after?.archivedClaudeSessions == nil)
         let terminals = try await db.terminals.list(worktreeID: wt.id)
-        #expect(terminals.count == 3,
+        // Exit 0 closes the resumed pre-session tab: only the two primaries
+        // remain.
+        #expect(terminals.count == 2,
                 "resumed phase 3 must spawn the primary terminals")
         #expect(terminals.contains { $0.label == "Claude Code" })
         #expect(terminals.contains { $0.label == "setup" })
+        #expect(!terminals.contains { $0.label == "pre-session" })
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
     }
@@ -1090,7 +1205,9 @@ struct PreSessionHookTests {
         for task in resumed { await task.value }
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
-        #expect(try await db.terminals.list(worktreeID: wt.id).count == 3)
+        // Exit 0 closes the resumed pre-session tab: only the two primaries
+        // remain.
+        #expect(try await db.terminals.list(worktreeID: wt.id).count == 2)
         #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty,
                 "no spurious paneKilled notification may be recorded")
     }

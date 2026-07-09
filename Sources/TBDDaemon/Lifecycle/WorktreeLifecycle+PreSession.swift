@@ -284,6 +284,8 @@ extension WorktreeLifecycle {
             return
         }
 
+        let succeeded = outcome == .completed(exitCode: 0)
+
         switch outcome {
         case .completed(exitCode: 0):
             logger.info("preSession hook completed for worktree \(worktree.id, privacy: .public)")
@@ -312,7 +314,9 @@ extension WorktreeLifecycle {
                 archivedClaudeSessions: archivedClaudeSessions,
                 initialPrompt: initialPrompt,
                 cols: cols, rows: rows,
-                preSessionTerminalID: preSession.terminalID,
+                // On success the hook tab is about to be deleted — never splice
+                // it into tab order. On failure it stays, at index 1 as before.
+                preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID
             )
             for terminal in created {
@@ -321,6 +325,18 @@ extension WorktreeLifecycle {
                     worktreeID: worktree.id,
                     label: terminal.label
                 )))
+            }
+
+            // Close the hook tab only after the primaries exist and
+            // `spawnPrimaryTerminals` has moved activeTabID onto the primary —
+            // the worktree is never momentarily tab-less, and focus never sits
+            // on a tab that is about to vanish. Deliberately INSIDE the `do`:
+            // if the spawn threw, the primaries don't exist, so tearing the
+            // hook tab down would leave the worktree tab-less — keep it instead.
+            // `.paneKilled` already has no window; the kill is best-effort so
+            // the row/tab cleanup still runs.
+            if succeeded {
+                await closePreSessionTerminal(worktree: worktree, preSession: preSession)
             }
         } catch {
             logger.error("phase-3 primary terminal spawn failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -347,6 +363,32 @@ extension WorktreeLifecycle {
             }
         } catch {
             logger.error("phase-3 status update failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Tears the pre-session tab down after a clean run: kill the tmux window,
+    /// delete the terminal + tab rows, broadcast `.terminalRemoved`.
+    ///
+    /// Deliberately NOT reusing `RPCRouter.handleTerminalDelete`: that handler
+    /// also cancels scheduled resumes, clears pending questions, cancels
+    /// auto-login, and reclaims a per-session `ClaudeHookOverlay` — all Claude
+    /// concerns, all no-ops for this `.shell` tab, and several reach for
+    /// `RPCRouter` state the lifecycle doesn't hold.
+    ///
+    /// Best-effort: a failure here must never take down the worktree, whose
+    /// checkout and agent terminals are already valid.
+    func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
+        try? await tmux.killWindow(
+            server: worktree.tmuxServer, windowID: preSession.windowID
+        )
+        do {
+            try await db.terminals.delete(id: preSession.terminalID)
+            try await db.tabs.delete(tabID: preSession.terminalID)
+            subscriptions?.broadcast(delta: .terminalRemoved(TerminalIDDelta(
+                terminalID: preSession.terminalID
+            )))
+        } catch {
+            logger.warning("failed to close pre-session terminal \(preSession.terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
