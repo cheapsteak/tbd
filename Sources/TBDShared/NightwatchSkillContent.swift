@@ -50,6 +50,16 @@ Only when `tick.py` exits 10 (or on the 2-hour deep-review window): read `queue/
 
 A PR may only be enqueued when **claude-review = APPROVED on the current SHA + checks clean**. Human approval never substitutes. `gh pr merge` is NOT a safe-wedge — it always escalates. nightwatch's job is to get PRs *ready*; the human merges.
 
+## Operating rules (hard-won via incidents)
+
+**REBALANCE FIRST on saturation** — A capacity crunch is usually too many sessions piled on ONE rate-capped account, not global scarcity. Swap stuck (STRANDED/RATE/ERROR) sessions onto an emptier account via `tbd terminal swap-profile --terminal <tid> --profile <name>` (parked=cold/cheap, awake=respawn). Passive holding just freezes them. *(Incident 2026-07-10: 14 of 19 stuck sessions were piled on one account; the watcher held instead of rebalancing and the whole fleet stalled overnight until rebalanced.)*
+
+**READ context before nudging** — Capture the worker's actual conversation (`tbd terminal conversation --terminal <tid>` or the pane) and give a SPECIFIC next step, not a blanket "continue" (which just makes agents re-idle).
+
+**FOLLOW UP in ~90s** — After nudging (background sleep), re-check in ~90 seconds rather than waiting for the next tick. Catches agents mid-action at confirm/permission prompts that would otherwise hang the whole cycle.
+
+**ALWAYS SIGN commits** — Never use `gpgsign=false`; some repos (longeye-ai/monorepo) silently reject unsigned commits.
+
 ## Config (`config/`)
 - `priorities.txt` — must-keep-moving worktrees (flagged ★, reported first)
 - `safe_wedges.txt` — permission-wedge prefixes the daemon may auto-approve (never `gh pr merge`)
