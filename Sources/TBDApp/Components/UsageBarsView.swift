@@ -3,8 +3,10 @@ import TBDShared
 
 /// A compact two-row usage meter for a Claude OAuth profile: the 5-hour session
 /// window and the weekly all-models window, each drawn as a thin bar with a
-/// severity-colored fill, a neutral "time marker" tick showing how far
-/// through the window we are, and a trailing percent.
+/// pace-aware colored fill (green/yellow/orange/red — projection of end-of-window
+/// usage from the current burn rate, floored by the API severity so a
+/// warning/critical bucket never reads healthy), a neutral "time marker" tick
+/// showing how far through the window we are, and a trailing percent.
 ///
 /// Pure presentation over a `ProfileUsageSnapshot` (no picker/tab state), so it
 /// is reusable anywhere a snapshot is in hand. `now`/`timeZone` are injectable
@@ -116,12 +118,20 @@ private struct UsageBarRow: View {
 
     // MARK: Colors
 
-    /// Usage-severity fill: green (adaptive) when healthy, orange at warning,
-    /// red at critical.
+    /// Pace-aware fill (shared by the bar and the trailing percent): green
+    /// (adaptive) when on a sustainable pace, yellow (adaptive) when the
+    /// projected end-of-window usage is warming (75–90%), orange when it will
+    /// likely graze the limit (90–100%), red when on pace to exceed. The API
+    /// severity (or the >=75/>=90 percent fallback) floors the tier, so a
+    /// warning/critical bucket never renders healthier than before; without
+    /// pace data (no reset date, <15% elapsed) this is exactly the old
+    /// severity coloring.
     private var fillColor: Color {
-        switch ProfileUsagePresentation.severityLevel(severity: bucket.severity,
-                                                      percent: bucket.percent) {
+        switch ProfileUsagePresentation.fillLevel(severity: bucket.severity,
+                                                  percent: bucket.percent,
+                                                  elapsedFraction: elapsedFraction) {
         case .normal: return Self.adaptiveGreen(colorScheme)
+        case .caution: return Self.adaptiveYellow(colorScheme)
         case .warning: return .orange
         case .critical: return .red
         }
@@ -140,6 +150,15 @@ private struct UsageBarRow: View {
         colorScheme == .dark
             ? Color(red: 60 / 255, green: 199 / 255, blue: 95 / 255)
             : Color(red: 27 / 255, green: 107 / 255, blue: 52 / 255)
+    }
+
+    /// Yellow that reads on both appearances: a bright warm yellow in dark
+    /// mode, a deeper amber in light mode (pure yellow washes out against the
+    /// pale bar track).
+    private static func adaptiveYellow(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color(red: 235 / 255, green: 194 / 255, blue: 52 / 255)
+            : Color(red: 158 / 255, green: 110 / 255, blue: 6 / 255)
     }
 
     // MARK: Tooltip
@@ -185,10 +204,12 @@ private struct UsageBarRow: View {
             bucket("weekly_all", 12, severity: "normal", resetsIn: 6 * 24 * 3600),
         ]), now: now)
 
-        // Mid usage, over pace — the marker sits behind the fill (burning fast).
+        // Mid usage, over pace — the marker sits behind the fill (burning
+        // fast). Session projects to ~85% (yellow "warming"); weekly projects
+        // to ~95% (orange) despite the API still saying "normal".
         UsageBarsView(snapshot: snap([
-            bucket("session", 70, severity: "normal", resetsIn: 3.5 * 3600),
-            bucket("weekly_all", 55, severity: "warning", resetsIn: 5 * 24 * 3600),
+            bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),
+            bucket("weekly_all", 55, severity: "normal", resetsIn: 2.95 * 24 * 3600),
         ]), now: now)
 
         // Near limit.

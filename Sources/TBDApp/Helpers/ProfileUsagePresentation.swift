@@ -56,6 +56,67 @@ enum ProfileUsagePresentation {
         }
     }
 
+    // MARK: - Pace-aware fill tier
+
+    /// Fill tiers for the usage bars, ordered by urgency. A superset of
+    /// `SeverityLevel` with one extra `caution` (yellow) tier between normal
+    /// and warning that only pace projection can produce — "you're burning
+    /// faster than the window, but not yet alarmingly so".
+    enum FillLevel: Int, Comparable {
+        case normal
+        case caution
+        case warning
+        case critical
+
+        static func < (lhs: FillLevel, rhs: FillLevel) -> Bool {
+            lhs.rawValue < rhs.rawValue
+        }
+    }
+
+    /// Minimum elapsed fraction before pace projection kicks in — earlier than
+    /// this the projection is too noisy to color by (a single request at
+    /// minute one would scream red). Matches the reference tracker's gate.
+    static let paceGateElapsedFraction = 0.15
+
+    /// Pace-aware fill tier for a usage bar: project end-of-window usage from
+    /// the current burn rate (`projected = (percent/100) / elapsedFraction`)
+    /// and tier it —
+    ///
+    /// - projected < 0.75 → `.normal` (green: sustainable pace)
+    /// - 0.75 ..< 0.90 → `.caution` (yellow: warming — on track to land close)
+    /// - 0.90 ..< 1.00 → `.warning` (orange: will likely graze the limit)
+    /// - >= 1.00 → `.critical` (red: on pace to exceed)
+    ///
+    /// The plain `severityLevel(severity:percent:)` result acts as a FLOOR:
+    /// the final tier is `max(paceTier, floor)`, so an API "warning"/
+    /// "critical" (or the >=75%/>=90% used fallback) never renders healthier
+    /// than it does today. Projection only runs when an elapsed fraction is
+    /// available, is within `[paceGateElapsedFraction, 1)`, and percent > 0;
+    /// otherwise (no reset date, window barely started, window over) the
+    /// result is exactly the floor — today's behavior.
+    static func fillLevel(severity: String?,
+                          percent: Double,
+                          elapsedFraction: Double?) -> FillLevel {
+        let floor: FillLevel
+        switch severityLevel(severity: severity, percent: percent) {
+        case .normal: floor = .normal
+        case .warning: floor = .warning
+        case .critical: floor = .critical
+        }
+        guard let elapsed = elapsedFraction,
+              elapsed >= paceGateElapsedFraction, elapsed < 1.0,
+              percent > 0 else { return floor }
+        let projected = (percent / 100) / elapsed
+        let pace: FillLevel
+        switch projected {
+        case ..<0.75: pace = .normal
+        case 0.75..<0.90: pace = .caution
+        case 0.90..<1.00: pace = .warning
+        default: pace = .critical
+        }
+        return max(pace, floor)
+    }
+
     // MARK: - Pace projection
 
     /// The 5-hour rolling session window, in seconds — the denominator for the
