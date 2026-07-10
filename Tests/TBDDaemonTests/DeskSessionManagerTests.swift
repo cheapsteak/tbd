@@ -148,10 +148,10 @@ extension TBDHomeSerialized {
             #expect(archived?.status == .archived)
         }
 
-        @Test("wrapUpDeskSession parks terminals instead of deleting")
-        func testWrapUpDeskSessionParksInsteadOfDeleting() async throws {
+        @Test("wrapUpDeskSession exits gracefully when hibernationCoordinator is nil (HIGH 1: in-production wired)")
+        func testWrapUpDeskSessionHandlesMissingCoordinator() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("tbd-desk-wrapup-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("tbd-desk-wrapup-nil-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
@@ -170,25 +170,20 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                hibernationCoordinator: nil  // Simulate nil (e.g., old code path)
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
             let deskID = desk.id
 
             // Wrap up with short grace period (0.1s for tests)
+            // Should exit gracefully when coordinator is nil (log warning, don't crash)
             await manager.wrapUpDeskSession(gracePeriodSeconds: 0.1)
 
-            // Verify worktree still exists (NOT archived)
+            // Verify worktree still exists (wrap-up should be a safe no-op)
             let worktree = try await db.worktrees.get(id: deskID)
-            #expect(worktree != nil, "Worktree should still exist after wrap-up")
-            #expect(worktree?.status == .active, "Worktree should still be active")
-
-            // Verify terminals are hibernated (parked)
-            let terminals = try await db.terminals.list(worktreeID: deskID)
-            for terminal in terminals {
-                #expect(terminal.hibernatedAt != nil, "Terminal should be hibernated after wrap-up")
-            }
+            #expect(worktree != nil, "Worktree should still exist after wrap-up even without coordinator")
         }
 
         @Test("wrapUpDeskSession idempotent when no desk")

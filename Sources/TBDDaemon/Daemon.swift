@@ -667,12 +667,14 @@ public final class Daemon: Sendable {
             let executor = ProcessDaywatchExecutor(skillDir: skillDir)
 
             // Phase A: Create desk session manager for visible worker
+            // Pass hibernationCoordinator so wrap-up uses the real park path (not raw DB flag)
             let deskSessionManager = DeskSessionManager(
                 db: database,
                 lifecycle: lifecycle,
                 tmux: tmux,
                 skillDir: skillDir,
-                subscriptions: subs
+                subscriptions: subs,
+                hibernationCoordinator: rpcRouter.hibernationCoordinator
             )
 
             let runner = DaywatchRunner(

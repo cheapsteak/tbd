@@ -228,32 +228,43 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Gracefully end the shift: send wrap-up prompt, capture session ID, and park the desk.
     /// Called when daywatch/nightwatch mode turns OFF. Preserves the desk worktree and transcript
     /// for reuse on the next ON cycle (off→park→on round-trip keeps the same desk).
-    /// Timing: sends the prompt, pauses to let agent write summary, then marks terminals hibernated.
+    /// Timing: sends the prompt, pauses to let agent write summary, then hibernates terminals via
+    /// HibernationCoordinator (which handles polite exit, tmux respawn, and all safety checks).
     /// Does NOT delete the worktree (unlike closeDeskSession).
     /// - Parameter gracePeriodSeconds: How long to wait before parking (default 10s for grace period)
     public func wrapUpDeskSession(gracePeriodSeconds: TimeInterval = 10) async {
-        await gateAcquire()
-        defer { gateRelease() }
-        guard let worktreeID = deskWorktreeID else {
-            logger.info("No active desk session to wrap up")
-            return
-        }
+        // MEDIUM 3: Do NOT hold the gate during the sleep. Acquire gate only for the prompt send
+        // and terminal list, then release before the grace sleep, then re-acquire for the park.
+        // This avoids blocking a quick ON→ that arrives during the grace window.
+        var terminalIDs: [UUID] = []
+        var worktreeID: UUID? = nil
 
+        // Step 1: Hold gate, grab worktree/terminals, send prompt, then release gate
+        await gateAcquire()
         do {
-            guard let wt = try await db.worktrees.get(id: worktreeID) else {
-                logger.warning("Watch Desk worktree not found during wrap-up: \(worktreeID, privacy: .public)")
+            guard let deskID = deskWorktreeID else {
+                gateRelease()
+                logger.info("No active desk session to wrap up")
+                return
+            }
+
+            guard let wt = try await db.worktrees.get(id: deskID) else {
+                gateRelease()
+                logger.warning("Watch Desk worktree not found during wrap-up: \(deskID, privacy: .public)")
                 deskWorktreeID = nil
                 return
             }
 
-            // Step 1: Send wrap-up prompt to the desk
+            // Get terminals and send prompt (while holding gate)
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                gateRelease()
                 logger.warning("No Claude terminal found in Watch Desk during wrap-up; skipping prompt")
                 deskWorktreeID = nil
                 return
             }
 
+            // Send wrap-up prompt
             let wrapUpPrompt = NightwatchDeskPrompts.wrapUpPrompt()
             do {
                 try await tmux.pasteText(
@@ -271,45 +282,46 @@ public actor DeskSessionManager: DeskSessionManaging {
                 logger.warning("Failed to send wrap-up prompt to desk: \(error.localizedDescription, privacy: .public)")
             }
 
-            // Step 2: Grace period — give agent time to write summary (default 10 seconds)
-            try? await Task.sleep(for: .seconds(gracePeriodSeconds))
+            // Capture terminal IDs for later hibernation
+            terminalIDs = terminals.map { $0.id }
+            worktreeID = wt.id
 
-            // Step 3: Park (hibernate) the terminals instead of killing them
-            for terminal in terminals {
-                do {
-                    guard let sessionID = terminal.claudeSessionID else {
-                        logger.warning("Terminal has no session ID; cannot park: \(terminal.id, privacy: .public)")
-                        continue
-                    }
-                    try await db.terminals.setHibernated(
-                        id: terminal.id,
-                        sessionID: sessionID,
-                        snapshot: nil,
-                        reason: .manual,
-                        at: Date()
-                    )
-                    logger.info("Parked terminal \(terminal.id, privacy: .public) for desk wrap-up")
-                } catch {
-                    logger.warning("Failed to park terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
-            }
-
-            // Step 4: Broadcast per-terminal hibernation delta (NOT archive; worktree stays active).
-            // This tells the app the terminal is parked, but the worktree/terminal entries stay in state.
-            // (Archive would delete the terminal entry and tombstone it, breaking wake-on-next-ON.)
-            for terminal in terminals {
-                subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
-                    terminalID: terminal.id,
-                    worktreeID: terminal.worktreeID,
-                    hibernated: true,
-                    keepWarm: terminal.keepWarm,
-                    suspendedSnapshot: nil,
-                    hibernateReason: .manual
-                )))
-            }
-            logger.info("Wrapped up Watch Desk session: \(wt.id, privacy: .public); parked for reuse on next ON cycle")
+            // Release gate BEFORE the grace sleep (key fix for MEDIUM 3)
+            gateRelease()
         } catch {
-            logger.error("Failed to wrap up desk session: \(error.localizedDescription, privacy: .public)")
+            gateRelease()
+            logger.error("Failed to send wrap-up prompt: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        // Step 2: Grace period — give agent time to write summary (OUTSIDE the gate)
+        try? await Task.sleep(for: .seconds(gracePeriodSeconds))
+
+        // Step 3: Re-acquire gate and park terminals via HibernationCoordinator (HIGH 2)
+        await gateAcquire()
+        defer { gateRelease() }
+
+        guard let coordinator = hibernationCoordinator else {
+            logger.warning("HibernationCoordinator not available; cannot park desk terminals")
+            deskWorktreeID = nil
+            return
+        }
+
+        // Use real hibernation path: calls manualHibernate which does polite exit, tmux respawn, etc.
+        for terminalID in terminalIDs {
+            let result = await coordinator.manualHibernate(terminalID: terminalID)
+            switch result {
+            case .ok:
+                logger.info("Hibernated desk terminal \(terminalID, privacy: .public) via coordinator")
+            case .alreadyHibernated:
+                logger.debug("Desk terminal already hibernated: \(terminalID, privacy: .public)")
+            default:
+                logger.warning("Failed to hibernate desk terminal \(terminalID, privacy: .public): \(String(describing: result))")
+            }
+        }
+
+        if let wid = worktreeID {
+            logger.info("Wrapped up Watch Desk session: \(wid, privacy: .public); parked for reuse on next ON cycle")
         }
 
         deskWorktreeID = nil

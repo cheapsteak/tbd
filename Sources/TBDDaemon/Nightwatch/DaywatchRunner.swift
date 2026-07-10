@@ -188,7 +188,7 @@ public actor DaywatchRunner {
             if let desker = deskSessionManager {
                 // Fire off wrap-up as a detached background task so apply() returns immediately
                 // (the RPC doesn't block for 10s). The grace sleep + park happen in the background.
-                Task.detached { [weak self] in
+                Task.detached {
                     await desker.wrapUpDeskSession(gracePeriodSeconds: 10)
                 }
             }
