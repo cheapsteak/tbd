@@ -131,6 +131,16 @@ jobs:
 
             TUI screen-scraping is a High-severity defect. REJECT any PR that adds logic parsing captured terminal screen text (tmux capture-pane output, pane text, composer lines) to infer agent state — e.g. matching TUI glyphs like ❯, prompts, placeholder or status strings. Agent state must come from machine interfaces (Claude Code hooks, transcript JSONL, control mode, exit codes). Likewise treat as High severity any file added to the `excluded:` lists of the `no_tui_scraping_literals` or `capture_pane_allowlist` rules in .swiftlint.yml without a compelling justification in the PR description. See the CLAUDE.md section "No TUI screen-scraping".
 
+            INVESTIGATION REQUIREMENTS for guard/safety-shaped changes. Apply this section when the PR adds or modifies a guard, veto, safety check, gate, or interceptor whose failure could lose user data or state, or let an unsafe action proceed — NOT routine logging, telemetry, or UI observers. For such changes the dangerous bug is usually not in the diff: it is a false belief about unchanged code. Verify the premises, not just the logic built on them. This is targeted verification of the load-bearing premises (typically a handful), not an exhaustive audit — keep it within a fraction of your turn budget.
+
+            1. Premise audit: extract every factual claim the PR description or design doc makes about EXISTING code — especially universally quantified ones ("all", "every", "only", "single chokepoint", "already handled", "verified"). Verify each with Grep/Read and cite file:line evidence. A false premise is a High severity finding even when the new code is internally correct. The more thorough and persuasive the PR description, the MORE its factual claims deserve verification — a well-argued writeup pre-frames the reviewer, and errors that survived the author's own careful reasoning live precisely in the premises.
+            2. Interception completeness: if the change observes an event at one point in order to cover "all" occurrences, enumerate the other producers of that event codebase-wide (flag-gated alternates, fallback paths, legacy paths, CLI vs GUI splits) and confirm each one actually crosses the instrumented point. Default-off branches are where universal claims fail.
+            3. Fail-direction analysis: enumerate every state in which the mechanism's input signal is nil, empty, stale, cleared, or reset, and classify each as fail-open (allows the guarded action) or fail-closed (blocks it). Every fail-open path needs an explicit justification in a code comment or the PR description; an unjustified fail-open path is at least Medium severity.
+            4. Guard lifecycle / proxy-signal audit: if the guard self-clears, list every cause of clearing and check that each one implies the hazard is actually gone. When condition A stands in for semantic event B ("marker advanced" for "user acted"), list every cause of A and check each implies B.
+            5. Claims-vs-tests reconciliation: for each guarantee the PR claims its tests prove ("fails safe", "cannot lose data"), confirm a test exercises the layer where that guarantee could break — a unit test restating the new logic does not prove an end-to-end claim.
+
+            Record the assumption table (claim → verified/refuted → file:line evidence) in your Phase 1 notes file. Refuted premises go through Phase 2 validation like any other finding (re-check the evidence — a misread grep is not a refutation); any premise you still judge refuted after Phase 2 must appear in the posted review as a finding. If the PR is not guard/safety-shaped, skip this section entirely — do not pad reviews of mechanical changes with it.
+
             IMPORTANT: You are to execute in three phases. Do not write the review content to your text response during Phases 1 and 2 — save that for Phase 3. Tool calls and brief phase transitions are fine.
 
             Phase 1: Write out your feedback and comments on the changes in a local txt file in the current working directory (not to GitHub). Use the Write tool to create the file, not shell redirection. Do not write to /tmp/.
@@ -158,8 +168,12 @@ jobs:
             Do NOT submit a formal GitHub review (no `gh pr review`). Your outputs are the sticky comment via `mcp__github_comment__update_claude_comment` and the `claude-verdict.txt` file.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+          # 80 was set after a large review (#364) exhausted its turns without
+          # writing the verdict file (which fails closed). The investigation
+          # requirements above add mandatory work on guard/safety PRs — the
+          # large-review class — so the budget carries headroom for it.
           claude_args: |
-            --max-turns 80
+            --max-turns 100
             --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
 
       - name: Enforce review verdict (block merge on Reject)
