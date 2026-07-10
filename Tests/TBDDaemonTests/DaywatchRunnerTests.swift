@@ -24,6 +24,10 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
         return tickExitCode
     }
 
+    func setTickExitCode(_ code: Int32) {
+        tickExitCode = code
+    }
+
     func wakeJudge(act: Bool) async {
         judgeWakeCalls.append(JudgeWakeCall(act: act))
     }
@@ -373,5 +377,33 @@ struct DaywatchRunnerTests {
         let wakeCalls = await executor.judgeWakeCalls
         #expect(wakeCalls.count == 1)
         #expect(wakeCalls[0].act == false, "fallback wakeJudge should have act=false")
+    }
+
+    @Test("concurrent same-mode apply() calls: one transition, loop running, desk set")
+    func testConcurrentSameModeApply() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Two racing apply(.daywatch) from .off — the gate serializes them; the
+        // second must be a genuine no-op, not a false supersession that closes
+        // the first call's desk and leaves mode=on with no loop.
+        async let a: Void = runner.apply(mode: .daywatch)
+        async let b: Void = runner.apply(mode: .daywatch)
+        _ = await (a, b)
+
+        let ensureCalls = await desker.ensureCalls
+        let closeCalls = await desker.closeCalls
+        #expect(ensureCalls.count == 1, "duplicate same-mode apply must not re-ensure")
+        #expect(closeCalls == 0, "no orphan-close on duplicate apply")
+
+        // The transition really completed: a tick with exit 10 nudges the desk.
+        await executor.setTickExitCode(10)
+        await runner.runOnce()
+        let nudges = await desker.nudgeCalls
+        #expect(nudges.count == 1, "loop state intact after duplicate apply")
+
+        await runner.apply(mode: .off)
+        #expect(await desker.closeCalls == 1)
     }
 }

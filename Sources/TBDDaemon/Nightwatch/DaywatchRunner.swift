@@ -110,7 +110,31 @@ public actor DaywatchRunner {
     private var deskWorktreeID: UUID?
     private var lastNudgeAttemptTime: Date?  // For retry on failure (MEDIUM 2)
     private var loopTask: Task<Void, Never>?
-    private var generation = 0  // Reentrancy guard: incremented on each apply() entry
+
+    // FIFO gate serializing apply() calls. Actors are reentrant across awaits,
+    // so overlapping apply()s (double-click, RPC bursts, boot-reconcile racing a
+    // user toggle) previously interleaved mid-ensure/close. Serializing the whole
+    // mode transition makes each apply atomic: a duplicate same-mode call simply
+    // waits, then no-ops; an off-during-ensure waits, then cleanly closes.
+    private var gateBusy = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func gateAcquire() async {
+        if gateBusy {
+            await withCheckedContinuation { gateWaiters.append($0) }
+            // Resumed by gateRelease(); gateBusy intentionally stays true.
+        } else {
+            gateBusy = true
+        }
+    }
+
+    private func gateRelease() {
+        if gateWaiters.isEmpty {
+            gateBusy = false
+        } else {
+            gateWaiters.removeFirst().resume()
+        }
+    }
 
     // MARK: - Init
 
@@ -128,11 +152,11 @@ public actor DaywatchRunner {
 
     /// Apply a mode change: start the loop for .daywatch/.nightwatch, stop for .off.
     /// Idempotent. Manages desk session lifecycle (ensure on start, close on stop).
-    /// Uses generation counter to guard against reentrancy: if a newer apply() call arrives
-    /// while an earlier one is suspended, the earlier call detects supersession and aborts.
+    /// Serialized by the FIFO gate: each transition runs to completion before the
+    /// next begins, so no reentrancy interleavings are possible by construction.
     public func apply(mode: NightwatchMode) async {
-        generation += 1
-        let myGen = generation
+        await gateAcquire()
+        defer { gateRelease() }
 
         let wasRunning = currentMode != .off
         let shouldRun = mode != .off
@@ -141,28 +165,15 @@ public actor DaywatchRunner {
         currentMode = mode
 
         if shouldRun && !wasRunning {
-            // Start the loop AND ensure desk session exists
+            // Start: ensure desk session exists, then start the loop.
             do {
                 if let desker = deskSessionManager {
                     let desk = try await desker.ensureDeskSession(mode: mode)
-                    // Reentrancy guard: if a newer apply() arrived, abort to let it take over
-                    guard myGen == generation else {
-                        // A newer apply() won (e.g. rapid toggle to .off). The desk we just
-                        // created would otherwise leak un-archived — close it before yielding.
-                        logger.debug("apply() superseded during desk ensure on start; closing orphan desk")
-                        await desker.closeDeskSession()
-                        return
-                    }
                     deskWorktreeID = desk.id
                 }
             } catch {
+                // Loop still starts; runOnce()'s retry path re-attempts the ensure.
                 logger.error("Failed to ensure desk session on mode start: \(error.localizedDescription, privacy: .public)")
-            }
-
-            // Reentrancy guard: re-check before starting loop
-            guard myGen == generation else {
-                logger.debug("apply() superseded before loop start; aborting")
-                return
             }
 
             loopTask = Task { [weak self] in
@@ -170,50 +181,30 @@ public actor DaywatchRunner {
             }
             logger.info("Started daywatch runner in mode \(mode.rawValue, privacy: .public)")
         } else if !shouldRun && wasRunning {
-            // Stop the loop AND close desk session
+            // Stop: cancel the loop, close the desk.
             loopTask?.cancel()
             loopTask = nil
 
-            // Pre-check: if a newer apply() already superseded us, the desk now belongs
-            // to it — do not close it out from under the newer call.
-            guard myGen == generation else {
-                logger.debug("apply() superseded before desk close on stop; skipping close")
-                return
-            }
             if let desker = deskSessionManager {
                 await desker.closeDeskSession()
-            }
-            // Reentrancy guard: a newer apply() may have started a fresh desk while we
-            // were suspended in closeDeskSession(). Only clear state if we're still the
-            // latest call — otherwise we'd clobber the newer call's deskWorktreeID and
-            // its next tick would spawn a duplicate desk.
-            guard myGen == generation else {
-                logger.debug("apply() superseded during desk close on stop; leaving newer state intact")
-                return
             }
             deskWorktreeID = nil
 
             logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public))")
         } else if shouldRun && wasRunning && previousMode != mode {
-            // Mode switch within running state (daywatch ↔ nightwatch)
-            // Ensure desk session exists (may reuse existing)
+            // Mode switch within running state (daywatch <-> nightwatch):
+            // desk is reused; ensure updates the prompt-relevant state.
             do {
                 if let desker = deskSessionManager {
                     let desk = try await desker.ensureDeskSession(mode: mode)
-                    // Reentrancy guard: if a newer apply() arrived, abort
-                    guard myGen == generation else {
-                        // Same orphan-desk cleanup as the start branch: a newer apply() won.
-                        logger.debug("apply() superseded during desk ensure on mode switch; closing orphan desk")
-                        await desker.closeDeskSession()
-                        return
-                    }
                     deskWorktreeID = desk.id
                 }
             } catch {
                 logger.error("Failed to ensure desk session on mode switch: \(error.localizedDescription, privacy: .public)")
             }
         }
-        // else: no-op (already in desired state)
+        // else: no-op (already in desired state — e.g. duplicate same-mode call
+        // that waited on the gate while the first call completed the transition)
     }
 
     // MARK: - Testable single tick

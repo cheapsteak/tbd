@@ -189,6 +189,11 @@ public actor DeskSessionManager: DeskSessionManaging {
     ///   - worktreeID: The Watch Desk worktree ID
     ///   - act: true for nightwatch (auto-act), false for daywatch (dry-run/batch only)
     public func nudgeDeskSession(worktreeID: UUID, act: Bool) async {
+        // Same FIFO gate as ensure/close: the overlap-guard's check-then-act
+        // (lastNudgeTime read → awaits → write) is not atomic under actor
+        // reentrancy without it.
+        await gateAcquire()
+        defer { gateRelease() }
         // M2: Skip nudge if previous nudge was < 10 min ago (prevent overlapping judge runs)
         if let last = lastNudgeTime {
             let elapsed = Date().timeIntervalSince(last)
