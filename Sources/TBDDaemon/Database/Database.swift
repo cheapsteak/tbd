@@ -854,6 +854,17 @@ public final class TBDDatabase: Sendable {
             try db.execute(sql: "UPDATE config SET auto_hibernate_enabled = 0")
         }
 
+        // Soak flag for the input-pipeline pending-input veto (design
+        // 2026-07-09-pending-input-detection-design). Default false: the veto is
+        // opt-in until it soaks; when on it's the primary machine-interface guard
+        // against parking a pane with typed-but-unsent input, demoting the TUI
+        // scrape to a backup.
+        migrator.registerMigration("v51_config_hibernate_input_veto") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "hibernate_input_veto_enabled",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }

@@ -751,6 +751,14 @@ public struct Config: Codable, Sendable, Equatable {
     /// classified as `ScheduledResume.apiErrorLimitType` rather than a hard
     /// usage-limit hit. Default OFF.
     public var autoResumeOnApiError: Bool
+    /// Soak flag for the input-pipeline pending-input veto (design spec
+    /// 2026-07-09). When true, the auto-hibernate idle sweep includes a
+    /// machine-interface guard against parking a pane with typed-but-unsent
+    /// input: if any keystroke arrived at or after the session went idle, the
+    /// park is vetoed. When false (the default), only the TUI scrape veto
+    /// applies. The input veto is opt-in until it soaks and the v50 master
+    /// default is reverted.
+    public var hibernateInputVetoEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -769,7 +777,8 @@ public struct Config: Codable, Sendable, Equatable {
                 autoHibernateEnabled: Bool = false,
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
-                autoResumeOnApiError: Bool = false) {
+                autoResumeOnApiError: Bool = false,
+                hibernateInputVetoEnabled: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -785,6 +794,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.hibernateIdleMinutes = hibernateIdleMinutes
         self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
+        self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -816,6 +826,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .controlModeEnabled) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
+        hibernateInputVetoEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
     }
 }
 
