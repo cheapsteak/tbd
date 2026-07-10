@@ -67,6 +67,7 @@ struct NightwatchDeskStatusBanner: View {
                 )
             }
             .buttonStyle(.plain)
+            .pointerStyle(.link)
             .help("Focus Watch Desk session")
             .onAppear {
                 // Only update desk worktree lookup when mode is active (not .off)
