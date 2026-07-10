@@ -164,7 +164,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
 
         let mode: NightwatchMode = act ? .nightwatch : .daywatch
-        let prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir, dryRun: false)
+        let prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
 
         do {
             let terminals = try await db.terminals.list(worktreeID: worktreeID)

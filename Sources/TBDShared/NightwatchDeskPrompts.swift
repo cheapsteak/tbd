@@ -43,11 +43,9 @@ public enum NightwatchDeskPrompts {
 
     /// Prompt sent when the daemon nudges the desk session with a batch of queued judgments.
     /// - Parameter skillDir: Absolute path to the nightwatch skill directory for file references
-    public static func judgePrompt(mode: NightwatchMode, skillDir: String, dryRun: Bool) -> String {
+    public static func judgePrompt(mode: NightwatchMode, skillDir: String) -> String {
         let actionHint: String
-        if dryRun {
-            actionHint = "(dry-run: predict actions but do NOT execute)"
-        } else if mode == .daywatch {
+        if mode == .daywatch {
             actionHint = "(daywatch: triage only; act on small_safe/preclear; batch rest for human review)"
         } else {
             actionHint = "(nightwatch: act on everything the gate allows)"

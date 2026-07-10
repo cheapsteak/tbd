@@ -177,6 +177,14 @@ public actor DaywatchRunner {
             if let desker = deskSessionManager {
                 await desker.closeDeskSession()
             }
+            // Reentrancy guard: a newer apply() may have started a fresh desk while we
+            // were suspended in closeDeskSession(). Only clear state if we're still the
+            // latest call — otherwise we'd clobber the newer call's deskWorktreeID and
+            // its next tick would spawn a duplicate desk.
+            guard myGen == generation else {
+                logger.debug("apply() superseded during desk close on stop; leaving newer state intact")
+                return
+            }
             deskWorktreeID = nil
 
             logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public))")
