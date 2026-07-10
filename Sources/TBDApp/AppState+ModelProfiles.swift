@@ -35,6 +35,9 @@ extension AppState {
             if result.autoHibernateOnMergeDefault != autoHibernateOnMergeDefault {
                 autoHibernateOnMergeDefault = result.autoHibernateOnMergeDefault
             }
+            if result.gcEnabled != gcEnabled {
+                gcEnabled = result.gcEnabled
+            }
             if result.nightwatchMode != nightwatchMode {
                 nightwatchMode = result.nightwatchMode
             }
@@ -187,6 +190,17 @@ extension AppState {
             autoHibernateOnMergeDefault = enabled
         } catch {
             logger.error("Failed to set auto-hibernate default: \(error, privacy: .public)")
+            showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set the orphan-GC master switch.
+    func setGCEnabled(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setGCEnabled(enabled)
+            gcEnabled = enabled
+        } catch {
+            logger.error("Failed to set gcEnabled: \(error, privacy: .public)")
             showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
         }
     }

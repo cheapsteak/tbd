@@ -60,7 +60,8 @@ extension RPCRouter {
             autoHibernateOnMergeDefault: config.autoHibernateOnMergeDefault,
             nightwatchMode: config.nightwatchMode,
             autoResumeOnLimitReset: config.autoResumeOnLimitReset,
-            autoResumeOnApiError: config.autoResumeOnApiError
+            autoResumeOnApiError: config.autoResumeOnApiError,
+            gcEnabled: config.gcEnabled
         ))
     }
 

@@ -332,6 +332,7 @@ extension AppState {
             // same as createWorktree relies on its delta.
             if let repoID = snapshot.repoID {
                 await refreshArchivedWorktrees(repoID: repoID)
+                await refreshReapRecords(repoID: repoID)
             }
         } catch {
             revivingArchived.removeValue(forKey: id)
@@ -591,6 +592,29 @@ extension AppState {
             ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
+        }
+    }
+
+    /// Fetch orphan-GC reap records for a repo (History → Reclaimed).
+    func refreshReapRecords(repoID: UUID) async {
+        guard let repoPath = repos.first(where: { $0.id == repoID })?.path else { return }
+        do {
+            reapRecords[repoID] = try await daemonClient.listReapRecords(repoPath: repoPath)
+        } catch {
+            logger.error("Failed to list reap records: \(error)")
+        }
+    }
+
+    /// Restore a swept `ReapRecord` (agent worktrees only) and refresh the
+    /// repo's list so the row disappears from Reclaimed once restored.
+    func restoreReap(_ record: ReapRecord, repoID: UUID) async {
+        do {
+            try await daemonClient.restoreReap(recordID: record.id)
+            await refreshReapRecords(repoID: repoID)
+            await refreshWorktrees()
+        } catch {
+            logger.error("Failed to restore reap record \(record.id, privacy: .public): \(error)")
+            showAlert("Couldn't restore worktree: \(error.localizedDescription)", isError: true)
         }
     }
 

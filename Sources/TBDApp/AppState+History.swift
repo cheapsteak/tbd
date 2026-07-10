@@ -180,6 +180,7 @@ extension AppState {
             await refreshWorktrees()
             if let repoID = snapshot.repoID {
                 await refreshArchivedWorktrees(repoID: repoID)
+                await refreshReapRecords(repoID: repoID)
             }
         } catch {
             revivingArchived.removeValue(forKey: worktreeID)

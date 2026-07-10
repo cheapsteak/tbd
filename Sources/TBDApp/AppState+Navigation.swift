@@ -212,6 +212,7 @@ extension AppState {
             selectedRepoID = id
             selectedScratchSection = false
             Task { await refreshArchivedWorktrees(repoID: id) }
+            Task { await refreshReapRecords(repoID: id) }
         }
     }
 

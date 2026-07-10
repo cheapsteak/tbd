@@ -205,6 +205,10 @@ final class AppState: ObservableObject {
     /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
     @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
 
+    /// Orphan-GC reap records (History → Reclaimed), keyed by repo ID and
+    /// fetched on demand alongside `archivedWorktrees`.
+    @Published var reapRecords: [UUID: [ReapRecord]] = [:]
+
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
     /// row, then clears the value after the flash animation completes.
@@ -430,6 +434,10 @@ final class AppState: ObservableObject {
     /// Global default for auto-hibernate-on-PR-merge. Loaded from the daemon
     /// alongside `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
     @Published var autoHibernateOnMergeDefault: Bool = false
+    /// Orphan-GC master switch (Config mirror, default true to match
+    /// `Config.gcEnabled`). Loaded from the daemon alongside
+    /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
+    @Published var gcEnabled: Bool = true
     @Published var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
@@ -965,6 +973,10 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.refreshWorktrees() }
         case .controlModeInputHealthChanged(let d):
             applyControlModeInputHealthDelta(d)
+        case .reapRecordsChanged:
+            if let repoID = selectedRepoID {
+                Task { [weak self] in await self?.refreshReapRecords(repoID: repoID) }
+            }
         default:
             break
         }

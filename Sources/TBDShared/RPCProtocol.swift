@@ -512,6 +512,8 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let nightwatchMode: NightwatchMode
     public let autoResumeOnLimitReset: Bool
     public let autoResumeOnApiError: Bool
+    /// The orphan-GC master switch (config mirror, default true).
+    public let gcEnabled: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -521,7 +523,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoHibernateOnMergeDefault: Bool = false,
         nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
-        autoResumeOnApiError: Bool = false
+        autoResumeOnApiError: Bool = false,
+        gcEnabled: Bool = true
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -532,6 +535,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.nightwatchMode = nightwatchMode
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
+        self.gcEnabled = gcEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -556,6 +560,7 @@ public struct ModelProfileListResult: Codable, Sendable {
             Bool.self, forKey: .autoResumeOnLimitReset) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
+        gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
     }
 }
 

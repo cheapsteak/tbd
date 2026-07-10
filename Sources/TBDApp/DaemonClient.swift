@@ -807,6 +807,32 @@ actor DaemonClient {
         try await callNoParamsAsync(method: RPCMethod.configGet, resultType: Config.self)
     }
 
+    /// List reaped `ReapRecord`s from the orphan GC, optionally scoped to one
+    /// repo's path (`nil` == every repo, including scratch reap records).
+    func listReapRecords(repoPath: String?) async throws -> [ReapRecord] {
+        try await callAsync(
+            method: RPCMethod.gcList,
+            params: GCListParams(repoPath: repoPath),
+            resultType: [ReapRecord].self
+        )
+    }
+
+    /// Restore a swept `ReapRecord` (agent worktrees only — snapshot-first).
+    func restoreReap(recordID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.gcRestore,
+            params: GCRestoreParams(recordID: recordID)
+        )
+    }
+
+    /// Set the orphan-GC master switch.
+    func setGCEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetGCEnabled,
+            params: ConfigSetGCEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the tmux control-mode opt-in (M5). Applies to newly created
     /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
     /// the gate on regardless of this flag.
