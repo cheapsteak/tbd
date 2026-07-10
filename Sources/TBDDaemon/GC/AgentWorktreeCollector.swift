@@ -136,7 +136,7 @@ public struct AgentWorktreeCollector: Sendable {
 
     /// Executes one reap: snapshot-first (any throw here means "keep, don't
     /// touch the directory"), then measure, then delete, then verify the
-    /// delete actually took, then prune git's stale registration.
+    /// delete actually took, and only then prune git's stale registration.
     ///
     /// Returns the `ReapRecord` for the caller to persist, or `nil` if a late
     /// gate refused — either the snapshot step threw (kept, nothing was
@@ -158,12 +158,16 @@ public struct AgentWorktreeCollector: Sendable {
 
         let bytes = await Self.apparentBytes(path: c.path)
         try? FileManager.default.removeItem(atPath: c.path)
-        try? await git.worktreePrune(repoPath: c.repoPath)
 
+        // Verify the removal actually took BEFORE pruning: if the directory
+        // is still there, git's worktree registration must stay intact too,
+        // so the retry on the next sweep starts from a consistent state.
         guard !FileManager.default.fileExists(atPath: c.path) else {
             logger.warning("gc: rm failed for \(c.path, privacy: .public), will retry next sweep")
             return nil
         }
+
+        try? await git.worktreePrune(repoPath: c.repoPath)
 
         logger.info("gc: reaped \(c.path, privacy: .public), snapshotRef=\(ref ?? "none", privacy: .public)")
         return ReapRecord(

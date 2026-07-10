@@ -4,16 +4,12 @@ import Foundation
 import TBDShared
 import TestSupport
 
-/// Resolves symlinks in a path the same way git's `worktree list --porcelain`
-/// does: `URL.resolvingSymlinksInPath()` does NOT follow macOS's
-/// `/var` -> `/private/var` symlink, but C `realpath()` does. Test fixtures
-/// must canonicalize before comparing against collector output — mirrors
-/// `AgentWorktreeCollector.canon(_:)` exactly (and `GitManagerGCTests`'
-/// private helper of the same shape).
+/// Test fixtures must canonicalize paths before comparing against collector
+/// output (git's `worktree list --porcelain` paths are always realpath'd).
+/// Uses the collector's own `canon(_:)` — reachable via `@testable import` —
+/// so both sides of every comparison share one resolution implementation.
 private func canon(_ path: String) -> String {
-    guard let cReal = realpath(path, nil) else { return path }
-    defer { free(cReal) }
-    return String(cString: cReal)
+    AgentWorktreeCollector.canon(path)
 }
 
 @Suite("AgentWorktreeCollector")
