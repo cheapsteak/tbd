@@ -64,6 +64,14 @@ struct ContentView: View {
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
             }
+
+            // Nightwatch desk session status banner (Phase A visible worker).
+            // Gated on the experimental flag like every other nightwatch surface
+            // (fail-closed to hidden when the user never opted in).
+            if nightwatchExperimental {
+                NightwatchDeskStatusBanner()
+            }
+
             NavigationSplitView {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)

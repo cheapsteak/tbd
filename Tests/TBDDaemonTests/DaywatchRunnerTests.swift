@@ -24,8 +24,92 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
         return tickExitCode
     }
 
+    func setTickExitCode(_ code: Int32) {
+        tickExitCode = code
+    }
+
     func wakeJudge(act: Bool) async {
         judgeWakeCalls.append(JudgeWakeCall(act: act))
+    }
+}
+
+// MARK: - Fake DeskSessionManager for Testing
+
+/// Fake desk session manager that records calls for testing desk-gated branches.
+/// Conforms to DeskSessionManaging protocol for use with DaywatchRunner.
+actor FakeDeskSessionManager: DeskSessionManaging {
+    enum EnsureBehavior {
+        case succeed
+        case failOnce
+        case alwaysFail
+    }
+
+    struct NudgeCall: Sendable {
+        let worktreeID: UUID
+        let act: Bool
+    }
+
+    private(set) var ensureCalls: [NightwatchMode] = []
+    private(set) var nudgeCalls: [NudgeCall] = []
+    private(set) var closeCalls: Int = 0
+
+    private(set) var lastEnsuredWorktreeID: UUID?
+    private var deskID: UUID? // Cached desk ID — reused across mode switches
+    private var ensureBehavior: EnsureBehavior = .succeed
+    private var ensureFailureCount: Int = 0
+
+    init(ensureBehavior: EnsureBehavior = .succeed) {
+        self.ensureBehavior = ensureBehavior
+    }
+
+    func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree {
+        ensureCalls.append(mode)
+
+        // Handle failure behavior
+        switch ensureBehavior {
+        case .failOnce:
+            if ensureFailureCount == 0 {
+                ensureFailureCount += 1
+                struct TestError: Error, CustomStringConvertible {
+                    let description = "Fake desk ensure failed (once)"
+                }
+                throw TestError()
+            }
+        case .alwaysFail:
+            struct TestError: Error, CustomStringConvertible {
+                let description = "Fake desk ensure failed (always)"
+            }
+            throw TestError()
+        case .succeed:
+            break
+        }
+
+        // Reuse desk ID across calls (models real behavior: desk is idempotent/persisted across mode switches)
+        if deskID == nil {
+            deskID = UUID()
+        }
+        lastEnsuredWorktreeID = deskID!
+
+        // Create a real Worktree with minimal test values (repoID: nil makes it scratch)
+        return Worktree(
+            id: deskID!,
+            repoID: nil,
+            name: "watch-desk",
+            displayName: "Watch Desk",
+            branch: "main",
+            path: "/tmp/test-desk",
+            status: .active,
+            createdAt: Date(),
+            tmuxServer: "test-tmux"
+        )
+    }
+
+    func nudgeDeskSession(worktreeID: UUID, act: Bool) async {
+        nudgeCalls.append(NudgeCall(worktreeID: worktreeID, act: act))
+    }
+
+    func closeDeskSession() async {
+        closeCalls += 1
     }
 }
 
@@ -184,5 +268,153 @@ struct DaywatchRunnerTests {
         wakeCalls = await executor.judgeWakeCalls
         #expect(wakeCalls.count == 2)
         #expect(wakeCalls[1].act == true, "nightwatch should pass act=true")
+    }
+
+    // MARK: - Test: Desk-gated branches (MEDIUM 1 + MEDIUM 2)
+
+    @Test("ensure-on-start: apply(.daywatch) ensures desk session")
+    func testEnsureOnStart() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        await runner.apply(mode: .daywatch)
+
+        let ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1)
+        #expect(ensureCalls[0] == .daywatch)
+    }
+
+    @Test("close-on-stop: apply(.off) closes desk session")
+    func testCloseOnStop() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Start in daywatch
+        await runner.apply(mode: .daywatch)
+        var closeCalls = await desker.closeCalls
+        #expect(closeCalls == 0, "No close yet")
+
+        // Switch to off
+        await runner.apply(mode: .off)
+        closeCalls = await desker.closeCalls
+        #expect(closeCalls == 1, "Should close desk on .off")
+    }
+
+    @Test("ensure-on-switch: mode switch ensures desk with new mode (reuses same desk)")
+    func testEnsureOnModeSwitch() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Start in daywatch
+        await runner.apply(mode: .daywatch)
+        var ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1)
+        #expect(ensureCalls[0] == .daywatch)
+        let deskID1 = await desker.lastEnsuredWorktreeID
+        #expect(deskID1 != nil)
+
+        // Switch to nightwatch
+        await runner.apply(mode: .nightwatch)
+        ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 2)
+        #expect(ensureCalls[1] == .nightwatch)
+        let deskID2 = await desker.lastEnsuredWorktreeID
+
+        // CRITICAL: Mode switch must REUSE the same desk and terminal, not respawn.
+        // The per-tick judgePrompt carries the mode, so initial frame is one-time only.
+        #expect(deskID2 == deskID1, "Mode switch should reuse same desk (not respawn terminal)")
+    }
+
+    @Test("nudge-on-tick-10: exit code 10 nudges desk with correct act flag (daywatch)")
+    func testNudgeDaywatch() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Deterministic: runOnce(mode:) ensures the desk via the retry path and
+        // ticks exactly once — no background loop (apply() would race its
+        // immediate first tick against this explicit one).
+        await runner.runOnce(mode: .daywatch)
+
+        let nudgeCalls = await desker.nudgeCalls
+        #expect(nudgeCalls.count == 1)
+        #expect(nudgeCalls[0].act == false, "daywatch nudge should have act=false")
+    }
+
+    @Test("nudge-on-tick-10: exit code 10 nudges desk with correct act flag (nightwatch)")
+    func testNudgeNightwatch() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Deterministic single tick — see daywatch variant for rationale.
+        await runner.runOnce(mode: .nightwatch)
+
+        let nudgeCalls = await desker.nudgeCalls
+        #expect(nudgeCalls.count == 1)
+        #expect(nudgeCalls[0].act == true, "nightwatch nudge should have act=true")
+    }
+
+    @Test("MEDIUM 2: retry ensure on next tick if initial ensure failed")
+    func testRetryEnsureOnFailure() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager(ensureBehavior: .failOnce)
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Deterministic: first runOnce hits the ensure (fails once), second retries.
+        // No apply() — its background loop's immediate tick would race these counts.
+        await runner.runOnce(mode: .daywatch)
+        var ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1, "First ensure call should have failed")
+
+        await runner.runOnce(mode: .daywatch)
+        ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 2, "Should retry ensure on next tick")
+    }
+
+    @Test("nudge falls back to wakeJudge when desk unavailable")
+    func testWakeJudgeFallback() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        // No desk session manager — fallback to wakeJudge
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
+
+        // Deterministic: no apply() — its loop's tick-on-start would race this
+        // explicit tick (same fix as the nudge/retry tests above).
+        await runner.runOnce(mode: .daywatch)
+
+        let wakeCalls = await executor.judgeWakeCalls
+        #expect(wakeCalls.count == 1)
+        #expect(wakeCalls[0].act == false, "fallback wakeJudge should have act=false")
+    }
+
+    @Test("concurrent same-mode apply() calls: one transition, loop running, desk set")
+    func testConcurrentSameModeApply() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Two racing apply(.daywatch) from .off — the gate serializes them; the
+        // second must be a genuine no-op, not a false supersession that closes
+        // the first call's desk and leaves mode=on with no loop.
+        async let a: Void = runner.apply(mode: .daywatch)
+        async let b: Void = runner.apply(mode: .daywatch)
+        _ = await (a, b)
+
+        let ensureCalls = await desker.ensureCalls
+        let closeCalls = await desker.closeCalls
+        #expect(ensureCalls.count == 1, "duplicate same-mode apply must not re-ensure")
+        #expect(closeCalls == 0, "no orphan-close on duplicate apply")
+
+        // The transition really completed: a tick with exit 10 nudges the desk.
+        await executor.setTickExitCode(10)
+        await runner.runOnce()
+        let nudges = await desker.nudgeCalls
+        #expect(nudges.count == 1, "loop state intact after duplicate apply")
+
+        await runner.apply(mode: .off)
+        #expect(await desker.closeCalls == 1)
     }
 }

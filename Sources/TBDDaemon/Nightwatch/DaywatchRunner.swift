@@ -101,28 +101,63 @@ public actor DaywatchRunner {
     // MARK: - Dependencies
 
     private let executor: DaywatchExecuting
+    private let deskSessionManager: (any DeskSessionManaging)?
     private let interval: TimeInterval
 
     // MARK: - State
 
     private var currentMode: NightwatchMode = .off
+    private var deskWorktreeID: UUID?
+    private var lastNudgeAttemptTime: Date?  // For retry on failure (MEDIUM 2)
     private var loopTask: Task<Void, Never>?
+
+    // FIFO gate serializing apply() calls. Actors are reentrant across awaits,
+    // so overlapping apply()s (double-click, RPC bursts, boot-reconcile racing a
+    // user toggle) previously interleaved mid-ensure/close. Serializing the whole
+    // mode transition makes each apply atomic: a duplicate same-mode call simply
+    // waits, then no-ops; an off-during-ensure waits, then cleanly closes.
+    private var gateBusy = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func gateAcquire() async {
+        if gateBusy {
+            await withCheckedContinuation { gateWaiters.append($0) }
+            // Resumed by gateRelease(); gateBusy intentionally stays true.
+        } else {
+            gateBusy = true
+        }
+    }
+
+    private func gateRelease() {
+        if gateWaiters.isEmpty {
+            gateBusy = false
+        } else {
+            gateWaiters.removeFirst().resume()
+        }
+    }
 
     // MARK: - Init
 
     public init(
         executor: DaywatchExecuting,
-        interval: TimeInterval = 15 * 60
+        deskSessionManager: (any DeskSessionManaging)? = nil,
+        interval: TimeInterval = DaywatchRunner.defaultInterval
     ) {
         self.executor = executor
+        self.deskSessionManager = deskSessionManager
         self.interval = interval
     }
 
     // MARK: - Public API
 
     /// Apply a mode change: start the loop for .daywatch/.nightwatch, stop for .off.
-    /// Idempotent.
+    /// Idempotent. Manages desk session lifecycle (ensure on start, close on stop).
+    /// Serialized by the FIFO gate: each transition runs to completion before the
+    /// next begins, so no reentrancy interleavings are possible by construction.
     public func apply(mode: NightwatchMode) async {
+        await gateAcquire()
+        defer { gateRelease() }
+
         let wasRunning = currentMode != .off
         let shouldRun = mode != .off
         let previousMode = currentMode
@@ -130,37 +165,96 @@ public actor DaywatchRunner {
         currentMode = mode
 
         if shouldRun && !wasRunning {
-            // Start the loop
+            // Start: ensure desk session exists, then start the loop.
+            do {
+                if let desker = deskSessionManager {
+                    let desk = try await desker.ensureDeskSession(mode: mode)
+                    deskWorktreeID = desk.id
+                }
+            } catch {
+                // Loop still starts; runOnce()'s retry path re-attempts the ensure.
+                logger.error("Failed to ensure desk session on mode start: \(error.localizedDescription, privacy: .public)")
+            }
+
             loopTask = Task { [weak self] in
                 await self?.runLoop()
             }
             logger.info("Started daywatch runner in mode \(mode.rawValue, privacy: .public)")
         } else if !shouldRun && wasRunning {
-            // Stop the loop
+            // Stop: cancel the loop, close the desk.
             loopTask?.cancel()
             loopTask = nil
+
+            if let desker = deskSessionManager {
+                await desker.closeDeskSession()
+            }
+            deskWorktreeID = nil
+
             logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public))")
+        } else if shouldRun && wasRunning && previousMode != mode {
+            // Mode switch within running state (daywatch <-> nightwatch):
+            // desk is reused; ensure updates the prompt-relevant state.
+            do {
+                if let desker = deskSessionManager {
+                    let desk = try await desker.ensureDeskSession(mode: mode)
+                    deskWorktreeID = desk.id
+                }
+            } catch {
+                logger.error("Failed to ensure desk session on mode switch: \(error.localizedDescription, privacy: .public)")
+            }
         }
-        // else: no-op (already in desired state)
+        // else: no-op (already in desired state — e.g. duplicate same-mode call
+        // that waited on the gate while the first call completed the transition)
     }
 
     // MARK: - Testable single tick
 
-    /// Run one tick cycle: execute tick.py and conditionally wake the judge.
+    /// Run one tick cycle: execute tick.py and conditionally nudge the desk session.
     /// This method contains the core logic that the background loop drives repeatedly.
+    /// MEDIUM 2: If desk ensure failed at mode-start, retry on next tick.
     /// - Parameter mode: If provided, use this mode instead of the actor's currentMode.
     ///   Useful for testing without starting the background loop.
     public func runOnce(mode: NightwatchMode? = nil) async {
         let effectiveMode = mode ?? currentMode
 
+        // MEDIUM 2: Retry desk ensure if it failed at mode-start but desk manager is available
+        if let desker = deskSessionManager,
+           deskWorktreeID == nil,
+           effectiveMode != .off {
+            do {
+                let desk = try await desker.ensureDeskSession(mode: effectiveMode)
+                deskWorktreeID = desk.id
+                logger.info("Retried desk session ensure on tick (recovered from prior failure)")
+            } catch {
+                if let lastAttempt = lastNudgeAttemptTime {
+                    let elapsed = Date().timeIntervalSince(lastAttempt)
+                    if elapsed > 30 {  // Log warning only if last failure was >30s ago
+                        logger.warning("Desk session ensure retry failed: \(error.localizedDescription, privacy: .public)")
+                        lastNudgeAttemptTime = Date()
+                    }
+                } else {
+                    lastNudgeAttemptTime = Date()
+                    logger.warning("Desk session ensure failed on tick retry (first failure): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+
         // Run one tick
         let exitCode = await executor.runTick()
 
-        // If exit code is 10, judgment is queued — wake the judge
+        // If exit code is 10, judgment is queued — nudge the desk session
         if exitCode == 10 {
             let act = (effectiveMode == .nightwatch)
-            await executor.wakeJudge(act: act)
-            logger.debug("Tick queued judgment; woke judge (act=\(act))")
+
+            // Try new desk session nudge (Phase A)
+            if let desker = deskSessionManager,
+               let deskID = deskWorktreeID {
+                await desker.nudgeDeskSession(worktreeID: deskID, act: act)
+                logger.debug("Tick queued judgment; nudged desk session (act=\(act))")
+            } else {
+                // Fallback to old no-op (for backward compat during transition)
+                await executor.wakeJudge(act: act)
+            }
         } else if exitCode == 0 {
             logger.debug("Tick completed (no judgment queued)")
         } else {
