@@ -22,6 +22,9 @@ public actor DeskSessionManager: DeskSessionManaging {
     private let lifecycle: WorktreeLifecycle
     private let modelProfileResolver: ModelProfileResolver?
     private let tmux: TmuxManager
+    /// Broadcasts worktree create/archive deltas so connected app clients update
+    /// immediately (matching RPCRouter+ScratchHandlers) instead of waiting for a poll.
+    private let subscriptions: StateSubscriptionManager?
     private let skillDir: String
 
     // MARK: - State
@@ -42,12 +45,14 @@ public actor DeskSessionManager: DeskSessionManaging {
         lifecycle: WorktreeLifecycle,
         modelProfileResolver: ModelProfileResolver?,
         tmux: TmuxManager,
-        skillDir: String
+        skillDir: String,
+        subscriptions: StateSubscriptionManager? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
         self.modelProfileResolver = modelProfileResolver
         self.tmux = tmux
+        self.subscriptions = subscriptions
         self.skillDir = skillDir
         self.deskWorktreeID = nil
     }
@@ -142,6 +147,10 @@ public actor DeskSessionManager: DeskSessionManaging {
         // Cache the worktree ID
         deskWorktreeID = wt.id
 
+        // Mirror handleScratchCreate: tell connected clients immediately.
+        subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
+            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path, status: wt.status)))
+
         logger.info("Created Watch Desk session: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return wt
     }
@@ -229,6 +238,9 @@ public actor DeskSessionManager: DeskSessionManaging {
 
             // Archive the worktree (preserve the folder on disk)
             try await db.worktrees.archive(id: wt.id)
+
+            // Mirror handleScratchArchive: tell connected clients immediately.
+            subscriptions?.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
 
             logger.info("Archived Watch Desk session: \(wt.id, privacy: .public)")
         } catch {

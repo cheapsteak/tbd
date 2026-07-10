@@ -663,7 +663,8 @@ public final class Daemon: Sendable {
                 lifecycle: lifecycle,
                 modelProfileResolver: modelProfileResolver,
                 tmux: tmux,
-                skillDir: skillDir
+                skillDir: skillDir,
+                subscriptions: subs
             )
 
             let runner = DaywatchRunner(

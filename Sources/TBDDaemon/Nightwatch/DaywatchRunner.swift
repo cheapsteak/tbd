@@ -237,6 +237,7 @@ public actor DaywatchRunner {
                     }
                 } else {
                     lastNudgeAttemptTime = Date()
+                    logger.warning("Desk session ensure failed on tick retry (first failure): \(error.localizedDescription, privacy: .public)")
                 }
             }
         }

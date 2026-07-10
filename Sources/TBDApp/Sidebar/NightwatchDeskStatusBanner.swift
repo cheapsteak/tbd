@@ -9,8 +9,9 @@ struct NightwatchDeskStatusBanner: View {
 
     /// Resolve the "Watch Desk" worktree by fixed display name.
     private func findDeskWorktree() -> Worktree? {
-        let allWorktrees = appState.worktrees.values.flatMap { $0 }
-        return allWorktrees.first { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }
+        // Scratch spaces live only in scratchWorktrees, never in the repo-keyed
+        // worktrees dict — allWorktrees resolves both (see AppState.swift).
+        return appState.allWorktrees.first { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }
     }
 
     /// Returns the banner text and glyph based on current mode.
@@ -93,4 +94,3 @@ struct NightwatchDeskStatusBanner: View {
 //            .padding()
 //            .frame(maxWidth: .infinity, maxHeight: .infinity)
 //    }
-// }
