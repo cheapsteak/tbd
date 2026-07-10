@@ -221,6 +221,7 @@ struct GeneralSettingsTab: View {
                     make prod/access calls yourself.
                     """)
                 controlModeToggle
+                hibernateInputVetoToggle
             }
         }
         .formStyle(.grouped)
@@ -250,6 +251,19 @@ struct GeneralSettingsTab: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
+    }
+
+    /// Pending-input veto for auto-hibernate. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.
+    /// Off by default (soaking).
+    @ViewBuilder
+    private var hibernateInputVetoToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Pending-input veto for auto-hibernate", isOn: Binding(
+            get: { capabilities?.hibernateInputVetoEnabled ?? false },
+            set: { newValue in Task { await appState.setHibernateInputVetoEnabled(newValue) } }
+        ))
+        .help("Guard that prevents hibernation of sessions with typed-but-unsent input (machine-interface input detector). Off by default (soaking). Independent of the auto-hibernate idle sweep, which is also off by default.")
     }
 
     private var primaryAgentPreferenceBinding: Binding<PrimaryAgentPreference> {

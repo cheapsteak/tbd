@@ -119,6 +119,37 @@ import TBDShared
             "a transient refresh failure after a successful set must not snap the toggle off")
 }
 
+// R8-M1 for hibernateInputVeto: these tests mirror the controlMode pair and
+// cover the same keep-last-known-value refresh path (transient failure safety).
+@MainActor
+@Test func appState_setHibernateInputVetoEnabledRefreshesCapabilitiesOnSuccess() async {
+    let state = AppState()
+    state.hibernateInputVetoSetter = { _ in }  // set RPC succeeds
+    state.daemonCapabilitiesFetcher = {
+        DaemonCapabilitiesResult(controlModeEnabled: false, hibernateInputVetoEnabled: true)
+    }
+    #expect(state.daemonCapabilities == nil)
+
+    await state.setHibernateInputVetoEnabled(true)
+
+    #expect(state.daemonCapabilities?.hibernateInputVetoEnabled == true,
+            "a successful toggle must re-fetch the daemon's effective state")
+}
+
+@MainActor
+@Test func appState_setHibernateInputVetoEnabledKeepsLastKnownCapabilitiesOnRefreshFailure() async {
+    let state = AppState()
+    state.hibernateInputVetoSetter = { _ in }  // set RPC succeeds...
+    state.daemonCapabilitiesFetcher = { nil }  // ...but the re-fetch transiently fails
+    state.daemonCapabilities = DaemonCapabilitiesResult(
+        controlModeEnabled: false, hibernateInputVetoEnabled: true)
+
+    await state.setHibernateInputVetoEnabled(true)
+
+    #expect(state.daemonCapabilities?.hibernateInputVetoEnabled == true,
+            "a transient refresh failure after a successful set must not snap the toggle off")
+}
+
 @MainActor
 @Test func appState_dismissedProxyWarningsStartsEmptyAndAcceptsInsertions() {
     // The banner dismissal logic in TerminalPanelView writes to this set so a

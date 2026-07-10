@@ -187,6 +187,7 @@ public enum RPCMethod {
     public static let nightwatchReport = "nightwatch.report"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
+    public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
 }
 
 // MARK: - Branch Listing
@@ -1174,6 +1175,15 @@ public struct ConfigSetControlModeParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setHibernateInputVeto` — persist the pending-input veto
+/// for auto-hibernate (machine-interface guard that prevents hibernation of
+/// sessions with typed-but-unsent input). The change applies on the next
+/// hibernation sweep; no daemon restart required.
+public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
 public struct SetRepoEnvOverridesParams: Codable, Sendable, Equatable {
     public let repoID: UUID
@@ -1305,13 +1315,19 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
     /// Computed daemon-side so the app never parses version strings.
     public let controlModeSupported: Bool
+    /// Whether the pending-input veto for auto-hibernate is enabled. Guards
+    /// against hibernating sessions with typed-but-unsent input. Re-evaluated
+    /// by the daemon on every call.
+    public let hibernateInputVetoEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
-                controlModeSupported: Bool = false) {
+                controlModeSupported: Bool = false,
+                hibernateInputVetoEnabled: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
+        self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1321,6 +1337,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // conservative "unsupported / unknown version".
         tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
+        // New field for pending-input veto; absent from older daemons defaults to false (soaking).
+        hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
     }
 }
 
