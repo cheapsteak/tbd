@@ -65,6 +65,28 @@ struct GitManagerGCTests {
         #expect(plainLinked == false)
     }
 
+    @Test func linkageProofRejectsGitdirOutsideRepoWorktreesDir() async throws {
+        let (tmp, repo, _, _) = try await makeRepoWithExternalWorktree(branch: "feat4", folder: "wt4")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // A `.git` FILE whose gitdir points somewhere other than
+        // <repo>/.git/worktrees/ (submodule-style modules dir): rejected.
+        // The target directory must actually exist — realpath() fails on
+        // missing paths and that guard alone would mask a broken prefix
+        // check — so create it for real to force the prefix comparison.
+        let modulesGitdir = repo.appendingPathComponent(".git/modules/sub")
+        try FileManager.default.createDirectory(at: modulesGitdir, withIntermediateDirectories: true)
+        let fakeWt = tmp.appendingPathComponent("fake-submodule")
+        try FileManager.default.createDirectory(at: fakeWt, withIntermediateDirectories: true)
+        try "gitdir: \(modulesGitdir.path)\n".write(
+            to: fakeWt.appendingPathComponent(".git"), atomically: true, encoding: .utf8
+        )
+
+        let git = GitManager()
+        let linked = await git.isLinkedWorktree(candidatePath: fakeWt.path, repoPath: repo.path)
+        #expect(linked == false)
+    }
+
     @Test func dirtyDetectsUntrackedAndErrorsAreDirty() async throws {
         let (tmp, repo) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -148,6 +170,24 @@ struct GitManagerGCTests {
         try await shell("git reset --hard HEAD~1", at: repo)
 
         #expect(await git.isReachableFromAnyBranch(repoPath: repo.path, sha: orphanSHA) == false)
+    }
+
+    @Test func reachabilityErrorsAreUnreachable() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let git = GitManager()
+
+        // Malformed SHA: `git branch --contains` exits non-zero. The error
+        // direction is load-bearing — error => false makes the caller create
+        // a protective anchor ref (more protection), never less.
+        #expect(await git.isReachableFromAnyBranch(repoPath: repo.path, sha: "not-a-sha") == false)
+
+        // Not a git repo at all: also an error, also false.
+        let notARepo = tmp.appendingPathComponent("not-a-repo")
+        try FileManager.default.createDirectory(at: notARepo, withIntermediateDirectories: true)
+        let headSHA = try await git.headSHA(repoPath: repo.path)
+        #expect(await git.isReachableFromAnyBranch(repoPath: notARepo.path, sha: headSHA) == false)
     }
 
     // MARK: - Helpers

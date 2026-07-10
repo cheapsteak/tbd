@@ -576,7 +576,8 @@ public struct GitManager: Sendable {
     }
 
     /// Adds a worktree either on an existing `branch` or detached at `sha`.
-    /// Exactly one of `branch`/`sha` must be non-nil.
+    /// At least one of `branch`/`sha` must be non-nil (both nil throws
+    /// `GitError`); when both are given, `branch` wins and `sha` is ignored.
     public func worktreeAdd(repoPath: String, path: String, branch: String?, detachAt sha: String?) async throws {
         if let branch {
             _ = try await run(arguments: ["worktree", "add", path, branch], at: repoPath)
