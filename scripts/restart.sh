@@ -49,11 +49,30 @@ if [ -z "${TBD_SKIP_RECLAIM:-}" ] && [ -x "$RECLAIM_SCRIPT" ]; then
 fi
 
 # MARK: - Build
+#
+# Shared clang/Swift module cache across ALL TBD worktrees. By default every
+# worktree's `.build` accumulates its own ~640 MB ModuleCache with near-
+# identical contents; pointing both the Swift frontend (-module-cache-path)
+# and clang (-fmodules-cache-path, reaches the C-shim dependency targets like
+# CNIOAtomics) at one $HOME-level directory keeps a single ~610 MB copy total,
+# concurrency-safe across parallel builds. Verified empirically (Swift 6.2.4):
+# local ModuleCache drops to ~0 MB with this flag combo.
+#
+# Stickiness note: SwiftPM bakes the cache path into .build/debug.yaml at plan
+# time, so a later plain `swift build` in this worktree silently keeps using
+# the shared cache until a manifest re-plan — expected, not a bug. See
+# docs/reclaim-build.md ("Shared module cache").
+SHARED_MODULE_CACHE="$HOME/Library/Caches/tbd/swift-module-cache"
+mkdir -p "$SHARED_MODULE_CACHE"
+MODULE_CACHE_FLAGS=(
+    -Xswiftc -module-cache-path -Xswiftc "$SHARED_MODULE_CACHE"
+    -Xcc -fmodules-cache-path="$SHARED_MODULE_CACHE"
+)
 
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3
+    (cd "$REPO_ROOT" && swift build "${MODULE_CACHE_FLAGS[@]}") 2>&1 | tail -3
     echo "  Build: $((SECONDS - t0))s"
 fi
 
