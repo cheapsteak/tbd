@@ -49,8 +49,13 @@ actor FakeDeskSessionManager: DeskSessionManaging {
         let act: Bool
     }
 
+    struct WrapUpCall: Sendable {
+        let worktreeID: UUID
+    }
+
     private(set) var ensureCalls: [NightwatchMode] = []
     private(set) var nudgeCalls: [NudgeCall] = []
+    private(set) var wrapUpCalls: [WrapUpCall] = []
     private(set) var closeCalls: Int = 0
 
     private(set) var lastEnsuredWorktreeID: UUID?
@@ -106,6 +111,10 @@ actor FakeDeskSessionManager: DeskSessionManaging {
 
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async {
         nudgeCalls.append(NudgeCall(worktreeID: worktreeID, act: act))
+    }
+
+    func postShiftWrapUp(worktreeID: UUID) async {
+        wrapUpCalls.append(WrapUpCall(worktreeID: worktreeID))
     }
 
     func closeDeskSession() async {
@@ -285,21 +294,25 @@ struct DaywatchRunnerTests {
         #expect(ensureCalls[0] == .daywatch)
     }
 
-    @Test("close-on-stop: apply(.off) closes desk session")
-    func testCloseOnStop() async {
+    @Test("wrap-up-on-stop: apply(.off) posts shift wrap-up (non-destructive)")
+    func testWrapUpOnStop() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
         let desker = FakeDeskSessionManager()
         let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
         // Start in daywatch
         await runner.apply(mode: .daywatch)
-        var closeCalls = await desker.closeCalls
-        #expect(closeCalls == 0, "No close yet")
+        var wrapUpCalls = await desker.wrapUpCalls
+        #expect(wrapUpCalls.isEmpty, "No wrap-up yet")
 
         // Switch to off
         await runner.apply(mode: .off)
-        closeCalls = await desker.closeCalls
-        #expect(closeCalls == 1, "Should close desk on .off")
+        wrapUpCalls = await desker.wrapUpCalls
+        #expect(wrapUpCalls.count == 1, "Should post wrap-up on .off")
+
+        // Verify desk was NOT closed (stays active for user review)
+        let closeCalls = await desker.closeCalls
+        #expect(closeCalls == 0, "Desk should NOT be closed (left active for user review)")
     }
 
     @Test("ensure-on-switch: mode switch ensures desk with new mode (reuses same desk)")
@@ -415,6 +428,6 @@ struct DaywatchRunnerTests {
         #expect(nudges.count == 1, "loop state intact after duplicate apply")
 
         await runner.apply(mode: .off)
-        #expect(await desker.closeCalls == 1)
+        #expect(await desker.wrapUpCalls.count == 1, "Should post wrap-up on .off")
     }
 }

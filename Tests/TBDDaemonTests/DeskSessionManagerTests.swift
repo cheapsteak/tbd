@@ -353,6 +353,60 @@ extension TBDHomeSerialized {
             #expect(activeCount == 1, "Only one active desk")
         }
 
+        @Test("postShiftWrapUp sends prompt and fires notification (non-destructive)")
+        func testPostShiftWrapUpNonDestructive() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-wrapup-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            // Create a desk
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let deskID = desk.id
+
+            // Verify desk is active and has a terminal
+            let desks = try await db.worktrees.get(id: deskID)
+            #expect(desks?.status == .active, "Desk should be active before wrap-up")
+            let terminals = try await db.terminals.list(worktreeID: deskID)
+            #expect(terminals.count > 0, "Desk should have terminals before wrap-up")
+
+            // Post shift wrap-up
+            await manager.postShiftWrapUp(worktreeID: deskID)
+
+            // Verify desk is STILL active (not archived)
+            let deskAfter = try await db.worktrees.get(id: deskID)
+            #expect(deskAfter?.status == .active, "Desk should remain active after wrap-up")
+
+            // Verify terminals are STILL there (not deleted)
+            let terminalsAfter = try await db.terminals.list(worktreeID: deskID)
+            #expect(terminalsAfter.count > 0, "Terminals should remain after wrap-up")
+
+            // Verify a notification was created
+            let notifications = try await db.notifications.unread(worktreeID: deskID)
+            #expect(notifications.count > 0, "Notification should be created")
+            let wrapUpNotif = notifications.first(where: { $0.type == .taskComplete })
+            #expect(wrapUpNotif != nil, "Should have a taskComplete notification")
+            #expect(wrapUpNotif?.message?.contains("Daywatch ended") ?? false, "Notification message should mention Daywatch")
+        }
+
         @Test("cached desk invalidated when terminal missing — ensure respawns")
         func testCachedDeskInvalidatedWhenTerminalMissing() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())

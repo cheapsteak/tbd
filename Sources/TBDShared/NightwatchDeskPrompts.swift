@@ -41,6 +41,24 @@ public enum NightwatchDeskPrompts {
         """
     }
 
+    /// Prompt sent when daywatch/nightwatch mode is turned OFF.
+    /// Asks the desk session to post a concise shift summary before wrapping up.
+    public static let wrapUpPrompt = """
+    # ◐ Daywatch Ending — Shift Summary
+
+    The daywatch shift is ending. Please post a concise shift summary now:
+
+    **What to include:**
+    - What you accomplished this shift
+    - What's still open / queued for the next shift
+    - What needs Adam's attention (escalations, blockers, decisions)
+
+    **Format:**
+    Keep it brief (3-5 bullets max). Post the summary to the terminal and you're done for this shift.
+
+    When you're ready, start typing your summary.
+    """
+
     /// Prompt sent when the daemon nudges the desk session with a batch of queued judgments.
     /// - Parameter skillDir: Absolute path to the nightwatch skill directory for file references
     public static func judgePrompt(mode: NightwatchMode, skillDir: String) -> String {
