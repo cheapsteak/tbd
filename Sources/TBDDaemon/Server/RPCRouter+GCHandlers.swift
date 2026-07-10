@@ -29,8 +29,6 @@ extension RPCRouter {
         }
         let params = try decoder.decode(GCSweepNowParams.self, from: paramsData)
         let result = await orphanGC.sweep(dryRun: params.dryRun)
-        // `OrphanGC.sweep` returns TBDDaemon's own (non-Codable) GCSweepResult;
-        // convert to TBDShared's Codable mirror for RPC serialization.
-        return try RPCResponse(result: TBDShared.GCSweepResult(planned: result.planned, reaped: result.reaped))
+        return try RPCResponse(result: result)
     }
 }

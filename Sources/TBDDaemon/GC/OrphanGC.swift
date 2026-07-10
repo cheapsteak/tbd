@@ -27,18 +27,10 @@ public enum OrphanGCError: Error, CustomStringConvertible, Equatable {
     }
 }
 
-/// Result of one `OrphanGC.sweep(dryRun:)` pass: a human-readable log of every
-/// decision made (`KEEP <reason> <path>` / `REAP <kind> <path>`) and a count
-/// of directories actually removed (always `0` when `dryRun` is `true`).
-public struct GCSweepResult: Sendable, Equatable {
-    public var planned: [String]
-    public var reaped: Int
-
-    public init(planned: [String], reaped: Int) {
-        self.planned = planned
-        self.reaped = reaped
-    }
-}
+// `OrphanGC.sweep` returns `TBDShared.GCSweepResult` (the Codable RPC wire
+// type, RPCProtocol.swift) directly — a same-shaped local mirror type used to
+// live here and silently module-shadow the shared one; it was consolidated
+// away so the RPC handler needs no conversion.
 
 /// Orchestrates one orphan-GC sweep: enumerates agent-worktree and scratchpad
 /// candidates via the Task 5/6 collectors, gates them through the

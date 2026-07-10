@@ -878,8 +878,10 @@ public struct GCSweepNowParams: Codable, Sendable {
     }
 }
 
-/// Result of a `gc.sweepNow` sweep (dry-run or real).
-public struct GCSweepResult: Codable, Sendable {
+/// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return
+/// type of `OrphanGC.sweep(dryRun:)` in TBDDaemon — one type, no daemon-side
+/// mirror.
+public struct GCSweepResult: Codable, Sendable, Equatable {
     /// Human-readable plan lines, e.g. "REAP agent-worktree /path …", "KEEP locked /path".
     public var planned: [String]
     public var reaped: Int
