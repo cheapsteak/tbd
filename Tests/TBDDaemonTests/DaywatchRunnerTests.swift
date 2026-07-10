@@ -52,6 +52,7 @@ actor FakeDeskSessionManager: DeskSessionManaging {
     private(set) var ensureCalls: [NightwatchMode] = []
     private(set) var nudgeCalls: [NudgeCall] = []
     private(set) var closeCalls: Int = 0
+    private(set) var wrapUpCalls: Int = 0
 
     private(set) var lastEnsuredWorktreeID: UUID?
     private var deskID: UUID? // Cached desk ID — reused across mode switches
@@ -110,6 +111,10 @@ actor FakeDeskSessionManager: DeskSessionManaging {
 
     func closeDeskSession() async {
         closeCalls += 1
+    }
+
+    func wrapUpDeskSession(gracePeriodSeconds: TimeInterval) async {
+        wrapUpCalls += 1
     }
 }
 
@@ -285,21 +290,25 @@ struct DaywatchRunnerTests {
         #expect(ensureCalls[0] == .daywatch)
     }
 
-    @Test("close-on-stop: apply(.off) closes desk session")
-    func testCloseOnStop() async {
+    @Test("wrap-up-on-stop: apply(.off) wraps up and parks desk session (not deletes)")
+    func testWrapUpOnStop() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
         let desker = FakeDeskSessionManager()
         let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
         // Start in daywatch
         await runner.apply(mode: .daywatch)
-        var closeCalls = await desker.closeCalls
-        #expect(closeCalls == 0, "No close yet")
+        var wrapUpCalls = await desker.wrapUpCalls
+        #expect(wrapUpCalls == 0, "No wrap-up yet")
 
         // Switch to off
         await runner.apply(mode: .off)
-        closeCalls = await desker.closeCalls
-        #expect(closeCalls == 1, "Should close desk on .off")
+        wrapUpCalls = await desker.wrapUpCalls
+        #expect(wrapUpCalls == 1, "Should wrap up (not close) desk on .off")
+
+        // Verify closeDeskSession was NOT called (graceful wrap-up instead)
+        let closeCalls = await desker.closeCalls
+        #expect(closeCalls == 0, "Should NOT call closeDeskSession; wrapUp preserves desk for reuse")
     }
 
     @Test("ensure-on-switch: mode switch ensures desk with new mode (reuses same desk)")
@@ -415,6 +424,33 @@ struct DaywatchRunnerTests {
         #expect(nudges.count == 1, "loop state intact after duplicate apply")
 
         await runner.apply(mode: .off)
-        #expect(await desker.closeCalls == 1)
+        let wrapUpCalls = await desker.wrapUpCalls
+        #expect(wrapUpCalls == 1, "Should wrap up desk on .off")
+    }
+
+    @Test("wrap-up + wake round-trip: off (wrap-up/park) → on (wake) preserves desk worktree")
+    func testWrapUpAndWakeRoundTrip() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Start in daywatch: creates desk
+        await runner.apply(mode: .daywatch)
+        var ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1)
+        let deskID1 = await desker.lastEnsuredWorktreeID
+        #expect(deskID1 != nil)
+
+        // Turn OFF: wraps up and parks desk (does NOT delete)
+        await runner.apply(mode: .off)
+        var wrapUpCalls = await desker.wrapUpCalls
+        #expect(wrapUpCalls == 1, "Should wrap up desk on .off")
+
+        // Turn ON again: should reuse parked desk (same ID)
+        await runner.apply(mode: .daywatch)
+        ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 2, "Should call ensure again on ON")
+        let deskID2 = await desker.lastEnsuredWorktreeID
+        #expect(deskID2 == deskID1, "ON side should reuse same desk worktree (no respawn)")
     }
 }

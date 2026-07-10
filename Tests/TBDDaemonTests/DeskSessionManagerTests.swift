@@ -148,6 +148,79 @@ extension TBDHomeSerialized {
             #expect(archived?.status == .archived)
         }
 
+        @Test("wrapUpDeskSession parks terminals instead of deleting")
+        func testWrapUpDeskSessionParksInsteadOfDeleting() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-wrapup-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let deskID = desk.id
+
+            // Wrap up with short grace period (0.1s for tests)
+            await manager.wrapUpDeskSession(gracePeriodSeconds: 0.1)
+
+            // Verify worktree still exists (NOT archived)
+            let worktree = try await db.worktrees.get(id: deskID)
+            #expect(worktree != nil, "Worktree should still exist after wrap-up")
+            #expect(worktree?.status == .active, "Worktree should still be active")
+
+            // Verify terminals are hibernated (parked)
+            let terminals = try await db.terminals.list(worktreeID: deskID)
+            for terminal in terminals {
+                #expect(terminal.hibernatedAt != nil, "Terminal should be hibernated after wrap-up")
+            }
+        }
+
+        @Test("wrapUpDeskSession idempotent when no desk")
+        func testWrapUpDeskSessionIdempotentWhenNoDesk() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-wrapup-none-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            // Wrap up when no desk exists — should not throw
+            await manager.wrapUpDeskSession(gracePeriodSeconds: 0.1)
+            // Test just verifies no crash
+        }
+
         @Test("mode switch reuses desk (daywatch → nightwatch)")
         func testModeSwitchReuses() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())

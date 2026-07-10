@@ -10,6 +10,7 @@ public protocol DeskSessionManaging: Sendable {
     func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async
     func closeDeskSession() async
+    func wrapUpDeskSession(gracePeriodSeconds: TimeInterval) async
 }
 
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
@@ -25,6 +26,7 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// immediately (matching RPCRouter+ScratchHandlers) instead of waiting for a poll.
     private let subscriptions: StateSubscriptionManager?
     private let skillDir: String
+    private let hibernationCoordinator: HibernationCoordinator?
 
     // MARK: - State
 
@@ -71,13 +73,15 @@ public actor DeskSessionManager: DeskSessionManaging {
         lifecycle: WorktreeLifecycle,
         tmux: TmuxManager,
         skillDir: String,
-        subscriptions: StateSubscriptionManager? = nil
+        subscriptions: StateSubscriptionManager? = nil,
+        hibernationCoordinator: HibernationCoordinator? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
         self.tmux = tmux
         self.subscriptions = subscriptions
         self.skillDir = skillDir
+        self.hibernationCoordinator = hibernationCoordinator
         self.deskWorktreeID = nil
     }
 
@@ -116,9 +120,26 @@ public actor DeskSessionManager: DeskSessionManaging {
         if let existing = activeWorktrees.first(where: { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }) {
             deskWorktreeID = existing.id
 
-            // Ensure the recovered desk has a live Claude terminal; respawn if missing
+            // Check recovered desk terminals: if parked/hibernated, wake them; otherwise respawn if missing
             let terminals = try await db.terminals.list(worktreeID: existing.id)
-            if terminals.first(where: { $0.label == TerminalLabel.claudeCode }) == nil {
+            if let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) {
+                // Terminal exists; check if it's parked (hibernated)
+                if claudeTerminal.isHibernated, let coordinator = hibernationCoordinator {
+                    logger.info("Recovered Watch Desk \(existing.id, privacy: .public) with parked terminal; waking...")
+                    let wakeResult = await coordinator.wake(terminalID: claudeTerminal.id)
+                    switch wakeResult {
+                    case .ok:
+                        logger.info("Successfully woke parked desk terminal \(claudeTerminal.id, privacy: .public)")
+                    case .notHibernated:
+                        logger.debug("Desk terminal already awake: \(claudeTerminal.id, privacy: .public)")
+                    default:
+                        logger.warning("Failed to wake parked desk terminal: \(String(describing: wakeResult))")
+                        // Fall through to respawn
+                    }
+                }
+                // Terminal exists and is live (or wake succeeded); use it as-is
+            } else {
+                // No Claude terminal found; respawn one
                 logger.info("Recovered Watch Desk \(existing.id, privacy: .public) but no Claude terminal; respawning")
                 do {
                     _ = try await spawnDeskTerminal(worktree: existing, mode: mode)
@@ -191,6 +212,85 @@ public actor DeskSessionManager: DeskSessionManaging {
 
         logger.info("Created Watch Desk session: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return wt
+    }
+
+    /// Gracefully end the shift: send wrap-up prompt, capture session ID, and park the desk.
+    /// Called when daywatch/nightwatch mode turns OFF. Preserves the desk worktree and transcript
+    /// for reuse on the next ON cycle (off→park→on round-trip keeps the same desk).
+    /// Timing: sends the prompt, pauses to let agent write summary, then marks terminals hibernated.
+    /// Does NOT delete the worktree (unlike closeDeskSession).
+    /// - Parameter gracePeriodSeconds: How long to wait before parking (default 10s for grace period)
+    public func wrapUpDeskSession(gracePeriodSeconds: TimeInterval = 10) async {
+        await gateAcquire()
+        defer { gateRelease() }
+        guard let worktreeID = deskWorktreeID else {
+            logger.info("No active desk session to wrap up")
+            return
+        }
+
+        do {
+            guard let wt = try await db.worktrees.get(id: worktreeID) else {
+                logger.warning("Watch Desk worktree not found during wrap-up: \(worktreeID, privacy: .public)")
+                deskWorktreeID = nil
+                return
+            }
+
+            // Step 1: Send wrap-up prompt to the desk
+            let terminals = try await db.terminals.list(worktreeID: wt.id)
+            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                logger.warning("No Claude terminal found in Watch Desk during wrap-up; skipping prompt")
+                deskWorktreeID = nil
+                return
+            }
+
+            let wrapUpPrompt = NightwatchDeskPrompts.wrapUpPrompt()
+            do {
+                try await tmux.pasteText(
+                    server: wt.tmuxServer,
+                    paneID: claudeTerminal.tmuxPaneID,
+                    bytes: Data(wrapUpPrompt.utf8)
+                )
+                try await tmux.sendKey(
+                    server: wt.tmuxServer,
+                    paneID: claudeTerminal.tmuxPaneID,
+                    key: "Enter"
+                )
+                logger.info("Sent wrap-up prompt to Watch Desk session: \(wt.id, privacy: .public)")
+            } catch {
+                logger.warning("Failed to send wrap-up prompt to desk: \(error.localizedDescription, privacy: .public)")
+            }
+
+            // Step 2: Grace period — give agent time to write summary (default 10 seconds)
+            try? await Task.sleep(for: .seconds(gracePeriodSeconds))
+
+            // Step 3: Park (hibernate) the terminals instead of killing them
+            for terminal in terminals {
+                do {
+                    guard let sessionID = terminal.claudeSessionID else {
+                        logger.warning("Terminal has no session ID; cannot park: \(terminal.id, privacy: .public)")
+                        continue
+                    }
+                    try await db.terminals.setHibernated(
+                        id: terminal.id,
+                        sessionID: sessionID,
+                        snapshot: nil,
+                        reason: .manual,
+                        at: Date()
+                    )
+                    logger.info("Parked terminal \(terminal.id, privacy: .public) for desk wrap-up")
+                } catch {
+                    logger.warning("Failed to park terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            // Step 4: Broadcast parked notification (worktree stays; terminals hibernated)
+            subscriptions?.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
+            logger.info("Wrapped up Watch Desk session: \(wt.id, privacy: .public); parked for reuse on next ON cycle")
+        } catch {
+            logger.error("Failed to wrap up desk session: \(error.localizedDescription, privacy: .public)")
+        }
+
+        deskWorktreeID = nil
     }
 
     /// Nudge the desk session to process queued judgment items.
