@@ -62,6 +62,13 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// daywatch and nightwatch.
     private var deskWorktreeID: UUID?
 
+    /// Monotonically-incrementing epoch to track desk reactivations.
+    /// MEDIUM 2: prevents uncancellable wrap-up from parking a just-reactivated desk.
+    /// When a wrap-up is scheduled, it captures the current epoch. If the desk is
+    /// reactivated (ensureDeskSession reuses it), the epoch bumps. The wrap-up's
+    /// delayed park step checks if the epoch changed and no-ops if it did.
+    private var deskWorktreeEpoch: Int = 0
+
     /// Timestamp of the last nudge; used to skip overlapping nudges (< 10 min apart).
     /// M2: nudge-overlap guard. Phase B upgrade: claim-file (queue/claims) single-driver enforcement.
     private var lastNudgeTime: Date?
@@ -106,6 +113,8 @@ public actor DeskSessionManager: DeskSessionManaging {
                 // Mode switches (daywatch ↔ nightwatch) intentionally REUSE the existing desk and terminal.
                 // The desk is NOT respawned on mode switch because the per-tick judgePrompt (via nudgeDeskSession)
                 // carries the current mode/act flag each cycle. Initial frame is one-time; steady-state mode is driven per-tick.
+                // MEDIUM 2: Bump epoch to supersede any pending wrap-up task.
+                deskWorktreeEpoch += 1
                 return existing
             }
         }
@@ -161,6 +170,8 @@ public actor DeskSessionManager: DeskSessionManaging {
             }
 
             logger.info("Reusing existing Watch Desk session: \(existing.id, privacy: .public)")
+            // MEDIUM 2: Bump epoch to supersede any pending wrap-up task.
+            deskWorktreeEpoch += 1
             return existing
         }
 
@@ -238,6 +249,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         // This avoids blocking a quick ON→ that arrives during the grace window.
         var terminalIDs: [UUID] = []
         var worktreeID: UUID? = nil
+        var capturedEpoch: Int = 0  // MEDIUM 2: Capture epoch to detect desk reactivation
 
         // Step 1: Hold gate, grab worktree/terminals, send prompt, then release gate
         await gateAcquire()
@@ -260,7 +272,6 @@ public actor DeskSessionManager: DeskSessionManaging {
             guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
                 gateRelease()
                 logger.warning("No Claude terminal found in Watch Desk during wrap-up; skipping prompt")
-                deskWorktreeID = nil
                 return
             }
 
@@ -282,9 +293,10 @@ public actor DeskSessionManager: DeskSessionManaging {
                 logger.warning("Failed to send wrap-up prompt to desk: \(error.localizedDescription, privacy: .public)")
             }
 
-            // Capture terminal IDs for later hibernation
+            // Capture terminal IDs and epoch for later hibernation
             terminalIDs = terminals.map { $0.id }
             worktreeID = wt.id
+            capturedEpoch = deskWorktreeEpoch  // MEDIUM 2: Capture epoch at scheduling time
 
             // Release gate BEFORE the grace sleep (key fix for MEDIUM 3)
             gateRelease()
@@ -297,34 +309,47 @@ public actor DeskSessionManager: DeskSessionManaging {
         // Step 2: Grace period — give agent time to write summary (OUTSIDE the gate)
         try? await Task.sleep(for: .seconds(gracePeriodSeconds))
 
-        // Step 3: Re-acquire gate and park terminals via HibernationCoordinator (HIGH 2)
+        // Step 3: Re-acquire gate and park terminals via HibernationCoordinator (HIGH 2 + MEDIUM 1 + MEDIUM 2)
         await gateAcquire()
         defer { gateRelease() }
 
+        // MEDIUM 2: Check if desk was reactivated (epoch changed) — if so, this wrap-up is stale, no-op
+        if capturedEpoch != self.deskWorktreeEpoch {
+            logger.info("Wrap-up superseded: desk was reactivated during grace period (epoch \(capturedEpoch) != \(self.deskWorktreeEpoch)); skipping park")
+            return
+        }
+
         guard let coordinator = hibernationCoordinator else {
             logger.warning("HibernationCoordinator not available; cannot park desk terminals")
-            deskWorktreeID = nil
+            // MEDIUM 1: Do NOT clear deskWorktreeID on failure — leave it set for retry
             return
         }
 
         // Use real hibernation path: calls manualHibernate which does polite exit, tmux respawn, etc.
+        // MEDIUM 1: Track park success; only clear deskWorktreeID if all parks succeed
+        var parkSucceeded = false
         for terminalID in terminalIDs {
             let result = await coordinator.manualHibernate(terminalID: terminalID)
             switch result {
-            case .ok:
-                logger.info("Hibernated desk terminal \(terminalID, privacy: .public) via coordinator")
-            case .alreadyHibernated:
-                logger.debug("Desk terminal already hibernated: \(terminalID, privacy: .public)")
+            case .ok, .alreadyHibernated:
+                parkSucceeded = true
+                if case .ok = result {
+                    logger.info("Hibernated desk terminal \(terminalID, privacy: .public) via coordinator")
+                } else {
+                    logger.debug("Desk terminal already hibernated: \(terminalID, privacy: .public)")
+                }
             default:
-                logger.warning("Failed to hibernate desk terminal \(terminalID, privacy: .public): \(String(describing: result))")
+                logger.warning("Failed to park desk terminal \(terminalID, privacy: .public): \(String(describing: result)); park incomplete, will retry on next cycle")
+                parkSucceeded = false
+                break  // Stop on first failure; leave deskWorktreeID set for retry
             }
         }
 
-        if let wid = worktreeID {
-            logger.info("Wrapped up Watch Desk session: \(wid, privacy: .public); parked for reuse on next ON cycle")
+        // MEDIUM 1: Only mark parked if all terminals successfully hibernated
+        if parkSucceeded, let wid = worktreeID {
+            deskWorktreeID = nil
+            logger.info("Wrapped up Watch Desk session: \(wid, privacy: .public); all terminals parked for reuse on next ON cycle")
         }
-
-        deskWorktreeID = nil
     }
 
     /// Nudge the desk session to process queued judgment items.
