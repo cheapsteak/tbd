@@ -1,6 +1,27 @@
 import SwiftUI
 import TBDShared
 
+/// Content displayed in the nightwatch desk status banner.
+struct NightwatchBannerContent: Equatable {
+    let glyph: String
+    let text: String
+}
+
+/// Computes the banner content (glyph and text) for a given nightwatch mode.
+/// - .off: returns nil (banner hidden)
+/// - .daywatch: returns content with "◐" glyph and "Daywatch — desk session active" text
+/// - .nightwatch: returns content with "🌙" glyph and "Nightwatch — desk session active" text
+func nightwatchBannerContent(for mode: NightwatchMode) -> NightwatchBannerContent? {
+    switch mode {
+    case .off:
+        return nil
+    case .daywatch:
+        return NightwatchBannerContent(glyph: "◐", text: "Daywatch — desk session active")
+    case .nightwatch:
+        return NightwatchBannerContent(glyph: "🌙", text: "Nightwatch — desk session active")
+    }
+}
+
 /// Banner showing the active nightwatch desk session status when mode != .off.
 /// Displays: "◐ Daywatch — desk session active" with click-through to focus the desk.
 struct NightwatchDeskStatusBanner: View {
@@ -15,15 +36,8 @@ struct NightwatchDeskStatusBanner: View {
     }
 
     /// Returns the banner text and glyph based on current mode.
-    private var bannerContent: (glyph: String, text: String)? {
-        switch appState.nightwatchMode {
-        case .off:
-            return nil
-        case .daywatch:
-            return ("◐", "Daywatch — desk session active")
-        case .nightwatch:
-            return ("🌙", "Nightwatch — desk session active")
-        }
+    private var bannerContent: NightwatchBannerContent? {
+        nightwatchBannerContent(for: appState.nightwatchMode)
     }
 
     var body: some View {

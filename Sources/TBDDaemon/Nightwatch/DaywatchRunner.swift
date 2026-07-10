@@ -141,7 +141,7 @@ public actor DaywatchRunner {
     public init(
         executor: DaywatchExecuting,
         deskSessionManager: (any DeskSessionManaging)? = nil,
-        interval: TimeInterval = 15 * 60
+        interval: TimeInterval = DaywatchRunner.defaultInterval
     ) {
         self.executor = executor
         self.deskSessionManager = deskSessionManager
