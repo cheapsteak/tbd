@@ -48,6 +48,17 @@ if [ -z "${TBD_SKIP_RECLAIM:-}" ] && [ -x "$RECLAIM_SCRIPT" ]; then
     RECLAIM_EXCLUDE_PATH="$REPO_ROOT" nohup "$RECLAIM_SCRIPT" >> "$HOME/Library/Logs/tbd-reclaim-build.log" 2>&1 < /dev/null &
 fi
 
+# MARK: - Opportunistic background scratchpad sweep
+#
+# Same fire-and-forget contract as the reclaim above: remove orphaned Claude
+# Code per-worktree scratchpads under /private/tmp/claude-<uid> whose worktree
+# is gone and which have been untouched for days (scripts/sweep-scratchpads.sh).
+# Shares the reclaim log file and the TBD_SKIP_RECLAIM opt-out.
+SWEEP_SCRIPT="$REPO_ROOT/scripts/sweep-scratchpads.sh"
+if [ -z "${TBD_SKIP_RECLAIM:-}" ] && [ -x "$SWEEP_SCRIPT" ]; then
+    nohup "$SWEEP_SCRIPT" >> "$HOME/Library/Logs/tbd-reclaim-build.log" 2>&1 < /dev/null &
+fi
+
 # MARK: - Build
 #
 # Shared clang/Swift module cache across ALL TBD worktrees. By default every
