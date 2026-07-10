@@ -759,9 +759,21 @@ public struct Config: Codable, Sendable, Equatable {
     /// applies. The input veto is opt-in until it soaks and the v50 master
     /// default is reverted.
     public var hibernateInputVetoEnabled: Bool
+    /// Master switch for the daemon-owned orphan GC sweep. Default ON.
+    public var gcEnabled: Bool
+    /// Minimum age (seconds) an orphaned worktree/scratchpad must reach
+    /// before the sweep reaps it, so a directory mid-teardown isn't raced.
+    public var gcGraceSeconds: Int
+    /// Days a reap snapshot (`refs/tbd/snapshots/...`) is retained before
+    /// being pruned.
+    public var gcSnapshotRetentionDays: Int
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
+    /// Default grace period before the orphan-GC sweep reaps a directory.
+    public static let defaultGCGraceSeconds = 3600
+    /// Default retention window for reap snapshots.
+    public static let defaultGCSnapshotRetentionDays = 30
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -778,7 +790,10 @@ public struct Config: Codable, Sendable, Equatable {
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
-                hibernateInputVetoEnabled: Bool = false) {
+                hibernateInputVetoEnabled: Bool = false,
+                gcEnabled: Bool = true,
+                gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
+                gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -795,6 +810,9 @@ public struct Config: Codable, Sendable, Equatable {
         self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
+        self.gcEnabled = gcEnabled
+        self.gcGraceSeconds = gcGraceSeconds
+        self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
     }
 
     public init(from decoder: Decoder) throws {
@@ -828,6 +846,11 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         hibernateInputVetoEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
+        gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
+        gcGraceSeconds = try c.decodeIfPresent(Int.self, forKey: .gcGraceSeconds)
+            ?? Config.defaultGCGraceSeconds
+        gcSnapshotRetentionDays = try c.decodeIfPresent(Int.self, forKey: .gcSnapshotRetentionDays)
+            ?? Config.defaultGCSnapshotRetentionDays
     }
 }
 
@@ -907,6 +930,46 @@ public struct Note: Codable, Sendable, Identifiable, Equatable {
         self.content = content
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// Kind of reaped directory a `ReapRecord` describes.
+public enum ReapKind: String, Codable, Sendable { case agentWorktree, scratchpad }
+
+/// Record of a directory the daemon-owned orphan GC swept and (optionally)
+/// snapshotted before removal. Persisted so a swept worktree/scratchpad can
+/// be listed and restored later.
+public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
+    public let id: UUID
+    public var kind: ReapKind
+    /// Main repo root ("" for scratchpads with no repo).
+    public var repoPath: String
+    /// Reaped dir (agent worktree path, or scratchpad path).
+    public var worktreePath: String
+    /// `agentWorktree` only.
+    public var branch: String?
+    /// `agentWorktree` only.
+    public var headSHA: String?
+    /// `refs/tbd/snapshots/...` when dirty state was captured.
+    public var snapshotRef: String?
+    /// `du -sk` * 1024 at reap time.
+    public var apparentBytes: Int64?
+    public var reapedAt: Date
+    public var restoredAt: Date?
+
+    public init(id: UUID = UUID(), kind: ReapKind, repoPath: String, worktreePath: String,
+                branch: String? = nil, headSHA: String? = nil, snapshotRef: String? = nil,
+                apparentBytes: Int64? = nil, reapedAt: Date = Date(), restoredAt: Date? = nil) {
+        self.id = id
+        self.kind = kind
+        self.repoPath = repoPath
+        self.worktreePath = worktreePath
+        self.branch = branch
+        self.headSHA = headSHA
+        self.snapshotRef = snapshotRef
+        self.apparentBytes = apparentBytes
+        self.reapedAt = reapedAt
+        self.restoredAt = restoredAt
     }
 }
 

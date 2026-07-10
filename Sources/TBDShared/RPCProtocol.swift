@@ -188,6 +188,9 @@ public enum RPCMethod {
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
+    public static let gcList = "gc.list"
+    public static let gcRestore = "gc.restore"
+    public static let gcSweepNow = "gc.sweepNow"
 }
 
 // MARK: - Branch Listing
@@ -845,6 +848,43 @@ public struct WorktreeArchiveParams: Codable, Sendable {
     public let force: Bool
     public init(worktreeID: UUID, force: Bool = false) {
         self.worktreeID = worktreeID; self.force = force
+    }
+}
+
+/// Params for `gc.list` — lists reaped `ReapRecord`s, optionally scoped to
+/// one repo (`nil` == every repo, including scratch reap records).
+public struct GCListParams: Codable, Sendable {
+    public var repoPath: String?
+    public init(repoPath: String? = nil) {
+        self.repoPath = repoPath
+    }
+}
+
+/// Params for `gc.restore` — restores a swept `ReapRecord` by id.
+public struct GCRestoreParams: Codable, Sendable {
+    public var recordID: UUID
+    public init(recordID: UUID) {
+        self.recordID = recordID
+    }
+}
+
+/// Params for `gc.sweepNow` — triggers an out-of-band sweep. `dryRun: true`
+/// plans without reaping.
+public struct GCSweepNowParams: Codable, Sendable {
+    public var dryRun: Bool
+    public init(dryRun: Bool = false) {
+        self.dryRun = dryRun
+    }
+}
+
+/// Result of a `gc.sweepNow` sweep (dry-run or real).
+public struct GCSweepResult: Codable, Sendable {
+    /// Human-readable plan lines, e.g. "REAP agent-worktree /path …", "KEEP locked /path".
+    public var planned: [String]
+    public var reaped: Int
+    public init(planned: [String], reaped: Int) {
+        self.planned = planned
+        self.reaped = reaped
     }
 }
 

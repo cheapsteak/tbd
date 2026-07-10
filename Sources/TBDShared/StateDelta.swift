@@ -27,6 +27,10 @@ public enum StateDelta: Codable, Sendable {
     case worktreeMoved(WorktreeMovedDelta)
     case terminalHibernationChanged(TerminalHibernationDelta)
     case controlModeInputHealthChanged(ControlModeInputHealthDelta)
+    /// Fired when the orphan GC sweep reaps or restores a `ReapRecord`. No
+    /// payload (mirrors `.modelProfilesChanged`) — subscribers refetch via
+    /// `gc.list`.
+    case reapRecordsChanged
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)
