@@ -319,11 +319,10 @@ struct DaywatchRunnerTests {
         let desker = FakeDeskSessionManager()
         let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
-        // Ensure desk exists
-        await runner.apply(mode: .daywatch)
-
-        // Run one tick (will trigger nudge on exit 10)
-        await runner.runOnce()
+        // Deterministic: runOnce(mode:) ensures the desk via the retry path and
+        // ticks exactly once — no background loop (apply() would race its
+        // immediate first tick against this explicit one).
+        await runner.runOnce(mode: .daywatch)
 
         let nudgeCalls = await desker.nudgeCalls
         #expect(nudgeCalls.count == 1)
@@ -336,11 +335,8 @@ struct DaywatchRunnerTests {
         let desker = FakeDeskSessionManager()
         let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
-        // Ensure desk exists
-        await runner.apply(mode: .nightwatch)
-
-        // Run one tick (will trigger nudge on exit 10)
-        await runner.runOnce()
+        // Deterministic single tick — see daywatch variant for rationale.
+        await runner.runOnce(mode: .nightwatch)
 
         let nudgeCalls = await desker.nudgeCalls
         #expect(nudgeCalls.count == 1)
@@ -353,13 +349,13 @@ struct DaywatchRunnerTests {
         let desker = FakeDeskSessionManager(ensureBehavior: .failOnce)
         let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
-        // Apply mode — ensure fails once
-        await runner.apply(mode: .daywatch)
+        // Deterministic: first runOnce hits the ensure (fails once), second retries.
+        // No apply() — its background loop's immediate tick would race these counts.
+        await runner.runOnce(mode: .daywatch)
         var ensureCalls = await desker.ensureCalls
         #expect(ensureCalls.count == 1, "First ensure call should have failed")
 
-        // Run next tick — should retry ensure
-        await runner.runOnce()
+        await runner.runOnce(mode: .daywatch)
         ensureCalls = await desker.ensureCalls
         #expect(ensureCalls.count == 2, "Should retry ensure on next tick")
     }
