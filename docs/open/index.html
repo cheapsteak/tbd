@@ -82,6 +82,14 @@
       // false-positive signal — the browser's "Open TBD.app?" confirmation
       // dialog blurs the window even if the user cancels — but that dialog
       // does not hide the document, so visibilitychange is safe.
+      //
+      // Accepted trade-off: document.hidden is the ONLY success signal we
+      // have, so if TBD is NOT installed, an incidental hide within the 3s
+      // window (alt-tab, clicking a notification) is a false positive and
+      // will navigate the user away from this fallback/install page. We
+      // accept that: cancelling the return when the tab became visible
+      // again defeated the auto-return in the real-success case, which is
+      // why the cancel path was removed.
       var DETECT_WINDOW_MS = 3000;
       var RETURN_DELAY_MS = 600;
       var armedUntil = 0;
@@ -104,7 +112,8 @@
           ? 'Opened in TBD — taking you back…'
           : 'TBD opened — you can close this tab.';
         // Short delay so the scheme launch isn't interrupted by navigating
-        // away; the tab is backgrounded at this point, so it's seamless.
+        // away. (The tab is usually backgrounded here, but not guaranteed —
+        // the return proceeds even if it's visible again by then.)
         setTimeout(function () {
           if (canGoBack) {
             console.log('[tbd-open] calling history.back() now');
@@ -148,7 +157,10 @@
       // The manual button fires the same tbd:// URL — arm the same
       // success-detection/auto-return logic on click.
       link.addEventListener('click', function () {
-        console.log('[tbd-open] manual fallback button clicked');
+        console.log('[tbd-open] manual fallback button clicked — re-arming, resetting returned flag');
+        // Reset so a retry after a false positive (whose window.close() was
+        // ignored) can trigger the status update and auto-return again.
+        returned = false;
         arm();
       });
 
