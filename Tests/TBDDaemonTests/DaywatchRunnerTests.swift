@@ -366,10 +366,9 @@ struct DaywatchRunnerTests {
         // No desk session manager — fallback to wakeJudge
         let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
 
-        await runner.apply(mode: .daywatch)
-
-        // Run one tick (will trigger fallback to wakeJudge)
-        await runner.runOnce()
+        // Deterministic: no apply() — its loop's tick-on-start would race this
+        // explicit tick (same fix as the nudge/retry tests above).
+        await runner.runOnce(mode: .daywatch)
 
         let wakeCalls = await executor.judgeWakeCalls
         #expect(wakeCalls.count == 1)
