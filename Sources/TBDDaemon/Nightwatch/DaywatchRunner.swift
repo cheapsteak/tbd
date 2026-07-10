@@ -181,16 +181,16 @@ public actor DaywatchRunner {
             }
             logger.info("Started daywatch runner in mode \(mode.rawValue, privacy: .public)")
         } else if !shouldRun && wasRunning {
-            // Stop: cancel the loop, close the desk.
+            // Stop: cancel the loop, post shift wrap-up, leave desk active for user review.
             loopTask?.cancel()
             loopTask = nil
 
-            if let desker = deskSessionManager {
-                await desker.closeDeskSession()
+            if let desker = deskSessionManager, let deskID = deskWorktreeID {
+                await desker.postShiftWrapUp(worktreeID: deskID)
             }
             deskWorktreeID = nil
 
-            logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public))")
+            logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public)) — posted shift wrap-up")
         } else if shouldRun && wasRunning && previousMode != mode {
             // Mode switch within running state (daywatch <-> nightwatch):
             // desk is reused; ensure updates the prompt-relevant state.

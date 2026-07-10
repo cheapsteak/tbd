@@ -5,10 +5,11 @@ import TBDShared
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "nightwatch.desk")
 
 /// Protocol for dependency injection in testing. Allows mocking DeskSessionManager
-/// for testing DaywatchRunner's desk-gated branches (ensure-on-start, nudge-on-tick-10, close-on-stop, etc).
+/// for testing DaywatchRunner's desk-gated branches (ensure-on-start, nudge-on-tick-10, wrap-up-on-stop, etc).
 public protocol DeskSessionManaging: Sendable {
     func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async
+    func postShiftWrapUp(worktreeID: UUID) async
     func closeDeskSession() async
 }
 
@@ -191,6 +192,54 @@ public actor DeskSessionManager: DeskSessionManaging {
 
         logger.info("Created Watch Desk session: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return wt
+    }
+
+    /// Post a shift wrap-up prompt to the desk session and fire a completion notification.
+    /// Called when daywatch/nightwatch mode is turned OFF to gracefully end the shift.
+    /// Sends the wrap-up prompt via tmux (non-destructive), fires a notification, and leaves
+    /// the desk active for the user to review/hibernate manually.
+    /// - Parameter worktreeID: The Watch Desk worktree ID
+    public func postShiftWrapUp(worktreeID: UUID) async {
+        await gateAcquire()
+        defer { gateRelease() }
+
+        do {
+            let terminals = try await db.terminals.list(worktreeID: worktreeID)
+            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                logger.warning("No Claude terminal found in Watch Desk; skipping wrap-up prompt")
+                return
+            }
+
+            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+                logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
+                return
+            }
+
+            // Paste the wrap-up prompt text
+            try await tmux.pasteText(
+                server: worktree.tmuxServer,
+                paneID: claudeTerminal.tmuxPaneID,
+                bytes: Data(NightwatchDeskPrompts.wrapUpPrompt.utf8)
+            )
+
+            // Send Enter to submit
+            try await tmux.sendKey(
+                server: worktree.tmuxServer,
+                paneID: claudeTerminal.tmuxPaneID,
+                key: "Enter"
+            )
+
+            // Fire a completion notification
+            _ = try await db.notifications.create(
+                worktreeID: worktreeID,
+                type: .taskComplete,
+                message: "Daywatch ended — shift summary posted to the Watch Desk."
+            )
+
+            logger.info("Posted shift wrap-up prompt to Watch Desk: \(worktreeID, privacy: .public)")
+        } catch {
+            logger.error("Failed to post shift wrap-up: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Nudge the desk session to process queued judgment items.
