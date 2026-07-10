@@ -4,10 +4,18 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "nightwatch.desk")
 
+/// Protocol for dependency injection in testing. Allows mocking DeskSessionManager
+/// for testing DaywatchRunner's desk-gated branches (ensure-on-start, nudge-on-tick-10, close-on-stop, etc).
+public protocol DeskSessionManaging: Sendable {
+    func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree
+    func nudgeDeskSession(worktreeID: UUID, act: Bool) async
+    func closeDeskSession() async
+}
+
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
 /// Idempotent creation: mode switches reuse the existing desk session.
 /// Nudges the session when judgment items are queued (tick exit code 10).
-public actor DeskSessionManager {
+public actor DeskSessionManager: DeskSessionManaging {
     // MARK: - Dependencies
 
     private let db: TBDDatabase

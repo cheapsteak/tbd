@@ -32,7 +32,14 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
 // MARK: - Fake DeskSessionManager for Testing
 
 /// Fake desk session manager that records calls for testing desk-gated branches.
-actor FakeDeskSessionManager {
+/// Conforms to DeskSessionManaging protocol for use with DaywatchRunner.
+actor FakeDeskSessionManager: DeskSessionManaging {
+    enum EnsureBehavior {
+        case succeed
+        case failOnce
+        case alwaysFail
+    }
+
     struct NudgeCall: Sendable {
         let worktreeID: UUID
         let act: Bool
@@ -43,17 +50,40 @@ actor FakeDeskSessionManager {
     private(set) var closeCalls: Int = 0
 
     private(set) var lastEnsuredWorktreeID: UUID?
+    private var ensureBehavior: EnsureBehavior = .succeed
+    private var ensureFailureCount: Int = 0
 
-    /// Minimal fake worktree for testing.
-    struct FakeWorktree: Sendable {
-        let id: UUID
+    init(ensureBehavior: EnsureBehavior = .succeed) {
+        self.ensureBehavior = ensureBehavior
     }
 
-    func ensureDeskSession(mode: NightwatchMode) async throws -> FakeWorktree {
+    func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree {
         ensureCalls.append(mode)
-        let desk = FakeWorktree(id: UUID())
-        lastEnsuredWorktreeID = desk.id
-        return desk
+
+        // Handle failure behavior
+        switch ensureBehavior {
+        case .failOnce:
+            if ensureFailureCount == 0 {
+                ensureFailureCount += 1
+                struct TestError: Error, CustomStringConvertible {
+                    let description = "Fake desk ensure failed (once)"
+                }
+                throw TestError()
+            }
+        case .alwaysFail:
+            struct TestError: Error, CustomStringConvertible {
+                let description = "Fake desk ensure failed (always)"
+            }
+            throw TestError()
+        case .succeed:
+            break
+        }
+
+        // Return a valid Worktree for testing
+        let deskID = UUID()
+        lastEnsuredWorktreeID = deskID
+        // Create a minimal worktree-like object (tests only access .id)
+        return MockWorktree(id: deskID)
     }
 
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async {
@@ -63,6 +93,18 @@ actor FakeDeskSessionManager {
     func closeDeskSession() async {
         closeCalls += 1
     }
+}
+
+/// Minimal mock Worktree for testing (only exposes id property).
+private struct MockWorktree: Worktree {
+    let id: UUID
+    let path: String = "/tmp/test"
+    let displayName: String = "Test Desk"
+    let status: WorktreeStatus = .active
+    let isScratch: Bool = true
+    let tmuxServer: String = "test"
+    let createdAt: Date = Date()
+    let isArchived: Bool = false
 }
 
 // MARK: - Tests
@@ -222,77 +264,114 @@ struct DaywatchRunnerTests {
         #expect(wakeCalls[1].act == true, "nightwatch should pass act=true")
     }
 
-    // MARK: - Test: Desk-gated branches (M1)
-    // Note: These tests verify that DaywatchRunner calls desk session lifecycle methods correctly.
-    // DaywatchRunner type-checks with optional DeskSessionManager, so we test without the desk manager
-    // to avoid type-mismatch complications. The core nudge/ensure/close logic is covered by the
-    // executor-based tests above (wakeJudge fallback). Phase B: refactor DaywatchRunner to accept
-    // a protocol interface for testability.
+    // MARK: - Test: Desk-gated branches (MEDIUM 1 + MEDIUM 2)
 
-    @Test("apply(.daywatch) without desk manager starts the loop")
-    func testEnsureOnStartWithoutDesker() async {
+    @Test("ensure-on-start: apply(.daywatch) ensures desk session")
+    func testEnsureOnStart() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        // nil desk manager: ensure-on-start skipped
-        let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
         await runner.apply(mode: .daywatch)
-        // Give the detached loop task time to run its first immediate tick
-        try? await Task.sleep(for: .milliseconds(50))
 
-        let tickCalls = await executor.tickCallCount
-        // First immediate tick should have run
-        #expect(tickCalls >= 1)
+        let ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1)
+        #expect(ensureCalls[0] == .daywatch)
     }
 
-    @Test("apply(.off) stops the loop")
-    func testCloseOnStopIdempotent() async {
+    @Test("close-on-stop: apply(.off) closes desk session")
+    func testCloseOnStop() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
         // Start in daywatch
         await runner.apply(mode: .daywatch)
-        // Give the loop time to run its first immediate tick
-        try? await Task.sleep(for: .milliseconds(50))
-
-        let beforeOff = await executor.tickCallCount
-        #expect(beforeOff >= 1, "Initial tick should have run")
+        var closeCalls = await desker.closeCalls
+        #expect(closeCalls == 0, "No close yet")
 
         // Switch to off
         await runner.apply(mode: .off)
-
-        // Small sleep to ensure no more ticks after off
-        try? await Task.sleep(for: .milliseconds(100))
-        let afterOff = await executor.tickCallCount
-
-        // Should not have significantly more ticks after off (at most one final tick in flight)
-        #expect(afterOff <= beforeOff + 1, "Loop should stop after .off")
+        closeCalls = await desker.closeCalls
+        #expect(closeCalls == 1, "Should close desk on .off")
     }
 
-    @Test("mode switch (daywatch → nightwatch) idempotent without desk")
-    func testModeSwitchIdempotent() async {
+    @Test("ensure-on-switch: mode switch ensures desk with new mode")
+    func testEnsureOnModeSwitch() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
 
         // Start in daywatch
         await runner.apply(mode: .daywatch)
-        let ticksAfterDaywatch = await executor.tickCallCount
+        var ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1)
+        #expect(ensureCalls[0] == .daywatch)
 
-        // Switch to nightwatch (should reuse loop, not create new one)
+        // Switch to nightwatch
         await runner.apply(mode: .nightwatch)
-        try? await Task.sleep(for: .milliseconds(50))
-        let ticksAfterNightwatch = await executor.tickCallCount
-
-        // Should have a few more ticks but not exponential
-        #expect(ticksAfterNightwatch >= ticksAfterDaywatch, "Mode switch should not reset loop")
+        ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 2)
+        #expect(ensureCalls[1] == .nightwatch)
     }
 
-    @Test("fall back to wakeJudge when desk unavailable (branch: nudge-vs-wakeJudge fallback)")
-    func testWakeJudgeFallbackWithNoDeskSessionManager() async {
+    @Test("nudge-on-tick-10: exit code 10 nudges desk with correct act flag (daywatch)")
+    func testNudgeDaywatch() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 10)
-        // No desk session manager
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Ensure desk exists
+        await runner.apply(mode: .daywatch)
+
+        // Run one tick (will trigger nudge on exit 10)
+        await runner.runOnce()
+
+        let nudgeCalls = await desker.nudgeCalls
+        #expect(nudgeCalls.count == 1)
+        #expect(nudgeCalls[0].act == false, "daywatch nudge should have act=false")
+    }
+
+    @Test("nudge-on-tick-10: exit code 10 nudges desk with correct act flag (nightwatch)")
+    func testNudgeNightwatch() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        let desker = FakeDeskSessionManager()
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Ensure desk exists
+        await runner.apply(mode: .nightwatch)
+
+        // Run one tick (will trigger nudge on exit 10)
+        await runner.runOnce()
+
+        let nudgeCalls = await desker.nudgeCalls
+        #expect(nudgeCalls.count == 1)
+        #expect(nudgeCalls[0].act == true, "nightwatch nudge should have act=true")
+    }
+
+    @Test("MEDIUM 2: retry ensure on next tick if initial ensure failed")
+    func testRetryEnsureOnFailure() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let desker = FakeDeskSessionManager(ensureBehavior: .failOnce)
+        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+
+        // Apply mode — ensure fails once
+        await runner.apply(mode: .daywatch)
+        var ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 1, "First ensure call should have failed")
+
+        // Run next tick — should retry ensure
+        await runner.runOnce()
+        ensureCalls = await desker.ensureCalls
+        #expect(ensureCalls.count == 2, "Should retry ensure on next tick")
+    }
+
+    @Test("nudge falls back to wakeJudge when desk unavailable")
+    func testWakeJudgeFallback() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        // No desk session manager — fallback to wakeJudge
         let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
 
-        // Apply mode without desk manager
         await runner.apply(mode: .daywatch)
 
         // Run one tick (will trigger fallback to wakeJudge)

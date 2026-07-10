@@ -11,12 +11,11 @@ public enum NightwatchDeskPrompts {
     /// - Parameter skillDir: Absolute path to the nightwatch skill directory (e.g., ~/.claude/plugins/skills/nightwatch)
     public static func initialPrompt(mode: NightwatchMode, skillDir: String) -> String {
         let modeLabel = mode == .daywatch ? "Daywatch" : "Nightwatch"
-        let modelHint = mode == .daywatch ? "Sonnet" : "Opus"
         let queueDir = skillDir + "/queue"
         let skillDocPath = skillDir + "/SKILL.md"
 
         return """
-        You are TBD's \(modeLabel) Judge — a \(modelHint) session monitoring merge-gate decisions.
+        You are TBD's \(modeLabel) Judge — monitoring merge-gate decisions with the configured profile model.
 
         **Your workspace:**
         - You're running in: \(skillDir)

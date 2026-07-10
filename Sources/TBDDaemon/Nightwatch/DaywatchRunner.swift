@@ -101,20 +101,21 @@ public actor DaywatchRunner {
     // MARK: - Dependencies
 
     private let executor: DaywatchExecuting
-    private let deskSessionManager: DeskSessionManager?
+    private let deskSessionManager: (any DeskSessionManaging)?
     private let interval: TimeInterval
 
     // MARK: - State
 
     private var currentMode: NightwatchMode = .off
     private var deskWorktreeID: UUID?
+    private var lastNudgeAttemptTime: Date?  // For retry on failure (MEDIUM 2)
     private var loopTask: Task<Void, Never>?
 
     // MARK: - Init
 
     public init(
         executor: DaywatchExecuting,
-        deskSessionManager: DeskSessionManager? = nil,
+        deskSessionManager: (any DeskSessionManaging)? = nil,
         interval: TimeInterval = 15 * 60
     ) {
         self.executor = executor
@@ -178,10 +179,32 @@ public actor DaywatchRunner {
 
     /// Run one tick cycle: execute tick.py and conditionally nudge the desk session.
     /// This method contains the core logic that the background loop drives repeatedly.
+    /// MEDIUM 2: If desk ensure failed at mode-start, retry on next tick.
     /// - Parameter mode: If provided, use this mode instead of the actor's currentMode.
     ///   Useful for testing without starting the background loop.
     public func runOnce(mode: NightwatchMode? = nil) async {
         let effectiveMode = mode ?? currentMode
+
+        // MEDIUM 2: Retry desk ensure if it failed at mode-start but desk manager is available
+        if let desker = deskSessionManager,
+           deskWorktreeID == nil,
+           effectiveMode != .off {
+            do {
+                let desk = try await desker.ensureDeskSession(mode: effectiveMode)
+                deskWorktreeID = desk.id
+                logger.info("Retried desk session ensure on tick (recovered from prior failure)")
+            } catch {
+                if let lastAttempt = lastNudgeAttemptTime {
+                    let elapsed = Date().timeIntervalSince(lastAttempt)
+                    if elapsed > 30 {  // Log warning only if last failure was >30s ago
+                        logger.warning("Desk session ensure retry failed: \(error.localizedDescription, privacy: .public)")
+                        lastNudgeAttemptTime = Date()
+                    }
+                } else {
+                    lastNudgeAttemptTime = Date()
+                }
+            }
+        }
 
         // Run one tick
         let exitCode = await executor.runTick()
