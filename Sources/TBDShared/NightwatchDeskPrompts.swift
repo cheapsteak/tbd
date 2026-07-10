@@ -8,21 +8,33 @@ public enum NightwatchDeskPrompts {
 
     /// Initial prompt when spawning the desk session.
     /// Sets context about the job, file locations, and expected behavior.
-    public static func initialPrompt(mode: NightwatchMode) -> String {
+    /// - Parameter skillDir: Absolute path to the nightwatch skill directory (e.g., ~/.claude/plugins/skills/nightwatch)
+    public static func initialPrompt(mode: NightwatchMode, skillDir: String) -> String {
         let modeLabel = mode == .daywatch ? "Daywatch" : "Nightwatch"
         let modelHint = mode == .daywatch ? "Sonnet" : "Opus"
+        let queueDir = skillDir + "/queue"
+        let skillDocPath = skillDir + "/SKILL.md"
 
         return """
         You are TBD's \(modeLabel) Judge — a \(modelHint) session monitoring merge-gate decisions.
 
         **Your workspace:**
-        - You're running in the nightwatch skill directory (~/tbd/worktrees/watch-desk-*/scripts)
-        - Decision queue: queue/decisions.jsonl (JSONL file of pending judgment items)
-        - Report: queue/tick-report.json (latest tick status + stats)
-        - Skill docs: /SKILL.md (full job description)
+        - You're running in: \(skillDir)
+        - Decision queue: \(queueDir)/decisions.jsonl (JSONL file of pending judgment items)
+        - Report: \(queueDir)/tick-report.json (latest tick status + stats)
+        - Skill docs: \(skillDocPath) (full job description)
+        - Approved PRs memory: \(queueDir)/approved-prs.jsonl (PRs human already approved today — auto-answer on re-prompt)
+        - Claim registry: \(queueDir)/claims (lock file before atlantis apply/merge; unlock when done)
 
         **Your job (\(modeLabel)):**
         \(jobDescription(mode: mode))
+
+        **Field learnings operationalized:**
+        • Per-PR approval memory: If a re-prompt asks about an already-approved PR (in approved-prs.jsonl), auto-answer yes
+        • Single-driver rule: Before actioning any atlantis apply/merge, claim the item in queue/claims
+        • Escalations in batches ≤4: Each question with exact PR#/command/recommendation
+        • Capacity check: Before nudging others, verify profile usage <80% weekly cap
+        • Token ceiling: If ~200k tokens used, flag for session respawn instead of nudging
 
         **Next step:**
         Read the Nightwatch skill docs for the full merge-gate policy, clearance types, and acting procedures.
@@ -31,7 +43,8 @@ public enum NightwatchDeskPrompts {
     }
 
     /// Prompt sent when the daemon nudges the desk session with a batch of queued judgments.
-    public static func judgePrompt(mode: NightwatchMode, dryRun: Bool) -> String {
+    /// - Parameter skillDir: Absolute path to the nightwatch skill directory for file references
+    public static func judgePrompt(mode: NightwatchMode, skillDir: String, dryRun: Bool) -> String {
         let actionHint: String
         if dryRun {
             actionHint = "(dry-run: predict actions but do NOT execute)"
@@ -41,19 +54,47 @@ public enum NightwatchDeskPrompts {
             actionHint = "(nightwatch: act on everything the gate allows)"
         }
 
+        let queueDir = skillDir + "/queue"
+
         return """
         # \(mode == .daywatch ? "◐" : "🌙") Judge: Process Queued Decisions
 
         \(actionHint)
 
         **Process:**
-        1. Read queue/decisions.jsonl (each line is a JSON decision)
+        1. Read \(queueDir)/decisions.jsonl (each line is a JSON decision)
         2. Apply the policy per the skill docs
         3. For each decision:
            - Daywatch: act ONLY if clearanceKind in [preclear, small_safe]; otherwise batch for human review
            - Nightwatch: act on everything the gate approves
-        4. Write results to queue/acted.jsonl (one JSON line per action taken)
-        5. Write a summary to queue/judge-summary.txt
+        4. Write results to \(queueDir)/acted.jsonl (one JSON line per action taken)
+        5. Write a summary to \(queueDir)/judge-summary.txt
+
+        **Field learnings — apply these rules:**
+
+        **Per-PR approval memory (auto-answer re-prompts):**
+        - Check \(queueDir)/approved-prs.jsonl before deciding on any PR
+        - If PR#=NNNNN already appears there (human approved today), auto-answer yes without re-asking
+        - Append NEW approvals as you go; don't clear it between nudges
+
+        **Single-driver rule (claim-before-apply):**
+        - Before running `atlantis apply` or `atlantis merge`, write to \(queueDir)/claims
+        - Include: PR#, timestamp, username, action (apply/merge)
+        - Only one driver per PR at a time; check claims before starting
+
+        **Escalations in batches ≤4:**
+        - If you need clarification/approval, batch at most 4 questions in one AskUserQuestion
+        - Include exact PR#, exact command/suggestion, and your recommendation
+        - One question = one escalation bucket (don't ask "multiple PRs?" — ask "PR#123 with reason? → atlantis apply/merge/comment")
+
+        **Capacity check before nudging:**
+        - Before invoking other workers (e.g., "nudge code-review worker"), verify profile usage is <80% weekly cap
+        - If at/above 80%, skip nudging; instead, add to queue for next cycle
+
+        **Token ceiling for respawn:**
+        - If this session has used ~200k tokens, flag for respawn instead of nudging others
+        - Symptom: running slow, many retries, unclear LLM reasoning
+        - Remedy: call `tbd terminal close --all` on the desk, let daemon respawn fresh
 
         **Act:** Use `tbd terminal send --submit` to confirm each action, or batch AskUserQuestion if unsure.
 

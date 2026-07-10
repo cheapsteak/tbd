@@ -14,6 +14,7 @@ public actor DeskSessionManager {
     private let lifecycle: WorktreeLifecycle
     private let modelProfileResolver: ModelProfileResolver?
     private let tmux: TmuxManager
+    private let skillDir: String
 
     // MARK: - State
 
@@ -22,18 +23,24 @@ public actor DeskSessionManager {
     /// daywatch and nightwatch.
     private var deskWorktreeID: UUID?
 
+    /// Timestamp of the last nudge; used to skip overlapping nudges (< 10 min apart).
+    /// M2: nudge-overlap guard. Phase B upgrade: claim-file (queue/claims) single-driver enforcement.
+    private var lastNudgeTime: Date?
+
     // MARK: - Init
 
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
         modelProfileResolver: ModelProfileResolver?,
-        tmux: TmuxManager
+        tmux: TmuxManager,
+        skillDir: String
     ) {
         self.db = db
         self.lifecycle = lifecycle
         self.modelProfileResolver = modelProfileResolver
         self.tmux = tmux
+        self.skillDir = skillDir
         self.deskWorktreeID = nil
     }
 
@@ -41,6 +48,7 @@ public actor DeskSessionManager {
 
     /// Idempotent: ensure a Watch Desk scratch space exists.
     /// Returns existing desk worktree if already created, otherwise creates one.
+    /// On recovery, respawns a Claude terminal if one doesn't exist (H1 fix: desk dead after off→on cycle).
     /// - Parameter mode: The current nightwatch mode (daywatch or nightwatch)
     /// - Returns: The Worktree for the desk session
     public func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree {
@@ -50,11 +58,25 @@ public actor DeskSessionManager {
             return existing
         }
 
-        // Query by displayName to detect existing desk worktrees
-        // (survives daemon restart since displayName is stable).
-        let allWorktrees = try await db.worktrees.list()
-        if let existing = allWorktrees.first(where: { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }) {
+        // Query by displayName to detect existing desk worktrees (active only).
+        // This recovery path excludes archived worktrees so off→on cycles don't
+        // resurrect dead desk sessions. (survives daemon restart since displayName is stable).
+        let activeWorktrees = try await db.worktrees.list(excludeArchived: true)
+        if let existing = activeWorktrees.first(where: { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }) {
             deskWorktreeID = existing.id
+
+            // Ensure the recovered desk has a live Claude terminal; respawn if missing
+            let terminals = try await db.terminals.list(worktreeID: existing.id)
+            if terminals.first(where: { $0.label == TerminalLabel.claudeCode }) == nil {
+                logger.info("Recovered Watch Desk \(existing.id, privacy: .public) but no Claude terminal; respawning")
+                do {
+                    _ = try await spawnDeskTerminal(worktree: existing, mode: mode)
+                } catch {
+                    logger.warning("Failed to respawn terminal on recovery: \(error.localizedDescription, privacy: .public)")
+                    // Best-effort; don't fail the recovery
+                }
+            }
+
             logger.info("Reusing existing Watch Desk session: \(existing.id, privacy: .public)")
             return existing
         }
@@ -118,12 +140,23 @@ public actor DeskSessionManager {
 
     /// Nudge the desk session to process queued judgment items.
     /// Uses pasteText + sendKey pattern (mirrors handleTerminalSend).
+    /// M2: nudge-overlap guard — skips if last nudge was < 10 min ago (prevent overlapping judge runs).
+    /// Phase B upgrade: implement claim-file (queue/claims) single-driver enforcement to replace time-based guard.
     /// - Parameters:
     ///   - worktreeID: The Watch Desk worktree ID
     ///   - act: true for nightwatch (auto-act), false for daywatch (dry-run/batch only)
     public func nudgeDeskSession(worktreeID: UUID, act: Bool) async {
+        // M2: Skip nudge if previous nudge was < 10 min ago (prevent overlapping judge runs)
+        if let last = lastNudgeTime {
+            let elapsed = Date().timeIntervalSince(last)
+            if elapsed < 10 * 60 {
+                logger.debug("Skipping nudge: last nudge was \(Int(elapsed))s ago (< 10 min)")
+                return
+            }
+        }
+
         let mode: NightwatchMode = act ? .nightwatch : .daywatch
-        let prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, dryRun: false)
+        let prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir, dryRun: false)
 
         do {
             let terminals = try await db.terminals.list(worktreeID: worktreeID)
@@ -151,6 +184,9 @@ public actor DeskSessionManager {
                 key: "Enter"
             )
 
+            // Record nudge time for overlap guard
+            lastNudgeTime = Date()
+
             logger.debug("Nudged Watch Desk session: act=\(act, privacy: .public)")
         } catch {
             logger.error("Failed to nudge desk session: \(error.localizedDescription, privacy: .public)")
@@ -158,6 +194,11 @@ public actor DeskSessionManager {
     }
 
     /// Gracefully close the desk session (archive it).
+    /// Direct archive (vs. promote-and-close) is intentional: desk sessions are transient scratch spaces
+    /// scoped to a single mode run. Archiving preserves the session history on disk while removing it
+    /// from active management. The next mode change (off→on) will detect the archived desk and exclude it
+    /// from recovery (ensuring a fresh session if desired). Promotion not applicable here since desk is
+    /// never user-facing as a persistent worktree.
     public func closeDeskSession() async {
         guard let worktreeID = deskWorktreeID else { return }
 
@@ -193,8 +234,11 @@ public actor DeskSessionManager {
 
     /// Spawn a Claude terminal in the desk worktree using lifecycle.spawnPrimaryTerminals.
     /// This reuses the production spawn path which handles trust seeding, overlay injection, etc.
+    /// Note: Model selection (daywatch=Sonnet, nightwatch=Opus) requires per-profile configuration.
+    /// The resolved profile's model is what gets used; mode affects behavior (conservative vs. free-acting),
+    /// not the LLM model directly (that's a user's profile choice).
     private func spawnDeskTerminal(worktree: Worktree, mode: NightwatchMode) async throws {
-        // Resolve profile to select model mode
+        // Resolve profile for auth/routing
         var resolvedProfile: ResolvedModelProfile? = nil
         if let resolver = modelProfileResolver {
             do {
@@ -204,11 +248,8 @@ public actor DeskSessionManager {
             }
         }
 
-        // Select model based on mode (use profile's model if available, else mode default)
-        let selectedModel = resolvedProfile?.model ?? (mode == .daywatch ? "claude-3-5-sonnet-20241022" : "claude-3-5-opus-20241022")
-
-        // Get initial prompt for mode
-        let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode)
+        // Get initial prompt for mode (includes absolute skillDir paths and field learnings)
+        let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: skillDir)
 
         // Use production spawn path which handles trust, overlay, and all lifecycle concerns
         _ = try await lifecycle.spawnPrimaryTerminals(
@@ -220,7 +261,8 @@ public actor DeskSessionManager {
             overrideProfileID: resolvedProfile?.profileID
         )
 
-        logger.info("Spawned desk terminal in \(worktree.id, privacy: .public) with model \(selectedModel, privacy: .public)")
+        let modelLabel = resolvedProfile?.model ?? "default"
+        logger.info("Spawned desk terminal in \(worktree.id, privacy: .public) with model \(modelLabel, privacy: .public)")
     }
 
 }

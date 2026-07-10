@@ -54,10 +54,18 @@ struct NightwatchDeskStatusBanner: View {
                     )
             )
             .onAppear {
-                deskWorktree = findDeskWorktree()
+                // Only update desk worktree lookup when mode is active (not .off)
+                if appState.nightwatchMode != .off {
+                    deskWorktree = findDeskWorktree()
+                }
             }
             .onReceive(appState.objectWillChange) { _ in
-                deskWorktree = findDeskWorktree()
+                // Gate desk lookup on mode != .off (MINOR: optimization)
+                if appState.nightwatchMode != .off {
+                    deskWorktree = findDeskWorktree()
+                } else {
+                    deskWorktree = nil
+                }
             }
         }
     }

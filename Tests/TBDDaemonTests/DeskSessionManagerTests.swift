@@ -24,11 +24,13 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver()
             )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
                 modelProfileResolver: nil,
-                tmux: TmuxManager(dryRun: true)
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
             )
 
             // First call creates
@@ -65,11 +67,13 @@ extension TBDHomeSerialized {
                     tmux: TmuxManager(dryRun: true),
                     hooks: HookResolver()
                 )
+                let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
                 let manager = DeskSessionManager(
                     db: db,
                     lifecycle: lifecycle,
                     modelProfileResolver: nil,
-                    tmux: TmuxManager(dryRun: true)
+                    tmux: TmuxManager(dryRun: true),
+                    skillDir: skillDir
                 )
 
                 let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -95,11 +99,13 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver()
             )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
                 modelProfileResolver: nil,
-                tmux: TmuxManager(dryRun: true)
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
             )
 
             // Nudge with non-existent ID should not throw
@@ -161,11 +167,13 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver()
             )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
                 modelProfileResolver: nil,
-                tmux: TmuxManager(dryRun: true)
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
             )
 
             let dayDesk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -177,6 +185,54 @@ extension TBDHomeSerialized {
             let allDesks = try await db.worktrees.list()
             let deskCount = allDesks.filter { $0.displayName == NightwatchDeskPrompts.deskDisplayName }.count
             #expect(deskCount == 1)
+        }
+
+        @Test("ensure → close → ensure yields desk with live terminal (H1: recovery)")
+        func testRecoveryAfterClose() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-recovery-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                modelProfileResolver: nil,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            // Ensure creates desk with terminal
+            let desk1 = try await manager.ensureDeskSession(mode: .daywatch)
+            var terminals = try await db.terminals.list(worktreeID: desk1.id)
+            #expect(terminals.count > 0, "Initial ensure should spawn terminals")
+
+            // Close archives the desk and deletes terminals
+            await manager.closeDeskSession()
+            terminals = try await db.terminals.list(worktreeID: desk1.id)
+            #expect(terminals.isEmpty, "After close, terminals should be deleted")
+
+            let archivedDesk = try await db.worktrees.get(id: desk1.id)
+            #expect(archivedDesk?.status == .archived, "Desk should be archived")
+
+            // Ensure again should recover and respawn terminal
+            let desk2 = try await manager.ensureDeskSession(mode: .daywatch)
+            #expect(desk2.id == desk1.id, "Recovery should reuse same desk UUID")
+
+            terminals = try await db.terminals.list(worktreeID: desk2.id)
+            let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode })
+            #expect(claudeTerminal != nil, "Recovery should respawn Claude terminal")
         }
     }
 }
