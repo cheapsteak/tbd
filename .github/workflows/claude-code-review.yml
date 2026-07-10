@@ -56,7 +56,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
+          # Full history, not depth 1: the reviewer needs a merge-base with the
+          # base branch for `git diff origin/main...HEAD` (a shallow clone made
+          # that impossible — PR #434 diagnostics), and git log/blame for
+          # premise-audit checks. The repo packs to ~10 MB; the cost is seconds.
+          fetch-depth: 0
 
       - name: Reset any pre-committed verdict file
         if: steps.trust.outputs.trusted == 'true'
@@ -75,8 +79,11 @@ jobs:
         # (ENOENT) — this blocked pre-existing fork PRs; (2) a PR must not be able to
         # neuter the gate that reviews it. github.event.pull_request.base.ref is the
         # base branch under pull_request_target; FETCH_HEAD is its tip after the fetch.
+        # No --depth=1 on this fetch: a shallow fetch into the now-complete clone
+        # (checkout uses fetch-depth: 0) would write shallow grafts and break the
+        # merge-base the reviewer relies on for `git diff origin/main...HEAD`.
         run: |
-          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.ref }}"
+          git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
           rm -rf "$GITHUB_WORKSPACE/.github/workflows/claude-review-hooks"
           git checkout FETCH_HEAD -- .github/workflows/claude-review-hooks
 
@@ -119,7 +126,7 @@ jobs:
           prompt: |
             /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
 
-            IMPORTANT: The repository is checked out locally at the PR's head commit. Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
+            IMPORTANT: The repository is checked out locally at the PR's head commit WITH FULL GIT HISTORY (all branches). Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. Get the diff from `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD` or `gh pr diff`; `git log` and `git blame` are available for history checks. Do not run `git fetch` — everything is already local. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
 
             Additional review instructions:
 
@@ -174,7 +181,7 @@ jobs:
           # large-review class — so the budget carries headroom for it.
           claude_args: |
             --max-turns 100
-            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
+            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git merge-base:*),WebSearch,Read,Write,Glob,Grep,Task"
 
       - name: Enforce review verdict (block merge on Reject)
         if: steps.trust.outputs.trusted == 'true'
