@@ -215,6 +215,104 @@ struct SeverityLevelTests {
     }
 }
 
+// MARK: - Pace-aware fill tier
+
+@Suite("ProfileUsagePresentation — fillLevel (pace)")
+struct FillLevelTests {
+    @Test func underPaceProjectionStaysNormal() {
+        // 20% used at half-window → projected 0.40 < 0.75 → green.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 20, elapsedFraction: 0.5) == .normal)
+    }
+
+    @Test func projectionInWarmingBandIsCaution() {
+        // 55% used at 0.65 elapsed → projected ≈ 0.846 → yellow.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 55, elapsedFraction: 0.65) == .caution)
+        // Band edges: exactly 0.75 is caution, just below is normal.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 37.5, elapsedFraction: 0.5) == .caution)
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 37.4, elapsedFraction: 0.5) == .normal)
+    }
+
+    @Test func projectionInPressingBandIsWarning() {
+        // 45% used at 0.475 elapsed → projected ≈ 0.947 → orange.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 45, elapsedFraction: 0.475) == .warning)
+        // Lower band edge: exactly 0.90.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 45, elapsedFraction: 0.5) == .warning)
+    }
+
+    @Test func projectionAtOrAboveOneIsCritical() {
+        // 50% used at 0.5 elapsed → projected exactly 1.0 → red.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 50, elapsedFraction: 0.5) == .critical)
+        // 70% at 0.3 elapsed → projected ≈ 2.33 → red.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 70, elapsedFraction: 0.3) == .critical)
+    }
+
+    @Test func gateOffBelowFifteenPercentElapsedFallsBackToFloor() {
+        // Burning insanely fast, but the window barely started: projection is
+        // too noisy, so the plain severity floor rules (normal here).
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 30, elapsedFraction: 0.10) == .normal)
+        // At exactly the gate the projection turns on.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 30, elapsedFraction: 0.15) == .critical)
+    }
+
+    @Test func windowOverOrNoFractionFallsBackToFloor() {
+        // elapsedFraction == 1.0 (window over) → floor only.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 60, elapsedFraction: 1.0) == .normal)
+        // No reset date → nil fraction → exactly today's severity mapping.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 60, elapsedFraction: nil) == .normal)
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: nil, percent: 80, elapsedFraction: nil) == .warning)
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: nil, percent: 95, elapsedFraction: nil) == .critical)
+    }
+
+    @Test func severityFloorWinsWhenWorseThanPaceTier() {
+        // Pace says green (10% at 0.8 elapsed → projected 0.125), but the API
+        // says warning/critical — the floor keeps the bar honest.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "warning", percent: 10, elapsedFraction: 0.8) == .warning)
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "critical", percent: 10, elapsedFraction: 0.8) == .critical)
+        // Percent-threshold fallback floors too: 76% used late in the window
+        // projects under 1.0 but still can't render below warning.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: nil, percent: 76, elapsedFraction: 0.99) == .warning)
+    }
+
+    @Test func paceTierWinsWhenWorseThanSeverityFloor() {
+        // API still says normal but the burn rate projects past the limit.
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 55, elapsedFraction: 0.286) == .critical)
+    }
+
+    @Test func zeroPercentStaysNormalRegardlessOfElapsed() {
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: "normal", percent: 0, elapsedFraction: 0.9) == .normal)
+        #expect(ProfileUsagePresentation.fillLevel(
+            severity: nil, percent: 0, elapsedFraction: 0.5) == .normal)
+    }
+
+    @Test func fillLevelsAreOrderedByUrgency() {
+        #expect(ProfileUsagePresentation.FillLevel.normal
+                < ProfileUsagePresentation.FillLevel.caution)
+        #expect(ProfileUsagePresentation.FillLevel.caution
+                < ProfileUsagePresentation.FillLevel.warning)
+        #expect(ProfileUsagePresentation.FillLevel.warning
+                < ProfileUsagePresentation.FillLevel.critical)
+    }
+}
+
 // MARK: - Pace projection: elapsed-time fraction
 
 @Suite("ProfileUsagePresentation — elapsedFraction")
