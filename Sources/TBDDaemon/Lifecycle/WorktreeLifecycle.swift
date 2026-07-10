@@ -82,6 +82,15 @@ public struct WorktreeLifecycle: Sendable {
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600
 
+    /// Fired immediately after a worktree's directory is actually removed
+    /// from disk (`completeArchiveWorktree`'s `git.worktreeRemove`), with the
+    /// removed worktree's path. `nil` by default (tests, older callers).
+    /// `Daemon` wires this to `OrphanGC.scratchpadCleanup(forRemovedWorktreePath:)`
+    /// so the worktree's Claude Code scratchpad is reclaimed event-driven
+    /// instead of waiting for the next hourly sweep. Deliberately NOT fired by
+    /// `forgetWorktree` — forget leaves the directory in place.
+    public var onWorktreeRemoved: (@Sendable (String) async -> Void)?
+
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, lifecycle paths open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.
