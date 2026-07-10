@@ -91,6 +91,57 @@ extension AppState {
         return "Couldn't wake \(failures.count) sessions: \(first)"
     }
 
+    /// Concurrency bound for the explicit "Wake all parked" fan-out. Small on
+    /// purpose: full parallelism caused the #367 spawn storm (N simultaneous
+    /// heavy `claude --resume` respawns → RPC-timeout hang), so this caps
+    /// in-flight respawns at 3 while still beating a fully-sequential walk on a
+    /// 20-session worktree. The focus path stays ONE-at-a-time (see
+    /// `wakeHibernatedTerminalsOnFocus`) — this bound is ONLY for the explicit
+    /// user action.
+    static let wakeAllBatchSize = 3
+
+    /// Split parked-terminal ids into sequential batches of at most
+    /// `batchSize`. Pure + static so the batching is unit-tested without a live
+    /// `DaemonClient` (same pattern as `coalescedWakeFailureMessage`).
+    static func wakeAllBatches(_ ids: [UUID], batchSize: Int = wakeAllBatchSize) -> [[UUID]] {
+        guard batchSize > 0 else { return ids.isEmpty ? [] : [ids] }
+        return stride(from: 0, to: ids.count, by: batchSize).map {
+            Array(ids[$0 ..< min($0 + batchSize, ids.count)])
+        }
+    }
+
+    /// Explicit "Wake all parked in this worktree" action: wake EVERY parked
+    /// (hibernated or legacy-suspended) Claude session in `worktreeID`, in
+    /// bounded-concurrency batches (`wakeAllBatchSize` in flight, sequential
+    /// batches). Deliberately NOT the focus default (one-per-focus) — this is
+    /// the explicit fan-out users sometimes want. Folds all failures into ONE
+    /// coalesced alert (never a modal per terminal).
+    func wakeAllParkedInWorktree(worktreeID: UUID) async {
+        let ids = (terminals[worktreeID] ?? []).filter { $0.isParked }.map { $0.id }
+        var failures: [String] = []
+        for batch in Self.wakeAllBatches(ids) {
+            // Each batch's wakes run concurrently: wakeTerminal suspends at its
+            // RPC await, so up to wakeAllBatchSize respawns are in flight at once;
+            // the loop only starts the next batch after this one fully drains.
+            let batchFailures = await withTaskGroup(of: String?.self) { group in
+                for id in batch {
+                    group.addTask {
+                        await self.wakeTerminal(terminalID: id, worktreeID: worktreeID, userInitiated: true)
+                    }
+                }
+                var collected: [String] = []
+                for await failure in group where failure != nil {
+                    collected.append(failure!)
+                }
+                return collected
+            }
+            failures.append(contentsOf: batchFailures)
+        }
+        if let message = Self.coalescedWakeFailureMessage(failures: failures) {
+            showAlert(message, isError: true)
+        }
+    }
+
     /// Toggle a terminal's keep-warm pin (exempts it from auto-hibernation).
     func setTerminalKeepWarm(terminalID: UUID, keepWarm: Bool, worktreeID: UUID) async {
         do {

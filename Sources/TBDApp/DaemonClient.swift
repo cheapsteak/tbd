@@ -966,10 +966,10 @@ actor DaemonClient {
 
     /// Wake a hibernated terminal: respawn `claude --resume` in its window.
     /// Idempotent — a double-call collapses to one respawn daemon-side.
-    func terminalWake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async throws {
+    func terminalWake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool = false) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminalID, cols: cols, rows: rows)
+            params: TerminalWakeParams(terminalID: terminalID, cols: cols, rows: rows, fallbackToDefaultProfile: fallbackToDefaultProfile)
         )
     }
 

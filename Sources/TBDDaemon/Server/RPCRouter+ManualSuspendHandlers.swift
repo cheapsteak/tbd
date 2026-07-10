@@ -54,6 +54,8 @@ extension RPCRouter {
             return RPCResponse(error: reason)
         case .worktreeMissing(let path):
             return RPCResponse(error: "Worktree directory missing on disk: \(path). Restore the directory (or relocate the repo), then retry — the session stays parked and resumable.")
+        case .profileMissing(let profileID):
+            return RPCResponse(error: "This session was pinned to an account profile (\(profileID.uuidString)) that no longer exists. It stays parked and resumable — retry with the default-profile fallback to wake it on your default account.")
         }
     }
 

@@ -126,24 +126,11 @@ struct RowActionMenuActions {
 
         case .wakeHibernated:
             let wtID = worktree.id
-            // Wake every PARKED session (hibernated or legacy-suspended).
-            let ids = terminals.filter { $0.isParked }.map { $0.id }
-            Task {
-                // Collect failures and show ONE coalesced alert after the
-                // loop — never a modal per terminal (post-reboot every window
-                // is dead, and a per-terminal alert becomes a modal storm).
-                var failures: [String] = []
-                for id in ids {
-                    if let failure = await appState.wakeTerminal(
-                        terminalID: id, worktreeID: wtID, userInitiated: true
-                    ) {
-                        failures.append(failure)
-                    }
-                }
-                if let message = AppState.coalescedWakeFailureMessage(failures: failures) {
-                    appState.showAlert(message, isError: true)
-                }
-            }
+            // Wake every PARKED session (hibernated or legacy-suspended) in
+            // bounded-concurrency batches — NOT a full fan-out (that caused the
+            // #367 spawn storm) and NOT the one-per-focus default. One coalesced
+            // failure alert for the whole action.
+            Task { await appState.wakeAllParkedInWorktree(worktreeID: wtID) }
 
         case let .toggleKeepWarm(enable):
             let wtID = worktree.id
