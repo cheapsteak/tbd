@@ -204,9 +204,10 @@ private struct UsageBarRow: View {
             bucket("weekly_all", 12, severity: "normal", resetsIn: 6 * 24 * 3600),
         ]), now: now)
 
-        // Mid usage, over pace — the marker sits behind the fill (burning
-        // fast). Session projects to ~85% (yellow "warming"); weekly projects
-        // to ~95% (orange) despite the API still saying "normal".
+        // Mid usage — the projection lands in the caution/warning bands even
+        // while the marker sits just ahead of the fill. Session projects to
+        // ~85% (yellow "warming"); weekly projects to ~95% (orange) despite
+        // the API still saying "normal".
         UsageBarsView(snapshot: snap([
             bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),
             bucket("weekly_all", 55, severity: "normal", resetsIn: 2.95 * 24 * 3600),
