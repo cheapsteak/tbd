@@ -52,12 +52,17 @@ extension AppState {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
                 let size = mainAreaTerminalSize()
-                // Pass the placeholder's name so the daemon row starts with
-                // the same displayName: untouched creations don't flip names
-                // at swap time, and replaceCreationPlaceholder's
-                // string-equality rename inference stays sound.
+                // Pass the placeholder's name as both folder and displayName so
+                // the daemon row reuses the same slug for both `name` and
+                // `displayName`: untouched creations keep `name == displayName`
+                // (so `hasDefaultDisplayName` stays true), and
+                // replaceCreationPlaceholder's string-equality rename inference
+                // stays sound. Only pass folder for auto-generated branches
+                // (existingBranch == nil); for existing branches let the daemon
+                // derive the folder name from the branch ref to avoid collisions.
                 let wt = try await daemonClient.createWorktree(
                     repoID: repoID,
+                    folder: existingBranch == nil ? placeholderName : nil,
                     branch: existingBranch?.name,
                     displayName: placeholderName,
                     cols: size.cols, rows: size.rows,
