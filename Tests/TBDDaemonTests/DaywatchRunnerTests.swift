@@ -29,14 +29,7 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
     }
 }
 
-// MARK: - Fake DeskSessionManager Protocol
-
-/// Protocol to allow testing with fake desk session managers.
-protocol DeskSessionManagerInterface: Sendable {
-    func ensureDeskSession(mode: NightwatchMode) async throws -> any Sendable & { var id: UUID { get } }
-    func nudgeDeskSession(worktreeID: UUID, act: Bool) async
-    func closeDeskSession() async
-}
+// MARK: - Fake DeskSessionManager for Testing
 
 /// Fake desk session manager that records calls for testing desk-gated branches.
 actor FakeDeskSessionManager {
@@ -265,7 +258,7 @@ struct DaywatchRunnerTests {
 
         // Small sleep to ensure no more ticks after off
         try? await Task.sleep(for: .milliseconds(100))
-        let afterOff = await executor.tickCallCount
+        _ = await executor.tickCallCount  // Not used, but ensures no more ticks fire
 
         // Should not have more than one tick (the initial immediate tick)
         #expect(beforeOff >= 1, "Initial tick should have run")

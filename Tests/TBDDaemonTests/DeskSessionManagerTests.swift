@@ -130,11 +130,13 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver()
             )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
                 modelProfileResolver: nil,
-                tmux: TmuxManager(dryRun: true)
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
