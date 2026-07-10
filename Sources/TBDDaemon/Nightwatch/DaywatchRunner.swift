@@ -147,7 +147,10 @@ public actor DaywatchRunner {
                     let desk = try await desker.ensureDeskSession(mode: mode)
                     // Reentrancy guard: if a newer apply() arrived, abort to let it take over
                     guard myGen == generation else {
-                        logger.debug("apply() superseded during desk ensure on start; aborting")
+                        // A newer apply() won (e.g. rapid toggle to .off). The desk we just
+                        // created would otherwise leak un-archived — close it before yielding.
+                        logger.debug("apply() superseded during desk ensure on start; closing orphan desk")
+                        await desker.closeDeskSession()
                         return
                     }
                     deskWorktreeID = desk.id
@@ -185,7 +188,9 @@ public actor DaywatchRunner {
                     let desk = try await desker.ensureDeskSession(mode: mode)
                     // Reentrancy guard: if a newer apply() arrived, abort
                     guard myGen == generation else {
-                        logger.debug("apply() superseded during desk ensure on mode switch; aborting")
+                        // Same orphan-desk cleanup as the start branch: a newer apply() won.
+                        logger.debug("apply() superseded during desk ensure on mode switch; closing orphan desk")
+                        await desker.closeDeskSession()
                         return
                     }
                     deskWorktreeID = desk.id

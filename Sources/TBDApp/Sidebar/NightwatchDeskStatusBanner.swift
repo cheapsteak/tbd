@@ -42,13 +42,13 @@ struct NightwatchDeskStatusBanner: View {
             }
             .padding(8)
             .background(
-                NightwatchModeTheme.tintColor(for: appState.nightwatchMode)
+                (tintColor(for: appState.nightwatchMode) ?? .gray)
                     .opacity(0.15)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .strokeBorder(
-                        NightwatchModeTheme.tintColor(for: appState.nightwatchMode)
+                        (tintColor(for: appState.nightwatchMode) ?? .gray)
                             .opacity(0.3),
                         lineWidth: 1
                     )
@@ -78,15 +78,6 @@ struct NightwatchDeskStatusBanner: View {
 }
 
 /// Helper for mode-themed colors. Consolidated: single tint color for both background and border.
-enum NightwatchModeTheme {
-    static func tintColor(for mode: NightwatchMode) -> Color {
-        switch mode {
-        case .off: return .gray
-        case .daywatch: return .orange
-        case .nightwatch: return .purple
-        }
-    }
-}
 
 // #Preview disabled — PreviewsMacros plugin unavailable in this build context
 // #Preview {

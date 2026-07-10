@@ -91,8 +91,8 @@ actor FakeDeskSessionManager: DeskSessionManaging {
             branch: "main",
             path: "/tmp/test-desk",
             status: .active,
-            tmuxServer: "test-tmux",
-            createdAt: Date()
+            createdAt: Date(),
+            tmuxServer: "test-tmux" 
         )
     }
 
