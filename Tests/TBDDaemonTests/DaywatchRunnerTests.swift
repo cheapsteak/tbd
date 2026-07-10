@@ -301,8 +301,11 @@ struct DaywatchRunnerTests {
         var wrapUpCalls = await desker.wrapUpCalls
         #expect(wrapUpCalls == 0, "No wrap-up yet")
 
-        // Switch to off
+        // Switch to off (returns immediately; wrapUp happens in background Task)
         await runner.apply(mode: .off)
+        // Give the detached Task a moment to execute
+        try? await Task.sleep(for: .milliseconds(50))
+
         wrapUpCalls = await desker.wrapUpCalls
         #expect(wrapUpCalls == 1, "Should wrap up (not close) desk on .off")
 
@@ -424,6 +427,8 @@ struct DaywatchRunnerTests {
         #expect(nudges.count == 1, "loop state intact after duplicate apply")
 
         await runner.apply(mode: .off)
+        // Give the detached Task a moment to execute
+        try? await Task.sleep(for: .milliseconds(50))
         let wrapUpCalls = await desker.wrapUpCalls
         #expect(wrapUpCalls == 1, "Should wrap up desk on .off")
     }
@@ -443,6 +448,8 @@ struct DaywatchRunnerTests {
 
         // Turn OFF: wraps up and parks desk (does NOT delete)
         await runner.apply(mode: .off)
+        // Give the detached Task a moment to execute
+        try? await Task.sleep(for: .milliseconds(50))
         var wrapUpCalls = await desker.wrapUpCalls
         #expect(wrapUpCalls == 1, "Should wrap up desk on .off")
 

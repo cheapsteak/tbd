@@ -124,6 +124,7 @@ public actor DeskSessionManager: DeskSessionManaging {
             let terminals = try await db.terminals.list(worktreeID: existing.id)
             if let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) {
                 // Terminal exists; check if it's parked (hibernated)
+                var shouldRespawn = false
                 if claudeTerminal.isHibernated, let coordinator = hibernationCoordinator {
                     logger.info("Recovered Watch Desk \(existing.id, privacy: .public) with parked terminal; waking...")
                     let wakeResult = await coordinator.wake(terminalID: claudeTerminal.id)
@@ -134,10 +135,20 @@ public actor DeskSessionManager: DeskSessionManaging {
                         logger.debug("Desk terminal already awake: \(claudeTerminal.id, privacy: .public)")
                     default:
                         logger.warning("Failed to wake parked desk terminal: \(String(describing: wakeResult))")
-                        // Fall through to respawn
+                        shouldRespawn = true
                     }
                 }
-                // Terminal exists and is live (or wake succeeded); use it as-is
+
+                // If wake failed, respawn instead
+                if shouldRespawn {
+                    logger.info("Wake failed for desk terminal; respawning new terminal")
+                    do {
+                        _ = try await spawnDeskTerminal(worktree: existing, mode: mode)
+                    } catch {
+                        logger.warning("Failed to respawn terminal after failed wake: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                // Terminal exists and is live (or wake succeeded or respawn attempted); use worktree as-is
             } else {
                 // No Claude terminal found; respawn one
                 logger.info("Recovered Watch Desk \(existing.id, privacy: .public) but no Claude terminal; respawning")
@@ -283,8 +294,19 @@ public actor DeskSessionManager: DeskSessionManaging {
                 }
             }
 
-            // Step 4: Broadcast parked notification (worktree stays; terminals hibernated)
-            subscriptions?.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
+            // Step 4: Broadcast per-terminal hibernation delta (NOT archive; worktree stays active).
+            // This tells the app the terminal is parked, but the worktree/terminal entries stay in state.
+            // (Archive would delete the terminal entry and tombstone it, breaking wake-on-next-ON.)
+            for terminal in terminals {
+                subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    hibernated: true,
+                    keepWarm: terminal.keepWarm,
+                    suspendedSnapshot: nil,
+                    hibernateReason: .manual
+                )))
+            }
             logger.info("Wrapped up Watch Desk session: \(wt.id, privacy: .public); parked for reuse on next ON cycle")
         } catch {
             logger.error("Failed to wrap up desk session: \(error.localizedDescription, privacy: .public)")
