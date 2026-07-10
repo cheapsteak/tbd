@@ -2,6 +2,29 @@
 
 Keeps each TBD worktree's SwiftPM `.build` small, reclaims idle dependency-install directories (`node_modules`, `.venv`, `.terraform`), and cleans up orphaned Claude Code per-worktree scratchpads. **Not part of the shipped product** — it is developer machine tooling, like `scripts/restart.sh`. Two sibling scripts share conventions: `scripts/reclaim-build.sh` (SwiftPM + installs), `scripts/sweep-scratchpads.sh` (orphaned scratchpads).
 
+## Product GC vs dev-script territory
+
+TBD also ships a **product** garbage collector — the daemon-owned orphan GC
+(`Sources/TBDDaemon/GC/`, [`docs/orphan-gc.md`](orphan-gc.md)) — which is a different
+thing from everything else in this file. The split is by construction, not overlap:
+
+| | Product GC (daemon) | This file's scripts |
+|---|---|---|
+| Owns | Orphaned Claude Code agent worktrees (`.claude/worktrees/agent-*`, `wf_*`) whose run has ended, + scratchpads TBD can attribute to a known worktree path | SwiftPM `.build` tiers, install dirs (`node_modules`/`.venv`/`.terraform`) in **living** TBD worktrees, and scratchpad residue TBD can't attribute |
+| Trigger | Orphan-only: the owning entity is provably gone (unlocked, no live process, linkage-proven) | Idle-only: the owner (a living worktree) still exists, reaped purely by elapsed time |
+| Surfacing | History "Reclaimed" section, `tbd gc` CLI, snapshot-first + restorable | Log file only, not restorable |
+| Runs via | Daemon sweep loop (boot + hourly) | `launchd` (hourly) + `scripts/restart.sh` background launch |
+
+They're non-overlapping populations: a living TBD worktree's `.build`/installs are
+never orphaned (only idle), so the daemon never touches them; an agent worktree that's
+been fully reaped by the daemon no longer exists for this file's scripts to consider.
+One overlap is now moot rather than active: the **"Claude agent worktrees" install-dir
+tier described below is redundant** wherever the daemon reaps the whole agent worktree
+first (whole-directory removal takes the installs with it) — but that tier's script
+behavior is intentionally left in place in this PR as a backstop for agent worktrees
+the daemon hasn't gotten to yet (still locked, within grace, or `gcEnabled` off), and
+for any repo the daemon doesn't manage.
+
 ## Triggers
 
 Both scripts write to the same log (`~/Library/Logs/tbd-reclaim-build.log`) and run from `scripts/restart.sh`; `reclaim-build.sh` additionally runs hourly via launchd:
