@@ -98,7 +98,10 @@ public actor DeskSessionManager: DeskSessionManaging {
             // Check if it has a live Claude terminal
             let terminals = try await db.terminals.list(worktreeID: existing.id)
             if terminals.first(where: { $0.label == TerminalLabel.claudeCode }) != nil {
-                // Fast path: cached desk is alive and valid
+                // Fast path: cached desk is alive and valid.
+                // Mode switches (daywatch ↔ nightwatch) intentionally REUSE the existing desk and terminal.
+                // The desk is NOT respawned on mode switch because the per-tick judgePrompt (via nudgeDeskSession)
+                // carries the current mode/act flag each cycle. Initial frame is one-time; steady-state mode is driven per-tick.
                 return existing
             }
         }

@@ -54,6 +54,7 @@ actor FakeDeskSessionManager: DeskSessionManaging {
     private(set) var closeCalls: Int = 0
 
     private(set) var lastEnsuredWorktreeID: UUID?
+    private var deskID: UUID? // Cached desk ID — reused across mode switches
     private var ensureBehavior: EnsureBehavior = .succeed
     private var ensureFailureCount: Int = 0
 
@@ -83,12 +84,15 @@ actor FakeDeskSessionManager: DeskSessionManaging {
             break
         }
 
-        // Return a valid Worktree for testing
-        let deskID = UUID()
-        lastEnsuredWorktreeID = deskID
+        // Reuse desk ID across calls (models real behavior: desk is idempotent/persisted across mode switches)
+        if deskID == nil {
+            deskID = UUID()
+        }
+        lastEnsuredWorktreeID = deskID!
+
         // Create a real Worktree with minimal test values (repoID: nil makes it scratch)
         return Worktree(
-            id: deskID,
+            id: deskID!,
             repoID: nil,
             name: "watch-desk",
             displayName: "Watch Desk",
@@ -96,7 +100,7 @@ actor FakeDeskSessionManager: DeskSessionManaging {
             path: "/tmp/test-desk",
             status: .active,
             createdAt: Date(),
-            tmuxServer: "test-tmux" 
+            tmuxServer: "test-tmux"
         )
     }
 
@@ -298,7 +302,7 @@ struct DaywatchRunnerTests {
         #expect(closeCalls == 1, "Should close desk on .off")
     }
 
-    @Test("ensure-on-switch: mode switch ensures desk with new mode")
+    @Test("ensure-on-switch: mode switch ensures desk with new mode (reuses same desk)")
     func testEnsureOnModeSwitch() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
         let desker = FakeDeskSessionManager()
@@ -309,12 +313,19 @@ struct DaywatchRunnerTests {
         var ensureCalls = await desker.ensureCalls
         #expect(ensureCalls.count == 1)
         #expect(ensureCalls[0] == .daywatch)
+        let deskID1 = await desker.lastEnsuredWorktreeID
+        #expect(deskID1 != nil)
 
         // Switch to nightwatch
         await runner.apply(mode: .nightwatch)
         ensureCalls = await desker.ensureCalls
         #expect(ensureCalls.count == 2)
         #expect(ensureCalls[1] == .nightwatch)
+        let deskID2 = await desker.lastEnsuredWorktreeID
+
+        // CRITICAL: Mode switch must REUSE the same desk and terminal, not respawn.
+        // The per-tick judgePrompt carries the mode, so initial frame is one-time only.
+        #expect(deskID2 == deskID1, "Mode switch should reuse same desk (not respawn terminal)")
     }
 
     @Test("nudge-on-tick-10: exit code 10 nudges desk with correct act flag (daywatch)")
