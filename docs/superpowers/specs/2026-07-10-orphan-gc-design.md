@@ -147,10 +147,18 @@ free.
 
 ## Config, DB, surfaces
 
-- **Config** (daemon-side): `gcEnabled` (default **on** — snapshot-first is the safety
-  story), `gcGraceSeconds` (3600), `gcSnapshotRetentionDays` (30). Per the house rule
-  on gated behavior, `gcEnabled` gets a test per branch: off → zero filesystem
-  mutations; on → reaps happen.
+- **Config** (daemon-side): `gcMode` — `off` | `observe` | `on`, default **on**
+  (snapshot-first is the safety story). `observe` runs the full detection pipeline and
+  records "would reap" entries in History/log but deletes nothing — dry-run as a
+  product state, for trust-building. One mode governs both collectors. Advanced knobs,
+  config-only (not in Settings UI): `gcGraceSeconds` (3600), `gcSnapshotRetentionDays`
+  (30). Per the house rule on gated behavior, `gcMode` gets a test per branch: `off` →
+  zero filesystem mutations and no records; `observe` → records but zero mutations;
+  `on` → reaps happen.
+- **Deliberately not configurable** (safety invariants, not knobs): snapshot-before-
+  delete (no mode exists where uncommitted work is deleted without a snapshot), the
+  detection gates (linkage proof, lock, live-cwd), and sweep cadence (`gc.sweepNow` /
+  `tbd gc sweep` cover "now").
 - **DB migration** (next `vN`): `reap_records` — id, kind (`agentWorktree` |
   `scratchpad`), repo path, worktree path, branch (nullable), head sha (nullable),
   snapshot ref (nullable), apparent bytes freed (nullable), `reaped_at`, `restored_at`
@@ -183,7 +191,7 @@ free.
   fixture lsof/ps output and tmp git repos built with real `git worktree add`
   (locked, dirty, detached-HEAD, submodule-decoy, symlinked-path variants);
   `ReapSnapshot` round-trip — snapshot → reap → restore → byte-identical dirty state;
-  exact-slug computation; `gcEnabled` off/on branch tests.
+  exact-slug computation; `gcMode` off/observe/on branch tests.
 - **Integration** (suites under `TBDHomeSerialized` in `Tests/TBDDaemonTests`): full
   sweep against a `TBD_HOME` sandbox; archive event → scratchpad deleted; daemon-down
   catch-up via reconciliation sweep.
@@ -195,7 +203,8 @@ free.
    universal live-cwd/dirty rails, fix the symlink-canonicalization finding, scope
    install reaping per the review (agent worktrees only, or re-measured clone-aware).
    Immediate relief, no product coupling.
-2. **This feature ships behind `gcEnabled`** (default on), dogfooded on the developer
+2. **This feature ships behind `gcMode`** (default on; `observe` available for
+   trust-building), dogfooded on the developer
    fleet. The shell scripts keep covering what the product intentionally does not:
    SwiftPM `.build`, install dirs in living worktrees, non-attributable scratchpads.
 3. **`docs/reclaim-build.md`** gains a section delineating product GC vs dev-script
