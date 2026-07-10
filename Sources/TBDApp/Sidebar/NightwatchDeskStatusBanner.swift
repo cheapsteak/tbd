@@ -42,32 +42,32 @@ struct NightwatchDeskStatusBanner: View {
 
     var body: some View {
         if let content = bannerContent {
-            HStack(spacing: 8) {
-                Text(content.glyph)
-                    .font(.system(size: 14, weight: .semibold))
-                Text(content.text)
-                    .font(.caption)
-                Spacer()
-                Button(action: focusDeskSession) {
+            Button(action: focusDeskSession) {
+                HStack(spacing: 8) {
+                    Text(content.glyph)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(content.text)
+                        .font(.caption)
+                    Spacer()
                     Image(systemName: "arrow.up.left")
                         .font(.system(size: 10))
                 }
-                .buttonStyle(.plain)
-                .help("Focus Watch Desk session")
+                .padding(8)
+                .background(
+                    (tintColor(for: appState.nightwatchMode) ?? .gray)
+                        .opacity(0.15)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(
+                            (tintColor(for: appState.nightwatchMode) ?? .gray)
+                                .opacity(0.3),
+                            lineWidth: 1
+                        )
+                )
             }
-            .padding(8)
-            .background(
-                (tintColor(for: appState.nightwatchMode) ?? .gray)
-                    .opacity(0.15)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .strokeBorder(
-                        (tintColor(for: appState.nightwatchMode) ?? .gray)
-                            .opacity(0.3),
-                        lineWidth: 1
-                    )
-            )
+            .buttonStyle(.plain)
+            .help("Focus Watch Desk session")
             .onAppear {
                 // Only update desk worktree lookup when mode is active (not .off)
                 if appState.nightwatchMode != .off {
