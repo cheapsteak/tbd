@@ -94,6 +94,7 @@
       var RETURN_DELAY_MS = 600;
       var armedUntil = 0;
       var returned = false;
+      var returnTimer = null;
 
       function arm() {
         armedUntil = Date.now() + DETECT_WINDOW_MS;
@@ -114,7 +115,8 @@
         // Short delay so the scheme launch isn't interrupted by navigating
         // away. (The tab is usually backgrounded here, but not guaranteed —
         // the return proceeds even if it's visible again by then.)
-        setTimeout(function () {
+        returnTimer = setTimeout(function () {
+          returnTimer = null;
           if (canGoBack) {
             console.log('[tbd-open] calling history.back() now');
             history.back();
@@ -155,9 +157,17 @@
       });
 
       // The manual button fires the same tbd:// URL — arm the same
-      // success-detection/auto-return logic on click.
+      // success-detection/auto-return logic on click. A manual retry
+      // explicitly supersedes any in-flight auto-return: cancel the pending
+      // return timer so the new cycle's own success detection drives the
+      // (single) return, rather than a stale timer double-firing.
       link.addEventListener('click', function () {
         console.log('[tbd-open] manual fallback button clicked — re-arming, resetting returned flag');
+        if (returnTimer !== null) {
+          console.log('[tbd-open] pending return timer cancelled by manual click');
+          clearTimeout(returnTimer);
+          returnTimer = null;
+        }
         // Reset so a retry after a false positive (whose window.close() was
         // ignored) can trigger the status update and auto-return again.
         returned = false;
