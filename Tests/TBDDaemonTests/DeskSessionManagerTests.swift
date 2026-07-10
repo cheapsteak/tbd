@@ -189,7 +189,7 @@ extension TBDHomeSerialized {
             #expect(deskCount == 1)
         }
 
-        @Test("ensure → close → ensure yields desk with live terminal (H1: recovery)")
+        @Test("ensure → close → ensure creates new desk (archived desk not reused)")
         func testRecoveryAfterClose() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-desk-recovery-\(UUID().uuidString)", isDirectory: true)
@@ -228,13 +228,16 @@ extension TBDHomeSerialized {
             let archivedDesk = try await db.worktrees.get(id: desk1.id)
             #expect(archivedDesk?.status == .archived, "Desk should be archived")
 
-            // Ensure again should recover and respawn terminal
+            // Ensure again creates a NEW desk (archived desk excluded from recovery)
+            // This is intentional: archived desks are session history, not live sessions to resume
             let desk2 = try await manager.ensureDeskSession(mode: .daywatch)
-            #expect(desk2.id == desk1.id, "Recovery should reuse same desk UUID")
+            #expect(desk2.id != desk1.id, "Archived desk not reused; new desk created")
+            #expect(desk2.status == .active, "New desk should be active")
 
+            // New desk should have Claude terminal
             terminals = try await db.terminals.list(worktreeID: desk2.id)
             let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode })
-            #expect(claudeTerminal != nil, "Recovery should respawn Claude terminal")
+            #expect(claudeTerminal != nil, "New desk should spawn Claude terminal")
         }
     }
 }
