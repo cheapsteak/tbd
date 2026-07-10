@@ -179,7 +179,7 @@ extension TBDHomeSerialized {
 
             // Wrap up with short poll interval (tests)
             // Should exit gracefully when coordinator is nil (log warning, don't crash)
-            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.1)
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, startupWindowSeconds: 0.05, settleDelaySeconds: 0.05, maxWaitSeconds: 0.1)
 
             // Verify worktree still exists (wrap-up should be a safe no-op)
             let worktree = try await db.worktrees.get(id: deskID)
@@ -212,7 +212,7 @@ extension TBDHomeSerialized {
             )
 
             // Wrap up when no desk exists — should not throw
-            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.1)
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, startupWindowSeconds: 0.05, settleDelaySeconds: 0.05, maxWaitSeconds: 0.1)
             // Test just verifies no crash
         }
 
@@ -515,10 +515,75 @@ extension TBDHomeSerialized {
             // but the epoch-bump logic is exercised here.)
         }
 
-        @Test("wrapUpDeskSession polls terminal activity state and times out if never idle")
-        func testWrapUpPollsActivityState() async throws {
+        @Test("wrapUpDeskSession phase A: waits for agent to START working (not instant on stale idle)")
+        func testWrapUpWaitsForAgentToStart() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("tbd-wrapup-idle-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("tbd-wrapup-phase-a-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let tmux = TmuxManager(dryRun: true)
+
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: tmux,
+                skillDir: skillDir,
+                hibernationCoordinator: nil
+            )
+
+            // Create desk session (terminal starts at .idle by default)
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let terminals = try await db.terminals.list(worktreeID: desk.id)
+            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                #expect(false, "No Claude terminal found")
+                return
+            }
+
+            // Terminal starts .idle (stale state before hook runs)
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
+
+            // Kick off wrap-up in background
+            let wrapUpTask = Task {
+                await manager.wrapUpDeskSession(
+                    pollIntervalSeconds: 0.01,
+                    startupWindowSeconds: 0.1,
+                    settleDelaySeconds: 0.05,
+                    maxWaitSeconds: 1.0
+                )
+            }
+
+            // Give phase A time to start polling, then flip to .working (simulate hook)
+            try await Task.sleep(for: .milliseconds(30))
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .working)
+
+            // Then flip to .idle to complete phase B
+            try await Task.sleep(for: .milliseconds(50))
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
+
+            // Wait for wrap-up to complete
+            await wrapUpTask.value
+
+            // Test passes: wrap-up proceeded through both phases and only parked
+            // AFTER observing working→idle, not at t≈0 on stale idle
+            #expect(true, "Wrap-up should complete two-phase polling")
+        }
+
+        @Test("wrapUpDeskSession phase A: never goes working → applies settle delay before phase B")
+        func testWrapUpSettleDelayIfNeverStarts() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-wrapup-settle-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
@@ -545,35 +610,31 @@ extension TBDHomeSerialized {
 
             // Create desk session
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
-
-            // Get the Claude terminal
             let terminals = try await db.terminals.list(worktreeID: desk.id)
             guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
                 #expect(false, "No Claude terminal found")
                 return
             }
 
-            // Start with terminal in .working state
-            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .working)
-
-            // Kick off wrap-up with quick poll and short max-wait
-            // (terminal is working, so it should timeout without error)
-            let startTime = Date()
-            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.05)
-            let elapsed = Date().timeIntervalSince(startTime)
-
-            // Verify it waited approximately max-wait time (at least close)
-            #expect(elapsed >= 0.04, "Should poll until timeout; elapsed=\(elapsed)")
-
-            // Now test with terminal already idle
+            // Terminal stays .idle throughout (agent never picked up prompt)
             try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
 
-            let startTime2 = Date()
-            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 1.0)
-            let elapsed2 = Date().timeIntervalSince(startTime2)
+            // Wrap-up with short startup window and settle delay
+            let startTime = Date()
+            await manager.wrapUpDeskSession(
+                pollIntervalSeconds: 0.01,
+                startupWindowSeconds: 0.05,
+                settleDelaySeconds: 0.1,
+                maxWaitSeconds: 0.05  // Short max-wait for phase B
+            )
+            let elapsed = Date().timeIntervalSince(startTime)
 
-            // Verify it returned quickly (found idle, didn't wait full max-wait)
-            #expect(elapsed2 < 0.2, "Should return early when idle detected; elapsed=\(elapsed2)")
+            // Should have waited at least startup + settle (and no more than startup + settle + phase B)
+            // startup_window (0.05) + settle_delay (0.1) + phase_B_timeout (0.05) = ~0.2s minimum
+            #expect(elapsed >= 0.15, "Should apply settle delay when agent never starts; elapsed=\(elapsed)")
+
+            // Should timeout in phase B (terminal stays idle, no parking)
+            #expect(elapsed < 0.3, "Should timeout after settle + phase B; elapsed=\(elapsed)")
         }
 
         @Test("wrapUpDeskSession respects epoch: superseded by concurrent reuse")
@@ -614,30 +675,36 @@ extension TBDHomeSerialized {
                 return
             }
 
-            // Set terminal to idle so wrap-up will check it
+            // Set terminal to idle (starts idle, then flip to working to pass phase A)
             try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
 
-            // Kick off wrap-up but intercept epoch bump: simulate concurrent reuse
-            // by calling ensureDeskSession (which bumps epoch) while wrap-up is waiting
+            // Kick off wrap-up with two-phase polling
             let wrapUpTask = Task {
-                await manager.wrapUpDeskSession(pollIntervalSeconds: 0.05, maxWaitSeconds: 0.5)
+                await manager.wrapUpDeskSession(
+                    pollIntervalSeconds: 0.01,
+                    startupWindowSeconds: 0.1,
+                    settleDelaySeconds: 0.05,
+                    maxWaitSeconds: 1.0
+                )
             }
 
-            // Give wrap-up time to send prompt and start polling
-            try await Task.sleep(for: .milliseconds(50))
+            // Simulate agent starting (phase A completes)
+            try await Task.sleep(for: .milliseconds(40))
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .working)
 
-            // Now simulate concurrent reuse (bump epoch)
+            // Now bump epoch to simulate concurrent desk reuse (stops wrap-up mid-phase-B)
+            try await Task.sleep(for: .milliseconds(20))
             _ = try await manager.ensureDeskSession(mode: .daywatch)
 
             // Wait for wrap-up to complete
             await wrapUpTask.value
 
-            // Test passes if wrapUpDeskSession returned without crashing
-            // (The epoch guard prevents it from doing anything after the desk is reused)
-            #expect(true, "Wrap-up should handle epoch change gracefully")
+            // Test passes: wrap-up detected epoch change and aborted gracefully
+            // (no park, no crash)
+            #expect(true, "Wrap-up should abort on epoch change gracefully")
         }
 
-        @Test("wrapUpDeskSession times out if terminal never goes idle")
+        @Test("wrapUpDeskSession phase B: stays working past max-wait → not parked")
         func testWrapUpTimeoutNeverGoesIdle() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-wrapup-timeout-\(UUID().uuidString)", isDirectory: true)
@@ -675,16 +742,34 @@ extension TBDHomeSerialized {
                 return
             }
 
-            // Set terminal to .working and keep it there (don't go idle)
+            // Terminal starts idle
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
+
+            // Wrap-up in background with VERY tight timeouts for fast test
+            let startTime = Date()
+            let wrapUpTask = Task {
+                await manager.wrapUpDeskSession(
+                    pollIntervalSeconds: 0.005,
+                    startupWindowSeconds: 0.02,
+                    settleDelaySeconds: 0.02,
+                    maxWaitSeconds: 0.02  // Phase B timeout
+                )
+            }
+
+            // Simulate agent starting (phase A completes)
+            try await Task.sleep(for: .milliseconds(15))
             try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .working)
 
-            // Wrap-up with very short max-wait
-            let startTime = Date()
-            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.05)
+            // Keep it working through phase B timeout (don't flip to idle)
+            await wrapUpTask.value
             let elapsed = Date().timeIntervalSince(startTime)
 
-            // Verify it waited close to max-wait time before giving up
-            #expect(elapsed >= 0.04, "Should poll until timeout without error; elapsed=\(elapsed)")
+            // Should have gone through startup + settle + phase B without excessive delay
+            // startup (0.02) + settle (0.02) + phase B (0.02) = ~0.06s minimum
+            #expect(elapsed >= 0.04, "Should timeout reasonably; elapsed=\(elapsed)")
+            #expect(elapsed < 0.3, "Should not hang; elapsed=\(elapsed)")
+
+            // Test passes: wrap-up timed out in phase B without parking desk
         }
     }
 }

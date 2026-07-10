@@ -187,9 +187,9 @@ public actor DaywatchRunner {
 
             if let desker = deskSessionManager {
                 // Fire off wrap-up as a detached background task so apply() returns immediately.
-                // Polls for idle state then parks; no fixed sleep, so wrap-up blocks based on actual agent state.
+                // Two-phase polling: wait for agent to START (absorb hook latency), then wait for FINISH.
                 Task.detached {
-                    await desker.wrapUpDeskSession(pollIntervalSeconds: 2, maxWaitSeconds: 180)
+                    await desker.wrapUpDeskSession(pollIntervalSeconds: 2, startupWindowSeconds: 15, settleDelaySeconds: 10, maxWaitSeconds: 180)
                 }
             }
             deskWorktreeID = nil

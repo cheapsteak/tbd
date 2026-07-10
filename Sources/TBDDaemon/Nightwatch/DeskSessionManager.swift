@@ -10,7 +10,7 @@ public protocol DeskSessionManaging: Sendable {
     func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async
     func closeDeskSession() async
-    func wrapUpDeskSession(pollIntervalSeconds: TimeInterval, maxWaitSeconds: TimeInterval) async
+    func wrapUpDeskSession(pollIntervalSeconds: TimeInterval, startupWindowSeconds: TimeInterval, settleDelaySeconds: TimeInterval, maxWaitSeconds: TimeInterval) async
 }
 
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
@@ -239,15 +239,23 @@ public actor DeskSessionManager: DeskSessionManaging {
         return wt
     }
 
-    /// Gracefully end the shift: send wrap-up prompt, wait for agent to idle, then park the desk.
+    /// Gracefully end the shift: send wrap-up prompt, wait for agent to START and FINISH, then park the desk.
     /// Called when daywatch/nightwatch mode turns OFF. Preserves the desk worktree and transcript
     /// for reuse on the next ON cycle (off→park→on round-trip keeps the same desk).
-    /// Design: send prompt → poll until idle → hibernates terminals via HibernationCoordinator.
-    /// This avoids the race where a fixed timer fires while agent is mid-write (would return .notEligible).
+    /// Two-phase design: (A) wait for agent to START working (activityState → .working), bounded by
+    /// startupWindow to absorb async hook latency; (B) wait for agent to FINISH (activityState → idle),
+    /// bounded by maxWait. This avoids both the instant-park-on-stale-idle race and the fixed-timer race.
     /// Does NOT delete the worktree (unlike closeDeskSession).
     /// - Parameter pollIntervalSeconds: How often to check terminal activity state (default ~2s)
-    /// - Parameter maxWaitSeconds: Max time to wait for idle before giving up (default ~3min; 0=skip idle check)
-    public func wrapUpDeskSession(pollIntervalSeconds: TimeInterval = 2, maxWaitSeconds: TimeInterval = 180) async {
+    /// - Parameter startupWindowSeconds: Max time to wait for agent to START (absorb hook latency; ~15s default)
+    /// - Parameter settleDelaySeconds: Min delay if agent never starts, before proceeding to phase B (~10s default)
+    /// - Parameter maxWaitSeconds: Max time in phase B to wait for idle before giving up (default ~3min)
+    public func wrapUpDeskSession(
+        pollIntervalSeconds: TimeInterval = 2,
+        startupWindowSeconds: TimeInterval = 15,
+        settleDelaySeconds: TimeInterval = 10,
+        maxWaitSeconds: TimeInterval = 180
+    ) async {
         var terminalIDs: [UUID] = []
         var claudeTerminalID: UUID? = nil
         var worktreeID: UUID? = nil
@@ -309,16 +317,52 @@ public actor DeskSessionManager: DeskSessionManaging {
             return
         }
 
-        // Step 2: Poll until the desk terminal goes idle (OUTSIDE the gate)
-        // This waits for the agent to finish writing the shift summary before parking.
-        // Design: wait for terminal.activityState to be idle (not .working/.waitingForUser).
+        // Step 2A: Wait for agent to START working (absorb async UserPromptSubmit hook latency)
+        // The terminal starts at .idle; we need to observe it flip to .working/.waitingForUser
+        // before proceeding to phase B. This prevents the race: "stale idle at t≈0 → park instantly".
+        let startupStart = Date()
+        var agentStartedWorking = false
+
+        while Date().timeIntervalSince(startupStart) < startupWindowSeconds {
+            // Check if epoch changed — abort entire wrap-up
+            if capturedEpoch != self.deskWorktreeEpoch {
+                logger.info("Wrap-up startup aborted: epoch changed (desk reactivated)")
+                return
+            }
+
+            do {
+                if let claudeID = claudeTerminalID,
+                   let terminal = try await db.terminals.get(id: claudeID) {
+                    // Flip to .working or .waitingForUser means agent picked up the prompt
+                    if terminal.activityState == .working || terminal.activityState == .waitingForUser {
+                        agentStartedWorking = true
+                        logger.info("Agent started working; proceeding to phase B (wait for idle)")
+                        break
+                    }
+                }
+            } catch {
+                logger.warning("Failed to poll terminal state in phase A: \(error.localizedDescription, privacy: .public)")
+            }
+
+            try? await Task.sleep(for: .seconds(pollIntervalSeconds))
+        }
+
+        // If agent never started working within startup window, apply minimum settle delay
+        // before phase B. Don't proceed instantly (that would still be a race).
+        if !agentStartedWorking {
+            logger.info("Agent did not start working within startup window; applying settle delay before phase B")
+            try? await Task.sleep(for: .seconds(settleDelaySeconds))
+        }
+
+        // Step 2B: Wait for agent to FINISH (return to idle state)
+        // Poll until terminal.activityState becomes idle (not .working/.waitingForUser).
         let idleStart = Date()
         var idleObserved = false
 
         while Date().timeIntervalSince(idleStart) < maxWaitSeconds {
             // Check if epoch changed (desk was reactivated) — abort wait
             if capturedEpoch != self.deskWorktreeEpoch {
-                logger.info("Wrap-up wait aborted: epoch changed (desk reactivated)")
+                logger.info("Wrap-up phase B aborted: epoch changed (desk reactivated)")
                 return
             }
 
@@ -334,7 +378,7 @@ public actor DeskSessionManager: DeskSessionManaging {
                     }
                 }
             } catch {
-                logger.warning("Failed to poll terminal state: \(error.localizedDescription, privacy: .public)")
+                logger.warning("Failed to poll terminal state in phase B: \(error.localizedDescription, privacy: .public)")
             }
 
             // Sleep before next poll
@@ -342,7 +386,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
 
         if !idleObserved {
-            logger.warning("Wrap-up timeout: desk terminal did not go idle within \(Int(maxWaitSeconds))s; leaving desk running (protect against mid-write park)")
+            logger.warning("Wrap-up phase B timeout: desk terminal did not go idle within \(Int(maxWaitSeconds))s; leaving desk running (protect against mid-write park)")
             return
         }
 
