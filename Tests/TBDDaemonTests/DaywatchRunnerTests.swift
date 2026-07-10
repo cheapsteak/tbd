@@ -229,39 +229,43 @@ struct DaywatchRunnerTests {
     // executor-based tests above (wakeJudge fallback). Phase B: refactor DaywatchRunner to accept
     // a protocol interface for testability.
 
-    @Test("apply(.daywatch) without desk manager is no-op (backward compat)")
+    @Test("apply(.daywatch) without desk manager starts the loop")
     func testEnsureOnStartWithoutDesker() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
         // nil desk manager: ensure-on-start skipped
         let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
 
         await runner.apply(mode: .daywatch)
+        // Give the detached loop task time to run its first immediate tick
+        try? await Task.sleep(for: .milliseconds(50))
 
         let tickCalls = await executor.tickCallCount
         // First immediate tick should have run
         #expect(tickCalls >= 1)
     }
 
-    @Test("apply(.off) with desk manager (nil) behavior")
+    @Test("apply(.off) stops the loop")
     func testCloseOnStopIdempotent() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
         let runner = DaywatchRunner(executor: executor, deskSessionManager: nil, interval: 1000)
 
         // Start in daywatch
         await runner.apply(mode: .daywatch)
+        // Give the loop time to run its first immediate tick
+        try? await Task.sleep(for: .milliseconds(50))
+
+        let beforeOff = await executor.tickCallCount
+        #expect(beforeOff >= 1, "Initial tick should have run")
 
         // Switch to off
         await runner.apply(mode: .off)
 
-        // Verify loop was stopped (no more ticks)
-        let beforeOff = await executor.tickCallCount
-
         // Small sleep to ensure no more ticks after off
         try? await Task.sleep(for: .milliseconds(100))
-        _ = await executor.tickCallCount  // Not used, but ensures no more ticks fire
+        let afterOff = await executor.tickCallCount
 
-        // Should not have more than one tick (the initial immediate tick)
-        #expect(beforeOff >= 1, "Initial tick should have run")
+        // Should not have significantly more ticks after off (at most one final tick in flight)
+        #expect(afterOff <= beforeOff + 1, "Loop should stop after .off")
     }
 
     @Test("mode switch (daywatch → nightwatch) idempotent without desk")
