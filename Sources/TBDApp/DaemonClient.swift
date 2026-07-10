@@ -817,6 +817,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the pending-input veto for auto-hibernate (machine-interface
+    /// guard that prevents hibernation of sessions with typed-but-unsent input).
+    /// Applies on the next hibernation sweep.
+    func setHibernateInputVeto(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetHibernateInputVeto,
+            params: ConfigSetHibernateInputVetoParams(enabled: enabled)
+        )
+    }
 
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {

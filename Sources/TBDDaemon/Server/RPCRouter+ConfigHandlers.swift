@@ -96,4 +96,16 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the pending-input veto for auto-hibernate (machine-interface
+    /// guard that prevents hibernation of sessions with typed-but-unsent input).
+    /// The hibernation sweep re-reads the flag per cycle, so this applies on
+    /// the next sweep immediately — existing hibernated sessions are unaffected.
+    func handleConfigSetHibernateInputVeto(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetHibernateInputVetoParams.self, from: paramsData)
+        try await db.config.setHibernateInputVeto(enabled: params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

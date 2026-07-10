@@ -177,4 +177,25 @@ struct ConfigStoreTests {
         cfg = try await db.config.get()
         #expect(cfg.nightwatchMode == .off)
     }
+
+    @Test func hibernateInputVetoDefaultsToFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.hibernateInputVetoEnabled == false)
+    }
+
+    @Test func setAndGetHibernateInputVetoEnabled() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHibernateInputVeto(enabled: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.hibernateInputVetoEnabled == true)
+    }
+
+    @Test func setHibernateInputVetoToFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHibernateInputVeto(enabled: true)
+        try await db.config.setHibernateInputVeto(enabled: false)
+        let cfg = try await db.config.get()
+        #expect(cfg.hibernateInputVetoEnabled == false)
+    }
 }

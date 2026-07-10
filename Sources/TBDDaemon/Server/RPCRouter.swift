@@ -354,6 +354,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoHibernate(request.paramsData)
             case RPCMethod.configSetControlMode:
                 return try await handleConfigSetControlMode(request.paramsData)
+            case RPCMethod.configSetHibernateInputVeto:
+                return try await handleConfigSetHibernateInputVeto(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -378,10 +380,12 @@ public final class RPCRouter: Sendable {
             enabled = false
         }
         let version = controlMode?.tmuxVersion
+        let config = try await db.config.get()
         return try RPCResponse(result: DaemonCapabilitiesResult(
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
-            controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false))
+            controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
+            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled))
     }
 
     // MARK: - PR Status

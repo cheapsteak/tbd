@@ -243,4 +243,17 @@ public struct ConfigStore: Sendable {
             )
         }
     }
+
+    /// Persist the pending-input veto for auto-hibernate (machine-interface
+    /// guard that prevents hibernation of sessions with typed-but-unsent input).
+    /// The hibernation sweep re-reads this per decision, so no daemon restart
+    /// is required — changes take effect on the next sweep cycle.
+    public func setHibernateInputVeto(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET hibernate_input_veto_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
 }
