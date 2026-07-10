@@ -215,6 +215,119 @@ struct OrphanGCTests {
         throw NSError(domain: "OrphanGCTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "no HEAD found"])
     }
 
+    // MARK: - lsof outcome parsing (parseLiveCWDs)
+
+    @Test func parseLiveCWDsTimedOutReturnsNil() {
+        #expect(OrphanGC.parseLiveCWDs(.timedOut) == nil,
+                "a timed-out lsof must be 'unavailable', never 'no live processes'")
+    }
+
+    @Test func parseLiveCWDsNonZeroExitReturnsNil() {
+        let outcome = BoundedProcessOutcome.completed(
+            status: 1, stdout: Data("p123\nn/some/path\n".utf8), stderr: Data()
+        )
+        #expect(OrphanGC.parseLiveCWDs(outcome) == nil,
+                "partial output from a failed lsof is not a complete cwd picture — fail toward keep")
+    }
+
+    @Test func parseLiveCWDsParsesCompletedOutput() {
+        // Nonexistent paths pass through canon() unchanged (realpath fallback),
+        // so expectations are deterministic. Mixed lines: p-prefixed pid
+        // headers are dropped, n-prefixed cwds are kept (prefix stripped),
+        // duplicates are deduped preserving first-seen order, and a bare "n"
+        // (empty path) is dropped.
+        let stdout = """
+        p101
+        n/nonexistent/gc-test/wt-a
+        p102
+        n/nonexistent/gc-test/wt-b
+        p103
+        n/nonexistent/gc-test/wt-a
+        p104
+        n
+        """
+        let outcome = BoundedProcessOutcome.completed(status: 0, stdout: Data(stdout.utf8), stderr: Data())
+        let parsed = OrphanGC.parseLiveCWDs(outcome)
+        #expect(parsed == ["/nonexistent/gc-test/wt-a", "/nonexistent/gc-test/wt-b"])
+    }
+
+    // MARK: - lsof unavailable skips the entire sweep
+
+    @Test func sweepSkipsEntirelyWhenLiveCWDsUnavailable() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await db.repos.create(path: repo.path, displayName: "acme", defaultBranch: "main")
+
+        let wtPath = try await makeAgentWorktree(repo: repo, name: "agent-x")
+
+        let broadcaster = BroadcastDeltas()
+        // Internal seam: a nil-returning provider simulates the real lsof
+        // path's timeout/spawn-failure/non-zero-exit sentinel.
+        let gc = OrphanGC(
+            db: db,
+            git: GitManager(),
+            broadcast: { broadcaster.append($0) },
+            liveCWDsProvider: { nil },
+            scratchpadBase: nil,
+            now: OrphanGCTests.farFuture
+        )
+
+        let result = await gc.sweep()
+
+        #expect(result.reaped == 0)
+        #expect(result.planned.contains { $0.contains("lsof unavailable") })
+        #expect(FileManager.default.fileExists(atPath: wtPath),
+                "an lsof outage must never be treated as 'no live processes'")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.isEmpty)
+        #expect(broadcaster.snapshot().isEmpty)
+    }
+
+    // MARK: - Dry-run scratchpad reconciliation
+
+    @Test func sweepDryRunPlansScratchpadReconciliationWithoutMutating() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-reconcile-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let db = try TBDDatabase(inMemory: true)
+        // Repo path deliberately nonexistent: candidates() returns [] and the
+        // sweep's agent-worktree loop is a no-op, isolating reconciliation.
+        let repo = try await db.repos.create(
+            path: sandbox.appendingPathComponent("repo").path, displayName: "acme", defaultBranch: "main"
+        )
+        // Archived worktree row whose directory never existed on disk.
+        let goneWorktreePath = sandbox.appendingPathComponent("gone-wt").path
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "gone-wt", branch: "gone-wt",
+            path: goneWorktreePath, tmuxServer: "test-server"
+        )
+        try await db.worktrees.archive(id: row.id)
+
+        // Its scratchpad, however, survives in the injected base.
+        let slug = ScratchpadCollector.slug(forWorktreePath: goneWorktreePath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: scratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        let result = await gc.sweep(dryRun: true)
+
+        #expect(result.planned.contains { $0.contains("REAP scratchpad") && $0.contains(scratchDir.path) })
+        #expect(result.reaped == 0)
+        #expect(FileManager.default.fileExists(atPath: scratchDir.path),
+                "dry run must not remove the scratchpad")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.isEmpty)
+        #expect(broadcaster.snapshot().isEmpty)
+    }
+
     // MARK: - Event-driven scratchpad cleanup
 
     @Test func scratchpadEventCleanup() async throws {
@@ -243,5 +356,32 @@ struct OrphanGCTests {
 
         let deltas = broadcaster.snapshot()
         #expect(deltas.contains { if case .reapRecordsChanged = $0 { return true }; return false })
+    }
+
+    @Test func scratchpadEventCleanupDisabledDoesNothing() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-scratch-disabled-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let worktreePath = "/Users/chang/tbd/worktrees/removed-wt"
+        let slug = ScratchpadCollector.slug(forWorktreePath: worktreePath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: scratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(false)
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath)
+
+        #expect(FileManager.default.fileExists(atPath: scratchDir.path),
+                "the gcEnabled master switch must suppress event-driven deletion too")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.isEmpty)
+        #expect(broadcaster.snapshot().isEmpty)
     }
 }

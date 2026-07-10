@@ -54,7 +54,10 @@ public actor OrphanGC {
     private let db: TBDDatabase
     private let git: GitManager
     private let broadcast: @Sendable (StateDelta) -> Void
-    private let lsofProvider: (@Sendable () async -> [String])?
+    /// Optional-returning live-cwd provider. The provider returning `nil`
+    /// means "live cwds could not be determined" and makes `sweep` skip
+    /// entirely; the property itself being `nil` means "use the real lsof".
+    private let liveCWDsProvider: (@Sendable () async -> [String]?)?
     private let scratchpadBase: URL
     private let now: @Sendable () -> Date
 
@@ -62,11 +65,37 @@ public actor OrphanGC {
     private let agentCollector: AgentWorktreeCollector
     private let scratchpadCollector: ScratchpadCollector
 
+    /// Production seam: an injected `lsofProvider` returns a non-optional
+    /// `[String]` — by definition authoritative, it can't signal
+    /// "unavailable". Wraps into the internal optional-returning provider.
     public init(
         db: TBDDatabase,
         git: GitManager,
         broadcast: @escaping @Sendable (StateDelta) -> Void,
         lsofProvider: (@Sendable () async -> [String])? = nil,
+        scratchpadBase: URL? = nil,
+        now: (@Sendable () -> Date)? = nil
+    ) {
+        var wrapped: (@Sendable () async -> [String]?)?
+        if let lsofProvider {
+            wrapped = { await lsofProvider() }
+        }
+        self.init(
+            db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
+            scratchpadBase: scratchpadBase, now: now
+        )
+    }
+
+    /// Internal seam (tests): the provider may return `nil` to simulate the
+    /// real lsof path's "unavailable" sentinel (timeout / spawn failure /
+    /// non-zero exit), which must make `sweep` skip entirely rather than be
+    /// treated as "no live processes". `liveCWDsProvider` has no default so
+    /// this never collides with the public init's defaulted overload.
+    init(
+        db: TBDDatabase,
+        git: GitManager,
+        broadcast: @escaping @Sendable (StateDelta) -> Void,
+        liveCWDsProvider: (@Sendable () async -> [String]?)?,
         scratchpadBase: URL? = nil,
         now: (@Sendable () -> Date)? = nil
     ) {
@@ -77,7 +106,7 @@ public actor OrphanGC {
         self.db = db
         self.git = git
         self.broadcast = broadcast
-        self.lsofProvider = lsofProvider
+        self.liveCWDsProvider = liveCWDsProvider
         self.scratchpadBase = resolvedScratchpadBase
         self.now = resolvedNow
         self.snapshot = snap
@@ -116,7 +145,9 @@ public actor OrphanGC {
                     logger.debug("gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)")
                 case .reap:
                     planned.append("REAP agent-worktree \(candidate.path)")
-                    guard !dryRun, config.gcEnabled else { continue }
+                    // The outer `gcEnabled || dryRun` guard means a non-dry
+                    // run here always has gcEnabled == true.
+                    guard !dryRun else { continue }
                     if let record = await agentCollector.reap(candidate) {
                         try? await db.reapRecords.insert(record)
                         reaped += 1
@@ -141,9 +172,11 @@ public actor OrphanGC {
             }
         }
 
-        await reconcileScratchpads(dryRun: dryRun, config: config, planned: &planned, reaped: &reaped)
+        await reconcileScratchpads(dryRun: dryRun, planned: &planned, reaped: &reaped)
 
-        if !dryRun, config.gcEnabled {
+        // Snapshot retention never runs in dryRun; the outer guard already
+        // establishes gcEnabled for any non-dry run.
+        if !dryRun {
             await gcOldSnapshots(retentionDays: config.gcSnapshotRetentionDays)
         }
 
@@ -155,7 +188,7 @@ public actor OrphanGC {
     /// already gone but whose Claude Code scratchpad survives. Mirrors the
     /// same keep-biased `dryRun`/`gcEnabled` gate as the agent-worktree loop.
     private func reconcileScratchpads(
-        dryRun: Bool, config: Config, planned: inout [String], reaped: inout Int
+        dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
         let knownPaths = ((try? await db.worktrees.list(status: .archived)) ?? []).map(\.path)
         let gonePaths = knownPaths.filter { !FileManager.default.fileExists(atPath: $0) }
@@ -164,7 +197,9 @@ public actor OrphanGC {
             let dir = scratchpadBase.appendingPathComponent(slug)
             guard FileManager.default.fileExists(atPath: dir.path) else { continue }
             planned.append("REAP scratchpad \(dir.path)")
-            guard !dryRun, config.gcEnabled else { continue }
+            // The outer `gcEnabled || dryRun` guard means a non-dry run here
+            // always has gcEnabled == true.
+            guard !dryRun else { continue }
             if let record = await scratchpadCollector.cleanUp(forRemovedWorktreePath: path, now: now()) {
                 try? await db.reapRecords.insert(record)
                 reaped += 1
@@ -238,7 +273,15 @@ public actor OrphanGC {
     /// Entry point for the archive hook (Task 8): a TBD worktree at `path`
     /// was just removed, so its Claude Code scratchpad (if any) is cleaned up
     /// immediately rather than waiting for the next sweep's reconciliation.
+    ///
+    /// The `gcEnabled` master switch governs ALL GC deletion, including this
+    /// event-driven path — one toggle covers both collectors. A config read
+    /// failure also skips (fail toward keeping).
     public func scratchpadCleanup(forRemovedWorktreePath path: String) async {
+        guard let config = try? await db.config.get(), config.gcEnabled else {
+            logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — gc disabled")
+            return
+        }
         guard let record = await scratchpadCollector.cleanUp(forRemovedWorktreePath: path, now: now()) else {
             return
         }
@@ -254,17 +297,15 @@ public actor OrphanGC {
     /// to spawn) — callers MUST treat `nil` as "skip the sweep", never as
     /// "no live processes".
     private func liveCWDs() async -> [String]? {
-        if let lsofProvider {
-            return await lsofProvider()
+        if let liveCWDsProvider {
+            return await liveCWDsProvider()
         }
         return await Self.realLiveCWDs()
     }
 
-    /// Real `lsof`-backed live-cwd provider: `lsof -d cwd -Fn` prints one
-    /// `p<pid>` header line per process followed by an `n<path>` line for its
-    /// cwd. Lines are filtered to the `n`-prefixed ones, canonicalized (so
-    /// they compare equal to git's always-canonical worktree paths), and
-    /// deduped.
+    /// Real `lsof`-backed live-cwd provider: runs `lsof -d cwd -Fn` under a
+    /// 60s deadline and hands the outcome to `parseLiveCWDs`. A spawn failure
+    /// is the same "unavailable" sentinel as a timeout: `nil`, skip the sweep.
     private static func realLiveCWDs() async -> [String]? {
         let outcome: BoundedProcessOutcome
         do {
@@ -278,12 +319,33 @@ public actor OrphanGC {
             logger.error("gc: lsof spawn failed: \(String(describing: error), privacy: .public)")
             return nil
         }
+        return parseLiveCWDs(outcome)
+    }
 
+    /// Pure parser for the lsof outcome — extracted so the safety-relevant
+    /// "unavailable ⇒ skip sweep" direction is directly unit-testable.
+    ///
+    /// `lsof -d cwd -Fn` prints one `p<pid>` header line per process followed
+    /// by an `n<path>` line for its cwd. Lines are filtered to the
+    /// `n`-prefixed ones, the prefix is stripped, each path is canonicalized
+    /// (so it compares equal to git's always-canonical worktree paths), and
+    /// the result is deduped preserving first-seen order.
+    ///
+    /// Returns `nil` — the "skip the entire sweep" sentinel — for:
+    /// - `.timedOut`: a partial listing must never read as "no live processes".
+    /// - non-zero exit: lsof's output on failure is not a complete cwd
+    ///   picture, so it gets the same keep-biased treatment as a timeout.
+    /// - non-UTF-8 stdout: unparseable output is no picture at all.
+    static func parseLiveCWDs(_ outcome: BoundedProcessOutcome) -> [String]? {
         switch outcome {
         case .timedOut:
             logger.error("gc: lsof timed out after 60s")
             return nil
-        case .completed(_, let stdout, _):
+        case .completed(let status, let stdout, _):
+            guard status == 0 else {
+                logger.error("gc: lsof exited \(status, privacy: .public) — treating live cwds as unavailable")
+                return nil
+            }
             guard let text = String(data: stdout, encoding: .utf8) else {
                 logger.error("gc: lsof output was not valid UTF-8")
                 return nil
