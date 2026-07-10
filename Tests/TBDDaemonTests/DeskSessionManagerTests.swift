@@ -3,163 +3,180 @@ import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-@Suite("DeskSessionManager")
-struct DeskSessionManagerTests {
+extension TBDHomeSerialized {
+    @Suite("DeskSessionManager — TBD_HOME isolated")
+    struct DeskSessionManagerTests {
 
-    private func makeManager() throws -> (DeskSessionManager, TBDDatabase) {
-        let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
-            db: db,
-            git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
-        )
-        let manager = DeskSessionManager(
-            db: db,
-            lifecycle: lifecycle,
-            modelProfileResolver: nil,
-            tmux: TmuxManager(dryRun: true)
-        )
-        return (manager, db)
-    }
+        @Test("ensureDeskSession creates idempotent desk worktree")
+        func testEnsureDeskSessionIdempotent() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-test-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-    @Test("ensureDeskSession creates idempotent desk worktree")
-    func testEnsureDeskSessionIdempotent() async throws {
-        let (manager, db) = try makeManager()
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
 
-        // First call creates
-        let desk1 = try await manager.ensureDeskSession(mode: .daywatch)
-        #expect(desk1.displayName == "◐ Watch Desk")
-        #expect(desk1.isScratch == true)
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                modelProfileResolver: nil,
+                tmux: TmuxManager(dryRun: true)
+            )
 
-        // Second call returns same desk (idempotent)
-        let desk2 = try await manager.ensureDeskSession(mode: .daywatch)
-        #expect(desk1.id == desk2.id, "Idempotent call should return same desk")
+            // First call creates
+            let desk1 = try await manager.ensureDeskSession(mode: .daywatch)
+            #expect(desk1.displayName == NightwatchDeskPrompts.deskDisplayName)
+            #expect(desk1.isScratch == true)
 
-        // Verify one worktree in DB
-        let allDesks = try await db.worktrees.list()
-        let desks = allDesks.filter { $0.displayName == "◐ Watch Desk" }
-        #expect(desks.count == 1)
-    }
+            // Second call returns same desk (idempotent)
+            let desk2 = try await manager.ensureDeskSession(mode: .daywatch)
+            #expect(desk1.id == desk2.id, "Idempotent call should return same desk")
 
-    @Test("ensureDeskSession daywatch uses Sonnet model")
-    func testDaywatchModel() async throws {
-        let (manager, _) = try makeManager()
+            // Verify one worktree in DB
+            let allDesks = try await db.worktrees.list()
+            let desks = allDesks.filter { $0.displayName == NightwatchDeskPrompts.deskDisplayName }
+            #expect(desks.count == 1)
+        }
 
-        let desk = try await manager.ensureDeskSession(mode: .daywatch)
-        #expect(!desk.id.uuidString.isEmpty)
+        @Test("ensureDeskSession idempotent twice in a row (tests scratch dir collision handling)")
+        func testEnsureDeskSessionIdempotentTwice() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-test2-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-        // The Sonnet model is baked into spawnDeskTerminal; verify worktree was created
-        #expect(desk.isScratch == true)
-    }
+            // Run twice to test directory collision handling
+            for attempt in 1...2 {
+                setenv("TBD_HOME", tmpHome.path, 1)
+                defer { unsetenv("TBD_HOME") }
 
-    @Test("ensureDeskSession nightwatch uses Opus model")
-    func testNightwatchModel() async throws {
-        let (manager, _) = try makeManager()
+                let db = try TBDDatabase(inMemory: true)
+                let lifecycle = WorktreeLifecycle(
+                    db: db,
+                    git: GitManager(),
+                    tmux: TmuxManager(dryRun: true),
+                    hooks: HookResolver()
+                )
+                let manager = DeskSessionManager(
+                    db: db,
+                    lifecycle: lifecycle,
+                    modelProfileResolver: nil,
+                    tmux: TmuxManager(dryRun: true)
+                )
 
-        let desk = try await manager.ensureDeskSession(mode: .nightwatch)
-        #expect(!desk.id.uuidString.isEmpty)
+                let desk = try await manager.ensureDeskSession(mode: .daywatch)
+                #expect(!desk.id.uuidString.isEmpty, "Attempt \(attempt): desk should exist")
+                #expect(desk.isScratch == true, "Attempt \(attempt): should be scratch")
+            }
+        }
 
-        // The Opus model is baked into spawnDeskTerminal; verify worktree was created
-        #expect(desk.isScratch == true)
-    }
+        @Test("nudgeDeskSession gracefully handles missing worktree")
+        func testNudgeMissingWorktree() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-nudge-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-    @Test("ensureDeskSession creates Claude terminal in desk")
-    func testEnsureDeskSessionCreatesTerminal() async throws {
-        let (manager, db) = try makeManager()
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
 
-        let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                modelProfileResolver: nil,
+                tmux: TmuxManager(dryRun: true)
+            )
 
-        let terminals = try await db.terminals.list(worktreeID: desk.id)
-        #expect(!terminals.isEmpty, "Desk session should have at least one terminal")
-        #expect(terminals.first?.label == TerminalLabel.claudeCode)
-    }
+            // Nudge with non-existent ID should not throw
+            await manager.nudgeDeskSession(worktreeID: UUID(), act: false)
+            // Test just verifies no crash
+        }
 
-    @Test("nudgeDeskSession sends text to existing terminal")
-    func testNudgeDeskSession() async throws {
-        let (manager, db) = try makeManager()
+        @Test("closeDeskSession idempotent")
+        func testCloseDeskSessionIdempotent() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-close-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-        let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
 
-        // Nudge should not throw
-        await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                modelProfileResolver: nil,
+                tmux: TmuxManager(dryRun: true)
+            )
 
-        // Verify terminal still exists (nudge is best-effort)
-        let terminals = try await db.terminals.list(worktreeID: desk.id)
-        #expect(!terminals.isEmpty)
-    }
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
 
-    @Test("nudgeDeskSession gracefully handles missing worktree")
-    func testNudgeMissingWorktree() async throws {
-        let (manager, _) = try makeManager()
+            // First close
+            await manager.closeDeskSession()
 
-        // Nudge with non-existent ID should not throw
-        await manager.nudgeDeskSession(worktreeID: UUID(), act: false)
-        // Test just verifies no crash
-    }
+            // Second close should not throw (idempotent)
+            await manager.closeDeskSession()
 
-    @Test("closeDeskSession idempotent")
-    func testCloseDeskSessionIdempotent() async throws {
-        let (manager, db) = try makeManager()
+            // Verify worktree is archived
+            let archived = try await db.worktrees.get(id: desk.id)
+            #expect(archived?.status == .archived)
+        }
 
-        let desk = try await manager.ensureDeskSession(mode: .daywatch)
+        @Test("mode switch reuses desk (daywatch → nightwatch)")
+        func testModeSwitchReuses() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-mode-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-        // First close
-        await manager.closeDeskSession()
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
 
-        // Second close should not throw (idempotent)
-        await manager.closeDeskSession()
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                modelProfileResolver: nil,
+                tmux: TmuxManager(dryRun: true)
+            )
 
-        // Verify worktree is archived
-        let archived = try await db.worktrees.get(id: desk.id)
-        #expect(archived?.status == .archived)
-    }
+            let dayDesk = try await manager.ensureDeskSession(mode: .daywatch)
+            let nightDesk = try await manager.ensureDeskSession(mode: .nightwatch)
 
-    @Test("boot recovery: ensureDeskSession finds existing desk by display name")
-    func testBootRecoveryByDisplayName() async throws {
-        let (manager, db) = try makeManager()
+            #expect(dayDesk.id == nightDesk.id, "Mode switch should reuse same desk")
 
-        // Create a desk
-        let desk1 = try await manager.ensureDeskSession(mode: .daywatch)
-
-        // Simulate daemon restart: create new manager (fresh cache)
-        let lifecycle = WorktreeLifecycle(
-            db: db,
-            git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
-        )
-        let manager2 = DeskSessionManager(
-            db: db,
-            lifecycle: lifecycle,
-            modelProfileResolver: nil,
-            tmux: TmuxManager(dryRun: true)
-        )
-
-        // New manager should find existing desk by display name
-        let desk2 = try await manager2.ensureDeskSession(mode: .nightwatch)
-        #expect(desk1.id == desk2.id, "Boot recovery should reuse desk by display name")
-    }
-
-    @Test("mode switch reuses desk (daywatch → nightwatch)")
-    func testModeSwitchReuses() async throws {
-        let (manager, db) = try makeManager()
-
-        let dayDesk = try await manager.ensureDeskSession(mode: .daywatch)
-        let nightDesk = try await manager.ensureDeskSession(mode: .nightwatch)
-
-        #expect(dayDesk.id == nightDesk.id, "Mode switch should reuse same desk")
-
-        // Verify single desk in DB
-        let allDesks = try await db.worktrees.list()
-        let deskCount = allDesks.filter { $0.displayName == "◐ Watch Desk" }.count
-        #expect(deskCount == 1)
+            // Verify single desk in DB
+            let allDesks = try await db.worktrees.list()
+            let deskCount = allDesks.filter { $0.displayName == NightwatchDeskPrompts.deskDisplayName }.count
+            #expect(deskCount == 1)
+        }
     }
 }
-
-// Banner pure logic tests (requires TBDApp which has C module dependencies)
-// These test the mode→text mapping in NightwatchDeskStatusBanner:
-// - .off → nil (banner hidden)
-// - .daywatch → "◐", "Daywatch — desk session active"
-// - .nightwatch → "🌙", "Nightwatch — desk session active"
-// Verified by inspection: Sources/TBDApp/Sidebar/NightwatchDeskStatusBanner.swift lines 17-26

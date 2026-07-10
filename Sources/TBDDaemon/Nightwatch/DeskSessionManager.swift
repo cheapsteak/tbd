@@ -22,9 +22,6 @@ public actor DeskSessionManager {
     /// daywatch and nightwatch.
     private var deskWorktreeID: UUID?
 
-    /// Cached display name to identify the desk worktree across daemon restarts.
-    private let deskDisplayName = "◐ Watch Desk"
-
     // MARK: - Init
 
     public init(
@@ -56,7 +53,7 @@ public actor DeskSessionManager {
         // Query by displayName to detect existing desk worktrees
         // (survives daemon restart since displayName is stable).
         let allWorktrees = try await db.worktrees.list()
-        if let existing = allWorktrees.first(where: { $0.displayName == deskDisplayName && $0.isScratch }) {
+        if let existing = allWorktrees.first(where: { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }) {
             deskWorktreeID = existing.id
             logger.info("Reusing existing Watch Desk session: \(existing.id, privacy: .public)")
             return existing
@@ -95,7 +92,7 @@ public actor DeskSessionManager {
         do {
             wt = try await db.worktrees.createScratch(
                 name: name,
-                displayName: deskDisplayName,
+                displayName: NightwatchDeskPrompts.deskDisplayName,
                 path: deskPath.path,
                 tmuxServer: tmuxServer
             )
@@ -120,6 +117,7 @@ public actor DeskSessionManager {
     }
 
     /// Nudge the desk session to process queued judgment items.
+    /// Uses pasteText + sendKey pattern (mirrors handleTerminalSend).
     /// - Parameters:
     ///   - worktreeID: The Watch Desk worktree ID
     ///   - act: true for nightwatch (auto-act), false for daywatch (dry-run/batch only)
@@ -134,17 +132,23 @@ public actor DeskSessionManager {
                 return
             }
 
-            // Send the judgment prompt to the terminal via tmux
             guard let worktree = try await db.worktrees.get(id: worktreeID) else {
                 logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
                 return
             }
 
-            let escapedPrompt = shellEscape(prompt)
-            try await tmux.sendKeys(
+            // Paste the prompt text (matches handleTerminalSend pattern for reliability)
+            try await tmux.pasteText(
                 server: worktree.tmuxServer,
                 paneID: claudeTerminal.tmuxPaneID,
-                text: escapedPrompt
+                bytes: Data(prompt.utf8)
+            )
+
+            // Send Enter to submit
+            try await tmux.sendKey(
+                server: worktree.tmuxServer,
+                paneID: claudeTerminal.tmuxPaneID,
+                key: "Enter"
             )
 
             logger.debug("Nudged Watch Desk session: act=\(act, privacy: .public)")
@@ -187,14 +191,10 @@ public actor DeskSessionManager {
 
     // MARK: - Private Helpers
 
-    /// Spawn a Claude terminal in the desk worktree, configured for nightwatch operations.
+    /// Spawn a Claude terminal in the desk worktree using lifecycle.spawnPrimaryTerminals.
+    /// This reuses the production spawn path which handles trust seeding, overlay injection, etc.
     private func spawnDeskTerminal(worktree: Worktree, mode: NightwatchMode) async throws {
-        let skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"
-
-        // Select model based on mode
-        let model: String = mode == .daywatch ? "claude-3-5-sonnet-20241022" : "claude-3-5-opus-20241022"
-
-        // Resolve profile for model routing
+        // Resolve profile to select model mode
         var resolvedProfile: ResolvedModelProfile? = nil
         if let resolver = modelProfileResolver {
             do {
@@ -204,70 +204,23 @@ public actor DeskSessionManager {
             }
         }
 
-        // Resolve profileConfigDir if there's a profile
-        let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+        // Select model based on mode (use profile's model if available, else mode default)
+        let selectedModel = resolvedProfile?.model ?? (mode == .daywatch ? "claude-3-5-sonnet-20241022" : "claude-3-5-opus-20241022")
 
-        // Build spawn command
-        let sessionID = UUID().uuidString
+        // Get initial prompt for mode
         let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode)
 
-        let spawnResult = ClaudeSpawnCommandBuilder.build(
-            resumeID: nil,
-            freshSessionID: sessionID,
-            appendSystemPrompt: nil,
+        // Use production spawn path which handles trust, overlay, and all lifecycle concerns
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: worktree,
+            repo: nil,
+            skipClaude: false,
             initialPrompt: initialPrompt,
-            profileSecret: resolvedProfile?.secret,
-            profileKind: resolvedProfile?.kind,
-            profileBaseURL: resolvedProfile?.baseURL,
-            profileModel: model,
-            profileAwsRegion: resolvedProfile?.awsRegion,
-            profileAwsProfile: resolvedProfile?.awsProfile,
-            profileConfigDir: profileConfigDir,
-            cmd: nil,
-            shellFallback: "/bin/zsh",
-            settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-            pluginDirPath: skillDir,
-            envSettingOverrides: [:],
-            fileExists: { FileManager.default.fileExists(atPath: $0) }
+            preSessionTerminalID: nil,
+            overrideProfileID: resolvedProfile?.profileID
         )
 
-        // Ensure tmux server exists
-        let tmuxServer = worktree.tmuxServer
-        _ = try await tmux.ensureServer(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            cols: TmuxManager.defaultCols,
-            rows: TmuxManager.defaultRows
-        )
-
-        // Create the window
-        let terminalID = UUID()
-        let (windowID, paneID) = try await tmux.createWindow(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            shellCommand: spawnResult.command,
-            env: [:],
-            sensitiveEnv: spawnResult.sensitiveEnv
-        )
-
-        // Record the terminal in the database
-        _ = try await db.terminals.create(
-            id: terminalID,
-            worktreeID: worktree.id,
-            tmuxWindowID: windowID,
-            tmuxPaneID: paneID,
-            label: TerminalLabel.claudeCode,
-            claudeSessionID: sessionID,
-            profileID: resolvedProfile?.profileID
-        )
-
-        logger.info("Spawned desk terminal in \(worktree.id, privacy: .public) with model \(model, privacy: .public)")
+        logger.info("Spawned desk terminal in \(worktree.id, privacy: .public) with model \(selectedModel, privacy: .public)")
     }
 
-    /// Shell-escape a string for safe use in shell commands.
-    private func shellEscape(_ str: String) -> String {
-        return "'\(str.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
 }

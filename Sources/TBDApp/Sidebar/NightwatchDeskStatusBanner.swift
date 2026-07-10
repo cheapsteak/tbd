@@ -10,7 +10,7 @@ struct NightwatchDeskStatusBanner: View {
     /// Resolve the "Watch Desk" worktree by fixed display name.
     private func findDeskWorktree() -> Worktree? {
         let allWorktrees = appState.worktrees.values.flatMap { $0 }
-        return allWorktrees.first { $0.displayName == "◐ Watch Desk" && $0.isScratch }
+        return allWorktrees.first { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }
     }
 
     /// Returns the banner text and glyph based on current mode.
