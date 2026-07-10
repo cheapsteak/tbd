@@ -394,10 +394,43 @@ test_restart_sh_launches_reclaim_async_and_silent() {
   # shellcheck disable=SC2016
   nohup_ln="$(grep -nF 'nohup "$RECLAIM_SCRIPT"' "$restart" | head -1 | cut -d: -f1)"
   # shellcheck disable=SC2016
-  build_ln="$(grep -nF '(cd "$REPO_ROOT" && swift build)' "$restart" | head -1 | cut -d: -f1)"
+  build_ln="$(grep -nF '(cd "$REPO_ROOT" && swift build' "$restart" | head -1 | cut -d: -f1)"
   local order="unknown"
   if [[ -n "$nohup_ln" && -n "$build_ln" ]] && (( nohup_ln < build_ln )); then order="before"; fi
   assert_eq "reclaim launch (line ${nohup_ln:-?}) precedes swift build (line ${build_ln:-?})" "before" "$order"
+}
+
+# Static check: restart.sh's swift build must route the clang/Swift module
+# cache to the shared per-user directory (single ~610 MB copy for ALL
+# worktrees instead of ~640 MB inside each .build) — both the Swift frontend
+# flag and the clang flag (which reaches C-shim dependency targets like
+# CNIOAtomics), and the cache dir must be created before the build runs.
+test_restart_sh_uses_shared_module_cache() {
+  local restart="$HERE/restart.sh"
+  local body; body="$(cat "$restart")"
+  assert_contains "restart.sh points at the shared per-user module cache" "$body" 'Library/Caches/tbd/swift-module-cache'
+  # shellcheck disable=SC2016 # literal, unexpanded strings searched in restart.sh
+  assert_contains "restart.sh creates the shared cache dir" "$body" 'mkdir -p "$SHARED_MODULE_CACHE"'
+  assert_contains "flags include the Swift frontend module-cache-path" "$body" '-Xswiftc -module-cache-path'
+  assert_contains "flags include the clang modules cache path" "$body" '-Xcc -fmodules-cache-path='
+
+  # The build line itself must carry the flags.
+  local build_line
+  # shellcheck disable=SC2016
+  build_line="$(grep -F '(cd "$REPO_ROOT" && swift build' "$restart")"
+  # shellcheck disable=SC2016
+  assert_contains "build line passes the module-cache flags" "$build_line" 'swift build "${MODULE_CACHE_FLAGS[@]}"'
+
+  # mkdir must precede the build so the first flagged build never races a
+  # missing parent directory.
+  local mkdir_ln build_ln
+  # shellcheck disable=SC2016
+  mkdir_ln="$(grep -nF 'mkdir -p "$SHARED_MODULE_CACHE"' "$restart" | head -1 | cut -d: -f1)"
+  # shellcheck disable=SC2016
+  build_ln="$(grep -nF '(cd "$REPO_ROOT" && swift build' "$restart" | head -1 | cut -d: -f1)"
+  local order="unknown"
+  if [[ -n "$mkdir_ln" && -n "$build_ln" ]] && (( mkdir_ln < build_ln )); then order="before"; fi
+  assert_eq "shared cache mkdir (line ${mkdir_ln:-?}) precedes swift build (line ${build_ln:-?})" "before" "$order"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
