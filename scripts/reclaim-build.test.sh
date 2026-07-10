@@ -74,7 +74,7 @@ NO_PS='printf ""'   # ps seam that matches nothing
 
 test_plan_skips_when_no_build_dir() {
   local d; d="$(mktmpd)"
-  local out; out="$(RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
   assert_eq "no .build -> no output" "" "$out"
   rm -rf "$d"
 }
@@ -82,7 +82,7 @@ test_plan_skips_when_no_build_dir() {
 test_plan_fresh_skips_both_tiers() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 60 60   # 1 min old — fresh
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
   assert_eq "fresh -> SKIP fresh" "SKIP fresh $d" "$out"
   rm -rf "$d"
 }
@@ -90,7 +90,7 @@ test_plan_fresh_skips_both_tiers() {
 test_plan_stale_index_only_is_tier1() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 25000 60   # index ~7h old, debug fresh
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
   assert_eq "stale index only -> tier1" "PLAN tier1 $d" "$out"
   rm -rf "$d"
 }
@@ -98,7 +98,7 @@ test_plan_stale_index_only_is_tier1() {
 test_plan_stale_whole_build_no_session_is_tier2() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 200000 200000   # both > 48h
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
   assert_eq "stale whole build, no session -> tier2" "PLAN tier2 $d" "$out"
   rm -rf "$d"
 }
@@ -106,7 +106,7 @@ test_plan_stale_whole_build_no_session_is_tier2() {
 test_plan_stale_build_with_live_session_falls_to_tier1() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 200000 200000   # both stale, but session present
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 1)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 1 tbd)"
   assert_eq "stale build + live session -> tier1 (keep debug)" "PLAN tier1 $d" "$out"
   rm -rf "$d"
 }
@@ -115,7 +115,7 @@ test_plan_active_build_hard_skips() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 200000 200000
   local ps="printf '%s\n' \"711 /usr/bin/swift-frontend -c $d/Sources/A.swift\""
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$ps" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$ps" plan_worktree "$d" 0 tbd)"
   assert_eq "active build -> hard skip" "SKIP active-build $d" "$out"
   rm -rf "$d"
 }
@@ -349,7 +349,7 @@ test_plan_tier2_works_on_x86_64_triple() {
   mkdir -p "$d/.build/x86_64-apple-macosx/debug"
   : > "$d/Package.swift"
   : > "$d/.build/x86_64-apple-macosx/debug/app.o"; touch_age "$d/.build/x86_64-apple-macosx/debug/app.o" "$now" 200000
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
   assert_eq "x86_64 triple -> tier2" "PLAN tier2 $d" "$out"
   rm -rf "$d"
 }
@@ -457,18 +457,18 @@ test_eligible_install_dirs_includes_present_regenerable() {
   local d; d="$(mktmpd)"
   : > "$d/package.json"
   mkdir -p "$d/node_modules"
-  : > "$d/uv.lock"
-  mkdir -p "$d/.venv"
+  : > "$d/main.tf"
+  mkdir -p "$d/.terraform"
   local out; out="$(eligible_install_dirs "$d")"
   assert_contains "eligible includes regenerable node_modules" "$out" "node_modules"
-  assert_contains "eligible includes regenerable .venv" "$out" ".venv"
+  assert_contains "eligible includes regenerable .terraform" "$out" ".terraform"
   rm -rf "$d"
 }
 
 test_eligible_install_dirs_excludes_non_regenerable() {
   local d; d="$(mktmpd)"
   mkdir -p "$d/node_modules"     # present but NO package.json
-  mkdir -p "$d/.venv"            # present but NO uv.lock or requirements*.txt
+  mkdir -p "$d/.terraform"       # present but NO *.tf
   local out; out="$(eligible_install_dirs "$d")"
   assert_eq "non-regenerable dirs excluded" "" "$out"
   rm -rf "$d"
@@ -568,19 +568,72 @@ test_is_dirty_false_for_non_git_dir() {
   rm -rf "$d"
 }
 
-test_plan_installs_when_idle_and_no_session() {
+test_is_worktree_locked_true_when_locked() {
+  local wt; wt="$(mktmpd)"
+  mkdir -p "$wt"
+  local porcelain; porcelain="worktree $wt
+locked"
+  local cmd; cmd="printf '%s\n' \"$porcelain\""
+  if RECLAIM_WORKTREE_LIST_CMD="$cmd" is_worktree_locked "$wt"; then
+    assert_eq "worktree marked locked -> true" y y
+  else
+    assert_eq "worktree marked locked -> true" y n
+  fi
+  rm -rf "$wt"
+}
+
+test_is_worktree_locked_false_when_not_locked() {
+  local wt; wt="$(mktmpd)"
+  mkdir -p "$wt"
+  local porcelain; porcelain="worktree $wt
+detached"
+  local cmd; cmd="printf '%s\n' \"$porcelain\""
+  if RECLAIM_WORKTREE_LIST_CMD="$cmd" is_worktree_locked "$wt"; then
+    assert_eq "worktree not marked locked -> false" n y
+  else
+    assert_eq "worktree not marked locked -> false" n n
+  fi
+  rm -rf "$wt"
+}
+
+test_is_worktree_locked_false_when_other_locked() {
+  local wt; wt="$(mktmpd)"; mkdir -p "$wt"
+  local other; other="$(mktmpd)"; mkdir -p "$other"
+  local porcelain; porcelain="worktree $other
+locked
+worktree $wt
+detached"
+  local cmd; cmd="printf '%s\n' \"$porcelain\""
+  if RECLAIM_WORKTREE_LIST_CMD="$cmd" is_worktree_locked "$wt"; then
+    assert_eq "different worktree locked -> target not locked" n y
+  else
+    assert_eq "different worktree locked -> target not locked" n n
+  fi
+  rm -rf "$wt" "$other"
+}
+
+test_plan_installs_when_idle_and_no_session_agent_worktree() {
   local d; d="$(mktmpd)"; local now=2000000000
   : > "$d/package.json"; touch_age "$d/package.json" "$now" 200000   # manifest aged old
   _mk_install_dir "$d" "$now" 200000 node_modules   # > 48h
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
-  assert_eq "idle installs, no session -> PLAN installs" "PLAN installs $d" "$out"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 agent)"
+  assert_eq "idle installs, no session, agent -> PLAN installs" "PLAN installs $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_installs_skipped_for_tbd_worktree_even_if_idle() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  : > "$d/package.json"; touch_age "$d/package.json" "$now" 200000   # manifest aged old
+  _mk_install_dir "$d" "$now" 200000 node_modules   # > 48h stale
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "tbd source -> no installs plan even if idle" "" "$out"
   rm -rf "$d"
 }
 
 test_plan_installs_skipped_with_live_session() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_install_dir "$d" "$now" 200000 node_modules
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 1)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 1 agent)"
   assert_eq "idle installs but live session -> no plan" "" "$out"
   rm -rf "$d"
 }
@@ -591,17 +644,17 @@ test_plan_installs_skipped_when_worktree_recently_used() {
   : > "$d/package.json"; touch_age "$d/package.json" "$now" 200000   # manifest aged old (idle)
   _mk_install_dir "$d" "$now" 200000 node_modules   # > 48h old
   : > "$d/src/main.py"; touch_age "$d/src/main.py" "$now" 60         # but source file recent -> active
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 agent)"
   assert_eq "worktree with recent use -> no plan" "" "$out"
   rm -rf "$d"
 }
 
 test_plan_installs_skipped_when_not_regenerable() {
   local d; d="$(mktmpd)"; local now=2000000000
-  mkdir -p "$d/.venv"            # present but NO uv.lock or requirements*.txt
-  touch_age "$d/.venv" "$now" 200000
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
-  assert_eq "non-regenerable .venv -> no plan" "" "$out"
+  mkdir -p "$d/.terraform"       # present but NO *.tf
+  touch_age "$d/.terraform" "$now" 200000
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 agent)"
+  assert_eq "non-regenerable .terraform -> no plan" "" "$out"
   rm -rf "$d"
 }
 
@@ -609,33 +662,28 @@ test_plan_swift_and_installs_both_emitted() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 200000 200000            # tier2 .build
   touch_age "$d/Package.swift" "$now" 200000        # Package.swift also aged old
-  : > "$d/uv.lock"; touch_age "$d/uv.lock" "$now" 200000  # manifest aged old (regenerable)
-  _mk_install_dir "$d" "$now" 200000 .venv          # + idle installs
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  : > "$d/main.tf"; touch_age "$d/main.tf" "$now" 200000  # manifest aged old (regenerable)
+  _mk_install_dir "$d" "$now" 200000 .terraform     # + idle installs
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 agent)"
   assert_contains "swift tier2 emitted" "$out" "PLAN tier2 $d"
   assert_contains "installs emitted alongside" "$out" "PLAN installs $d"
   rm -rf "$d"
 }
 
-test_main_reaps_installs_in_non_swift_worktree() {
+test_main_reaps_installs_in_agent_worktree() {
   local root; root="$(mktmpd)"; local now=2000000000
-  local a="$root/node-wt"
-  mkdir -p "$a"
-  : > "$a/package.json"; touch_age "$a/package.json" "$now" 200000
-  : > "$a/uv.lock"; touch_age "$a/uv.lock" "$now" 200000
-  : > "$a/main.tf"; touch_age "$a/main.tf" "$now" 200000
-  _mk_install_dir "$a" "$now" 200000 node_modules
-  _mk_install_dir "$a" "$now" 200000 .venv
-  _mk_install_dir "$a" "$now" 200000 .terraform
+  local agent="$root/.claude/worktrees/agent-node"
+  mkdir -p "$agent"
+  : > "$agent/package.json"; touch_age "$agent/package.json" "$now" 200000
+  : > "$agent/main.tf"; touch_age "$agent/main.tf" "$now" 200000
+  _mk_install_dir "$agent" "$now" 200000 node_modules
+  _mk_install_dir "$agent" "$now" 200000 .terraform
   local j="$root/wt.json"
-  cat > "$j" <<JSON
-[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
-JSON
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  printf '[]' > "$j"
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
-  assert_eq "node_modules reaped" "false" "$([[ -d "$a/node_modules" ]] && echo true || echo false)"
-  assert_eq ".venv reaped"        "false" "$([[ -d "$a/.venv" ]] && echo true || echo false)"
-  assert_eq ".terraform reaped"   "false" "$([[ -d "$a/.terraform" ]] && echo true || echo false)"
+  assert_eq "node_modules reaped" "false" "$([[ -d "$agent/node_modules" ]] && echo true || echo false)"
+  assert_eq ".terraform reaped"   "false" "$([[ -d "$agent/.terraform" ]] && echo true || echo false)"
   rm -rf "$root"
 }
 
@@ -790,6 +838,42 @@ test_restart_sh_launches_scratchpad_sweep() {
   assert_contains "sweep launch merges stderr" "$launch_line" '2>&1'
   assert_contains "sweep launch redirects stdin from /dev/null" "$launch_line" '< /dev/null'
   assert_contains "sweep launch is backgrounded" "$launch_line" '/dev/null &'
+}
+
+test_main_skips_locked_worktree() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local wt="$root/wt"
+  _mk_worktree "$wt" "$now" 200000 200000            # tier2-eligible
+  mkdir -p "$wt/Sources"                              # Create so canon_path can resolve
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$wt","status":"active","liveClaudeSessionCount":0}]
+JSON
+  local porcelain; porcelain="worktree $wt
+locked"
+  local cmd; cmd="printf '%s\n' \"$porcelain\""
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_WORKTREE_LIST_CMD="$cmd" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "locked worktree skipped" "$out" "SKIP locked $wt"
+  assert_eq "locked .build survives" "true" "$([[ -d "$wt/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_tbd_source_worktree_installs_not_reaped() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local wt="$root/wt"
+  mkdir -p "$wt"
+  : > "$wt/package.json"; touch_age "$wt/package.json" "$now" 200000
+  _mk_install_dir "$wt" "$now" 200000 node_modules   # > 48h stale
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$wt","status":"active","liveClaudeSessionCount":0}]
+JSON
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+    bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  assert_eq "tbd source worktree node_modules NOT reaped" "true" "$([[ -d "$wt/node_modules" ]] && echo true || echo false)"
+  rm -rf "$root"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done

@@ -20,9 +20,10 @@ SourceKit-LSP background-indexing suppression is a **committed** `.sourcekit-lsp
 The script reclaims disk from **active, idle** worktrees:
 - **Tier 1** — `index-build/` idle > 6h → deleted (regenerates on demand). SwiftPM-only (`Package.swift`-gated).
 - **Tier 2** — whole `.build` idle > 48h AND no live Claude session → deleted (one cold rebuild next time). SwiftPM-only.
-- **Installs** — `node_modules`, `.venv`, `.terraform` idle > 48h AND no live Claude session → deleted (regenerate with npm/uv/terraform). Reaps ONLY when the worktree carries a regenerating lockfile/manifest (`.venv` needs `uv.lock` or `requirements*.txt`; `node_modules` needs `package.json`; `.terraform` needs `*.tf`). Idleness measured by the worktree's newest non-pruned file mtime, which tracks REAL USE (source edits, test output, logs), not the install dir's own mtime (which only moves on install). NOT gated on `Package.swift`, covering non-Swift worktrees where these directories dominate disk usage (typically ~4.3 GB vs ~2.5 GB `.build`).
+- **Installs** — `node_modules`, `.terraform` idle > 48h AND no live Claude session → deleted (regenerate with npm/terraform). **Agent worktrees only** (Claude-managed one-shot sessions; TBD-managed worktrees are never orphaned, only idle). Reaps ONLY when the worktree carries a regenerating lockfile/manifest (`node_modules` needs `package.json`; `.terraform` needs `*.tf`). Idleness measured by the worktree's newest non-pruned file mtime, which tracks REAL USE (source edits, test output, logs), not the install dir's own mtime (which only moves on install). NOT gated on `Package.swift`, covering non-Swift worktrees where these directories dominate disk usage (typically ~4.3 GB vs ~2.5 GB `.build`).
 
 Safety rails applied before anything is reaped:
+- Never reap a git-worktree-locked worktree (a `git worktree lock` held by Claude Code during an active run: `SKIP locked`).
 - Never reap a worktree that is the cwd of a live process (one `lsof -d cwd` pass per run: `SKIP live-cwd`).
 - Never reap a worktree with uncommitted changes (`git status --porcelain`: `SKIP dirty`).
 - Never reap a target touched within `RECLAIM_ACTIVE_GRACE` (10m default; defense-in-depth recency guard).
@@ -68,6 +69,7 @@ scripts/reclaim-build.sh             # reclaim now
 | `RECLAIM_WT_JSON` | run `tbd worktree list --json` | Fixture file for the TBD worktree list (tests) |
 | `RECLAIM_PS_CMD` | `ps -axo pid,args` | Fixture command for the active-build-process scan (tests) |
 | `RECLAIM_LSOF_CMD` | `lsof -d cwd -Fn` | Fixture command for the live-cwd scan — outputs `lsof -d cwd -Fn` format (tests) |
+| `RECLAIM_WORKTREE_LIST_CMD` | `git -C <wt> worktree list --porcelain` | Fixture command for the git-worktree-locked check — outputs `git worktree list --porcelain` format (tests) |
 | `RECLAIM_T1_SECONDS` | `21600` (6h) | Tier-1 (`index-build/`) idle threshold |
 | `RECLAIM_T2_SECONDS` | `172800` (48h) | Tier-2 (whole `.build` + installs) idle threshold |
 | `RECLAIM_ACTIVE_GRACE` | `600` (10m) | Skip a target whose newest mtime is more recent than this, even if a `PLAN` was made |

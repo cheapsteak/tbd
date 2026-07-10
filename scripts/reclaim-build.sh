@@ -10,10 +10,11 @@
 # What it reclaims, per worktree (a TBD worktree OR a Claude .claude/worktrees/* one):
 #   Tier 1 — SwiftPM .build/index-build idle > T1 (6h). Package.swift-gated.
 #   Tier 2 — whole SwiftPM .build idle > T2 (48h), no live session. Package.swift-gated.
-#   installs — node_modules/.venv/.terraform idle > T2, no live session. NOT gated on
-#              Package.swift (these dominate non-Swift worktrees: ~4.3GB vs ~2.5GB .build).
+#   installs — node_modules/.terraform idle > T2, no live session. Agent worktrees only
+#              (Claude-managed, one-shot; NOT TBD-managed). NOT gated on Package.swift.
 #
 # Safety rails applied to every worktree before anything is reaped:
+#   - never reap a git-worktree-locked worktree (in-use signal from Claude Code)
 #   - never reap a worktree that is the cwd of a live process (one lsof -d cwd pass)
 #   - never reap a worktree with uncommitted changes (git status --porcelain)
 #   - never reap a target touched within RECLAIM_ACTIVE_GRACE (recency guard)
@@ -23,6 +24,8 @@
 #   RECLAIM_WT_JSON     file with `tbd worktree list --json` output (default: run the CLI)
 #   RECLAIM_PS_CMD      command emitting `pid args` lines   (default: ps -axo pid,args)
 #   RECLAIM_LSOF_CMD    command emitting `lsof -d cwd -Fn`  (default: lsof -d cwd -Fn)
+#   RECLAIM_WORKTREE_LIST_CMD  command emitting `git worktree list --porcelain` output
+#                       (default: git -C WORKTREE worktree list --porcelain)
 #   RECLAIM_T1_SECONDS  Tier-1 (index-build) idle threshold (default 21600 = 6h)
 #   RECLAIM_T2_SECONDS  Tier-2 (.build + installs) idle threshold (default 172800 = 48h)
 #   RECLAIM_NOW         epoch seconds treated as "now"      (default: date +%s)
@@ -48,7 +51,7 @@ LIVE_CWDS=""
 
 # Dependency-install dirs reaped alongside .build at Tier 2. Kept in one place so
 # plan/reap/recency-guard all agree on the set.
-INSTALL_DIRS=(node_modules .venv .terraform)
+INSTALL_DIRS=(node_modules .terraform)
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -57,6 +60,7 @@ _now()           { printf '%s\n' "${RECLAIM_NOW:-$(date +%s)}"; }
 _worktree_json() { if [[ -n "${RECLAIM_WT_JSON:-}" ]]; then cat "$RECLAIM_WT_JSON"; else tbd worktree list --json; fi; }
 _ps_lines()      { if [[ -n "${RECLAIM_PS_CMD:-}" ]]; then eval "$RECLAIM_PS_CMD"; else ps -axo pid,args; fi; }
 _lsof_lines()    { if [[ -n "${RECLAIM_LSOF_CMD:-}" ]]; then eval "$RECLAIM_LSOF_CMD"; else lsof -d cwd -Fn 2>/dev/null; fi; }
+_worktree_list_lines() { if [[ -n "${RECLAIM_WORKTREE_LIST_CMD:-}" ]]; then eval "$RECLAIM_WORKTREE_LIST_CMD"; else git -C "$1" worktree list --porcelain 2>/dev/null; fi; }
 
 # --- helpers -----------------------------------------------------------------
 
@@ -92,13 +96,11 @@ _any_match() {
 
 # install_regenerable WORKTREE NAME -> exit 0 if the install dir NAME under
 # WORKTREE is regenerable (has a manifest/lockfile that can re-create it).
-# Never reap an install dir without its regenerating lockfile — e.g. a hand-built
-# `python -m venv` with no uv.lock or requirements*.txt can't be reproduced.
+# Never reap an install dir without its regenerating lockfile.
 install_regenerable() {
   local wt="$1" name="$2"
   case "$name" in
     node_modules) [[ -f "$wt/package.json" ]] ;;
-    .venv)        [[ -f "$wt/uv.lock" ]] || _any_match "$wt/requirements*.txt" ;;
     .terraform)   _any_match "$wt/"'*.tf' ;;
     *) return 1 ;;
   esac
@@ -166,6 +168,22 @@ is_dirty() {
   [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null | head -1)" ]]
 }
 
+# is_worktree_locked WORKTREE -> exit 0 if git reports this worktree as locked.
+# Parses --porcelain output: each block starts with "worktree <path>", and a locked
+# worktree's block contains a line that is exactly "locked" or starts with "locked ".
+# Paths are canonicalized before comparing.
+is_worktree_locked() {
+  local target cur=""; target="$(canon_path "${1%/}")"
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) cur="$(canon_path "${line#worktree }")" ;;
+      "locked"|"locked "*) [[ "$cur" == "$target" ]] && return 0 ;;
+    esac
+  done < <(_worktree_list_lines "$1")
+  return 1
+}
+
 # has_reclaimable WORKTREE -> exit 0 if the reaper can act on this worktree at
 # all: a SwiftPM .build (Package.swift-gated, so a stray non-Swift `.build` is
 # left alone) or any eligible dependency-install dir (one with a regenerating
@@ -187,9 +205,10 @@ reclaim_opted_out() {
   [[ -n "$root" && -e "$root/$RECLAIM_OPTOUT_FILE" ]]
 }
 
-# list_worktrees_tsv -> "<path>\t<liveSessions>" for each active worktree
+# list_worktrees_tsv -> "<path>\t<liveSessions>\t<source>" for each active worktree
+# Source is "tbd" for TBD-managed worktrees.
 list_worktrees_tsv() {
-  _worktree_json | jq -r '.[] | select(.status == "active") | [.path, (.liveClaudeSessionCount // 0)] | @tsv'
+  _worktree_json | jq -r '.[] | select(.status == "active") | [.path, (.liveClaudeSessionCount // 0), "tbd"] | @tsv'
 }
 
 # repo_root_for_worktree WORKTREE_PATH -> absolute repo root (parent of the
@@ -220,17 +239,18 @@ repo_roots() {
   fi | grep -v '^[[:space:]]*$' | sort -u
 }
 
-# claude_agent_worktrees_tsv -> "<path>\t0" for each .claude/worktrees/*/ dir
+# claude_agent_worktrees_tsv -> "<path>\t0\t<source>" for each .claude/worktrees/*/ dir
 # under every repo root. These have no TBD session concept, so they're always
 # reported with 0 live sessions (Tier-2 eligible on idleness alone). The
 # live-cwd / dirty gates in main() are what protect a busy agent worktree.
+# Source is "agent" for Claude-managed agent worktrees.
 claude_agent_worktrees_tsv() {
   local root d
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     for d in "$root"/.claude/worktrees/*/; do
       [[ -d "$d" ]] || continue
-      printf '%s\t0\n' "${d%/}"
+      printf '%s\t0\tagent\n' "${d%/}"
     done
   done < <(repo_roots)
 }
@@ -242,14 +262,15 @@ list_all_worktrees_tsv() {
   { list_worktrees_tsv; claude_agent_worktrees_tsv; } | awk -F'\t' '!seen[$1]++'
 }
 
-# plan_worktree WORKTREE_PATH LIVE_SESSIONS -> decision line(s):
+# plan_worktree WORKTREE_PATH LIVE_SESSIONS SOURCE -> decision line(s):
 #   PLAN tier1 <wt>     rm .build/index-build
 #   PLAN tier2 <wt>     rm whole .build
-#   PLAN installs <wt>  rm node_modules/.venv/.terraform
+#   PLAN installs <wt>  rm node_modules/.terraform (agent worktrees only)
 #   SKIP active-build|fresh <wt>
+# Tier 1/2 apply to all worktrees. Installs apply only to agent worktrees.
 # A SwiftPM worktree may emit both a .build tier line AND an installs line.
 plan_worktree() {
-  local wt="$1" sessions="$2"
+  local wt="$1" sessions="$2" source="$3"
   local now t1 t2
   now="$(_now)"; t1="$RECLAIM_T1_SECONDS"; t2="$RECLAIM_T2_SECONDS"
 
@@ -282,11 +303,13 @@ plan_worktree() {
     fi
   fi
 
-  # Dependency installs: reap only when the WORKTREE has been idle (no real use)
-  # for T2 and there's no live session — independent of Package.swift so node/
-  # python/terraform worktrees are covered. Idleness is the worktree's newest
-  # non-pruned file mtime (tracks use), NOT the install dir's own mtime.
-  if (( sessions == 0 )) && [[ -n "$(eligible_install_dirs "$wt")" ]]; then
+  # Dependency installs: reap only for agent worktrees when the WORKTREE has been
+  # idle (no real use) for T2 and there's no live session — independent of
+  # Package.swift so node/python/terraform worktrees are covered. Idleness is the
+  # worktree's newest non-pruned file mtime (tracks use), NOT the install dir's own
+  # mtime. Installs on TBD-managed worktrees are never reaped (they're never
+  # orphaned, only idle, and idle-clock reaping would footgun daily-driver worktrees).
+  if [[ "$source" == "agent" ]] && (( sessions == 0 )) && [[ -n "$(eligible_install_dirs "$wt")" ]]; then
     local act; act="$(worktree_newest_mtime "$wt")"
     if [[ -z "$act" ]] || (( now - act >= t2 )); then
       echo "PLAN installs $wt"; emitted=true
@@ -324,18 +347,19 @@ main() {
     exclude_canon="$(canon_path "$RECLAIM_EXCLUDE_PATH")"
   fi
 
-  local wt sessions
-  while IFS=$'\t' read -r wt sessions; do
+  local wt sessions source
+  while IFS=$'\t' read -r wt sessions source; do
     [[ -n "$wt" ]] || continue
     if [[ -n "$exclude_canon" && "$(canon_path "$wt")" == "$exclude_canon" ]]; then
       echo "SKIP excluded $wt"
       continue
     fi
     if reclaim_opted_out "$wt"; then echo "SKIP opted-out $wt"; continue; fi
+    if is_worktree_locked "$wt"; then echo "SKIP locked $wt"; continue; fi
     if is_live_cwd "$wt"; then echo "SKIP live-cwd $wt"; continue; fi
     if is_dirty "$wt"; then echo "SKIP dirty $wt"; continue; fi
     has_reclaimable "$wt" || continue
-    plan_worktree "$wt" "$sessions"
+    plan_worktree "$wt" "$sessions" "$source"
   done < <(list_all_worktrees_tsv) | tee "$plan_file" >&2
 
   if [[ "$dry" != "true" ]]; then
