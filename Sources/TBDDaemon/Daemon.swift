@@ -661,7 +661,6 @@ public final class Daemon: Sendable {
             let deskSessionManager = DeskSessionManager(
                 db: database,
                 lifecycle: lifecycle,
-                modelProfileResolver: modelProfileResolver,
                 tmux: tmux,
                 skillDir: skillDir,
                 subscriptions: subs

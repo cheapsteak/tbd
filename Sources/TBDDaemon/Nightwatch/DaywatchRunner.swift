@@ -174,6 +174,12 @@ public actor DaywatchRunner {
             loopTask?.cancel()
             loopTask = nil
 
+            // Pre-check: if a newer apply() already superseded us, the desk now belongs
+            // to it — do not close it out from under the newer call.
+            guard myGen == generation else {
+                logger.debug("apply() superseded before desk close on stop; skipping close")
+                return
+            }
             if let desker = deskSessionManager {
                 await desker.closeDeskSession()
             }

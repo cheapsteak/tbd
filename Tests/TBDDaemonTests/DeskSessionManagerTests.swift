@@ -28,7 +28,6 @@ extension TBDHomeSerialized {
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
-                modelProfileResolver: nil,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir
             )
@@ -71,8 +70,7 @@ extension TBDHomeSerialized {
                 let manager = DeskSessionManager(
                     db: db,
                     lifecycle: lifecycle,
-                    modelProfileResolver: nil,
-                    tmux: TmuxManager(dryRun: true),
+                        tmux: TmuxManager(dryRun: true),
                     skillDir: skillDir
                 )
 
@@ -103,7 +101,6 @@ extension TBDHomeSerialized {
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
-                modelProfileResolver: nil,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir
             )
@@ -134,7 +131,6 @@ extension TBDHomeSerialized {
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
-                modelProfileResolver: nil,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir
             )
@@ -173,7 +169,6 @@ extension TBDHomeSerialized {
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
-                modelProfileResolver: nil,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir
             )
@@ -210,7 +205,6 @@ extension TBDHomeSerialized {
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: lifecycle,
-                modelProfileResolver: nil,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir
             )
@@ -238,6 +232,41 @@ extension TBDHomeSerialized {
             terminals = try await db.terminals.list(worktreeID: desk2.id)
             let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode })
             #expect(claudeTerminal != nil, "New desk should spawn Claude terminal")
+        }
+
+        @Test("concurrent ensureDeskSession calls are serialized — single desk")
+        func testConcurrentEnsureSerialized() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-conc-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: "/tmp/skill"
+            )
+
+            // Fire two ensures concurrently: without the FIFO gate both pass the
+            // "does a desk exist" check before either write lands → two desks.
+            async let a = manager.ensureDeskSession(mode: .daywatch)
+            async let b = manager.ensureDeskSession(mode: .nightwatch)
+            let (deskA, deskB) = try await (a, b)
+
+            #expect(deskA.id == deskB.id, "concurrent ensures must converge on one desk")
+            let desks = try await db.worktrees.list()
+                .filter { $0.displayName == NightwatchDeskPrompts.deskDisplayName }
+            #expect(desks.count == 1, "exactly one desk row must exist")
         }
     }
 }

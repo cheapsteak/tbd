@@ -20,7 +20,6 @@ public actor DeskSessionManager: DeskSessionManaging {
 
     private let db: TBDDatabase
     private let lifecycle: WorktreeLifecycle
-    private let modelProfileResolver: ModelProfileResolver?
     private let tmux: TmuxManager
     /// Broadcasts worktree create/archive deltas so connected app clients update
     /// immediately (matching RPCRouter+ScratchHandlers) instead of waiting for a poll.
@@ -28,6 +27,33 @@ public actor DeskSessionManager: DeskSessionManaging {
     private let skillDir: String
 
     // MARK: - State
+
+    // MARK: - Serialization gate
+    //
+    // Actors are reentrant across suspension points, so ensure/close each have
+    // read→await→write windows on `deskWorktreeID` that can interleave (two
+    // concurrent first-ensures double-creating a desk; a stale close archiving
+    // a desk a newer ensure just made). This FIFO gate makes each public
+    // mutating operation atomic with respect to the others.
+    private var gateBusy = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func gateAcquire() async {
+        if gateBusy {
+            await withCheckedContinuation { gateWaiters.append($0) }
+            // Resumed by gateRelease(); gateBusy intentionally stays true.
+        } else {
+            gateBusy = true
+        }
+    }
+
+    private func gateRelease() {
+        if gateWaiters.isEmpty {
+            gateBusy = false
+        } else {
+            gateWaiters.removeFirst().resume()
+        }
+    }
 
     /// UUID of the current Watch Desk worktree; nil if none exists.
     /// Cleared when mode transitions to .off. Persists across mode switches between
@@ -43,14 +69,12 @@ public actor DeskSessionManager: DeskSessionManaging {
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
-        modelProfileResolver: ModelProfileResolver?,
         tmux: TmuxManager,
         skillDir: String,
         subscriptions: StateSubscriptionManager? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
-        self.modelProfileResolver = modelProfileResolver
         self.tmux = tmux
         self.subscriptions = subscriptions
         self.skillDir = skillDir
@@ -65,6 +89,8 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// - Parameter mode: The current nightwatch mode (daywatch or nightwatch)
     /// - Returns: The Worktree for the desk session
     public func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree {
+        await gateAcquire()
+        defer { gateRelease() }
         // If we already have a cached desk session, return it
         if let cachedID = deskWorktreeID,
            let existing = try await db.worktrees.get(id: cachedID) {
@@ -217,6 +243,8 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// from recovery (ensuring a fresh session if desired). Promotion not applicable here since desk is
     /// never user-facing as a persistent worktree.
     public func closeDeskSession() async {
+        await gateAcquire()
+        defer { gateRelease() }
         guard let worktreeID = deskWorktreeID else { return }
 
         do {
@@ -258,16 +286,6 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// The resolved profile's model is what gets used; mode affects behavior (conservative vs. free-acting),
     /// not the LLM model directly (that's a user's profile choice).
     private func spawnDeskTerminal(worktree: Worktree, mode: NightwatchMode) async throws {
-        // Resolve profile for auth/routing
-        var resolvedProfile: ResolvedModelProfile? = nil
-        if let resolver = modelProfileResolver {
-            do {
-                resolvedProfile = try await resolver.resolve(repoID: nil, override: nil)
-            } catch {
-                logger.warning("Failed to resolve profile for desk terminal: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
         // Get initial prompt for mode (includes absolute skillDir paths and field learnings)
         let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: skillDir)
 
@@ -277,12 +295,11 @@ public actor DeskSessionManager: DeskSessionManaging {
             repo: nil,
             skipClaude: false,
             initialPrompt: initialPrompt,
-            preSessionTerminalID: nil,
-            overrideProfileID: resolvedProfile?.profileID
+            preSessionTerminalID: nil
         )
-
-        let modelLabel = resolvedProfile?.model ?? "default"
-        logger.info("Spawned desk terminal in \(worktree.id, privacy: .public) with model \(modelLabel, privacy: .public)")
+        // Model follows the profile spawnPrimaryTerminals resolves internally —
+        // resolving here too would just double the keychain-backed lookup.
+        logger.info("Spawned desk terminal in \(worktree.id, privacy: .public)")
     }
 
 }
