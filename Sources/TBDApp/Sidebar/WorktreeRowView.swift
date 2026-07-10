@@ -49,10 +49,10 @@ struct WorktreeRowView: View {
 
     @ViewBuilder
     private func nestedPlusButton(repoID: UUID) -> some View {
-        SectionHeaderPlusButton(
-            help: "New nested worktree under \(worktree.displayName) (hover to pick a model profile, or \u{2325}-click)",
-            action: { handleNestedPlus(repoID: repoID) }
-        )
+        // No tooltip — hover opens the profile picker menu, which a tooltip
+        // would render on top of.
+        SectionHeaderPlusButton(action: { handleNestedPlus(repoID: repoID) })
+        .accessibilityLabel("New nested worktree under \(worktree.displayName)")
         .onHover { newChildMenu.triggerHover($0) }
         .background(
             FloatingMenuAnchor(

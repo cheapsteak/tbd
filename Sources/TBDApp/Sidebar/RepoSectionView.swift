@@ -137,13 +137,12 @@ struct RepoSectionView: View {
 
             Group {
                 if HoverMenuModel.shouldShowPlus(hovered: isSectionHovered, menuOpen: newWorktreeMenu.isOpen) {
-                    SectionHeaderPlusButton(
-                        // Hover opens the unified profile picker; its "Choose a
-                        // branch…" row drills into the branch list. ⌥-click opens
-                        // it immediately.
-                        help: "New worktree (hover to pick a model profile, or \u{2325}-click)",
-                        action: handlePlusButton
-                    )
+                    // Hover opens the unified profile picker; its "Choose a
+                    // branch…" row drills into the branch list. ⌥-click opens
+                    // it immediately. No tooltip — it would render on top of
+                    // the hover menu.
+                    SectionHeaderPlusButton(action: handlePlusButton)
+                    .accessibilityLabel("New worktree")
                     .disabled(repo.status == .missing)
                     // `.disabled` blocks the click path but NOT `.onHover`
                     // tracking-area events, so gate the hover-open explicitly —
