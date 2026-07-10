@@ -178,6 +178,10 @@ struct ArchivedWorktreesView: View {
         }
         .onAppear { reconcileSelection() }
         .onChange(of: hideEmpty) { _, _ in reconcileSelection() }
+        // This view isn't .id(repoID)-keyed, so @State survives repo switches
+        // (see RepoDetailView note) — a reap selection must not leak into
+        // another repo's Reclaimed section.
+        .onChange(of: repoID) { _, _ in selectedReapRecordID = nil }
     }
 
     /// Make sure `selectedArchivedWorktreeIDs[repoID]` points to a row that
@@ -185,6 +189,9 @@ struct ArchivedWorktreesView: View {
     /// unset or stale; clears when nothing is visible. Triggers a session
     /// fetch for any newly-selected row.
     private func reconcileSelection() {
+        // A deliberate Reclaimed-row selection must not be stolen by the
+        // archived auto-select (mutual exclusivity with selectedReapRecordID).
+        if selectedReapRecordID != nil { return }
         let visibleIDs = Set(rows.map(\.id))
         if let current = selectedID, visibleIDs.contains(current) { return }
         if let first = rows.first(where: { $0.reviveState == nil })?.worktree {

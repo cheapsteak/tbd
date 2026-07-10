@@ -615,6 +615,7 @@ extension AppState {
         } catch {
             logger.error("Failed to restore reap record \(record.id, privacy: .public): \(error)")
             showAlert("Couldn't restore worktree: \(error.localizedDescription)", isError: true)
+            handleConnectionError(error)
         }
     }
 

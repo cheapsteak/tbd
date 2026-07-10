@@ -103,16 +103,21 @@ private struct ReclaimedRow: View {
     let record: ReapRecord
     let isSelected: Bool
 
+    /// Restored records stay in the list (audit trail) but are no longer
+    /// reclaimed disk — dim the row a step and swap the reaped-at date for
+    /// a "Restored <date>" label so they're visually distinct.
+    private var isRestored: Bool { record.restoredAt != nil }
+
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: ReclaimedSectionView.glyph)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isRestored ? .tertiary : .secondary)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(basename)
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isRestored ? .tertiary : .secondary)
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     if let branch = record.branch {
@@ -125,11 +130,16 @@ private struct ReclaimedRow: View {
                         Text("snapshot ✓")
                     }
                     Spacer(minLength: 6)
-                    Text(record.reapedAt, format: .relative(presentation: .named))
-                        .lineLimit(1)
+                    if let restoredAt = record.restoredAt {
+                        Text("Restored \(restoredAt, format: .relative(presentation: .named))")
+                            .lineLimit(1)
+                    } else {
+                        Text(record.reapedAt, format: .relative(presentation: .named))
+                            .lineLimit(1)
+                    }
                 }
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(isRestored ? .quaternary : .tertiary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
