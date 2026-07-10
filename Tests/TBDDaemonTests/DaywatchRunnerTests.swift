@@ -82,8 +82,18 @@ actor FakeDeskSessionManager: DeskSessionManaging {
         // Return a valid Worktree for testing
         let deskID = UUID()
         lastEnsuredWorktreeID = deskID
-        // Create a minimal worktree-like object (tests only access .id)
-        return MockWorktree(id: deskID)
+        // Create a real Worktree with minimal test values (repoID: nil makes it scratch)
+        return Worktree(
+            id: deskID,
+            repoID: nil,
+            name: "watch-desk",
+            displayName: "Watch Desk",
+            branch: "main",
+            path: "/tmp/test-desk",
+            status: .active,
+            tmuxServer: "test-tmux",
+            createdAt: Date()
+        )
     }
 
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async {
@@ -93,18 +103,6 @@ actor FakeDeskSessionManager: DeskSessionManaging {
     func closeDeskSession() async {
         closeCalls += 1
     }
-}
-
-/// Minimal mock Worktree for testing (only exposes id property).
-private struct MockWorktree: Worktree {
-    let id: UUID
-    let path: String = "/tmp/test"
-    let displayName: String = "Test Desk"
-    let status: WorktreeStatus = .active
-    let isScratch: Bool = true
-    let tmuxServer: String = "test"
-    let createdAt: Date = Date()
-    let isArchived: Bool = false
 }
 
 // MARK: - Tests

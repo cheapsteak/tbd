@@ -110,6 +110,7 @@ public actor DaywatchRunner {
     private var deskWorktreeID: UUID?
     private var lastNudgeAttemptTime: Date?  // For retry on failure (MEDIUM 2)
     private var loopTask: Task<Void, Never>?
+    private var generation = 0  // Reentrancy guard: incremented on each apply() entry
 
     // MARK: - Init
 
@@ -127,7 +128,12 @@ public actor DaywatchRunner {
 
     /// Apply a mode change: start the loop for .daywatch/.nightwatch, stop for .off.
     /// Idempotent. Manages desk session lifecycle (ensure on start, close on stop).
+    /// Uses generation counter to guard against reentrancy: if a newer apply() call arrives
+    /// while an earlier one is suspended, the earlier call detects supersession and aborts.
     public func apply(mode: NightwatchMode) async {
+        generation += 1
+        let myGen = generation
+
         let wasRunning = currentMode != .off
         let shouldRun = mode != .off
         let previousMode = currentMode
@@ -139,10 +145,21 @@ public actor DaywatchRunner {
             do {
                 if let desker = deskSessionManager {
                     let desk = try await desker.ensureDeskSession(mode: mode)
+                    // Reentrancy guard: if a newer apply() arrived, abort to let it take over
+                    guard myGen == generation else {
+                        logger.debug("apply() superseded during desk ensure on start; aborting")
+                        return
+                    }
                     deskWorktreeID = desk.id
                 }
             } catch {
                 logger.error("Failed to ensure desk session on mode start: \(error.localizedDescription, privacy: .public)")
+            }
+
+            // Reentrancy guard: re-check before starting loop
+            guard myGen == generation else {
+                logger.debug("apply() superseded before loop start; aborting")
+                return
             }
 
             loopTask = Task { [weak self] in
@@ -166,6 +183,11 @@ public actor DaywatchRunner {
             do {
                 if let desker = deskSessionManager {
                     let desk = try await desker.ensureDeskSession(mode: mode)
+                    // Reentrancy guard: if a newer apply() arrived, abort
+                    guard myGen == generation else {
+                        logger.debug("apply() superseded during desk ensure on mode switch; aborting")
+                        return
+                    }
                     deskWorktreeID = desk.id
                 }
             } catch {
