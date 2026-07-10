@@ -57,6 +57,11 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// a `StateDelta.controlModeInputHealthChanged` broadcast; tests inject
     /// a recorder; the default is a no-op.
     private let onHealthChange: @Sendable (UUID, String, Bool, UInt64?) -> Void
+    /// Sink for input-activity recording: called with paneID whenever input
+    /// (keystroke or paste) is delivered to a pane. Wired to InputActivityTracker
+    /// in production so the idle sweep can veto a park if input arrived after
+    /// the session went idle. Tests inject a no-op.
+    private let onInput: @Sendable (String) -> Void
     private let latency: InputLatencyRecorder
     private let chunkSize: Int
 
@@ -78,11 +83,13 @@ final class ControlModeInputRouter: @unchecked Sendable {
     init(commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          latency: InputLatencyRecorder = InputLatencyRecorder(),
          chunkSize: Int = 330,
-         onHealthChange: @escaping @Sendable (UUID, String, Bool, UInt64?) -> Void = { _, _, _, _ in }) {
+         onHealthChange: @escaping @Sendable (UUID, String, Bool, UInt64?) -> Void = { _, _, _, _ in },
+         onInput: @escaping @Sendable (String) -> Void = { _ in }) {
         self.commandProvider = commandProvider
         self.latency = latency
         self.chunkSize = chunkSize
         self.onHealthChange = onHealthChange
+        self.onInput = onInput
 
         var escapedContinuation: AsyncStream<Item>.Continuation!
         let stream = AsyncStream<Item>(bufferingPolicy: .unbounded) { escapedContinuation = $0 }
@@ -195,6 +202,8 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// missing paste — but tears NOTHING down; no latency sample (keystroke
     /// telemetry only).
     private func deliverPaste(_ item: Item, client: TmuxControlCommandClient) async {
+        // Record input attempt regardless of send success — the user DID paste it.
+        onInput(item.header.paneID)
         do {
             try await PasteExecutor.paste(client: client, paneID: item.header.paneID, bytes: item.bytes)
             reportDelivery(header: item.header, success: true)
@@ -208,6 +217,8 @@ final class ControlModeInputRouter: @unchecked Sendable {
     }
 
     private func deliverInput(_ item: Item, client: TmuxControlCommandClient) async {
+        // Record input attempt regardless of send success — the user DID type it.
+        onInput(item.header.paneID)
         let commandTexts = SendKeysEncoder.commands(
             paneID: item.header.paneID, bytes: item.bytes, maxBytesPerCommand: chunkSize)
         guard !commandTexts.isEmpty else { return }

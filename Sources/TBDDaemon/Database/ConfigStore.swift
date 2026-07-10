@@ -28,6 +28,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
+    var hibernate_input_veto_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -47,7 +48,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             autoHibernateEnabled: auto_hibernate_enabled ?? false,
             hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
             controlModeEnabled: control_mode_enabled ?? false,
-            autoResumeOnApiError: auto_resume_on_api_error ?? false
+            autoResumeOnApiError: auto_resume_on_api_error ?? false,
+            hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false
         )
     }
 }

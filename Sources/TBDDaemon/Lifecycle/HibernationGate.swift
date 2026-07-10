@@ -25,6 +25,7 @@ public enum HibernationGate {
         case running            // actively running a turn — never eat an in-flight generation
         case waitingForUser     // a raised permission hand — hibernating would eat it
         case notIdleLongEnough  // idle, but not past the timeout yet
+        case pendingTypedInput  // idle, but input arrived after it went to rest
     }
 
     /// Evaluate the auto-hibernate decision for `terminal`.
@@ -32,16 +33,22 @@ public enum HibernationGate {
     /// - Parameters:
     ///   - terminal: the candidate.
     ///   - autoHibernateEnabled: the global master switch.
+    ///   - inputVetoEnabled: soak flag for the input-pipeline pending-input veto.
     ///   - idleTimeout: how long a terminal must be idle before it qualifies.
     ///   - idleSince: when the terminal last went idle (its `hibernationIdleSince`
     ///     marker). `nil` means "no idle marker yet" — treated as not-yet-idle,
     ///     since we can't prove it has been at rest long enough.
+    ///   - lastInputAt: the timestamp of the last keystroke/paste routed to this
+    ///     terminal's pane (from InputActivityTracker). `nil` means "no input
+    ///     recorded" (e.g. post-restart, or a pane never typed into).
     ///   - now: the reference time (injectable for tests).
     public static func decide(
         terminal: Terminal,
         autoHibernateEnabled: Bool,
+        inputVetoEnabled: Bool = false,
         idleTimeout: TimeInterval,
         idleSince: Date?,
+        lastInputAt: Date? = nil,
         now: Date
     ) -> Decision {
         guard autoHibernateEnabled else { return .featureDisabled }
@@ -51,6 +58,11 @@ public enum HibernationGate {
         // Idle-duration rail: needs a marker and enough elapsed time.
         guard let idleSince, now.timeIntervalSince(idleSince) >= idleTimeout else {
             return .notIdleLongEnough
+        }
+        // Input veto: if the soak flag is on and input arrived at or after the
+        // session went idle, block the park — pending typed input should not be eaten.
+        if inputVetoEnabled, let lastInputAt, lastInputAt >= idleSince {
+            return .pendingTypedInput
         }
         return .eligible
     }

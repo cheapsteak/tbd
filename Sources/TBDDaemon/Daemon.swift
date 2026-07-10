@@ -320,6 +320,10 @@ public final class Daemon: Sendable {
         // gated control connection through a single supervisor. When the gate
         // is off (the default), `enableIfGated` is a no-op.
         let tmuxVersion = await TmuxVersion.detect()
+        // Input activity tracker: records the timestamp of the last keystroke
+        // routed to each pane so the idle sweep can veto a park if input arrived
+        // after the session went idle (pending-input detection).
+        let inputActivity = InputActivityTracker()
         // Input router with the health sink wired to the state-delta broadcast
         // (#318 polish): edge-triggered per-pane input-delivery transitions
         // ride the same subscription channel the app already listens on.
@@ -331,6 +335,9 @@ public final class Daemon: Sendable {
                 subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
                     worktreeID: worktreeID, paneID: paneID, healthy: healthy,
                     generation: generation)))
+            },
+            onInput: { [inputActivity] paneID in
+                inputActivity.recordInput(paneID: paneID)
             }
         )
         let controlModeBridge = TmuxControlModeBridge(
@@ -431,6 +438,8 @@ public final class Daemon: Sendable {
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
         )
+        // Wire the shared input activity tracker to the coordinator
+        await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
         rpcRouter.controlMode = controlModeBridge
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the

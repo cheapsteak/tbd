@@ -31,12 +31,15 @@ struct HibernationGateTests {
     private func decide(
         _ terminal: Terminal,
         enabled: Bool = true,
+        inputVetoEnabled: Bool = false,
         timeout: TimeInterval = 30 * 60,
-        idleSince: Date?
+        idleSince: Date?,
+        lastInputAt: Date? = nil
     ) -> HibernationGate.Decision {
         HibernationGate.decide(
             terminal: terminal, autoHibernateEnabled: enabled,
-            idleTimeout: timeout, idleSince: idleSince, now: now
+            inputVetoEnabled: inputVetoEnabled,
+            idleTimeout: timeout, idleSince: idleSince, lastInputAt: lastInputAt, now: now
         )
     }
 
@@ -139,5 +142,98 @@ struct HibernationGateTests {
         let t = claudeTerminal(activityState: .working)
         let idleSince = now.addingTimeInterval(-60 * 60)
         #expect(decide(t, idleSince: idleSince) == .running)
+    }
+
+    // MARK: - Rail: pending typed input (input veto)
+
+    @Test func pendingTypedInputBlocksWhenVetoEnabled() {
+        // Input veto on + lastInputAt >= idleSince + idle long enough →
+        // `.pendingTypedInput`. This is the headline guarantee: pending typed
+        // input is never eaten by the park.
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        let lastInputAt = now.addingTimeInterval(-10 * 60) // input 10m after idle
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt) == .pendingTypedInput)
+    }
+
+    @Test func vetoDisabledProvesFlagIsGated() {
+        // Flag OFF + same inputs (input after idle, idle long enough) →
+        // `.eligible`. Proves the veto is truly gated; regression-guards
+        // today's behavior (scrape-only guard).
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        let lastInputAt = now.addingTimeInterval(-10 * 60) // input 10m after idle
+        #expect(decide(t, inputVetoEnabled: false, idleSince: idleSince, lastInputAt: lastInputAt) == .eligible)
+    }
+
+    @Test func inputBeforeIdleIsEligible() {
+        // Input veto on + lastInputAt < idleSince (input consumed by last turn) →
+        // `.eligible`. The session DID see the input (it was processed in a turn),
+        // so it's safe to park.
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-30 * 60)
+        let lastInputAt = now.addingTimeInterval(-35 * 60) // input 35m ago, before idle
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt) == .eligible)
+    }
+
+    @Test func noRecordedInputIsEligible() {
+        // Input veto on + lastInputAt == nil (no input recorded, e.g. post-restart,
+        // or a pane never typed into) → `.eligible` from the gate. The scrape veto
+        // in performHibernate covers this branch.
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: nil) == .eligible)
+    }
+
+    @Test func inputVetoLosesToRunning() {
+        // Precedence: `.running` wins over the input veto. A session that
+        // received input AND is actively running is reported as running, not
+        // pending-input.
+        let t = claudeTerminal(activityState: .working)
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        let lastInputAt = now.addingTimeInterval(-10 * 60) // input after idle
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt) == .running)
+    }
+
+    @Test func inputVetoLosesToWaitingForUser() {
+        // Precedence: `.waitingForUser` wins over the input veto.
+        let t = claudeTerminal(activityState: .waitingForUser)
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        let lastInputAt = now.addingTimeInterval(-10 * 60) // input after idle
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt) == .waitingForUser)
+    }
+
+    @Test func inputVetoLosesToNotIdleLongEnough() {
+        // Precedence: `.notIdleLongEnough` wins over the input veto — the
+        // timeout check comes before the input check.
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-5 * 60) // only 5m idle, not 30m
+        let lastInputAt = now.addingTimeInterval(-2 * 60) // input 2m after idle
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt) == .notIdleLongEnough)
+    }
+
+    @Test func inputAtExactIdleTimestampIsBlocked() {
+        // Edge case: input at exactly idleSince → input >= idleSince is true →
+        // blocked. Conservative: the comparison is >=, so input at the idle moment
+        // is treated as "after idle".
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        let lastInputAt = idleSince // input exactly when idle was marked
+        #expect(decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt) == .pendingTypedInput)
+    }
+
+    @Test func tuiBreakSimulation() {
+        // Headline guarantee (fail-safe test): a simulated Claude Code composer
+        // redesign where the scraper is blind (would return false for pending input)
+        // cannot eat typed-but-unsent input because the input veto catches it at
+        // the gate level. This terminal received input AFTER going idle, and while
+        // the gate passes only the decision (the scrape logic is separate), the
+        // input veto alone suffices to block the park.
+        let t = claudeTerminal()
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        let lastInputAt = now.addingTimeInterval(-5 * 60) // typed something 5m after idle
+        let decision = decide(t, inputVetoEnabled: true, idleSince: idleSince, lastInputAt: lastInputAt)
+        #expect(decision == .pendingTypedInput)
+        // The gate alone blocks, so even if the scrape is broken the park is safe.
     }
 }

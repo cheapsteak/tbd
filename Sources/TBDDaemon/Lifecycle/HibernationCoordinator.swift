@@ -75,6 +75,9 @@ public actor HibernationCoordinator {
     /// sync — injectable (mirroring `RPCRouter.configDirManager`) so tests
     /// point it at a temp dir instead of falling back to the real `~/.claude`.
     private let configDirManager: ClaudeProfileConfigDirManager
+    /// Default input activity tracker. Wired post-construction by Daemon.swift
+    /// to the shared instance from the input router so both use the same tracker.
+    private var inputActivity: InputActivityTracker
     private let now: @Sendable () -> Date
 
     /// Per-terminal "first time we observed it idle-at-rest" marker, maintained
@@ -144,6 +147,7 @@ public actor HibernationCoordinator {
         self.modelProfileResolver = modelProfileResolver
         self.subscriptions = subscriptions
         self.configDirManager = configDirManager
+        self.inputActivity = InputActivityTracker()
         self.now = now
     }
 
@@ -167,6 +171,15 @@ public actor HibernationCoordinator {
     /// `controlMode` is wired post-construction.
     public func setOnServerCreated(_ hook: (@Sendable (String) async -> Void)?) {
         onServerCreated = hook
+    }
+
+    /// Wire the input activity tracker so the sweep can veto parks based on
+    /// pending typed input. Set once by Daemon.swift after construction so the
+    /// shared tracker is used across the input router and coordinator.
+    func setInputActivity(_ tracker: InputActivityTracker) {
+        // Replace the default tracker with the shared one from the input router.
+        // This is safe because nothing has accessed inputActivity yet at wiring time.
+        self.inputActivity = tracker
     }
 
     // MARK: - Keep-warm
@@ -235,7 +248,7 @@ public actor HibernationCoordinator {
         case .keepWarm: return "Terminal is pinned keep-warm"
         case .running: return "Session is actively running"
         case .waitingForUser: return "Session is waiting on a permission prompt"
-        case .eligible, .featureDisabled, .notIdleLongEnough: return "Not hibernatable"
+        case .eligible, .featureDisabled, .notIdleLongEnough, .pendingTypedInput: return "Not hibernatable"
         }
     }
 
@@ -329,6 +342,13 @@ public actor HibernationCoordinator {
         // orphaned claude child processes (#43944, #25188) are logged but not
         // killed in v1 — surfacing them is enough.
         await verifyHibernationTookEffect(server: server, paneID: paneID, terminalID: terminal.id)
+
+        // Clear the recorded input timestamp for this pane. The paneID may be
+        // reused in a future respawn, so clearing prevents a stale veto from the
+        // old session's final keystrokes. (A paneID reused with residual input
+        // would only add a stale veto, never drop a real one — the safe direction
+        // — but clearing is cleaner.)
+        inputActivity.forget(paneID: paneID)
 
         do {
             // setHibernated also cancels any scheduled auto-resume in the
@@ -749,15 +769,20 @@ public actor HibernationCoordinator {
 
         // Prune markers for terminals that vanished.
         let liveIDs = Set(terminals.map { $0.id })
+        let livePaneIDs = Set(terminals.compactMap { $0.tmuxPaneID })
         idleSince = idleSince.filter { liveIDs.contains($0.key) }
         pendingKillSince = pendingKillSince.filter { liveIDs.contains($0.key) }
+        inputActivity.prune(keeping: livePaneIDs)
 
         for terminal in terminals {
+            let lastInputAt = inputActivity.lastInput(paneID: terminal.tmuxPaneID)
             let decision = HibernationGate.decide(
                 terminal: terminal,
                 autoHibernateEnabled: config.autoHibernateEnabled,
+                inputVetoEnabled: config.hibernateInputVetoEnabled,
                 idleTimeout: timeout,
                 idleSince: idleSince[terminal.id],
+                lastInputAt: lastInputAt,
                 now: reference
             )
 
@@ -786,6 +811,14 @@ public actor HibernationCoordinator {
                 if idleSince[terminal.id] == nil {
                     idleSince[terminal.id] = reference
                 }
+                pendingKillSince[terminal.id] = nil
+
+            case .pendingTypedInput:
+                // Idle long enough but input arrived after it went idle: keep the
+                // idle marker (session IS at rest) but clear the armed debounce so
+                // the veto persists across sweeps until input is consumed (sending
+                // advances idleSince past lastInputAt).
+                logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input")
                 pendingKillSince[terminal.id] = nil
 
             case .featureDisabled, .notClaudeResumable, .alreadyHibernated,
