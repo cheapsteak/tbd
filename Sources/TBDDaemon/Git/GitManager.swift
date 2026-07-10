@@ -14,6 +14,27 @@ public struct GitTimeoutError: Error, CustomStringConvertible {
     }
 }
 
+/// A single entry from `git worktree list --porcelain`, parsed with full
+/// detail (lock state, detached-HEAD detection) for the orphan-GC sweep.
+/// Bare-repository entries (no `HEAD` line) are dropped by the parser since
+/// they aren't worktrees a GC pass would ever act on.
+public struct WorktreeListEntry: Sendable, Equatable {
+    /// Canonical path as git reports it (git itself `realpath()`s worktree
+    /// paths when recording them, so no extra resolution is needed here).
+    public var path: String
+    public var headSHA: String
+    /// `nil` when the worktree's HEAD is detached.
+    public var branch: String?
+    public var locked: Bool
+
+    public init(path: String, headSHA: String, branch: String?, locked: Bool) {
+        self.path = path
+        self.headSHA = headSHA
+        self.branch = branch
+        self.locked = locked
+    }
+}
+
 /// A branch reference returned by `GitManager.listBranches`.
 ///
 /// Includes both `refs/heads/*` (local) and `refs/remotes/origin/*` (remote
@@ -423,6 +444,153 @@ public struct GitManager: Sendable {
         }
     }
 
+    // MARK: - Orphan-GC primitives
+
+    /// Lists all worktrees with full detail (HEAD SHA, branch or detached,
+    /// lock state) for the orphan-GC sweep. Unlike `worktreeList`, this
+    /// parses the `HEAD`, `detached`, and `locked[ reason]` lines that the
+    /// legacy parser ignores.
+    public func worktreeListDetailed(repoPath: String) async throws -> [WorktreeListEntry] {
+        let output = try await run(arguments: ["worktree", "list", "--porcelain"], at: repoPath)
+        return parseWorktreeListDetailed(output)
+    }
+
+    /// Returns `true` iff `candidatePath` is a bona fide linked worktree of
+    /// the repo at `repoPath` — i.e. `<candidatePath>/.git` is a *file*
+    /// (not the repo root's `.git` directory) containing a `gitdir:` pointer
+    /// that resolves under `<repoPath>/.git/worktrees/`.
+    ///
+    /// This is the proof-of-linkage check the orphan-GC sweep uses before
+    /// ever touching a directory: any read/parse failure returns `false`
+    /// (not proven linked → untouchable), which is the safe direction since
+    /// callers only act on directories proven to be linked worktrees.
+    ///
+    /// Foundation's `URL.resolvingSymlinksInPath()` does NOT follow macOS's
+    /// `/var` → `/private/var` symlink; POSIX `realpath()` does (see the
+    /// same trap documented in `WorktreeCommands.swift`), so resolution here
+    /// goes through `realpath()` directly.
+    public func isLinkedWorktree(candidatePath: String, repoPath: String) async -> Bool {
+        let gitFilePath = candidatePath + "/.git"
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: gitFilePath, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            return false
+        }
+        guard let contents = try? String(contentsOfFile: gitFilePath, encoding: .utf8) else {
+            return false
+        }
+        let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "gitdir: "
+        guard trimmed.hasPrefix(prefix) else {
+            return false
+        }
+        let gitdirPath = String(trimmed.dropFirst(prefix.count))
+        guard let resolvedGitdir = Self.resolveRealPath(gitdirPath),
+              let resolvedWorktreesDir = Self.resolveRealPath(repoPath + "/.git/worktrees") else {
+            return false
+        }
+        return resolvedGitdir.hasPrefix(resolvedWorktreesDir + "/")
+    }
+
+    /// Returns `true` if `git status --porcelain` reports any changes
+    /// (tracked or untracked) in the worktree. A thrown error (e.g. the path
+    /// isn't a git worktree at all) is treated as `true` — fail toward
+    /// keeping the worktree rather than reaping something we couldn't
+    /// actually verify was clean.
+    public func isDirty(worktreePath: String) async -> Bool {
+        guard let output = try? await run(arguments: ["status", "--porcelain"], at: worktreePath) else {
+            return true
+        }
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Returns `true` if `sha` is an ancestor of (contained in) any local
+    /// branch. A thrown error is treated as `false` — the orphan-GC caller
+    /// treats `false` as "no branch protects this commit, create an anchor
+    /// ref", so failing to `false` here fails toward MORE protection, not
+    /// less.
+    public func isReachableFromAnyBranch(repoPath: String, sha: String) async -> Bool {
+        guard let output = try? await run(
+            arguments: ["branch", "--contains", sha, "--format=%(refname)"],
+            at: repoPath
+        ) else {
+            return false
+        }
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Stages every change in the worktree (`git add -A`) and writes the
+    /// resulting index as a tree object, returning its SHA.
+    ///
+    /// This intentionally mutates the worktree's real index rather than
+    /// using a scratch `GIT_INDEX_FILE` — the worktree is orphaned and about
+    /// to be deleted by the GC sweep, so there's no working state left to
+    /// preserve.
+    public func stageAllAndWriteTree(worktreePath: String) async throws -> String {
+        _ = try await run(arguments: ["add", "-A"], at: worktreePath)
+        let output = try await run(arguments: ["write-tree"], at: worktreePath)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Creates a commit object from an existing tree with a single parent,
+    /// without touching any ref. Returns the new commit's SHA.
+    public func commitTree(repoPath: String, tree: String, parent: String, message: String) async throws -> String {
+        let output = try await run(
+            arguments: ["commit-tree", tree, "-p", parent, "-m", message],
+            at: repoPath
+        )
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Points `ref` at `sha`, creating it if it doesn't exist.
+    public func updateRef(repoPath: String, ref: String, sha: String) async throws {
+        _ = try await run(arguments: ["update-ref", ref, sha], at: repoPath)
+    }
+
+    /// Deletes `ref`.
+    public func deleteRef(repoPath: String, ref: String) async throws {
+        _ = try await run(arguments: ["update-ref", "-d", ref], at: repoPath)
+    }
+
+    /// Lists all ref names under `prefix` (e.g. `refs/tbd/snapshots`).
+    public func listRefs(repoPath: String, prefix: String) async throws -> [String] {
+        let output = try await run(
+            arguments: ["for-each-ref", "--format=%(refname)", prefix],
+            at: repoPath
+        )
+        return output
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Restores every path in the worktree to its content in `ref`.
+    ///
+    /// Known limitation: this only restores content present in the ref's
+    /// tree — files that were *deleted* in the pre-snapshot dirty state are
+    /// not re-deleted (git's `restore` doesn't replay deletions for paths it
+    /// wasn't asked about). Acceptable for the GC use case, where the goal
+    /// is recovering lost work, not exact working-tree reconstruction.
+    public func restoreFromRef(worktreePath: String, ref: String) async throws {
+        _ = try await run(arguments: ["restore", "--source", ref, "--worktree", "--", "."], at: worktreePath)
+    }
+
+    /// Adds a worktree either on an existing `branch` or detached at `sha`.
+    /// Exactly one of `branch`/`sha` must be non-nil.
+    public func worktreeAdd(repoPath: String, path: String, branch: String?, detachAt sha: String?) async throws {
+        if let branch {
+            _ = try await run(arguments: ["worktree", "add", path, branch], at: repoPath)
+        } else if let sha {
+            _ = try await run(arguments: ["worktree", "add", "--detach", path, sha], at: repoPath)
+        } else {
+            throw GitError(
+                command: "git worktree add \(path)",
+                exitCode: -1,
+                stderr: "worktreeAdd requires either a branch or a detachAt sha"
+            )
+        }
+    }
+
     // MARK: - Private
 
     /// Runs a git command with the given arguments at the given directory and returns stdout.
@@ -511,6 +679,73 @@ public struct GitManager: Sendable {
         }
 
         return results
+    }
+
+    /// Parses the porcelain output of `git worktree list --porcelain` into
+    /// full-detail entries (HEAD SHA, detached vs. branch, lock state).
+    ///
+    /// Format (blank-line-separated blocks):
+    /// ```
+    /// worktree /path/to/worktree
+    /// HEAD abc123
+    /// branch refs/heads/main
+    /// locked optional reason
+    ///
+    /// worktree /path/to/other
+    /// HEAD def456
+    /// detached
+    /// ```
+    /// Entries with no `HEAD` line (bare-repository entries, which report a
+    /// `bare` line instead) are dropped — a GC sweep never acts on the bare
+    /// source repo itself.
+    private func parseWorktreeListDetailed(_ output: String) -> [WorktreeListEntry] {
+        var results: [WorktreeListEntry] = []
+        var currentPath: String?
+        var currentHeadSHA: String?
+        var currentBranch: String?
+        var currentLocked = false
+
+        func flush() {
+            if let path = currentPath, let headSHA = currentHeadSHA {
+                results.append(WorktreeListEntry(path: path, headSHA: headSHA, branch: currentBranch, locked: currentLocked))
+            }
+        }
+
+        for line in output.components(separatedBy: "\n") {
+            if line.hasPrefix("worktree ") {
+                flush()
+                currentPath = String(line.dropFirst("worktree ".count))
+                currentHeadSHA = nil
+                currentBranch = nil
+                currentLocked = false
+            } else if line.hasPrefix("HEAD ") {
+                currentHeadSHA = String(line.dropFirst("HEAD ".count))
+            } else if line.hasPrefix("branch ") {
+                let ref = String(line.dropFirst("branch ".count))
+                if ref.hasPrefix("refs/heads/") {
+                    currentBranch = String(ref.dropFirst("refs/heads/".count))
+                } else {
+                    currentBranch = ref
+                }
+            } else if line == "detached" {
+                currentBranch = nil
+            } else if line == "locked" || line.hasPrefix("locked ") {
+                currentLocked = true
+            }
+        }
+
+        flush()
+        return results
+    }
+
+    /// Resolves `path` through POSIX `realpath()`, following every symlink
+    /// component including macOS's `/var` → `/private/var`, which
+    /// `URL.resolvingSymlinksInPath()` does not follow. Returns `nil` if any
+    /// path component doesn't exist.
+    private static func resolveRealPath(_ path: String) -> String? {
+        guard let cString = realpath(path, nil) else { return nil }
+        defer { free(cString) }
+        return String(cString: cString)
     }
 }
 
