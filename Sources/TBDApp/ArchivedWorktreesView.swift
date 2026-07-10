@@ -8,6 +8,11 @@ struct ArchivedWorktreesView: View {
     @State private var listWidth: CGFloat = 280
     @State private var dragStartWidth: CGFloat? = nil
     @AppStorage("archived.hideEmpty") private var hideEmpty: Bool = true
+    /// Selection for the "Reclaimed" section (Task 12), mutually exclusive
+    /// with `appState.selectedArchivedWorktreeIDs[repoID]` — selecting a reap
+    /// row clears the archived-row selection and vice versa (see `select(_:)`
+    /// and `ReclaimedSectionView.select(_:)`).
+    @State private var selectedReapRecordID: UUID?
 
     /// All archived rows for this repo (∪ lingering revive snapshots), unfiltered.
     /// Used for the unfiltered count and to back the filter visibility decision.
@@ -166,6 +171,10 @@ struct ArchivedWorktreesView: View {
                     }
                 }
             }
+
+            if appState.reapRecords[repoID]?.isEmpty == false {
+                ReclaimedSectionView(repoID: repoID, selectedReapRecordID: $selectedReapRecordID)
+            }
         }
         .onAppear { reconcileSelection() }
         .onChange(of: hideEmpty) { _, _ in reconcileSelection() }
@@ -207,7 +216,10 @@ struct ArchivedWorktreesView: View {
 
     @ViewBuilder
     private var rightPane: some View {
-        if let id = selectedID,
+        if let reapID = selectedReapRecordID,
+           let record = (appState.reapRecords[repoID] ?? []).first(where: { $0.id == reapID }) {
+            ReclaimedDetailView(record: record, repoID: repoID)
+        } else if let id = selectedID,
            let row = rows.first(where: { $0.id == id }) {
             if row.effectiveSessionCount == 0 {
                 noSessionsState(for: row.worktree)
@@ -260,6 +272,7 @@ struct ArchivedWorktreesView: View {
     private func select(_ row: ArchivedRow) {
         // In-flight revives are non-selectable; .done rows are fine to browse.
         if case .inFlight = row.reviveState { return }
+        selectedReapRecordID = nil
         appState.selectedArchivedWorktreeIDs[repoID] = row.id
         Task { await appState.fetchSessions(worktreeID: row.id) }
     }

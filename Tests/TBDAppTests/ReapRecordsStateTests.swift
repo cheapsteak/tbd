@@ -97,6 +97,27 @@ struct ReapRecordsStateTests {
         #expect(rollup?.bytes == 500)
     }
 
+    @Test func unrestoredExcludesRestoredRecordsFromCountAndBytes() {
+        let restored = record(kind: .agentWorktree, apparentBytes: 1_000, restoredAt: Date())
+        let live = record(kind: .agentWorktree, apparentBytes: 500)
+        let scratch = record(kind: .scratchpad, apparentBytes: 250)
+        let summary = ReclaimedSummary(records: [restored, live, scratch])
+
+        #expect(summary.count == 3) // unfiltered — the expanded list still shows everything
+        #expect(summary.unrestored.count == 2)
+        #expect(summary.unrestored.totalApparentBytes == 750)
+    }
+
+    @Test func unrestoredIsIdentityWhenNothingRestored() {
+        let records = [
+            record(kind: .agentWorktree, apparentBytes: 100),
+            record(kind: .scratchpad, apparentBytes: 200),
+        ]
+        let summary = ReclaimedSummary(records: records)
+        #expect(summary.unrestored.count == summary.count)
+        #expect(summary.unrestored.totalApparentBytes == summary.totalApparentBytes)
+    }
+
     // MARK: - AppState mirror
 
     @Test func gcEnabledDefaultsToTrue() {

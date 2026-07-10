@@ -48,4 +48,13 @@ struct ReclaimedSummary {
         let bytes = scratch.reduce(Int64(0)) { $0 + ($1.apparentBytes ?? 0) }
         return (scratch.count, bytes)
     }
+
+    /// Subset excluding already-restored records — a restored agent worktree
+    /// is no longer reclaimed disk. This is what the "Reclaimed (N · X GB)"
+    /// header counts; the expanded row list still shows every `agentRecords`
+    /// entry (restored ones render "Restored <date>" instead of a Restore
+    /// button, via `ReapRecord.restoredAt`).
+    var unrestored: ReclaimedSummary {
+        ReclaimedSummary(records: records.filter { $0.restoredAt == nil })
+    }
 }
