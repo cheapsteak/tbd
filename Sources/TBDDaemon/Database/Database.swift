@@ -24,6 +24,7 @@ public final class TBDDatabase: Sendable {
     public let clearance: ClearanceStore
     public let audit: AuditStore
     public let scheduledResumes: ScheduledResumeStore
+    public let reapRecords: ReapRecordStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -56,6 +57,7 @@ public final class TBDDatabase: Sendable {
         self.clearance = ClearanceStore(writer: pool)
         self.audit = AuditStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
+        self.reapRecords = ReapRecordStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -88,6 +90,7 @@ public final class TBDDatabase: Sendable {
         self.clearance = ClearanceStore(writer: queue)
         self.audit = AuditStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
+        self.reapRecords = ReapRecordStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -863,6 +866,29 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(
                 table: "config", column: "hibernate_input_veto_enabled",
                 type: .boolean, defaults: false)
+        }
+
+        // Orphan GC: persisted record of every agent-worktree/scratchpad the
+        // daemon-owned GC swept (and optionally snapshotted) before removal,
+        // plus the config knobs that gate the sweep (default ON, 1h grace,
+        // 30-day snapshot retention).
+        migrator.registerMigration("v52_reap_records_and_gc_config") { db in
+            try db.createTableIfNotExists("reap_records") { t in
+                t.column("id", .text).primaryKey()
+                t.column("kind", .text).notNull()
+                t.column("repoPath", .text).notNull()
+                t.column("worktreePath", .text).notNull()
+                t.column("branch", .text)
+                t.column("headSHA", .text)
+                t.column("snapshotRef", .text)
+                t.column("apparentBytes", .integer)
+                t.column("reapedAt", .datetime).notNull()
+                t.column("restoredAt", .datetime)
+            }
+            try db.addIndexIfMissing("idx_reap_records_repo", on: "reap_records", columns: ["repoPath"])
+            try db.addColumnIfMissing(table: "config", column: "gc_enabled", type: .boolean, defaults: true)
+            try db.addColumnIfMissing(table: "config", column: "gc_grace_seconds", type: .integer, defaults: 3600)
+            try db.addColumnIfMissing(table: "config", column: "gc_snapshot_retention_days", type: .integer, defaults: 30)
         }
 
         return migrator
