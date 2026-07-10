@@ -268,5 +268,101 @@ extension TBDHomeSerialized {
                 .filter { $0.displayName == NightwatchDeskPrompts.deskDisplayName }
             #expect(desks.count == 1, "exactly one desk row must exist")
         }
+
+        @Test("cached desk invalidated when archived — ensure recreates")
+        func testCachedDeskInvalidatedWhenArchived() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-archived-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            // Create initial desk (caches ID internally)
+            let desk1 = try await manager.ensureDeskSession(mode: .daywatch)
+            #expect(desk1.status == .active)
+
+            // Manually archive it in the database (simulating external change or self-heal)
+            try await db.worktrees.archive(id: desk1.id)
+
+            // Call ensure again: cached path should detect archived status, fall through,
+            // and recreate a new desk (since the archived one is excluded from recovery)
+            let desk2 = try await manager.ensureDeskSession(mode: .daywatch)
+            #expect(desk2.id != desk1.id, "Archived cached desk should be recreated")
+            #expect(desk2.status == .active)
+
+            // Verify both desks in DB, only one active
+            let allDesks = try await db.worktrees.list()
+                .filter { $0.displayName == NightwatchDeskPrompts.deskDisplayName }
+            #expect(allDesks.count == 2, "Both old (archived) and new (active) desks should exist")
+            let activeCount = allDesks.filter { $0.status == .active }.count
+            #expect(activeCount == 1, "Only one active desk")
+        }
+
+        @Test("cached desk invalidated when terminal missing — ensure respawns")
+        func testCachedDeskInvalidatedWhenTerminalMissing() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-noterminal-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            // Create initial desk (caches ID internally)
+            let desk1 = try await manager.ensureDeskSession(mode: .daywatch)
+            let desk1ID = desk1.id
+            #expect(desk1.status == .active)
+
+            // Verify it has a Claude terminal
+            let terminals1 = try await db.terminals.list(worktreeID: desk1ID)
+            let claudeTerminal1 = terminals1.first(where: { $0.label == TerminalLabel.claudeCode })
+            #expect(claudeTerminal1 != nil, "Initial desk should have Claude terminal")
+
+            // Manually delete the terminals (simulating terminal crash or close without respawn)
+            try await db.terminals.deleteForWorktree(worktreeID: desk1ID)
+
+            // Call ensure again: cached path should detect no Claude terminal, fall through,
+            // and respawn the terminal on the same desk
+            let desk2 = try await manager.ensureDeskSession(mode: .daywatch)
+            #expect(desk2.id == desk1ID, "Same desk should be recovered and reused")
+            #expect(desk2.status == .active)
+
+            // Verify terminal was respawned
+            let terminals2 = try await db.terminals.list(worktreeID: desk1ID)
+            let claudeTerminal2 = terminals2.first(where: { $0.label == TerminalLabel.claudeCode })
+            #expect(claudeTerminal2 != nil, "Terminal should be respawned")
+        }
     }
 }

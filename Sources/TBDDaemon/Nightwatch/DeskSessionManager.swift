@@ -91,11 +91,20 @@ public actor DeskSessionManager: DeskSessionManaging {
     public func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree {
         await gateAcquire()
         defer { gateRelease() }
-        // If we already have a cached desk session, return it
+        // Validate cached desk session: must be active AND have a live Claude terminal
         if let cachedID = deskWorktreeID,
-           let existing = try await db.worktrees.get(id: cachedID) {
-            return existing
+           let existing = try await db.worktrees.get(id: cachedID),
+           existing.status == .active {
+            // Check if it has a live Claude terminal
+            let terminals = try await db.terminals.list(worktreeID: existing.id)
+            if terminals.first(where: { $0.label == TerminalLabel.claudeCode }) != nil {
+                // Fast path: cached desk is alive and valid
+                return existing
+            }
         }
+
+        // Cached entry was stale (archived or no terminal); clear it and fall through to recovery/create
+        deskWorktreeID = nil
 
         // Query by displayName to detect existing desk worktrees (active only).
         // This recovery path excludes archived worktrees so off→on cycles don't
