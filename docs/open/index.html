@@ -58,12 +58,16 @@
       var manual = document.getElementById('manual');
       var link = document.getElementById('link');
 
+      console.log('[tbd-open] script start; worktree param:', JSON.stringify(raw));
+
       if (!ok) {
+        console.log('[tbd-open] worktree param missing or invalid — aborting');
         status.textContent = 'Missing or invalid ?worktree= parameter.';
         return;
       }
 
       var target = 'tbd://open?worktree=' + encodeURIComponent(raw);
+      console.log('[tbd-open] computed target:', target);
       link.href = target;
       manual.hidden = false;
       status.innerHTML = 'Opening TBD for worktree <code>' + raw.replace(/[<&]/g, function (c) {
@@ -82,51 +86,71 @@
       var RETURN_DELAY_MS = 600;
       var armedUntil = 0;
       var returned = false;
-      var returnTimer = null;
-      var fallbackStatusHTML = status.innerHTML;
 
       function arm() {
         armedUntil = Date.now() + DETECT_WINDOW_MS;
+        console.log('[tbd-open] arm(): detection window open until', armedUntil,
+          '(' + DETECT_WINDOW_MS + 'ms from now)');
       }
 
       function onOpened() {
         if (returned) return; // guard against double-fire
         returned = true;
         var canGoBack = history.length > 1;
+        console.log('[tbd-open] onOpened(): history.length =', history.length,
+          '— will', canGoBack ? 'history.back()' : 'window.close()',
+          'in', RETURN_DELAY_MS + 'ms');
         status.textContent = canGoBack
           ? 'Opened in TBD — taking you back…'
           : 'TBD opened — you can close this tab.';
         // Short delay so the scheme launch isn't interrupted by navigating
         // away; the tab is backgrounded at this point, so it's seamless.
-        returnTimer = setTimeout(function () {
-          returnTimer = null;
+        setTimeout(function () {
           if (canGoBack) {
+            console.log('[tbd-open] calling history.back() now');
             history.back();
           } else {
             // Works for script/link-opened tabs; silently no-ops otherwise,
             // in which case the status text above already tells the user.
+            console.log('[tbd-open] calling window.close() now');
             window.close();
+            setTimeout(function () {
+              // If this runs, the tab is still alive — the browser refused
+              // the scripted close (tab wasn't script/link-opened).
+              console.log('[tbd-open] window.close() was ignored by the browser — tab still alive');
+            }, 500);
           }
         }, RETURN_DELAY_MS);
       }
 
       document.addEventListener('visibilitychange', function () {
+        var now = Date.now();
+        var inWindow = now <= armedUntil;
+        console.log('[tbd-open] visibilitychange: document.hidden =', document.hidden,
+          '; inside armed window =', inWindow);
         if (document.hidden) {
-          if (Date.now() <= armedUntil) onOpened();
-        } else if (returnTimer !== null) {
-          // Tab became visible again before the return fired — the hide was
-          // incidental (alt-tab, a notification), not TBD activating. Cancel
-          // the pending navigation and restore the fallback UI intact.
-          clearTimeout(returnTimer);
-          returnTimer = null;
-          returned = false;
-          status.innerHTML = fallbackStatusHTML;
+          if (inWindow) {
+            onOpened();
+          } else if (armedUntil > 0) {
+            // Hidden arrived after the window expired — classic symptom of the
+            // user taking >3s on the "Open TBD.app?" permission dialog.
+            console.log('[tbd-open] hidden arrived', now - armedUntil,
+              'ms after the detection window expired — no auto-return');
+          }
+        } else if (returned) {
+          // Tab became visible again while the return is pending. We no longer
+          // cancel here — once onOpened() has fired, the auto-return proceeds
+          // regardless (glancing back at the tab must not defeat the return).
+          console.log('[tbd-open] tab visible again while return pending — continuing anyway');
         }
       });
 
       // The manual button fires the same tbd:// URL — arm the same
       // success-detection/auto-return logic on click.
-      link.addEventListener('click', arm);
+      link.addEventListener('click', function () {
+        console.log('[tbd-open] manual fallback button clicked');
+        arm();
+      });
 
       // Trigger the custom scheme. location.replace avoids a back-button trap.
       // Browsers handle the unknown scheme silently if the handler isn't installed,
@@ -134,6 +158,7 @@
       // detected, the status message, button, and install hint stay as-is.
       setTimeout(function () {
         arm();
+        console.log('[tbd-open] auto-redirect: calling location.replace(), armed until', armedUntil);
         location.replace(target);
       }, 50);
     })();
