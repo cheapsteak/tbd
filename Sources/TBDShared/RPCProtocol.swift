@@ -191,6 +191,7 @@ public enum RPCMethod {
     public static let gcList = "gc.list"
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
+    public static let configSetGCEnabled = "config.setGCEnabled"
 }
 
 // MARK: - Branch Listing
@@ -1221,6 +1222,12 @@ public struct ConfigSetControlModeParams: Codable, Sendable {
 /// hibernation sweep; no daemon restart required.
 public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
     public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCEnabled` — the orphan-GC master switch.
+public struct ConfigSetGCEnabledParams: Codable, Sendable {
+    public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
 

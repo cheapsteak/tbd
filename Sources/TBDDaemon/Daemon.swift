@@ -496,6 +496,11 @@ public final class Daemon: Sendable {
         }
 
         self.router = rpcRouter
+        // Post-construction wiring, same shape as `claudeUsagePoller` below:
+        // `orphanGC` was constructed earlier (before `lifecycle`) so the
+        // archive-event callback could reach it; the `gc.*` handlers reach it
+        // through the router the same way they reach `hibernationCoordinator`.
+        rpcRouter.orphanGC = orphanGC
 
         // Shared foreground gate: the app reports its active/inactive state via
         // `app.setForegroundState`; the periodic git tasks below slow their

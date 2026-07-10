@@ -108,4 +108,15 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the orphan-GC master switch. Turning it off does not cancel or
+    /// undo any in-progress sweep — `OrphanGC.sweep` re-reads the flag itself
+    /// on its next pass — this just flips the persisted gate.
+    func handleConfigSetGCEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetGCEnabledParams.self, from: paramsData)
+        try await db.config.setGCEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }
