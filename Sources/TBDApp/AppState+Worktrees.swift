@@ -52,14 +52,18 @@ extension AppState {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
                 let size = mainAreaTerminalSize()
-                // Pass the placeholder's name so the daemon row starts with
-                // the same displayName: untouched creations don't flip names
-                // at swap time, and replaceCreationPlaceholder's
-                // string-equality rename inference stays sound.
+                // Let the daemon generate `name` and default `displayName` to it
+                // via WorktreeStore.create's `displayName ?? name` default.
+                // This yields `name == displayName` (fixing the bug where new
+                // worktrees were born with diverged slugs), and keeps `folder == nil`
+                // so the collision-retry safety net in attemptWorktreeAdd stays
+                // enabled (do not pass folder; it gates retry logic). The local
+                // optimistic placeholder still uses placeholderName for immediate UI,
+                // and replaceCreationPlaceholder's rename inference (comparing local
+                // state) is unaffected. A cosmetic slug-flip at swap is acceptable.
                 let wt = try await daemonClient.createWorktree(
                     repoID: repoID,
                     branch: existingBranch?.name,
-                    displayName: placeholderName,
                     cols: size.cols, rows: size.rows,
                     parentWorktreeID: parentWorktreeID,
                     useExistingBranch: existingBranch != nil,
