@@ -6,16 +6,26 @@ import TBDShared
 @Suite("ScratchpadCollector")
 struct ScratchpadCollectorTests: ~Copyable {
     let fm = FileManager.default
+    /// Sandbox root for this test instance; everything lives under it.
+    let sandbox: URL
+    /// Injected scratchpad base (`ScratchpadCollector(base:)`).
     let tmpDir: URL
+    /// Parent for fixture "worktree" directories — inside the sandbox so
+    /// parallel test runs never collide on shared literal paths like
+    /// `/tmp/existing-wt`.
+    let wtParent: URL
 
     init() {
-        tmpDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("scratchpad-test-\(UUID().uuidString)")
+        tmpDir = sandbox.appendingPathComponent("base")
+        wtParent = sandbox.appendingPathComponent("worktrees")
         try? fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: wtParent, withIntermediateDirectories: true)
     }
 
     deinit {
-        try? fm.removeItem(at: tmpDir)
+        try? fm.removeItem(at: sandbox)
     }
 
     @Test("slug replaces forward slashes with hyphens")
@@ -74,8 +84,8 @@ struct ScratchpadCollectorTests: ~Copyable {
     func testReconcileRemovesGoneWorktrees() async {
         let collector = ScratchpadCollector(base: tmpDir)
 
-        let existingWT = "/tmp/existing-wt"
-        let goneWT = "/tmp/gone-wt"
+        let existingWT = wtParent.appendingPathComponent("existing-wt").path
+        let goneWT = wtParent.appendingPathComponent("gone-wt").path
 
         // Create scratchpads for both
         let existingSlug = ScratchpadCollector.slug(forWorktreePath: existingWT)
@@ -95,9 +105,6 @@ struct ScratchpadCollectorTests: ~Copyable {
 
         let records = await collector.reconcile(knownPaths: [existingWT, goneWT], now: Date())
 
-        // Clean up the test worktree
-        try? fm.removeItem(atPath: existingWT)
-
         #expect(records.count == 1)
         #expect(records[0].kind == ReapKind.scratchpad)
         #expect(records[0].worktreePath == goneDir.path)
@@ -109,7 +116,7 @@ struct ScratchpadCollectorTests: ~Copyable {
     func testReconcilePreservesUnrelated() async {
         let collector = ScratchpadCollector(base: tmpDir)
 
-        let worktreePath = "/tmp/some-wt"
+        let worktreePath = wtParent.appendingPathComponent("some-wt").path
         let unrelatedDir = tmpDir.appendingPathComponent("unrelated-project")
 
         // Create the scratchpad
@@ -127,9 +134,6 @@ struct ScratchpadCollectorTests: ~Copyable {
 
         let records = await collector.reconcile(knownPaths: [worktreePath], now: Date())
 
-        // Clean up test worktree
-        try? fm.removeItem(atPath: worktreePath)
-
         // Scratchpad should still exist because worktree exists
         #expect(records.count == 0)
         #expect(fm.fileExists(atPath: scratchpadDir.path))
@@ -144,7 +148,9 @@ struct ScratchpadCollectorTests: ~Copyable {
 
         let collector = ScratchpadCollector(base: missingBase)
 
-        let records = await collector.reconcile(knownPaths: ["/tmp/some-wt"], now: Date())
+        let records = await collector.reconcile(
+            knownPaths: [wtParent.appendingPathComponent("gone-wt").path], now: Date()
+        )
 
         #expect(records.count == 0)
     }
