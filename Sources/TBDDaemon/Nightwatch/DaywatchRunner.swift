@@ -186,10 +186,10 @@ public actor DaywatchRunner {
             loopTask = nil
 
             if let desker = deskSessionManager {
-                // Fire off wrap-up as a detached background task so apply() returns immediately
-                // (the RPC doesn't block for 10s). The grace sleep + park happen in the background.
+                // Fire off wrap-up as a detached background task so apply() returns immediately.
+                // Polls for idle state then parks; no fixed sleep, so wrap-up blocks based on actual agent state.
                 Task.detached {
-                    await desker.wrapUpDeskSession(gracePeriodSeconds: 10)
+                    await desker.wrapUpDeskSession(pollIntervalSeconds: 2, maxWaitSeconds: 180)
                 }
             }
             deskWorktreeID = nil

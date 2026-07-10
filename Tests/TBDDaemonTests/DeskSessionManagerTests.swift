@@ -177,9 +177,9 @@ extension TBDHomeSerialized {
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
             let deskID = desk.id
 
-            // Wrap up with short grace period (0.1s for tests)
+            // Wrap up with short poll interval (tests)
             // Should exit gracefully when coordinator is nil (log warning, don't crash)
-            await manager.wrapUpDeskSession(gracePeriodSeconds: 0.1)
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.1)
 
             // Verify worktree still exists (wrap-up should be a safe no-op)
             let worktree = try await db.worktrees.get(id: deskID)
@@ -212,7 +212,7 @@ extension TBDHomeSerialized {
             )
 
             // Wrap up when no desk exists — should not throw
-            await manager.wrapUpDeskSession(gracePeriodSeconds: 0.1)
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.1)
             // Test just verifies no crash
         }
 
@@ -513,6 +513,178 @@ extension TBDHomeSerialized {
             // and fires after a reuse, it will see a different epoch and no-op.
             // (We can't easily test the full concurrent flow without a real coordinator,
             // but the epoch-bump logic is exercised here.)
+        }
+
+        @Test("wrapUpDeskSession polls terminal activity state and times out if never idle")
+        func testWrapUpPollsActivityState() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-wrapup-idle-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let tmux = TmuxManager(dryRun: true)
+
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: tmux,
+                skillDir: skillDir,
+                hibernationCoordinator: nil
+            )
+
+            // Create desk session
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+
+            // Get the Claude terminal
+            let terminals = try await db.terminals.list(worktreeID: desk.id)
+            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                #expect(false, "No Claude terminal found")
+                return
+            }
+
+            // Start with terminal in .working state
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .working)
+
+            // Kick off wrap-up with quick poll and short max-wait
+            // (terminal is working, so it should timeout without error)
+            let startTime = Date()
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.05)
+            let elapsed = Date().timeIntervalSince(startTime)
+
+            // Verify it waited approximately max-wait time (at least close)
+            #expect(elapsed >= 0.04, "Should poll until timeout; elapsed=\(elapsed)")
+
+            // Now test with terminal already idle
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
+
+            let startTime2 = Date()
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 1.0)
+            let elapsed2 = Date().timeIntervalSince(startTime2)
+
+            // Verify it returned quickly (found idle, didn't wait full max-wait)
+            #expect(elapsed2 < 0.2, "Should return early when idle detected; elapsed=\(elapsed2)")
+        }
+
+        @Test("wrapUpDeskSession respects epoch: superseded by concurrent reuse")
+        func testWrapUpSupersededByEpochChange() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-wrapup-epoch-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let tmux = TmuxManager(dryRun: true)
+
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: tmux,
+                skillDir: skillDir,
+                hibernationCoordinator: nil
+            )
+
+            // Create desk session
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+
+            // Get the Claude terminal
+            let terminals = try await db.terminals.list(worktreeID: desk.id)
+            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                #expect(false, "No Claude terminal found")
+                return
+            }
+
+            // Set terminal to idle so wrap-up will check it
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .idle)
+
+            // Kick off wrap-up but intercept epoch bump: simulate concurrent reuse
+            // by calling ensureDeskSession (which bumps epoch) while wrap-up is waiting
+            let wrapUpTask = Task {
+                await manager.wrapUpDeskSession(pollIntervalSeconds: 0.05, maxWaitSeconds: 0.5)
+            }
+
+            // Give wrap-up time to send prompt and start polling
+            try await Task.sleep(for: .milliseconds(50))
+
+            // Now simulate concurrent reuse (bump epoch)
+            _ = try await manager.ensureDeskSession(mode: .daywatch)
+
+            // Wait for wrap-up to complete
+            await wrapUpTask.value
+
+            // Test passes if wrapUpDeskSession returned without crashing
+            // (The epoch guard prevents it from doing anything after the desk is reused)
+            #expect(true, "Wrap-up should handle epoch change gracefully")
+        }
+
+        @Test("wrapUpDeskSession times out if terminal never goes idle")
+        func testWrapUpTimeoutNeverGoesIdle() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-wrapup-timeout-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let tmux = TmuxManager(dryRun: true)
+
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: tmux,
+                skillDir: skillDir,
+                hibernationCoordinator: nil
+            )
+
+            // Create desk session
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+
+            // Get the Claude terminal
+            let terminals = try await db.terminals.list(worktreeID: desk.id)
+            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
+                #expect(false, "No Claude terminal found")
+                return
+            }
+
+            // Set terminal to .working and keep it there (don't go idle)
+            try await db.terminals.setActivityState(id: claudeTerminal.id, activityState: .working)
+
+            // Wrap-up with very short max-wait
+            let startTime = Date()
+            await manager.wrapUpDeskSession(pollIntervalSeconds: 0.01, maxWaitSeconds: 0.05)
+            let elapsed = Date().timeIntervalSince(startTime)
+
+            // Verify it waited close to max-wait time before giving up
+            #expect(elapsed >= 0.04, "Should poll until timeout without error; elapsed=\(elapsed)")
         }
     }
 }

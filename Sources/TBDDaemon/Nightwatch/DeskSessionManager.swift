@@ -10,7 +10,7 @@ public protocol DeskSessionManaging: Sendable {
     func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async
     func closeDeskSession() async
-    func wrapUpDeskSession(gracePeriodSeconds: TimeInterval) async
+    func wrapUpDeskSession(pollIntervalSeconds: TimeInterval, maxWaitSeconds: TimeInterval) async
 }
 
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
@@ -142,6 +142,9 @@ public actor DeskSessionManager: DeskSessionManaging {
                         logger.info("Successfully woke parked desk terminal \(claudeTerminal.id, privacy: .public)")
                     case .notHibernated:
                         logger.debug("Desk terminal already awake: \(claudeTerminal.id, privacy: .public)")
+                    case .inFlight:
+                        // Another wake is in progress; don't spawn duplicate, just wait for that one to complete
+                        logger.info("Wake already in flight for desk terminal \(claudeTerminal.id, privacy: .public); skipping respawn")
                     default:
                         logger.warning("Failed to wake parked desk terminal: \(String(describing: wakeResult))")
                         shouldRespawn = true
@@ -236,20 +239,19 @@ public actor DeskSessionManager: DeskSessionManaging {
         return wt
     }
 
-    /// Gracefully end the shift: send wrap-up prompt, capture session ID, and park the desk.
+    /// Gracefully end the shift: send wrap-up prompt, wait for agent to idle, then park the desk.
     /// Called when daywatch/nightwatch mode turns OFF. Preserves the desk worktree and transcript
     /// for reuse on the next ON cycle (off→park→on round-trip keeps the same desk).
-    /// Timing: sends the prompt, pauses to let agent write summary, then hibernates terminals via
-    /// HibernationCoordinator (which handles polite exit, tmux respawn, and all safety checks).
+    /// Design: send prompt → poll until idle → hibernates terminals via HibernationCoordinator.
+    /// This avoids the race where a fixed timer fires while agent is mid-write (would return .notEligible).
     /// Does NOT delete the worktree (unlike closeDeskSession).
-    /// - Parameter gracePeriodSeconds: How long to wait before parking (default 10s for grace period)
-    public func wrapUpDeskSession(gracePeriodSeconds: TimeInterval = 10) async {
-        // MEDIUM 3: Do NOT hold the gate during the sleep. Acquire gate only for the prompt send
-        // and terminal list, then release before the grace sleep, then re-acquire for the park.
-        // This avoids blocking a quick ON→ that arrives during the grace window.
+    /// - Parameter pollIntervalSeconds: How often to check terminal activity state (default ~2s)
+    /// - Parameter maxWaitSeconds: Max time to wait for idle before giving up (default ~3min; 0=skip idle check)
+    public func wrapUpDeskSession(pollIntervalSeconds: TimeInterval = 2, maxWaitSeconds: TimeInterval = 180) async {
         var terminalIDs: [UUID] = []
+        var claudeTerminalID: UUID? = nil
         var worktreeID: UUID? = nil
-        var capturedEpoch: Int = 0  // MEDIUM 2: Capture epoch to detect desk reactivation
+        var capturedEpoch: Int = 0
 
         // Step 1: Hold gate, grab worktree/terminals, send prompt, then release gate
         await gateAcquire()
@@ -293,12 +295,13 @@ public actor DeskSessionManager: DeskSessionManaging {
                 logger.warning("Failed to send wrap-up prompt to desk: \(error.localizedDescription, privacy: .public)")
             }
 
-            // Capture terminal IDs and epoch for later hibernation
+            // Capture terminal IDs, epoch, and worktree for later hibernation
             terminalIDs = terminals.map { $0.id }
+            claudeTerminalID = claudeTerminal.id
             worktreeID = wt.id
-            capturedEpoch = deskWorktreeEpoch  // MEDIUM 2: Capture epoch at scheduling time
+            capturedEpoch = deskWorktreeEpoch
 
-            // Release gate BEFORE the grace sleep (key fix for MEDIUM 3)
+            // Release gate BEFORE polling (don't block ON→ during the wait)
             gateRelease()
         } catch {
             gateRelease()
@@ -306,47 +309,77 @@ public actor DeskSessionManager: DeskSessionManaging {
             return
         }
 
-        // Step 2: Grace period — give agent time to write summary (OUTSIDE the gate)
-        try? await Task.sleep(for: .seconds(gracePeriodSeconds))
+        // Step 2: Poll until the desk terminal goes idle (OUTSIDE the gate)
+        // This waits for the agent to finish writing the shift summary before parking.
+        // Design: wait for terminal.activityState to be idle (not .working/.waitingForUser).
+        let idleStart = Date()
+        var idleObserved = false
 
-        // Step 3: Re-acquire gate and park terminals via HibernationCoordinator (HIGH 2 + MEDIUM 1 + MEDIUM 2)
+        while Date().timeIntervalSince(idleStart) < maxWaitSeconds {
+            // Check if epoch changed (desk was reactivated) — abort wait
+            if capturedEpoch != self.deskWorktreeEpoch {
+                logger.info("Wrap-up wait aborted: epoch changed (desk reactivated)")
+                return
+            }
+
+            // Poll terminal activity state
+            do {
+                if let claudeID = claudeTerminalID,
+                   let terminal = try await db.terminals.get(id: claudeID) {
+                    // Check if idle: not .working and not .waitingForUser
+                    if terminal.activityState != .working && terminal.activityState != .waitingForUser {
+                        idleObserved = true
+                        logger.info("Desk terminal idle, proceeding to park (state: \(String(describing: terminal.activityState)))")
+                        break
+                    }
+                }
+            } catch {
+                logger.warning("Failed to poll terminal state: \(error.localizedDescription, privacy: .public)")
+            }
+
+            // Sleep before next poll
+            try? await Task.sleep(for: .seconds(pollIntervalSeconds))
+        }
+
+        if !idleObserved {
+            logger.warning("Wrap-up timeout: desk terminal did not go idle within \(Int(maxWaitSeconds))s; leaving desk running (protect against mid-write park)")
+            return
+        }
+
+        // Step 3: Re-acquire gate and park terminals via HibernationCoordinator
         await gateAcquire()
         defer { gateRelease() }
 
-        // MEDIUM 2: Check if desk was reactivated (epoch changed) — if so, this wrap-up is stale, no-op
+        // Check if epoch changed during the idle wait (final guard)
         if capturedEpoch != self.deskWorktreeEpoch {
-            logger.info("Wrap-up superseded: desk was reactivated during grace period (epoch \(capturedEpoch) != \(self.deskWorktreeEpoch)); skipping park")
+            logger.info("Wrap-up superseded: epoch changed during idle wait; skipping park")
             return
         }
 
         guard let coordinator = hibernationCoordinator else {
             logger.warning("HibernationCoordinator not available; cannot park desk terminals")
-            // MEDIUM 1: Do NOT clear deskWorktreeID on failure — leave it set for retry
             return
         }
 
         // Use real hibernation path: calls manualHibernate which does polite exit, tmux respawn, etc.
-        // MEDIUM 1: Track park success; only clear deskWorktreeID if all parks succeed
-        var parkSucceeded = false
+        // Track ALL terminals: only clear deskWorktreeID if ALL successfully hibernated
+        var allParked = true
         for terminalID in terminalIDs {
             let result = await coordinator.manualHibernate(terminalID: terminalID)
             switch result {
-            case .ok, .alreadyHibernated:
-                parkSucceeded = true
-                if case .ok = result {
-                    logger.info("Hibernated desk terminal \(terminalID, privacy: .public) via coordinator")
-                } else {
-                    logger.debug("Desk terminal already hibernated: \(terminalID, privacy: .public)")
-                }
+            case .ok:
+                logger.info("Hibernated desk terminal \(terminalID, privacy: .public) via coordinator")
+            case .alreadyHibernated:
+                logger.debug("Desk terminal already hibernated: \(terminalID, privacy: .public)")
             default:
                 logger.warning("Failed to park desk terminal \(terminalID, privacy: .public): \(String(describing: result)); park incomplete, will retry on next cycle")
-                parkSucceeded = false
-                break  // Stop on first failure; leave deskWorktreeID set for retry
+                allParked = false
+                // Continue (don't break early) so we attempt all terminals
             }
         }
 
-        // MEDIUM 1: Only mark parked if all terminals successfully hibernated
-        if parkSucceeded, let wid = worktreeID {
+        // Only mark parked if ALL terminals successfully hibernated
+        if allParked, let wid = worktreeID {
             deskWorktreeID = nil
             logger.info("Wrapped up Watch Desk session: \(wid, privacy: .public); all terminals parked for reuse on next ON cycle")
         }

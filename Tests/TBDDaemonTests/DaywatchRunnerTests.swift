@@ -113,7 +113,7 @@ actor FakeDeskSessionManager: DeskSessionManaging {
         closeCalls += 1
     }
 
-    func wrapUpDeskSession(gracePeriodSeconds: TimeInterval) async {
+    func wrapUpDeskSession(pollIntervalSeconds: TimeInterval, maxWaitSeconds: TimeInterval) async {
         wrapUpCalls += 1
     }
 }
