@@ -162,10 +162,16 @@ free.
   snapshot ref (nullable), apparent bytes freed (nullable), `reaped_at`, `restored_at`
   (nullable). Migration + GRDB record + `TBDShared` Codable model (new fields optional
   or defaulted) in one commit.
-- **History tab**: reap entries alongside archived worktrees — e.g. *"Agent worktree
-  `agent-a3c04…` reaped · branch `fix-render-path-waste` kept · 1.2 GB (apparent) ·
-  snapshot ✓"* — with a Restore button (RPC `gc.restore`). Restore applies to
-  `agentWorktree` records only (scratchpads have no snapshot and nothing to restore);
+- **History tab**: reap records live in a **separate, collapsed-by-default disclosure
+  section** at the bottom of the archived-worktrees left rail — header *"Reclaimed
+  (12 · ~9.4 GB)"* — rendered only when the repo has reap records, so the main archived
+  list is unchanged until the user expands it. Reap rows are a visually distinct row
+  type (own GC glyph, muted styling — never dressed up as archived worktrees): agent-
+  worktree rows read *"`agent-a3c04…` · branch `fix-render-path-waste` kept · 1.2 GB
+  (apparent) · snapshot ✓"* with a Restore button in the detail pane (RPC `gc.restore`),
+  and no session-count/revive affordances. Scratchpad reaps are rolled up into one
+  aggregate row per repo (*"23 scratchpads cleaned · 31 GB"*) — they have no restore
+  action, so per-row listing is noise. Restore applies to `agentWorktree` records only;
   restored entries show restored-at instead of the button.
 - **CLI**: `tbd gc list` (incl. snapshot/restorable state), `tbd gc restore <id>`,
   `tbd gc sweep [--dry-run]` — dry-run prints the identical plan without mutating.
