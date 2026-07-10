@@ -1132,10 +1132,15 @@ public struct TerminalWakeParams: Codable, Sendable {
     /// Initial tmux window size in cells (see TerminalSwapProfileParams).
     public let cols: Int?
     public let rows: Int?
-    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) {
+    /// Opt-in: when the pinned profile no longer resolves, resume on the ambient
+    /// default login instead of failing with `.profileMissing`. nil == false ==
+    /// strict (the default). Set true only on an explicit user retry.
+    public let fallbackToDefaultProfile: Bool?
+    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool? = nil) {
         self.terminalID = terminalID
         self.cols = cols
         self.rows = rows
+        self.fallbackToDefaultProfile = fallbackToDefaultProfile
     }
 }
 

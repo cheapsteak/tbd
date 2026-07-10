@@ -694,6 +694,94 @@ struct HibernationCoordinatorTests {
                 "wake must mirror the parked transcript into the derived dir under the injected projects root")
     }
 
+    // MARK: - Profile pre-wake check
+    //
+    // When a terminal is pinned to a profile that no longer resolves (row
+    // deleted or keychain secret missing for .apiKey), the OLD behavior silently
+    // fell back to ambient keychain login — resuming on the WRONG account. The
+    // new behavior refuses and surfaces `.profileMissing` so the app can offer
+    // an explicit default-profile fallback. Both branches covered: missing
+    // profile (strict mode) and opt-in fallback (lax mode). Also test that the
+    // check only fires when a resolver is present (no regression for daemon
+    // without a resolver).
+
+    private func coordinatorWithResolver(_ db: TBDDatabase) -> HibernationCoordinator {
+        HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            modelProfileResolver: ModelProfileResolver(
+                profiles: db.modelProfiles, repos: db.repos, config: db.config,
+                keychain: { _ in nil }),
+            configDirManager: isolatedConfigDirManager())
+    }
+
+    /// Wake refuses when the pinned profile ID no longer exists, returning
+    /// `.profileMissing` with the profile id. The row stays parked, retryable.
+    @Test func wakeRefusesWhenPinnedProfileMissing() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let bogusProfileID = UUID()
+        try await db.terminals.setProfileID(id: terminalID, profileID: bogusProfileID)
+
+        let coord = coordinatorWithResolver(db)
+        let wake = await coord.wake(terminalID: terminalID)
+
+        #expect(wake == .profileMissing(profileID: bogusProfileID))
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt != nil, "row must stay parked and retryable")
+    }
+
+    /// Wake succeeds when `allowDefaultProfileFallback: true` is passed, even
+    /// if the pinned profile is missing. The row is un-parked.
+    @Test func wakeWithFallbackResumesDespiteMissingProfile() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let bogusProfileID = UUID()
+        try await db.terminals.setProfileID(id: terminalID, profileID: bogusProfileID)
+
+        let coord = coordinatorWithResolver(db)
+        let wake = await coord.wake(terminalID: terminalID, allowDefaultProfileFallback: true)
+
+        #expect(wake == .ok)
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt == nil, "row must be un-parked")
+    }
+
+    /// Wake succeeds (and doesn't return `.profileMissing`) when the pinned
+    /// profile actually resolves. Tests the happy path isn't broken by the check.
+    @Test func wakeSucceedsWhenPinnedProfileResolves() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        // Create a real oauth profile (oauth resolves without a keychain secret).
+        let profile = try await db.modelProfiles.create(name: "test", kind: .oauth)
+        try await db.terminals.setProfileID(id: terminalID, profileID: profile.id)
+
+        let coord = coordinatorWithResolver(db)
+        let wake = await coord.wake(terminalID: terminalID)
+
+        #expect(wake == .ok)
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt == nil, "row must be un-parked")
+    }
+
+    /// When no resolver is injected, the profile check doesn't fire — even if a
+    /// profileID is pinned. This pins that the plain `coordinator(db)` (used by
+    /// other tests) is unaffected.
+    @Test func wakeIgnoresProfileCheckWhenNoResolverInjected() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let bogusProfileID = UUID()
+        try await db.terminals.setProfileID(id: terminalID, profileID: bogusProfileID)
+
+        // Plain coordinator with no resolver.
+        let coord = coordinator(db)
+        let wake = await coord.wake(terminalID: terminalID)
+
+        #expect(wake == .ok, "without a resolver, no profile check fires")
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt == nil)
+    }
+
     // MARK: - Startup reconciliation
 
     /// `reconcileOnStartup` clears a stale parked timestamp for a terminal whose

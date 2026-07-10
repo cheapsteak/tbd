@@ -25,6 +25,13 @@ public enum WakeResult: Equatable, Sendable {
     /// would silently land in $HOME. Carries the missing path so callers can
     /// surface an actionable message instead of a generic "not found".
     case worktreeMissing(path: String)
+    /// The terminal was pinned to a model profile whose row (or, for an
+    /// .apiKey profile, its keychain secret) no longer resolves. Waking would
+    /// silently fall back to the ambient keychain login and resume on the WRONG
+    /// account. Refuse and surface this so the app can offer an explicit
+    /// default-profile fallback; the row stays parked and resumable. Carries
+    /// the missing profile id for the message.
+    case profileMissing(profileID: UUID)
 }
 
 /// Owns session PARKING — the single unified "park a Claude session" feature
@@ -406,7 +413,7 @@ public actor HibernationCoordinator {
     /// machine reboot), the window is recreated (ensureServer + createWindow)
     /// and the same resume command spawned there; the terminal row keeps its
     /// identity and gets the new window/pane ids persisted.
-    public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async -> WakeResult {
+    public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false) async -> WakeResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
@@ -446,11 +453,26 @@ public actor HibernationCoordinator {
 
         // Honor the exact profile persisted on the terminal (loadByID, not
         // re-resolve) so wake lands on the same account the session used.
+        //
+        // Pre-wake profile check: if the pinned profile no longer resolves (row
+        // deleted, or an .apiKey profile whose keychain secret is gone), the OLD
+        // behavior silently fell back to the ambient keychain login — resuming on
+        // the WRONG account, which reads to the user as "the session won't wake".
+        // Refuse and surface `.profileMissing` so the app can offer an explicit
+        // default-profile fallback (mirrors how `.worktreeMissing` fails loudly
+        // just above rather than resuming into $HOME). This is BEFORE the tmux
+        // mutation section, so a refusal never disturbs the pane. Pass
+        // `allowDefaultProfileFallback` to opt back into the ambient-login resume.
         var resolvedProfile: ResolvedModelProfile? = nil
         if let profileID = terminal.profileID, let resolver = modelProfileResolver {
             resolvedProfile = try? await resolver.loadByID(profileID)
             if resolvedProfile == nil {
-                logger.warning("wake: profile \(profileID, privacy: .public) missing for terminal \(terminal.id, privacy: .public); falling back to keychain login")
+                if allowDefaultProfileFallback {
+                    logger.warning("wake: profile \(profileID, privacy: .public) missing for terminal \(terminal.id, privacy: .public); explicit default-profile fallback → ambient keychain login")
+                } else {
+                    logger.error("wake: profile \(profileID, privacy: .public) no longer resolves for terminal \(terminal.id, privacy: .public); refusing wake — retry with the default-profile fallback to resume on the default account")
+                    return .profileMissing(profileID: profileID)
+                }
             }
         }
 

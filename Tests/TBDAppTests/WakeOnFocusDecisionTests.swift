@@ -181,4 +181,79 @@ struct WakeOnFocusDecisionTests {
         )
         #expect(message == "Couldn't wake 3 sessions: window @1 gone")
     }
+
+    // MARK: - Wake-all batching (bounded concurrency)
+    //
+    // The explicit "Wake all parked" menu action uses bounded-concurrency
+    // batches (at most wakeAllBatchSize in flight at once) to prevent the #367
+    // spawn storm. The focus path stays one-per-focus (see
+    // `terminalIDToWakeOnFocus` — covered by existing tests). Tests verify the
+    // batching pure function's branches and the batch-size constant.
+
+    /// Empty input → empty batches.
+    @Test func wakeAllBatchesEmptyIsEmpty() {
+        let result = AppState.wakeAllBatches([])
+        #expect(result == [])
+    }
+
+    /// Input smaller than batch size → single batch containing all ids.
+    @Test func wakeAllBatchesUnderSizeIsSingleBatch() {
+        let ids = [UUID(), UUID()]
+        let result = AppState.wakeAllBatches(ids)
+        #expect(result.count == 1)
+        #expect(result[0] == ids)
+    }
+
+    /// Input exactly a multiple of batch size → exact batches with no remainder.
+    @Test func wakeAllBatchesExactMultiple() {
+        let ids = (0..<6).map { _ in UUID() }
+        let result = AppState.wakeAllBatches(ids, batchSize: 3)
+        #expect(result.count == 2)
+        #expect(result[0].count == 3)
+        #expect(result[1].count == 3)
+    }
+
+    /// Input with remainder → last batch smaller than batch size.
+    @Test func wakeAllBatchesWithRemainder() {
+        let ids = (0..<7).map { _ in UUID() }
+        let result = AppState.wakeAllBatches(ids, batchSize: 3)
+        #expect(result.count == 3)
+        #expect(result[0].count == 3)
+        #expect(result[1].count == 3)
+        #expect(result[2].count == 1)
+        // Verify order is preserved (flattened = original).
+        let flattened = result.flatMap { $0 }
+        #expect(flattened == ids)
+    }
+
+    /// Verify the constant batch size and default argument behavior.
+    @Test func wakeAllBatchesDefaultSizeIsThree() {
+        #expect(AppState.wakeAllBatchSize == 3)
+        let ids = (0..<4).map { _ in UUID() }
+        let result = AppState.wakeAllBatches(ids)
+        #expect(result.count == 2)
+        #expect(result[0].count == 3)
+        #expect(result[1].count == 1)
+    }
+
+    /// The focus path default stays one-per-focus. `terminalIDToWakeOnFocus`
+    /// returns exactly one terminal (from existing tests). Pin that the bounded
+    /// method is ONLY for the explicit user action, not the background focus path.
+    @Test func focusPathStaysOneAtATime() {
+        let state = AppState()
+        let wt = UUID()
+        let ids = (0..<5).map { _ in UUID() }
+        state.terminals[wt] = ids.map { id in
+            Terminal(id: id, worktreeID: wt, tmuxWindowID: "@1", tmuxPaneID: "%1",
+                     hibernatedAt: Date())
+        }
+        // Focus the first parked terminal.
+        state.tabs[wt] = [Tab(id: UUID(), content: .terminal(terminalID: ids[0]), label: nil)]
+        state.activeTabIndices[wt] = 0
+
+        // terminalIDToWakeOnFocus returns exactly one, never a batch.
+        let focused = state.terminalIDToWakeOnFocus(worktreeID: wt)
+        #expect(focused == ids[0],
+                "focus wake must return exactly one terminal, not a batch")
+    }
 }
