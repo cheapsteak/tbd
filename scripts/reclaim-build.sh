@@ -34,10 +34,12 @@
 #                       the same dir still match. Empty/unset = no exclusion.
 #                       restart.sh passes its own worktree here so the background
 #                       reclaim it fires can never race the swift build it overlaps.
+#   RECLAIM_OPTOUT_FILE marker file for per-worktree/repo opt-out (default .tbd-reclaim-optout)
 
 RECLAIM_T1_SECONDS="${RECLAIM_T1_SECONDS:-21600}"
 RECLAIM_T2_SECONDS="${RECLAIM_T2_SECONDS:-172800}"
 RECLAIM_ACTIVE_GRACE="${RECLAIM_ACTIVE_GRACE:-600}"
+RECLAIM_OPTOUT_FILE="${RECLAIM_OPTOUT_FILE:-.tbd-reclaim-optout}"
 
 # Newline-separated cwds of every live process, populated once by main() before
 # the planning loop and consumed by is_live_cwd(). Declared here so it is defined
@@ -75,20 +77,55 @@ newest_mtime() {
 # dir_mtime DIR -> mtime of DIR itself (empty if missing). Cheap single stat —
 # used for install dirs so we never deep-scan a 100k-file node_modules. npm/uv/
 # terraform rewrite the top-level dir on install, so its mtime tracks "last
-# installed" well enough for a >48h staleness gate.
+# installed" well enough for a >48h staleness gate. Also used as a recency guard
+# over eligible installs (an in-flight install bumps the top-level dir mtime).
 dir_mtime() { stat -f '%m' "$1" 2>/dev/null || true; }
 
-# newest_install_mtime WORKTREE -> newest dir_mtime across the install dirs that
-# exist under WORKTREE (empty if none exist).
-newest_install_mtime() {
-  local wt="$1" d m newest=""
+# _any_match GLOB -> exit 0 if at least one path matches (literal when none match).
+# Used to test for the existence of shell-glob patterns in a safe, literal way.
+_any_match() {
+  local g
+  # shellcheck disable=SC2086 # deliberate glob expansion of the pattern arg
+  for g in $1; do [[ -e "$g" ]] && return 0; done
+  return 1
+}
+
+# install_regenerable WORKTREE NAME -> exit 0 if the install dir NAME under
+# WORKTREE is regenerable (has a manifest/lockfile that can re-create it).
+# Never reap an install dir without its regenerating lockfile — e.g. a hand-built
+# `python -m venv` with no uv.lock or requirements*.txt can't be reproduced.
+install_regenerable() {
+  local wt="$1" name="$2"
+  case "$name" in
+    node_modules) [[ -f "$wt/package.json" ]] ;;
+    .venv)        [[ -f "$wt/uv.lock" ]] || _any_match "$wt/requirements*.txt" ;;
+    .terraform)   _any_match "$wt/"'*.tf' ;;
+    *) return 1 ;;
+  esac
+}
+
+# eligible_install_dirs WORKTREE -> newline list of INSTALL_DIRS present AND
+# regenerable under the worktree. Directories without a regenerating manifest
+# are excluded (e.g. a .venv with no uv.lock or requirements*.txt).
+eligible_install_dirs() {
+  local wt="$1" d
   for d in "${INSTALL_DIRS[@]}"; do
     [[ -d "$wt/$d" ]] || continue
-    m="$(dir_mtime "$wt/$d")"
-    [[ -n "$m" ]] || continue
-    if [[ -z "$newest" ]] || (( m > newest )); then newest="$m"; fi
+    install_regenerable "$wt" "$d" || continue
+    printf '%s\n' "$d"
   done
-  printf '%s\n' "$newest"
+}
+
+# worktree_newest_mtime WORKTREE -> epoch of the newest regular file under WT,
+# EXCLUDING heavy regenerable / VCS dirs (node_modules/.venv/.terraform/.build/
+# .git). Tracks real USE (source edits, test output, logs) instead of the install
+# dir's own mtime, which only moves on install and reads an actively developed
+# worktree as idle. Empty if no non-pruned file exists.
+worktree_newest_mtime() {
+  local wt="$1"
+  [[ -d "$wt" ]] || return 0
+  { find "$wt" \( -name node_modules -o -name .venv -o -name .terraform -o -name .build -o -name .git \) -prune -o -type f -print0 2>/dev/null \
+      | xargs -0 stat -f '%m' 2>/dev/null | sort -rn | head -1; } || true
 }
 
 # has_active_build WORKTREE_PATH -> exit 0 if a swift build process references it
@@ -97,18 +134,23 @@ has_active_build() {
   _ps_lines | grep -Ei 'swift-build|swift-frontend|swiftc|swift-driver' | grep -Fq -- "$wt"
 }
 
-# live_cwds -> newline-separated, deduped absolute cwds of every live process.
-# The `|| true` keeps a no-match `grep` (no live cwds at all) from tripping the
-# caller's `set -euo pipefail` when the result is captured into a variable.
+# live_cwds -> newline-separated, deduped absolute cwds of every live process,
+# each canonicalized (symlinks resolved) so a process cwd like /var/tmp/... that
+# actually is /private/var/tmp/... matches when compared against symlink-resolved
+# worktree paths. The `|| true` keeps a no-match `grep` (no live cwds at all)
+# from tripping the caller's `set -euo pipefail` when the result is captured.
 live_cwds() {
-  { _lsof_lines | grep '^n/' | sed 's|^n||' | sort -u; } || true
+  { _lsof_lines | grep '^n/' | sed 's|^n||' | while IFS= read -r p; do canon_path "$p"; done | sort -u; } || true
 }
 
 # is_live_cwd WORKTREE -> exit 0 if any live process cwd is at or below WORKTREE.
-# Uses the LIVE_CWDS global (populated by main) and pure glob matching so paths
-# with regex metacharacters can't misfire.
+# Canonicalizes the worktree path before comparing (symlinks resolved, trailing
+# slash dropped) so a symlinked worktree is recognized even when LIVE_CWDS entries
+# are already canonical from lsof. Uses the LIVE_CWDS global (populated by main)
+# and pure glob matching so paths with regex metacharacters can't misfire.
 is_live_cwd() {
-  local wt="${1%/}" line
+  local wt line
+  wt="$(canon_path "${1%/}")"
   [[ -n "${LIVE_CWDS:-}" ]] || return 1
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
@@ -126,14 +168,23 @@ is_dirty() {
 
 # has_reclaimable WORKTREE -> exit 0 if the reaper can act on this worktree at
 # all: a SwiftPM .build (Package.swift-gated, so a stray non-Swift `.build` is
-# left alone) or any dependency-install dir.
+# left alone) or any eligible dependency-install dir (one with a regenerating
+# manifest/lockfile).
 has_reclaimable() {
-  local wt="$1" d
+  local wt="$1"
   [[ -f "$wt/Package.swift" && -d "$wt/.build" ]] && return 0
-  for d in "${INSTALL_DIRS[@]}"; do
-    [[ -d "$wt/$d" ]] && return 0
-  done
-  return 1
+  [[ -n "$(eligible_install_dirs "$wt")" ]]
+}
+
+# reclaim_opted_out WORKTREE -> exit 0 if opted out via marker file.
+# Per-worktree or per-repo opt-out marker makes the reaper skip it on EVERY
+# invocation path (launchd, restart.sh, manual), unlike TBD_SKIP_RECLAIM which
+# only gates restart.sh's background launch.
+reclaim_opted_out() {
+  local wt="$1" root
+  [[ -e "$wt/$RECLAIM_OPTOUT_FILE" ]] && return 0
+  root="$(repo_root_for_worktree "$wt")" || return 1
+  [[ -n "$root" && -e "$root/$RECLAIM_OPTOUT_FILE" ]]
 }
 
 # list_worktrees_tsv -> "<path>\t<liveSessions>" for each active worktree
@@ -231,11 +282,13 @@ plan_worktree() {
     fi
   fi
 
-  # Dependency installs: Tier-2 idleness, no live session. Independent of
-  # Package.swift so node/python/terraform worktrees are covered.
-  if (( sessions == 0 )); then
-    local inst_m; inst_m="$(newest_install_mtime "$wt")"
-    if [[ -n "$inst_m" ]] && (( now - inst_m >= t2 )); then
+  # Dependency installs: reap only when the WORKTREE has been idle (no real use)
+  # for T2 and there's no live session — independent of Package.swift so node/
+  # python/terraform worktrees are covered. Idleness is the worktree's newest
+  # non-pruned file mtime (tracks use), NOT the install dir's own mtime.
+  if (( sessions == 0 )) && [[ -n "$(eligible_install_dirs "$wt")" ]]; then
+    local act; act="$(worktree_newest_mtime "$wt")"
+    if [[ -z "$act" ]] || (( now - act >= t2 )); then
       echo "PLAN installs $wt"; emitted=true
     fi
   fi
@@ -278,6 +331,7 @@ main() {
       echo "SKIP excluded $wt"
       continue
     fi
+    if reclaim_opted_out "$wt"; then echo "SKIP opted-out $wt"; continue; fi
     if is_live_cwd "$wt"; then echo "SKIP live-cwd $wt"; continue; fi
     if is_dirty "$wt"; then echo "SKIP dirty $wt"; continue; fi
     has_reclaimable "$wt" || continue
@@ -306,18 +360,23 @@ main() {
           fi
           ;;
         installs)
-          # Recency guard on the install dirs themselves (a just-finished install
-          # bumps the dir mtime).
-          local inst_newest; inst_newest="$(newest_install_mtime "$path")"
-          if [[ -n "$inst_newest" ]] && (( $(_now) - inst_newest < RECLAIM_ACTIVE_GRACE )); then
+          local elig; elig="$(eligible_install_dirs "$path")"
+          [[ -n "$elig" ]] || continue
+          # Recency guard: an in-flight install bumps the top-level dir mtime.
+          local d newest_dir="" m
+          while IFS= read -r d; do
+            [[ -n "$d" ]] || continue
+            m="$(dir_mtime "$path/$d")"; [[ -n "$m" ]] || continue
+            if [[ -z "$newest_dir" ]] || (( m > newest_dir )); then newest_dir="$m"; fi
+          done <<< "$elig"
+          if [[ -n "$newest_dir" ]] && (( $(_now) - newest_dir < RECLAIM_ACTIVE_GRACE )); then
             log "skip (recently active installs): $path"; continue
           fi
-          local d
-          for d in "${INSTALL_DIRS[@]}"; do
-            [[ -d "$path/$d" ]] || continue
-            # ${path:?} guards against an empty path ever expanding "rm -rf" to "/$d".
+          while IFS= read -r d; do
+            [[ -n "$d" ]] || continue
+            # ${path:?} guards against an empty path ever expanding rm -rf to /$d.
             if rm -rf "${path:?}/$d"; then log "reclaimed $d: $path"; else log "rm failed ($d): $path"; fi
-          done
+          done <<< "$elig"
           ;;
       esac
     done < "$plan_file"

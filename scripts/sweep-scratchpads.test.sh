@@ -21,6 +21,18 @@ test_live_cwd_slugs_slugifies_lsof_output() {
   assert_eq "cwd slugified with leading dash" "-Users-x-wt" "$out"
 }
 
+test_live_cwd_slugs_canonicalizes_symlinked_paths() {
+  local root; root="$(mktmpd)"
+  mkdir -p "$root/real"
+  ln -s "$root/real" "$root/link"
+  local canon; canon="$(cd "$root/real" && pwd -P)"
+  local slug_real; slug_real="$(printf '%s\n' "$canon" | tr '/' '-')"
+  local lsof; lsof="printf 'p1\nfcwd\nn%s\n' \"$root/link\""
+  local out; out="$(SWEEP_LSOF_CMD="$lsof" live_cwd_slugs)"
+  assert_eq "symlinked path resolves to canonical slug" "$slug_real" "$out"
+  rm -rf "$root"
+}
+
 test_no_base_dir_is_noop() {
   local out; out="$(SWEEP_BASE="/no/such/base/here" bash "$HERE/sweep-scratchpads.sh" 2>&1)"
   assert_contains "missing base reported" "$out" "no scratchpad base at /no/such/base/here"

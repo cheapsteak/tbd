@@ -32,11 +32,18 @@ _base()      { printf '%s\n' "${SWEEP_BASE:-/private/tmp/claude-$(id -u)}"; }
 _lsof_lines() { if [[ -n "${SWEEP_LSOF_CMD:-}" ]]; then eval "$SWEEP_LSOF_CMD"; else lsof -d cwd -Fn 2>/dev/null; fi; }
 
 # --- helpers -----------------------------------------------------------------
-# live_cwd_slugs -> the scratchpad slug ('/'->'-') for every live process cwd.
-# The `|| true` keeps a no-match `grep` (no live cwds at all) from tripping
-# `set -euo pipefail` when the result is captured into a variable.
+
+# canon_path PATH -> physical path (symlinks resolved, trailing slash dropped);
+# falls back to the input verbatim if the dir is gone, so a vanished path still
+# compares equal textually. Mirrors scripts/reclaim-build.sh.
+canon_path() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }
+
+# live_cwd_slugs -> the scratchpad slug ('/'->'-') for every live process cwd,
+# each canonicalized first so a symlinked cwd (macOS /tmp -> /private/tmp) still
+# slugifies to the same value Claude Code derived from the resolved path. The
+# `|| true` keeps a no-match grep from tripping `set -euo pipefail` on capture.
 live_cwd_slugs() {
-  { _lsof_lines | grep '^n/' | sed 's|^n||' | tr '/' '-' | sort -u; } || true
+  { _lsof_lines | grep '^n/' | sed 's|^n||' | while IFS= read -r p; do canon_path "$p"; done | tr '/' '-' | sort -u; } || true
 }
 
 _avail_kb() { df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}' || true; }

@@ -453,24 +453,62 @@ test_dir_mtime_reads_dir_not_contents() {
   rm -rf "$d"
 }
 
-test_newest_install_mtime_picks_newest_of_present_dirs() {
-  local d; d="$(mktmpd)"; local now=2000000000
-  _mk_install_dir "$d" "$now" 9000 node_modules
-  _mk_install_dir "$d" "$now" 3000 .venv        # newer
-  assert_eq "newest install mtime is the freshest present dir" "$((now - 3000))" "$(newest_install_mtime "$d")"
-  rm -rf "$d"
-}
-
-test_newest_install_mtime_empty_when_none() {
+test_eligible_install_dirs_includes_present_regenerable() {
   local d; d="$(mktmpd)"
-  assert_eq "no install dirs -> empty" "" "$(newest_install_mtime "$d")"
-  rm -rf "$d"
-}
-
-test_has_reclaimable_true_for_installs_without_package_swift() {
-  local d; d="$(mktmpd)"
+  : > "$d/package.json"
   mkdir -p "$d/node_modules"
-  if has_reclaimable "$d"; then assert_eq "installs -> reclaimable" y y; else assert_eq "installs -> reclaimable" y n; fi
+  : > "$d/uv.lock"
+  mkdir -p "$d/.venv"
+  local out; out="$(eligible_install_dirs "$d")"
+  assert_contains "eligible includes regenerable node_modules" "$out" "node_modules"
+  assert_contains "eligible includes regenerable .venv" "$out" ".venv"
+  rm -rf "$d"
+}
+
+test_eligible_install_dirs_excludes_non_regenerable() {
+  local d; d="$(mktmpd)"
+  mkdir -p "$d/node_modules"     # present but NO package.json
+  mkdir -p "$d/.venv"            # present but NO uv.lock or requirements*.txt
+  local out; out="$(eligible_install_dirs "$d")"
+  assert_eq "non-regenerable dirs excluded" "" "$out"
+  rm -rf "$d"
+}
+
+test_worktree_newest_mtime_picks_newest_non_pruned_file() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  mkdir -p "$d/Sources"
+  : > "$d/Sources/main.swift"
+  touch_age "$d/Sources/main.swift" "$now" 5000
+  mkdir -p "$d/.build"           # pruned dir
+  : > "$d/.build/artifact"
+  touch_age "$d/.build/artifact" "$now" 100    # much newer, but in pruned dir
+  local expected; expected="$((now - 5000))"
+  assert_eq "worktree_newest_mtime ignores .build" "$expected" "$(worktree_newest_mtime "$d")"
+  rm -rf "$d"
+}
+
+test_worktree_newest_mtime_empty_when_only_pruned_dirs() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  mkdir -p "$d/node_modules"; : > "$d/node_modules/pkg"
+  touch_age "$d/node_modules/pkg" "$now" 100
+  mkdir -p "$d/.build"; : > "$d/.build/artifact"
+  touch_age "$d/.build/artifact" "$now" 50
+  assert_eq "no non-pruned files -> empty" "" "$(worktree_newest_mtime "$d")"
+  rm -rf "$d"
+}
+
+test_has_reclaimable_true_for_regenerable_installs() {
+  local d; d="$(mktmpd)"
+  : > "$d/package.json"
+  mkdir -p "$d/node_modules"
+  if has_reclaimable "$d"; then assert_eq "regenerable installs -> reclaimable" y y; else assert_eq "regenerable installs -> reclaimable" y n; fi
+  rm -rf "$d"
+}
+
+test_has_reclaimable_false_for_non_regenerable_install() {
+  local d; d="$(mktmpd)"
+  mkdir -p "$d/node_modules"  # present but NO package.json
+  if has_reclaimable "$d"; then assert_eq "non-regenerable installs not reclaimable" n y; else assert_eq "non-regenerable installs not reclaimable" n n; fi
   rm -rf "$d"
 }
 
@@ -497,6 +535,17 @@ test_is_live_cwd_ignores_parent_and_prefix_sibling() {
   LIVE_CWDS=""
 }
 
+test_is_live_cwd_canonicalizes_symlinked_worktree() {
+  local root; root="$(mktmpd)"
+  mkdir -p "$root/real/Sources"
+  ln -s "$root/real" "$root/link"
+  local canon; canon="$(cd "$root/real" && pwd -P)"
+  LIVE_CWDS="$canon/Sources"
+  if is_live_cwd "$root/link"; then assert_eq "symlinked worktree seen as live" y y; else assert_eq "symlinked worktree seen as live" y n; fi
+  LIVE_CWDS=""
+  rm -rf "$root"
+}
+
 test_live_cwds_parses_and_dedups_lsof_fn_output() {
   local lsof="printf 'p1\nfcwd\nn/a/b\np2\nfcwd\nn/a/b\np3\nfcwd\nn/c/d\n'"
   local out; out="$(RECLAIM_LSOF_CMD="$lsof" live_cwds)"
@@ -521,6 +570,7 @@ test_is_dirty_false_for_non_git_dir() {
 
 test_plan_installs_when_idle_and_no_session() {
   local d; d="$(mktmpd)"; local now=2000000000
+  : > "$d/package.json"; touch_age "$d/package.json" "$now" 200000   # manifest aged old
   _mk_install_dir "$d" "$now" 200000 node_modules   # > 48h
   local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
   assert_eq "idle installs, no session -> PLAN installs" "PLAN installs $d" "$out"
@@ -535,17 +585,31 @@ test_plan_installs_skipped_with_live_session() {
   rm -rf "$d"
 }
 
-test_plan_installs_skipped_when_fresh() {
+test_plan_installs_skipped_when_worktree_recently_used() {
   local d; d="$(mktmpd)"; local now=2000000000
-  _mk_install_dir "$d" "$now" 60 node_modules       # 1 min old
+  mkdir -p "$d/src"
+  : > "$d/package.json"; touch_age "$d/package.json" "$now" 200000   # manifest aged old (idle)
+  _mk_install_dir "$d" "$now" 200000 node_modules   # > 48h old
+  : > "$d/src/main.py"; touch_age "$d/src/main.py" "$now" 60         # but source file recent -> active
   local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
-  assert_eq "fresh installs -> no plan" "" "$out"
+  assert_eq "worktree with recent use -> no plan" "" "$out"
+  rm -rf "$d"
+}
+
+test_plan_installs_skipped_when_not_regenerable() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  mkdir -p "$d/.venv"            # present but NO uv.lock or requirements*.txt
+  touch_age "$d/.venv" "$now" 200000
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  assert_eq "non-regenerable .venv -> no plan" "" "$out"
   rm -rf "$d"
 }
 
 test_plan_swift_and_installs_both_emitted() {
   local d; d="$(mktmpd)"; local now=2000000000
   _mk_worktree "$d" "$now" 200000 200000            # tier2 .build
+  touch_age "$d/Package.swift" "$now" 200000        # Package.swift also aged old
+  : > "$d/uv.lock"; touch_age "$d/uv.lock" "$now" 200000  # manifest aged old (regenerable)
   _mk_install_dir "$d" "$now" 200000 .venv          # + idle installs
   local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
   assert_contains "swift tier2 emitted" "$out" "PLAN tier2 $d"
@@ -556,6 +620,10 @@ test_plan_swift_and_installs_both_emitted() {
 test_main_reaps_installs_in_non_swift_worktree() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/node-wt"
+  mkdir -p "$a"
+  : > "$a/package.json"; touch_age "$a/package.json" "$now" 200000
+  : > "$a/uv.lock"; touch_age "$a/uv.lock" "$now" 200000
+  : > "$a/main.tf"; touch_age "$a/main.tf" "$now" 200000
   _mk_install_dir "$a" "$now" 200000 node_modules
   _mk_install_dir "$a" "$now" 200000 .venv
   _mk_install_dir "$a" "$now" 200000 .terraform
@@ -565,22 +633,24 @@ test_main_reaps_installs_in_non_swift_worktree() {
 JSON
   RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
-  assert_eq "node_modules reaped (no Package.swift)" "false" "$([[ -d "$a/node_modules" ]] && echo true || echo false)"
-  assert_eq ".venv reaped"      "false" "$([[ -d "$a/.venv" ]] && echo true || echo false)"
-  assert_eq ".terraform reaped" "false" "$([[ -d "$a/.terraform" ]] && echo true || echo false)"
+  assert_eq "node_modules reaped" "false" "$([[ -d "$a/node_modules" ]] && echo true || echo false)"
+  assert_eq ".venv reaped"        "false" "$([[ -d "$a/.venv" ]] && echo true || echo false)"
+  assert_eq ".terraform reaped"   "false" "$([[ -d "$a/.terraform" ]] && echo true || echo false)"
   rm -rf "$root"
 }
 
 test_main_installs_recency_guard_keeps_fresh() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/node-wt"
+  mkdir -p "$a"
+  : > "$a/package.json"; touch_age "$a/package.json" "$now" 200000   # manifest aged old (regenerable + idle)
   mkdir -p "$a/node_modules"; : > "$a/node_modules/content"
-  touch_age "$a/node_modules" "$now" 0     # touched "now" -> inside grace
+  touch_age "$a/node_modules" "$now" 0     # dir touched "now" -> inside grace
   local j="$root/wt.json"
   cat > "$j" <<JSON
 [{"path":"$a","status":"active","liveClaudeSessionCount":0}]
 JSON
-  # T2=0 forces a plan despite freshness; the in-main RECLAIM_ACTIVE_GRACE guard
+  # T2=0 forces a plan despite manifest freshness; the in-main RECLAIM_ACTIVE_GRACE guard
   # is what must save the just-touched install dir.
   RECLAIM_NOW=$now RECLAIM_T2_SECONDS=0 RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
@@ -592,6 +662,7 @@ test_main_skips_live_cwd_worktree() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/wt"
   _mk_worktree "$a" "$now" 200000 200000            # tier2-eligible .build
+  mkdir -p "$a/Sources"                              # Create so canon_path can resolve it
   local j="$root/wt.json"
   cat > "$j" <<JSON
 [{"path":"$a","status":"active","liveClaudeSessionCount":0}]
@@ -625,6 +696,8 @@ JSON
 test_agent_worktree_installs_reaped() {
   local root; root="$(mktmpd)"; local now=2000000000
   local agent="$root/.claude/worktrees/agent-node"
+  mkdir -p "$agent"
+  : > "$agent/package.json"; touch_age "$agent/package.json" "$now" 200000
   _mk_install_dir "$agent" "$now" 200000 node_modules   # non-Swift agent worktree
   local j="$root/wt.json"; printf '[]' > "$j"
   RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
@@ -636,7 +709,9 @@ test_agent_worktree_installs_reaped() {
 test_agent_worktree_dirty_skipped() {
   local root; root="$(mktmpd)"; local now=2000000000
   local agent="$root/.claude/worktrees/agent-dirty"
+  mkdir -p "$agent"
   git init -q "$agent"
+  : > "$agent/package.json"; touch_age "$agent/package.json" "$now" 200000
   _mk_install_dir "$agent" "$now" 200000 node_modules
   local j="$root/wt.json"; printf '[]' > "$j"
   local out
@@ -650,6 +725,8 @@ test_agent_worktree_dirty_skipped() {
 test_agent_worktree_live_cwd_skipped() {
   local root; root="$(mktmpd)"; local now=2000000000
   local agent="$root/.claude/worktrees/agent-live"
+  mkdir -p "$agent"
+  : > "$agent/package.json"; touch_age "$agent/package.json" "$now" 200000
   _mk_install_dir "$agent" "$now" 200000 node_modules
   local j="$root/wt.json"; printf '[]' > "$j"
   local lsof; lsof="printf 'p1\nfcwd\nn%s\n' \"$agent\""
@@ -658,6 +735,44 @@ test_agent_worktree_live_cwd_skipped() {
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "live agent worktree skipped" "$out" "SKIP live-cwd $agent"
   assert_eq "live agent installs survive" "true" "$([[ -d "$agent/node_modules" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_skips_opted_out_worktree() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/wt-a" b="$root/wt-b"
+  _mk_worktree "$a" "$now" 200000 200000   # both tier2-eligible
+  _mk_worktree "$b" "$now" 200000 200000
+  : > "$a/.tbd-reclaim-optout"   # opt out A
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "opted-out worktree skipped" "$out" "SKIP opted-out $a"
+  assert_contains "sibling still planned" "$out" "PLAN tier2 $b"
+  assert_eq "opted-out .build survives" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  assert_eq "sibling .build reaped" "false" "$([[ -d "$b/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_reclaim_opted_out_via_repo_root_marker() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local agent="$root/.claude/worktrees/agent-opt"
+  mkdir -p "$agent"
+  _mk_worktree "$agent" "$now" 200000 200000
+  git init -q "$root"
+  : > "$root/.tbd-reclaim-optout"   # opt out the whole repo
+  local j="$root/wt.json"; printf '[]' > "$j"
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "repo-rooted marker skips agent worktree" "$out" "SKIP opted-out $agent"
+  assert_eq "opted-out agent .build survives" "true" "$([[ -d "$agent/.build" ]] && echo true || echo false)"
   rm -rf "$root"
 }
 
