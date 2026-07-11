@@ -46,7 +46,7 @@ struct ScratchpadCollectorTests: ~Copyable {
         #expect(slug == "")
     }
 
-    @Test("cleanUp removes scratchpad dir and returns record")
+    @Test("cleanUp removes scratchpad dir and returns record stamped with repoPath")
     func testCleanUpSuccess() async {
         let collector = ScratchpadCollector(base: tmpDir)
         let worktreePath = "/Users/chang/tbd/worktrees/test-wt"
@@ -60,14 +60,27 @@ struct ScratchpadCollectorTests: ~Copyable {
         try? "test content".write(to: file1, atomically: true, encoding: .utf8)
 
         let now = Date()
-        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, now: now)
+        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd", now: now)
 
         #expect(record != nil)
         #expect(record?.kind == ReapKind.scratchpad)
-        #expect(record?.repoPath == "")
+        #expect(record?.repoPath == "/Users/chang/tbd")
         #expect(record?.worktreePath == scratchpadDir.path)
         #expect(record?.apparentBytes != nil)
         #expect(!fm.fileExists(atPath: scratchpadDir.path))
+    }
+
+    @Test("cleanUp stamps an empty repoPath when the caller has none to give")
+    func testCleanUpStampsEmptyRepoPathWhenUnknown() async {
+        let collector = ScratchpadCollector(base: tmpDir)
+        let worktreePath = "/Users/chang/tbd/worktrees/test-wt-2"
+        let slug = ScratchpadCollector.slug(forWorktreePath: worktreePath)
+        let scratchpadDir = tmpDir.appendingPathComponent(slug)
+        try? fm.createDirectory(at: scratchpadDir, withIntermediateDirectories: true)
+
+        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "", now: Date())
+
+        #expect(record?.repoPath == "")
     }
 
     @Test("cleanUp returns nil when scratchpad does not exist")
@@ -75,12 +88,12 @@ struct ScratchpadCollectorTests: ~Copyable {
         let collector = ScratchpadCollector(base: tmpDir)
         let worktreePath = "/Users/chang/tbd/worktrees/nonexistent"
 
-        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, now: Date())
+        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd", now: Date())
 
         #expect(record == nil)
     }
 
-    @Test("reconcile removes only scratchpads for nonexistent worktrees")
+    @Test("reconcile removes only scratchpads for nonexistent worktrees, stamped with each pair's repoPath")
     func testReconcileRemovesGoneWorktrees() async {
         let collector = ScratchpadCollector(base: tmpDir)
 
@@ -103,11 +116,18 @@ struct ScratchpadCollectorTests: ~Copyable {
         // Create the existing worktree dir
         try? fm.createDirectory(atPath: existingWT, withIntermediateDirectories: true)
 
-        let records = await collector.reconcile(knownPaths: [existingWT, goneWT], now: Date())
+        let records = await collector.reconcile(
+            knownPaths: [
+                (worktreePath: existingWT, repoPath: "/repo/existing"),
+                (worktreePath: goneWT, repoPath: "/repo/gone"),
+            ],
+            now: Date()
+        )
 
         #expect(records.count == 1)
         #expect(records[0].kind == ReapKind.scratchpad)
         #expect(records[0].worktreePath == goneDir.path)
+        #expect(records[0].repoPath == "/repo/gone", "must stamp the repoPath from its own pair, not the survivor's")
         #expect(!fm.fileExists(atPath: goneDir.path))
         #expect(fm.fileExists(atPath: existingDir.path))
     }
@@ -132,7 +152,9 @@ struct ScratchpadCollectorTests: ~Copyable {
         // Create the worktree so it won't be cleaned
         try? fm.createDirectory(atPath: worktreePath, withIntermediateDirectories: true)
 
-        let records = await collector.reconcile(knownPaths: [worktreePath], now: Date())
+        let records = await collector.reconcile(
+            knownPaths: [(worktreePath: worktreePath, repoPath: "/repo/some")], now: Date()
+        )
 
         // Scratchpad should still exist because worktree exists
         #expect(records.count == 0)
@@ -149,7 +171,8 @@ struct ScratchpadCollectorTests: ~Copyable {
         let collector = ScratchpadCollector(base: missingBase)
 
         let records = await collector.reconcile(
-            knownPaths: [wtParent.appendingPathComponent("gone-wt").path], now: Date()
+            knownPaths: [(worktreePath: wtParent.appendingPathComponent("gone-wt").path, repoPath: "/repo/gone")],
+            now: Date()
         )
 
         #expect(records.count == 0)

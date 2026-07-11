@@ -102,10 +102,7 @@ public actor OrphanGC {
         self.scratchpadBase = resolvedScratchpadBase
         self.now = resolvedNow
         self.snapshot = snap
-        // OrphanGC always passes live cwds explicitly to `decide(_:liveCWDs:graceSeconds:)`
-        // per sweep (one lsof pass), so the collector's own stored closure is
-        // never consulted here — it's a harmless placeholder.
-        self.agentCollector = AgentWorktreeCollector(git: git, snapshot: snap, liveCWDs: { [] }, now: resolvedNow)
+        self.agentCollector = AgentWorktreeCollector(git: git, snapshot: snap, now: resolvedNow)
         self.scratchpadCollector = ScratchpadCollector(base: resolvedScratchpadBase)
     }
 
@@ -150,7 +147,7 @@ public actor OrphanGC {
                         // The reaped worktree may have had its own Claude Code
                         // scratchpad; clean that up too.
                         if let scratchRecord = await scratchpadCollector.cleanUp(
-                            forRemovedWorktreePath: candidate.path, now: now()
+                            forRemovedWorktreePath: candidate.path, repoPath: candidate.repoPath, now: now()
                         ) {
                             try? await db.reapRecords.insert(scratchRecord)
                             reaped += 1
@@ -164,7 +161,7 @@ public actor OrphanGC {
             }
         }
 
-        await reconcileScratchpads(dryRun: dryRun, planned: &planned, reaped: &reaped)
+        await reconcileScratchpads(repos: repos, dryRun: dryRun, planned: &planned, reaped: &reaped)
 
         // Snapshot retention never runs in dryRun; the outer guard already
         // establishes gcEnabled for any non-dry run.
@@ -179,20 +176,30 @@ public actor OrphanGC {
     /// Scratchpad reconciliation: archived TBD worktrees whose directory is
     /// already gone but whose Claude Code scratchpad survives. Mirrors the
     /// same keep-biased `dryRun`/`gcEnabled` gate as the agent-worktree loop.
+    /// `repos` is the sweep's own already-loaded repo list, reused here to
+    /// resolve each archived row's `repoID` to a `repo.path` without a second
+    /// DB round trip; a row with no resolvable repo (deleted repo, no
+    /// `repoID`) stamps `""` — fails toward the previous behavior rather than
+    /// dropping the record.
     private func reconcileScratchpads(
-        dryRun: Bool, planned: inout [String], reaped: inout Int
+        repos: [Repo], dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        let knownPaths = ((try? await db.worktrees.list(status: .archived)) ?? []).map(\.path)
-        let gonePaths = knownPaths.filter { !FileManager.default.fileExists(atPath: $0) }
-        for path in gonePaths {
-            let slug = ScratchpadCollector.slug(forWorktreePath: path)
+        let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
+        let archived = (try? await db.worktrees.list(status: .archived)) ?? []
+        let gone = archived
+            .filter { !FileManager.default.fileExists(atPath: $0.path) }
+            .map { (worktreePath: $0.path, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
+        for entry in gone {
+            let slug = ScratchpadCollector.slug(forWorktreePath: entry.worktreePath)
             let dir = scratchpadBase.appendingPathComponent(slug)
             guard FileManager.default.fileExists(atPath: dir.path) else { continue }
             planned.append("REAP scratchpad \(dir.path)")
             // The outer `gcEnabled || dryRun` guard means a non-dry run here
             // always has gcEnabled == true.
             guard !dryRun else { continue }
-            if let record = await scratchpadCollector.cleanUp(forRemovedWorktreePath: path, now: now()) {
+            if let record = await scratchpadCollector.cleanUp(
+                forRemovedWorktreePath: entry.worktreePath, repoPath: entry.repoPath, now: now()
+            ) {
                 try? await db.reapRecords.insert(record)
                 reaped += 1
                 logger.info("gc: reaped scratchpad \(record.worktreePath, privacy: .public)")
@@ -265,16 +272,29 @@ public actor OrphanGC {
     /// Entry point for the archive hook (Task 8): a TBD worktree at `path`
     /// was just removed, so its Claude Code scratchpad (if any) is cleaned up
     /// immediately rather than waiting for the next sweep's reconciliation.
+    /// `repoPath` is the owning repo's root (the archive caller has `repo` in
+    /// scope), stamped onto the resulting record; pass `""` when unknown.
+    ///
+    /// Verifies the worktree directory is actually gone before doing
+    /// anything else: `completeArchiveWorktree` fires this callback after a
+    /// `try?`-swallowed `git.worktreeRemove`, so a failed removal must not
+    /// orphan-classify (and delete) a scratchpad that's still in active use.
     ///
     /// The `gcEnabled` master switch governs ALL GC deletion, including this
     /// event-driven path — one toggle covers both collectors. A config read
     /// failure also skips (fail toward keeping).
-    public func scratchpadCleanup(forRemovedWorktreePath path: String) async {
+    public func scratchpadCleanup(forRemovedWorktreePath path: String, repoPath: String) async {
+        guard !FileManager.default.fileExists(atPath: path) else {
+            logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — worktree dir still exists")
+            return
+        }
         guard let config = try? await db.config.get(), config.gcEnabled else {
             logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — gc disabled")
             return
         }
-        guard let record = await scratchpadCollector.cleanUp(forRemovedWorktreePath: path, now: now()) else {
+        guard let record = await scratchpadCollector.cleanUp(
+            forRemovedWorktreePath: path, repoPath: repoPath, now: now()
+        ) else {
             return
         }
         try? await db.reapRecords.insert(record)

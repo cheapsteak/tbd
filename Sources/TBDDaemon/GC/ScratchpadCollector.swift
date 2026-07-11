@@ -25,9 +25,13 @@ public struct ScratchpadCollector: Sendable {
     }
 
     /// Event-driven: delete the scratchpad for one known, just-removed worktree
-    /// path. Returns a `ReapRecord` on success, or `nil` if the scratchpad did
+    /// path. `repoPath` is the owning repo's root, stamped onto the resulting
+    /// record so it surfaces in the per-repo History UI (`gc.list(repoPath:)`);
+    /// pass `""` when the owning repo can't be resolved (fails toward the
+    /// record simply not appearing per-repo rather than dropping it).
+    /// Returns a `ReapRecord` on success, or `nil` if the scratchpad did
     /// not exist, or if removal failed (directory still exists).
-    public func cleanUp(forRemovedWorktreePath path: String, now: Date) async -> ReapRecord? {
+    public func cleanUp(forRemovedWorktreePath path: String, repoPath: String, now: Date) async -> ReapRecord? {
         let slug = Self.slug(forWorktreePath: path)
         let dir = base.appendingPathComponent(slug)
 
@@ -56,25 +60,31 @@ public struct ScratchpadCollector: Sendable {
 
         logger.info("gc: reaped scratchpad \(dir.path, privacy: .public)")
         return ReapRecord(
-            kind: .scratchpad, repoPath: "", worktreePath: dir.path,
+            kind: .scratchpad, repoPath: repoPath, worktreePath: dir.path,
             apparentBytes: bytes, reapedAt: now
         )
     }
 
-    /// Reconciliation: for each known path whose directory no longer exists,
-    /// delete its scratchpad. Unrelated directories in the base are untouched.
-    /// Returns an array of `ReapRecord` for paths that were successfully cleaned.
+    /// Reconciliation: for each known `(worktreePath, repoPath)` pair whose
+    /// worktree directory no longer exists, delete its scratchpad. Unrelated
+    /// directories in the base are untouched. Returns an array of `ReapRecord`
+    /// for paths that were successfully cleaned, each stamped with the
+    /// `repoPath` of its own pair.
     ///
     /// If the base directory does not exist, this is a no-op (returns empty array).
-    public func reconcile(knownPaths: [String], now: Date) async -> [ReapRecord] {
+    public func reconcile(
+        knownPaths: [(worktreePath: String, repoPath: String)], now: Date
+    ) async -> [ReapRecord] {
         guard FileManager.default.fileExists(atPath: base.path) else {
             return []
         }
 
-        let gonePaths = knownPaths.filter { !FileManager.default.fileExists(atPath: $0) }
+        let gone = knownPaths.filter { !FileManager.default.fileExists(atPath: $0.worktreePath) }
         var records: [ReapRecord] = []
-        for path in gonePaths {
-            if let record = await cleanUp(forRemovedWorktreePath: path, now: now) {
+        for entry in gone {
+            if let record = await cleanUp(
+                forRemovedWorktreePath: entry.worktreePath, repoPath: entry.repoPath, now: now
+            ) {
                 records.append(record)
             }
         }

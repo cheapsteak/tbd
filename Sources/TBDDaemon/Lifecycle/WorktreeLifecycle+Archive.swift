@@ -170,7 +170,7 @@ extension WorktreeLifecycle {
         // The directory is gone from disk — fire the event-driven scratchpad
         // cleanup hook (Task 8) rather than waiting for the next hourly sweep.
         if let onWorktreeRemoved {
-            await onWorktreeRemoved(worktree.path)
+            await onWorktreeRemoved(worktree.path, repo.path)
         }
     }
 

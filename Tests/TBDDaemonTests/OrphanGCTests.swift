@@ -109,6 +109,48 @@ struct OrphanGCTests {
         #expect(deltas.contains { if case .reapRecordsChanged = $0 { return true }; return false })
     }
 
+    // MARK: - Sweep-companion scratchpad reap stamps the agent worktree's own repoPath
+
+    @Test func sweepReapsCompanionScratchpadStampedWithAgentWorktreeRepoPath() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-companion-repopath-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await db.repos.create(path: repo.path, displayName: "acme", defaultBranch: "main")
+
+        let wtPath = try await makeAgentWorktree(repo: repo, name: "agent-x")
+
+        // The agent worktree's own Claude Code scratchpad, planted so the
+        // sweep's reap-then-clean-companion-scratchpad path (OrphanGC.swift
+        // ~149-155) has something to find.
+        let slug = ScratchpadCollector.slug(forWorktreePath: wtPath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: scratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        let result = await gc.sweep()
+
+        #expect(result.reaped == 2, "one agent-worktree reap + one companion scratchpad reap")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.count == 2)
+
+        let agentRecord = try #require(records.first { $0.kind == .agentWorktree })
+        #expect(agentRecord.repoPath == repo.path)
+
+        let scratchRecord = try #require(records.first { $0.kind == .scratchpad })
+        #expect(scratchRecord.worktreePath == scratchDir.path)
+        #expect(scratchRecord.repoPath == repo.path, "companion scratchpad must carry the same repoPath as its agent worktree")
+    }
+
     // MARK: - Dry run plans without mutating
 
     @Test func sweepDryRunPlansWithoutMutating() async throws {
@@ -328,6 +370,44 @@ struct OrphanGCTests {
         #expect(broadcaster.snapshot().isEmpty)
     }
 
+    @Test func sweepReconciliationStampsArchivedWorktreesOwningRepoPath() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-reconcile-repopath-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let db = try TBDDatabase(inMemory: true)
+        // Repo path deliberately nonexistent: candidates() returns [] and the
+        // sweep's agent-worktree loop is a no-op, isolating reconciliation.
+        let repo = try await db.repos.create(
+            path: sandbox.appendingPathComponent("repo").path, displayName: "acme", defaultBranch: "main"
+        )
+        let goneWorktreePath = sandbox.appendingPathComponent("gone-wt").path
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "gone-wt", branch: "gone-wt",
+            path: goneWorktreePath, tmuxServer: "test-server"
+        )
+        try await db.worktrees.archive(id: row.id)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: goneWorktreePath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: scratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        let result = await gc.sweep()
+
+        #expect(result.reaped == 1)
+        #expect(!FileManager.default.fileExists(atPath: scratchDir.path))
+        let records = try await db.reapRecords.list(repoPath: nil)
+        let record = try #require(records.first)
+        #expect(record.kind == .scratchpad)
+        #expect(record.repoPath == repo.path, "reconcile must resolve the archived row's repoID to its repo.path")
+    }
+
     // MARK: - Event-driven scratchpad cleanup
 
     @Test func scratchpadEventCleanup() async throws {
@@ -347,15 +427,48 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath)
+        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd")
 
         #expect(!FileManager.default.fileExists(atPath: scratchDir.path))
         let records = try await db.reapRecords.list(repoPath: nil)
         #expect(records.count == 1)
         #expect(records.first?.kind == .scratchpad)
+        #expect(records.first?.repoPath == "/Users/chang/tbd", "event path must stamp the caller's repoPath")
 
         let deltas = broadcaster.snapshot()
         #expect(deltas.contains { if case .reapRecordsChanged = $0 { return true }; return false })
+    }
+
+    @Test func scratchpadEventCleanupKeepsWhenWorktreeDirStillExists() async throws {
+        // Guards against the case where `completeArchiveWorktree`'s
+        // `try?`-swallowed `git.worktreeRemove` actually failed: the
+        // worktree directory is still there, so the scratchpad must not be
+        // orphan-classified (and deleted) out from under a live session.
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-scratch-dir-still-exists-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let worktreeDir = sandbox.appendingPathComponent("still-here-wt")
+        try FileManager.default.createDirectory(at: worktreeDir, withIntermediateDirectories: true)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: worktreeDir.path)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: scratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let db = try TBDDatabase(inMemory: true)
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreeDir.path, repoPath: "/Users/chang/tbd")
+
+        #expect(FileManager.default.fileExists(atPath: scratchDir.path),
+                "worktree dir still on disk — the removal must have failed, so the scratchpad stays intact")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.isEmpty)
+        #expect(broadcaster.snapshot().isEmpty)
     }
 
     @Test func scratchpadEventCleanupDisabledDoesNothing() async throws {
@@ -376,7 +489,7 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath)
+        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd")
 
         #expect(FileManager.default.fileExists(atPath: scratchDir.path),
                 "the gcEnabled master switch must suppress event-driven deletion too")

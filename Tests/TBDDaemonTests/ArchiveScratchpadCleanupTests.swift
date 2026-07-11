@@ -20,7 +20,7 @@ import Testing
             hooks: HookResolver()
         )
         let box = RemovedPathBox()
-        lifecycle.onWorktreeRemoved = { path in await box.record(path) }
+        lifecycle.onWorktreeRemoved = { path, repoPath in await box.record(path, repoPath) }
 
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -30,6 +30,7 @@ import Testing
 
         #expect(!FileManager.default.fileExists(atPath: wt.path))
         #expect(await box.paths == [wt.path])
+        #expect(await box.repoPaths == [repo.path], "must thread the owning repo's path alongside the worktree path")
     }
 
     @Test func archiveWorktreeWithoutCallbackStillArchives() async throws {
@@ -69,7 +70,7 @@ import Testing
             hooks: HookResolver()
         )
         let box = RemovedPathBox()
-        lifecycle.onWorktreeRemoved = { path in await box.record(path) }
+        lifecycle.onWorktreeRemoved = { path, repoPath in await box.record(path, repoPath) }
 
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -82,5 +83,9 @@ import Testing
 
 actor RemovedPathBox {
     private(set) var paths: [String] = []
-    func record(_ path: String) { paths.append(path) }
+    private(set) var repoPaths: [String] = []
+    func record(_ path: String, _ repoPath: String) {
+        paths.append(path)
+        repoPaths.append(repoPath)
+    }
 }

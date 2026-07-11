@@ -84,12 +84,15 @@ public struct WorktreeLifecycle: Sendable {
 
     /// Fired immediately after a worktree's directory is actually removed
     /// from disk (`completeArchiveWorktree`'s `git.worktreeRemove`), with the
-    /// removed worktree's path. `nil` by default (tests, older callers).
-    /// `Daemon` wires this to `OrphanGC.scratchpadCleanup(forRemovedWorktreePath:)`
-    /// so the worktree's Claude Code scratchpad is reclaimed event-driven
-    /// instead of waiting for the next hourly sweep. Deliberately NOT fired by
+    /// removed worktree's path and its owning repo's path (the archive
+    /// caller has `repo` in scope). `nil` by default (tests, older callers).
+    /// `Daemon` wires this to
+    /// `OrphanGC.scratchpadCleanup(forRemovedWorktreePath:repoPath:)` so the
+    /// worktree's Claude Code scratchpad is reclaimed event-driven instead of
+    /// waiting for the next hourly sweep, stamped with the repo path so it
+    /// surfaces in that repo's History UI. Deliberately NOT fired by
     /// `forgetWorktree` — forget leaves the directory in place.
-    public var onWorktreeRemoved: (@Sendable (String) async -> Void)?
+    public var onWorktreeRemoved: (@Sendable (_ worktreePath: String, _ repoPath: String) async -> Void)?
 
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, lifecycle paths open a gated
