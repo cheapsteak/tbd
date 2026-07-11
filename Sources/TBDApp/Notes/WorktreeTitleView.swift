@@ -30,13 +30,17 @@ struct WorktreeTitleView: View {
         }
     }
 
-    // Repo name → dropdown linking to the repo's detail tabs.
+    // Repo name → dropdown linking to the repo's detail tabs, plus repo
+    // actions (New Worktree).
     private var repoMenu: some View {
         Menu {
             if let repoID = worktree.repoID {
                 Button("Archived Worktrees") { openRepoTab(repoID, .archived) }
                 Button("Default Prompts") { openRepoTab(repoID, .instructions) }
                 Button("Hooks & Settings") { openRepoTab(repoID, .settings) }
+                Divider()
+                Button("New Worktree") { appState.createWorktree(repoID: repoID) }
+                    .keyboardShortcut("n", modifiers: .command)
             }
         } label: {
             Text(repoName ?? "")
