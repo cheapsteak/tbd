@@ -201,7 +201,7 @@ extension AppState {
             gcEnabled = enabled
         } catch {
             logger.error("Failed to set gcEnabled: \(error, privacy: .public)")
-            showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
+            showAlert("Failed to update GC setting: \(error.localizedDescription)", isError: true)
         }
     }
 

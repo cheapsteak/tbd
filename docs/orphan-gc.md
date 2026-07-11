@@ -126,7 +126,11 @@ The sweep itself runs:
 
 For an ad-hoc look without waiting for the clock, use `tbd gc sweep --dry-run` — it
 computes and prints the identical plan without touching disk or the DB, regardless of
-`gcEnabled`.
+`gcEnabled`. One under-report to know about: a companion scratchpad reap for an
+agent worktree that's only *planned* (not actually reaped) in a dry run isn't planned
+either, since it's only computed once the agent worktree itself has actually been
+removed — a real (non-dry) sweep will report more scratchpad reaps than the preceding
+dry run predicted.
 
 ## Config knobs
 

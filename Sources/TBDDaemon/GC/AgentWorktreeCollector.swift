@@ -53,21 +53,15 @@ public enum GCDecision: Sendable, Equatable {
 public struct AgentWorktreeCollector: Sendable {
     let git: GitManager
     let snapshot: ReapSnapshot
-    /// Canonicalized (realpath'd) cwds of currently-running processes, as a
-    /// live-cwd provider would report them (built in Task 7 from `lsof`).
-    /// Injected so tests never shell out to `lsof`.
-    let liveCWDs: @Sendable () async -> [String]
     let now: @Sendable () -> Date
 
     public init(
         git: GitManager,
         snapshot: ReapSnapshot,
-        liveCWDs: @escaping @Sendable () async -> [String],
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.git = git
         self.snapshot = snapshot
-        self.liveCWDs = liveCWDs
         self.now = now
     }
 

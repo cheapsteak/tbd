@@ -17,11 +17,10 @@ struct AgentWorktreeCollectorTests {
     // MARK: - Helpers
 
     private func makeCollector(
-        liveCWDs: @escaping @Sendable () async -> [String] = { [] },
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> AgentWorktreeCollector {
         let git = GitManager()
-        return AgentWorktreeCollector(git: git, snapshot: ReapSnapshot(git: git), liveCWDs: liveCWDs, now: now)
+        return AgentWorktreeCollector(git: git, snapshot: ReapSnapshot(git: git), now: now)
     }
 
     /// Builds `<repo>/.claude/worktrees/<name>` as a real linked git
@@ -132,14 +131,14 @@ struct AgentWorktreeCollectorTests {
 
         // Well within a 1-hour grace window: kept.
         let recentCollector = AgentWorktreeCollector(
-            git: git, snapshot: snap, liveCWDs: { [] }, now: { baseline.addingTimeInterval(100) }
+            git: git, snapshot: snap, now: { baseline.addingTimeInterval(100) }
         )
         let keepDecision = await recentCollector.decide(candidate, liveCWDs: [], graceSeconds: 3600)
         #expect(keepDecision == .keep(reason: "grace"))
 
         // Well past a 1-hour grace window: reaps.
         let staleCollector = AgentWorktreeCollector(
-            git: git, snapshot: snap, liveCWDs: { [] }, now: { baseline.addingTimeInterval(7200) }
+            git: git, snapshot: snap, now: { baseline.addingTimeInterval(7200) }
         )
         let reapDecision = await staleCollector.decide(candidate, liveCWDs: [], graceSeconds: 3600)
         guard case .reap = reapDecision else {
