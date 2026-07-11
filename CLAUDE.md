@@ -27,7 +27,7 @@ New features that act autonomously or can destroy state land gated behind a flag
 
 Not required for bug fixes, small additive UI, or refactors — don't sprawl flags.
 
-Mechanics: daemon-side behavior gates on a `config` column added by migration (follow "Database migrations must update the shared model" below); app-only behavior may gate on a UserDefaults key (precedent: `useTableViewTranscript`). Test both branches (see Workflow above). State the flag name, how to enable it for the soak, and the graduation plan in the PR description.
+Mechanics: daemon-side behavior gates on a `config` column added by migration (follow "Database migrations must update the shared model" below); app-only behavior may gate on a UserDefaults key (precedent: `enableTranscript`, default-off). Test both branches (see Workflow above). State the flag name, how to enable it for the soak, and the graduation plan in the PR description.
 
 Cautionary precedent: `auto_hibernate_enabled` shipped default-ON in `v39_session_hibernation` and had to be force-disabled in `v50` once the eat-typed-input risk was understood. Because `ADD COLUMN ... DEFAULT` backfills existing rows, flipping a default later needs a forcing `UPDATE` migration (a Swift-side default change alone is a no-op for existing installs) — and after the force-off, a user's deliberate opt-in is indistinguishable from the backfilled value, so it got reset too. Shipping default-OFF first avoids all of this. Good precedents: `control_mode_enabled`, `hibernate_input_veto_enabled` (v51).
 
