@@ -192,7 +192,18 @@ struct ThemeStoreTests {
         try JSONEncoder().encode(theme)
             .write(to: themesDir.appendingPathComponent("ext.json"))
 
-        let deadline = Date().addingTimeInterval(5)
+        // Generous positive-wait deadline that only elapses on failure. Both
+        // this polling loop and the FSEvents callback's `Task { @MainActor in
+        // ... }` bounce must acquire a turn on the single serial MainActor
+        // executor (bound to the process's one main thread); under a
+        // full-suite `swift test --parallel -j 2` run, hundreds of other
+        // @MainActor suites queue for that same executor and can stretch
+        // delivery well past a 5s window (reproduced locally: reload landed
+        // at ~12s wall-clock). Same root cause as the cooperative-pool
+        // starvation documented for `ciSafeDeadline` in
+        // Tests/TBDDaemonTests/ControlModeTestSupport.swift (PR #379).
+        // Passing runs still complete in ~0.1s.
+        let deadline = Date().addingTimeInterval(30)
         while store.userThemes.isEmpty && Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
