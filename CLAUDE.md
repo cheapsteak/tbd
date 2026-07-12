@@ -17,6 +17,20 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Run `swift test` if you changed daemon or shared code.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
+### Large or risky new behavior ships behind a default-off flag
+
+New features that act autonomously or can destroy state land gated behind a flag that defaults to OFF, soak, and only then graduate (flip the default, eventually delete the flag). Required when the feature:
+
+- acts without a user gesture — background sweeps, timers, anything "auto-"
+- kills processes, deletes or mutates persisted state, or sends input to sessions
+- wholesale-replaces a load-bearing path (rendering, input routing, persistence)
+
+Not required for bug fixes, small additive UI, or refactors — don't sprawl flags.
+
+Mechanics: daemon-side behavior gates on a `config` column added by migration (follow "Database migrations must update the shared model" below); app-only behavior may gate on a UserDefaults key (precedent: `enableTranscript`, default-off). Test both branches (see Workflow above). State the flag name, how to enable it for the soak, and the graduation plan in the PR description.
+
+Cautionary precedent: `auto_hibernate_enabled` shipped default-ON in `v39_session_hibernation` and had to be force-disabled in `v50` once the eat-typed-input risk was understood. Because `ADD COLUMN ... DEFAULT` backfills existing rows, flipping a default later needs a forcing `UPDATE` migration (a Swift-side default change alone is a no-op for existing installs) — and after the force-off, a user's deliberate opt-in is indistinguishable from the backfilled value, so it got reset too. Shipping default-OFF first avoids all of this. Good precedents: `control_mode_enabled`, `hibernate_input_veto_enabled` (v51).
+
 ### Restart must use the worktree's own script
 Always run `scripts/restart.sh` (relative, from the worktree cwd), never an absolute path to the main project's copy. Using `/Users/chang/projects/tbd/scripts/restart.sh` builds and starts binaries from the main branch, leaving old worktree processes running and causing "Unknown method" RPC errors. After any restart, verify with:
 ```
