@@ -85,6 +85,17 @@ private func recordUsed(bundleID: String, repoID: UUID?) {
 struct OpenInEditorButton: View {
     let path: String
     let repoID: UUID?
+    /// Runs at the start of every open action (pinned icon click and overflow
+    /// menu selection alike) — e.g. to make sure `path` exists on disk before
+    /// the target app is asked to open it. Default nil keeps existing call
+    /// sites unchanged.
+    var beforeOpen: (() -> Void)? = nil
+    /// Runs after every open action (pinned icon click and overflow menu
+    /// selection alike) — e.g. to dismiss the containing popover once the
+    /// external app has been asked to open `path`, so stale content isn't
+    /// left showing (see `NotepadPopoverView`). Default nil keeps existing
+    /// call sites unchanged.
+    var afterOpen: (() -> Void)? = nil
 
     @State private var recentBundleIDs: [String] = []
     @State private var hovering: String? = nil
@@ -172,9 +183,35 @@ struct OpenInEditorButton: View {
     }
 
     private func open(entry: (editor: ExternalEditor, appURL: URL)) {
-        openInEditor(path: path, bundleID: entry.editor.bundleID)
+        Self.performOpen(
+            beforeOpen: beforeOpen,
+            path: path,
+            bundleID: entry.editor.bundleID,
+            openWith: openInEditor,
+            afterOpen: afterOpen
+        )
         recordUsed(bundleID: entry.editor.bundleID, repoID: repoID)
         recentBundleIDs = loadRecentBundleIDs(repoID: repoID)
+    }
+
+    /// The ordered open sequence shared by the pinned-icon and overflow-menu
+    /// paths: `beforeOpen` must complete before the editor is asked to open
+    /// `path`, because the hook may create the very file being opened, and
+    /// `afterOpen` runs only after the open action, because it may tear down
+    /// the UI hosting this button (see `NotepadPopoverView`). Internal, with
+    /// `openWith` injected, so tests can pin the ordering without launching
+    /// real apps or touching `UserDefaults.standard` (see
+    /// `OpenInEditorButtonBeforeOpenTests`).
+    static func performOpen(
+        beforeOpen: (() -> Void)?,
+        path: String,
+        bundleID: String,
+        openWith: (_ path: String, _ bundleID: String) -> Void,
+        afterOpen: (() -> Void)? = nil
+    ) {
+        beforeOpen?()
+        openWith(path, bundleID)
+        afterOpen?()
     }
 
     private func showOverflowMenu() {

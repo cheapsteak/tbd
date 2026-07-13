@@ -21,6 +21,10 @@ struct NotepadPopoverView: View {
     @State private var loadedPath: String = ""
     @State private var saveTask: Task<Void, Never>?
     @FocusState private var editorFocused: Bool
+    /// Dismisses the containing popover after an open-in-app action, so the
+    /// notepad doesn't keep showing content that goes stale while the file is
+    /// edited externally (it re-reads from disk on the next presentation).
+    @Environment(\.dismiss) private var dismiss
 
     private var placeholder: String {
         switch scope {
@@ -29,22 +33,58 @@ struct NotepadPopoverView: View {
         }
     }
 
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            TextEditor(text: $content)
-                .font(.body)
-                .scrollContentBackground(.hidden)
-                .focused($editorFocused)
+    /// Matches the notes button tooltip wording in `WorktreeTitleView`.
+    private var title: String {
+        switch scope {
+        case .repo: return "Repo notes"
+        case .worktree: return "Worktree notes"
+        }
+    }
 
-            if content.isEmpty {
-                Text(placeholder)
+    /// MRU key for the open-in control: the repo when repo-scoped, else nil
+    /// (scratch worktrees fall back to the shared "scratch" MRU key).
+    private var openInRepoID: UUID? {
+        if case .repo(let id) = scope { return id }
+        return nil
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                OpenInEditorButton(path: scope.notesPath, repoID: openInRepoID, beforeOpen: {
+                    // Flush any pending debounced edit, then make sure the
+                    // file exists on disk (it won't yet when the notepad is
+                    // empty — `write` deletes empty files) so the editor
+                    // opens the real path.
+                    saveTask?.cancel()
+                    saveTask = nil
+                    flushSave()
+                    store.ensureFileExists(at: scope.notesPath)
+                }, afterOpen: {
+                    dismiss()
+                })
+            }
+
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $content)
                     .font(.body)
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 5)
-                    .allowsHitTesting(false)
+                    .scrollContentBackground(.hidden)
+                    .focused($editorFocused)
+
+                if content.isEmpty {
+                    Text(placeholder)
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
+                }
             }
         }
-        .frame(width: 360, height: 280)
+        .frame(width: 360, height: 308)
         .padding(10)
         .defaultFocus($editorFocused, true)
         .onChange(of: content) { _, newValue in
