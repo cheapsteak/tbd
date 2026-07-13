@@ -21,6 +21,10 @@ struct NotepadPopoverView: View {
     @State private var loadedPath: String = ""
     @State private var saveTask: Task<Void, Never>?
     @FocusState private var editorFocused: Bool
+    /// Dismisses the containing popover after an open-in-app action, so the
+    /// notepad doesn't keep showing content that goes stale while the file is
+    /// edited externally (it re-reads from disk on the next presentation).
+    @Environment(\.dismiss) private var dismiss
 
     private var placeholder: String {
         switch scope {
@@ -60,6 +64,8 @@ struct NotepadPopoverView: View {
                     saveTask = nil
                     flushSave()
                     store.ensureFileExists(at: scope.notesPath)
+                }, afterOpen: {
+                    dismiss()
                 })
             }
 
