@@ -87,7 +87,12 @@
       //     silently miss even though the handler launched.
       //   - window blur: fires whenever the browser window loses focus,
       //     including when TBD activates without occluding it. This catches
-      //     the partial-occlusion case visibilitychange misses.
+      //     the partial-occlusion case visibilitychange misses. Note blur
+      //     fires BEFORE hidden even in the full-occlusion/minimize case
+      //     (OS focus loss precedes the browser's occlusion recompute), so
+      //     the first signal to arrive is almost always blur — a later
+      //     'hidden' therefore upgrades a pending blur-scheduled return to
+      //     the fast path instead of being ignored (see onOpened()).
       //
       // Known wrinkle: blur is also fired by the browser's "Open TBD.app?"
       // confirmation dialog the moment it OPENS — before the user has
@@ -114,6 +119,9 @@
       var armedUntil = 0;
       var returned = false;
       var returnTimer = null;
+      // Which signal scheduled the currently pending returnTimer — lets a
+      // later 'hidden' recognize (and upgrade) a blur-scheduled return.
+      var pendingSignal = null;
 
       function arm() {
         armedUntil = Date.now() + DETECT_WINDOW_MS;
@@ -121,21 +129,15 @@
           '(' + DETECT_WINDOW_MS + 'ms from now)');
       }
 
-      function onOpened(signal) {
-        if (returned) return; // guard against double-fire
-        returned = true;
-        var canGoBack = history.length > 1;
+      function scheduleReturn(signal, canGoBack) {
         // 'hidden' is unambiguous — return quickly. 'blur' may just be the
         // "Open TBD.app?" dialog opening, so give it long enough to outlast
         // most dialog interactions before we decide.
         var delay = signal === 'blur' ? BLUR_RETURN_DELAY_MS : RETURN_DELAY_MS;
-        console.log('[tbd-open] onOpened(): signal =', signal,
-          '; history.length =', history.length,
+        console.log('[tbd-open] scheduleReturn(): signal =', signal,
           '— will', canGoBack ? 'history.back()' : 'window.close()',
           'in', delay + 'ms');
-        status.textContent = canGoBack
-          ? 'Opened in TBD — taking you back…'
-          : 'TBD opened — you can close this tab.';
+        pendingSignal = signal;
         // Short delay so the scheme launch isn't interrupted by navigating
         // away. (The tab is usually backgrounded here, but not guaranteed —
         // the return proceeds even if the tab is visible again by then,
@@ -143,6 +145,7 @@
         // has regained focus.)
         returnTimer = setTimeout(function () {
           returnTimer = null;
+          pendingSignal = null;
           if (signal === 'blur' && document.hasFocus()) {
             // The blur was likely the confirmation dialog opening and the
             // user cancelled — or they deliberately came back to this page.
@@ -168,6 +171,34 @@
             }, 500);
           }
         }, delay);
+      }
+
+      function onOpened(signal) {
+        if (returned) {
+          // blur fires before hidden even in the full-occlusion/minimize
+          // case, so a blur-scheduled return is usually already pending when
+          // 'hidden' arrives. 'hidden' is the unambiguous signal (the
+          // confirmation dialog never hides the document), so let it preempt
+          // the slow blur path and upgrade to the fast unconditional return.
+          if (signal === 'hidden' && pendingSignal === 'blur' && returnTimer !== null) {
+            console.log('[tbd-open] hidden signal upgrading pending blur return to the fast unconditional path');
+            clearTimeout(returnTimer);
+            returnTimer = null;
+            pendingSignal = null;
+            // Status text was already set by the first onOpened — no need
+            // to set it again here.
+            scheduleReturn('hidden', history.length > 1);
+          }
+          return; // guard against double-fire
+        }
+        returned = true;
+        var canGoBack = history.length > 1;
+        console.log('[tbd-open] onOpened(): signal =', signal,
+          '; history.length =', history.length);
+        status.textContent = canGoBack
+          ? 'Opened in TBD — taking you back…'
+          : 'TBD opened — you can close this tab.';
+        scheduleReturn(signal, canGoBack);
       }
 
       document.addEventListener('visibilitychange', function () {
@@ -218,6 +249,7 @@
           console.log('[tbd-open] pending return timer cancelled by manual click');
           clearTimeout(returnTimer);
           returnTimer = null;
+          pendingSignal = null;
         }
         // Reset so a retry after a false positive (whose window.close() was
         // ignored) can trigger the status update and auto-return again.
