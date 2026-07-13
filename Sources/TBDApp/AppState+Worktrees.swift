@@ -488,7 +488,7 @@ extension AppState {
         } else {
             do {
                 archived = try await daemonClient.listWorktrees(
-                    repoID: nil, status: .archived
+                    repoID: nil, status: .archived, includeSessionCounts: false
                 )
             } catch {
                 logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")

@@ -149,6 +149,67 @@ extension RPCRouterTests {
         #expect(page.map(\.id) == [wt2.id])
     }
 
+    @Test("worktree.list archived enriches liveClaudeSessionCount by default")
+    func worktreeListArchivedEnrichesSessionCounts() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "b",
+            path: "/tmp/wt-\(UUID())",
+            tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: wt.id)
+
+        // Default (includeSessionCounts nil == true): the archived row is
+        // enriched, so liveClaudeSessionCount is populated (0 here — the /tmp
+        // path has no `~/.claude/projects` dir — but non-nil is the point).
+        let request = try RPCRequest(
+            method: RPCMethod.worktreeList,
+            params: WorktreeListParams(repoID: repo.id, status: .archived)
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+        let worktrees = try response.decodeResult([Worktree].self)
+        #expect(worktrees.count == 1)
+        #expect(worktrees[0].liveClaudeSessionCount != nil)
+    }
+
+    @Test("worktree.list archived with includeSessionCounts:false skips enrichment")
+    func worktreeListArchivedSkipsSessionCounts() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "b",
+            path: "/tmp/wt-\(UUID())",
+            tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: wt.id)
+
+        // includeSessionCounts:false (deep-link lookup) skips the expensive
+        // per-row scan, so liveClaudeSessionCount stays nil.
+        let request = try RPCRequest(
+            method: RPCMethod.worktreeList,
+            params: WorktreeListParams(
+                repoID: repo.id, status: .archived, includeSessionCounts: false
+            )
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+        let worktrees = try response.decodeResult([Worktree].self)
+        #expect(worktrees.count == 1)
+        #expect(worktrees[0].liveClaudeSessionCount == nil)
+    }
+
     @Test("worktree.list with scratchOnly + archived returns only repo-less archived rows")
     func worktreeListScratchOnlyArchived() async throws {
         let repo = try await db.repos.create(

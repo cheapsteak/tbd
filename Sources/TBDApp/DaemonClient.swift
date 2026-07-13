@@ -513,7 +513,8 @@ actor DaemonClient {
         limit: Int? = nil,
         offset: Int? = nil,
         excludeArchived: Bool = false,
-        scratchOnly: Bool = false
+        scratchOnly: Bool = false,
+        includeSessionCounts: Bool? = nil
     ) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
@@ -523,7 +524,8 @@ actor DaemonClient {
                 limit: limit,
                 offset: offset,
                 excludeArchived: excludeArchived,
-                scratchOnly: scratchOnly
+                scratchOnly: scratchOnly,
+                includeSessionCounts: includeSessionCounts
             ),
             resultType: [Worktree].self
         )
