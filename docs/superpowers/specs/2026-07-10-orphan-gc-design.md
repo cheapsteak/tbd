@@ -129,7 +129,10 @@ excludes `.gitignore`d content — so `node_modules`/`.venv` never enter the sna
 `git write-tree`, `git commit-tree <tree> -p HEAD -m "TBD reap snapshot: <path> @
 <iso-date>"`, `git update-ref refs/tbd/snapshots/<worktree-name>-<yyyymmdd-hhmmss>`.
 Nothing is stored outside the repo; content dedupes into the object store; power users
-can inspect with plain git.
+can inspect with plain git. (Shipped implementation note: `GitManager.stageAllAndWriteTree`
+stages directly against the orphaned worktree's own real index via a plain `git add -A`
+rather than a temp `GIT_INDEX_FILE` as sketched above — safe because the worktree is
+already orphaned and about to be deleted, so there is no live index state left to protect.)
 
 **Restore** (`tbd gc restore <id>` or the History button): `git worktree add
 <original-path> <branch>` (or `--detach <head-sha>` if the branch is gone), then if a
