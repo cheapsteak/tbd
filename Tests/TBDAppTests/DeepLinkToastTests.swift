@@ -22,6 +22,19 @@ struct DeepLinkToastTests {
         await body(state)
     }
 
+    private func makeArchived(id: UUID, repoID: UUID?) -> Worktree {
+        Worktree(
+            id: id,
+            repoID: repoID,
+            name: "wt-\(id.uuidString.prefix(8))",
+            displayName: "Fix Login",
+            branch: "fix-login",
+            path: "/tmp/test",
+            status: .archived,
+            tmuxServer: "test-server"
+        )
+    }
+
     /// Poll `cond` on the main actor until true or deadline. Returns success.
     private func waitUntil(
         deadline: Duration = .seconds(2), _ cond: @MainActor () -> Bool
@@ -121,6 +134,136 @@ struct DeepLinkToastTests {
             #expect(state.activeToast?.style == .error)
             let dismissed = await waitUntil { state.activeToast == nil }
             #expect(dismissed)
+        }
+    }
+
+    // MARK: - Deep-link archived flow
+
+    @Test func archivedHit_showsCountdownToastWithDisplayName() async {
+        await withState { state in
+            let repoID = UUID()
+            let id = UUID()
+            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
+
+            await state.navigateToArchivedWorktree(id)
+
+            #expect(state.activeToast?.style == .countdown(secondsRemaining: 5))
+            #expect(state.activeToast?.message.contains("Fix Login") == true)
+            #expect(state.activeToast?.message.contains("archived") == true)
+            // Navigation deferred: nothing selected yet.
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+        }
+    }
+
+    @Test func archivedCountdownExpiry_navigatesToArchiveEntry() async {
+        await withState { state in
+            let repoID = UUID()
+            let id = UUID()
+            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
+
+            await state.navigateToArchivedWorktree(id)
+
+            let navigated = await waitUntil {
+                state.highlightedArchivedWorktreeID == id && state.activeToast == nil
+            }
+            #expect(navigated)
+            #expect(state.selectedRepoID == repoID)
+            #expect(state.selectedWorktreeIDs.isEmpty)
+            #expect(state.archivedWorktrees[repoID]?.map(\.id) == [id])
+        }
+    }
+
+    @Test func archivedHoverThenCTA_navigatesImmediately() async {
+        await withState { state in
+            let repoID = UUID()
+            let id = UUID()
+            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
+
+            await state.navigateToArchivedWorktree(id)
+            state.toastHoverChanged(true)
+            #expect(state.activeToast?.style == .action(ctaLabel: "Go to archive entry"))
+
+            state.toastCTAAction?()
+
+            #expect(state.selectedRepoID == repoID)
+            #expect(state.highlightedArchivedWorktreeID == id)
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    @Test func archivedHoverThenDismiss_neverNavigates() async {
+        await withState { state in
+            let repoID = UUID()
+            let id = UUID()
+            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
+
+            await state.navigateToArchivedWorktree(id)
+            state.toastHoverChanged(true)
+            state.dismissToast()
+            try? await Task.sleep(for: .milliseconds(60))
+
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    @Test func unknownWorktree_showsErrorToast() async {
+        await withState { state in
+            state.archivedLookupOverride = { _ in [] }
+
+            await state.navigateToArchivedWorktree(UUID())
+
+            #expect(state.activeToast?.style == .error)
+            #expect(state.activeToast?.message == "Worktree not found — it may have been deleted.")
+            let dismissed = await waitUntil { state.activeToast == nil }
+            #expect(dismissed)
+        }
+    }
+
+    @Test func scratchWorktree_dismissesToastWithoutNavigation() async {
+        await withState { state in
+            let id = UUID()
+            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: nil)] _ in [wt] }
+
+            await state.navigateToArchivedWorktree(id)
+
+            #expect(state.activeToast == nil)
+            #expect(state.selectedRepoID == nil)
+        }
+    }
+
+    @Test func navigateToWorktreeMiss_showsLookingToast() async {
+        await withState { state in
+            state.isInitialStateLoaded = true
+            // Slow lookup so the progress state is observable.
+            state.archivedLookupOverride = { _ in
+                try? await Task.sleep(for: .milliseconds(100))
+                return []
+            }
+
+            state.navigateToWorktree(UUID())
+
+            let looking = await waitUntil { state.activeToast?.style == .progress }
+            #expect(looking)
+            #expect(state.activeToast?.message == "Looking for worktree…")
+        }
+    }
+
+    @Test func activeWorktreeHit_showsNoToast() async {
+        await withState { state in
+            state.isInitialStateLoaded = true
+            let repoID = UUID()
+            let id = UUID()
+            var wt = makeArchived(id: id, repoID: repoID)
+            wt.status = .active
+            state.worktrees = [repoID: [wt]]
+
+            state.navigateToWorktree(id)
+
+            #expect(state.activeToast == nil)
+            #expect(state.selectedWorktreeIDs == [id])
         }
     }
 }

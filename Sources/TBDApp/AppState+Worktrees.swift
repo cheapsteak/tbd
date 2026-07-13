@@ -474,8 +474,12 @@ extension AppState {
     }
 
     /// Archived-worktree path for deep-link navigation. Async — issues an RPC
-    /// to find the worktree across all archived ones, then opens the
-    /// archived pane and flashes the row.
+    /// to find the worktree across all archived ones, then announces the
+    /// upcoming navigation via a countdown toast instead of yanking the user
+    /// immediately (spec: 2026-07-13-deeplink-archived-toast-design.md).
+    /// Hovering the toast cancels the countdown permanently and leaves an
+    /// explicit "Go to archive entry" CTA. Lookup failures and unknown UUIDs
+    /// surface as error toasts (previously silent).
     @MainActor
     func navigateToArchivedWorktree(_ id: UUID) async {
         let archived: [Worktree]
@@ -488,26 +492,47 @@ extension AppState {
                 )
             } catch {
                 logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
+                showErrorToast("Couldn't look up the worktree: \(error.localizedDescription)")
                 return
             }
         }
 
         guard let wt = archived.first(where: { $0.id == id }) else {
             logger.warning("Deep link references unknown worktree \(id.uuidString, privacy: .public)")
+            showErrorToast("Worktree not found — it may have been deleted.")
             return
         }
         // Archived flows are repo-only — a scratch space has no archived view to deep-link into.
-        guard let rid = wt.repoID else { return }
-
-        selectedWorktreeIDs = []
-        selectedRepoID = rid
-        selectedScratchSection = false
-        archivedWorktrees[rid] = archived.filter { $0.repoID == rid }
-        archivedWorktreesHasMore[rid] = false
-        highlightedArchivedWorktreeID = id
-        if NSApplication.shared.isRunning {
-            NSApplication.shared.activate(ignoringOtherApps: true)
+        guard let rid = wt.repoID else {
+            dismissToast()
+            return
         }
+
+        showToast(Toast(
+            id: UUID(),
+            message: "“\(wt.displayName)” is archived — showing its archive entry",
+            style: .progress
+        ))
+        let navigate: @MainActor () -> Void = { [weak self] in
+            self?.performArchivedNavigation(worktreeID: id, repoID: rid, archived: archived)
+        }
+        toastCTAAction = { [weak self] in
+            self?.dismissToast()
+            navigate()
+        }
+        startToastCountdown(onExpiry: navigate)
+    }
+
+    /// The pre-toast navigation tail: select the repo, populate its archived
+    /// rows, and flash-highlight the target. Runs on countdown expiry or CTA.
+    @MainActor
+    private func performArchivedNavigation(worktreeID: UUID, repoID: UUID, archived: [Worktree]) {
+        selectedWorktreeIDs = []
+        selectedRepoID = repoID
+        selectedScratchSection = false
+        archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
+        archivedWorktreesHasMore[repoID] = false
+        highlightedArchivedWorktreeID = worktreeID
     }
 
     /// Public entry point for deep-link navigation. Synchronous fast path
@@ -531,6 +556,12 @@ extension AppState {
         if activeMatch {
             navigateToActiveWorktree(id, terminalID: terminalID)
         } else {
+            // Foreground the app *before* the async lookup so the progress
+            // toast is actually visible (guarded: NSApp is nil under tests).
+            if NSApplication.shared.isRunning {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            showToast(Toast(id: UUID(), message: "Looking for worktree…", style: .progress))
             Task { await navigateToArchivedWorktree(id) }
         }
     }
