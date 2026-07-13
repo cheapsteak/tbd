@@ -38,6 +38,22 @@ struct NotesFileStore {
         (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
     }
 
+    /// Creates an empty file at `path` (with intermediate directories) when
+    /// none exists, so external editors can open a real on-disk file. Existing
+    /// files are left untouched. Failures are logged (not surfaced).
+    func ensureFileExists(at path: String) {
+        guard !FileManager.default.fileExists(atPath: path) else { return }
+        do {
+            let dir = (path as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            if !FileManager.default.createFile(atPath: path, contents: Data()) {
+                notesLogger.debug("notepad ensure-exists failed to create file at \(path, privacy: .public)")
+            }
+        } catch {
+            notesLogger.debug("notepad ensure-exists failed at \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Writes `content` verbatim to `path`. Empty/whitespace-only content
     /// deletes the file. Creates intermediate directories; writes atomically.
     /// Failures are logged (not surfaced) — mirrors the hooks storage pattern.

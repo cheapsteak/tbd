@@ -70,4 +70,20 @@ private func makeWorktree(repoID: UUID?) -> Worktree {
         #expect(store.read(at: path) == "content")
         cleanup(path)
     }
+
+    @Test func ensureFileExistsCreatesParentDirsAndEmptyFile() {
+        let path = tempNotesPath() // parent dir does not exist yet
+        store.ensureFileExists(at: path)
+        #expect(FileManager.default.fileExists(atPath: path))
+        #expect(store.read(at: path) == "")
+        cleanup(path)
+    }
+
+    @Test func ensureFileExistsLeavesExistingContentUntouched() {
+        let path = tempNotesPath()
+        store.write("keep me", to: path)
+        store.ensureFileExists(at: path)
+        #expect(store.read(at: path) == "keep me")
+        cleanup(path)
+    }
 }

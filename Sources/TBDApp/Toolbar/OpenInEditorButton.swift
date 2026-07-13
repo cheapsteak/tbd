@@ -85,6 +85,11 @@ private func recordUsed(bundleID: String, repoID: UUID?) {
 struct OpenInEditorButton: View {
     let path: String
     let repoID: UUID?
+    /// Runs at the start of every open action (pinned icon click and overflow
+    /// menu selection alike) — e.g. to make sure `path` exists on disk before
+    /// the target app is asked to open it. Default nil keeps existing call
+    /// sites unchanged.
+    var beforeOpen: (() -> Void)? = nil
 
     @State private var recentBundleIDs: [String] = []
     @State private var hovering: String? = nil
@@ -172,6 +177,7 @@ struct OpenInEditorButton: View {
     }
 
     private func open(entry: (editor: ExternalEditor, appURL: URL)) {
+        beforeOpen?()
         openInEditor(path: path, bundleID: entry.editor.bundleID)
         recordUsed(bundleID: entry.editor.bundleID, repoID: repoID)
         recentBundleIDs = loadRecentBundleIDs(repoID: repoID)
