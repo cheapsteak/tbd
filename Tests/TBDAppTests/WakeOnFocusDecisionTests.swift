@@ -256,4 +256,125 @@ struct WakeOnFocusDecisionTests {
         #expect(focused == ids[0],
                 "focus wake must return exactly one terminal, not a batch")
     }
+
+    // MARK: - Wake outcome classification (fallback-offer logic)
+    //
+    // When an explicit wake fails with profileMissing, the app offers a
+    // default-account fallback retry. The classifier detects the code and
+    // structured outcome, avoiding loops (a fallback retry that also fails
+    // with the same code becomes `.failed`, never `.profileMissing` again).
+    // All branches tested.
+
+    /// Profile-missing code on first attempt → structured `.profileMissing`
+    /// outcome so the app can offer a retry.
+    @Test func wakeOutcomeProfileMissingCodeNotFallback() {
+        let tid = UUID()
+        let wid = UUID()
+        let msg = "Profile gone"
+        let outcome = AppState.wakeOutcome(
+            forErrorCode: RPCErrorCode.profileMissing.rawValue,
+            alreadyFallback: false,
+            terminalID: tid, worktreeID: wid, message: msg)
+        #expect(outcome == .profileMissing(terminalID: tid, worktreeID: wid, message: msg))
+    }
+
+    /// Profile-missing code but `alreadyFallback: true` → `.failed`, not
+    /// `.profileMissing` again. Prevents the offer loop.
+    @Test func wakeOutcomeProfileMissingCodeDuringFallbackIsFailed() {
+        let tid = UUID()
+        let wid = UUID()
+        let msg = "Still missing"
+        let outcome = AppState.wakeOutcome(
+            forErrorCode: RPCErrorCode.profileMissing.rawValue,
+            alreadyFallback: true,
+            terminalID: tid, worktreeID: wid, message: msg)
+        #expect(outcome == .failed(message: msg))
+    }
+
+    /// Different error code → `.failed`.
+    @Test func wakeOutcomeOtherCodeIsFailed() {
+        let tid = UUID()
+        let wid = UUID()
+        let msg = "Some other error"
+        let outcome = AppState.wakeOutcome(
+            forErrorCode: "someOtherCode",
+            alreadyFallback: false,
+            terminalID: tid, worktreeID: wid, message: msg)
+        #expect(outcome == .failed(message: msg))
+    }
+
+    /// Nil code → `.failed`.
+    @Test func wakeOutcomeNilCodeIsFailed() {
+        let tid = UUID()
+        let wid = UUID()
+        let msg = "Unknown error"
+        let outcome = AppState.wakeOutcome(
+            forErrorCode: nil,
+            alreadyFallback: false,
+            terminalID: tid, worktreeID: wid, message: msg)
+        #expect(outcome == .failed(message: msg))
+    }
+
+    // MARK: - Default-account fallback prompt copy
+    //
+    // The confirmation dialog copy is pure and testable so the wording is
+    // pinned and can be audited.
+
+    /// Singular case: one session.
+    @Test func defaultAccountFallbackPromptSingular() {
+        let (message, informative, confirm) = AppState.defaultAccountFallbackPrompt(count: 1)
+        #expect(message == "Wake this session on your default account?")
+        #expect(informative.contains("This session was"))
+        #expect(informative.contains("pinned to an account profile"))
+        #expect(confirm == "Wake on Default Account")
+    }
+
+    /// Plural case: multiple sessions.
+    @Test func defaultAccountFallbackPromptPlural() {
+        let (message, informative, confirm) = AppState.defaultAccountFallbackPrompt(count: 3)
+        #expect(message == "Wake 3 sessions on your default account?")
+        #expect(informative.contains("3 sessions were"))
+        #expect(informative.contains("pinned to an account profile"))
+        #expect(confirm == "Wake 3 on Default Account")
+    }
+
+    // MARK: - Wake outcome accessors
+    //
+    // Computed properties on `.WakeAttemptOutcome` extract fields for coalescing
+    // failures and detecting profile-missing terminals. All branches tested.
+
+    /// `.ok` outcome: all accessors return nil.
+    @Test func wakeOutcomeAccessorsOkIsNil() {
+        let outcome = AppState.WakeAttemptOutcome.ok
+        #expect(outcome.failureMessage == nil)
+        #expect(outcome.anyFailureMessage == nil)
+        #expect(outcome.profileMissingTerminalID == nil)
+        #expect(outcome.profileMissingMessage == nil)
+    }
+
+    /// `.failed` outcome: `failureMessage` and `anyFailureMessage` carry the
+    /// message; profile accessors return nil.
+    @Test func wakeOutcomeAccessorsFailed() {
+        let msg = "Wake failed"
+        let outcome = AppState.WakeAttemptOutcome.failed(message: msg)
+        #expect(outcome.failureMessage == msg)
+        #expect(outcome.anyFailureMessage == msg)
+        #expect(outcome.profileMissingTerminalID == nil)
+        #expect(outcome.profileMissingMessage == nil)
+    }
+
+    /// `.profileMissing` outcome: all accessors return their fields.
+    @Test func wakeOutcomeAccessorsProfileMissing() {
+        let tid = UUID()
+        let wid = UUID()
+        let msg = "Profile gone"
+        let outcome = AppState.WakeAttemptOutcome.profileMissing(
+            terminalID: tid, worktreeID: wid, message: msg)
+        #expect(outcome.failureMessage == nil,
+                "`failureMessage` is nil for `.profileMissing` (only `.failed` carries it)")
+        #expect(outcome.anyFailureMessage == msg,
+                "`anyFailureMessage` captures both `.failed` and `.profileMissing`")
+        #expect(outcome.profileMissingTerminalID == tid)
+        #expect(outcome.profileMissingMessage == msg)
+    }
 }

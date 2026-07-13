@@ -17,7 +17,7 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     case sendFailed(String)
     case receiveFailed(String)
     case invalidResponse
-    case rpcError(String)
+    case rpcError(String, code: String?)
     case attachUnavailable(String)
 
     var description: String {
@@ -32,7 +32,7 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
             return "Receive failed: \(msg)"
         case .invalidResponse:
             return "Invalid response from daemon"
-        case .rpcError(let msg):
+        case .rpcError(let msg, _):
             return "RPC error: \(msg)"
         case .attachUnavailable(let status):
             return "Control-mode attach unavailable (status: \(status))"
@@ -40,6 +40,12 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     }
 
     var errorDescription: String? { description }
+
+    /// The daemon-attached `RPCErrorCode` raw value, when present.
+    var rpcCode: String? {
+        if case .rpcError(_, let code) = self { return code }
+        return nil
+    }
 }
 
 /// `openAttach` failed AFTER `attach.request` succeeded — the daemon minted
@@ -317,7 +323,7 @@ actor DaemonClient {
         let request = try RPCRequest(method: method, params: params)
         let response = try sendRaw(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         return try response.decodeResult(resultType)
     }
@@ -327,7 +333,7 @@ actor DaemonClient {
         let request = try RPCRequest(method: method, params: params)
         let response = try sendRaw(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
     }
 
@@ -336,7 +342,7 @@ actor DaemonClient {
         let request = RPCRequest(method: method)
         let response = try sendRaw(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         return try response.decodeResult(resultType)
     }
@@ -354,7 +360,7 @@ actor DaemonClient {
         let request = try RPCRequest(method: method, params: params)
         let response = try await sendRawAsync(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
     }
 
@@ -364,7 +370,7 @@ actor DaemonClient {
         let request = try RPCRequest(method: method, params: params)
         let response = try await sendRawAsync(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         return try response.decodeResult(resultType)
     }
@@ -373,7 +379,7 @@ actor DaemonClient {
         let request = RPCRequest(method: method)
         let response = try await sendRawAsync(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         return try response.decodeResult(resultType)
     }
@@ -1386,7 +1392,7 @@ actor DaemonClient {
         )
         let response = try await sendRawAsync(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         let bytes = response.result?.utf8.count ?? 0
         let decodeStart = ContinuousClock.now
@@ -1411,7 +1417,7 @@ actor DaemonClient {
         )
         let response = try await sendRawAsync(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         let bytes = response.result?.utf8.count ?? 0
         let decodeStart = ContinuousClock.now
@@ -1458,7 +1464,7 @@ actor DaemonClient {
         let request = RPCRequest(method: RPCMethod.daemonRemoveLegacyGlobalHooks)
         let response = try await sendRawAsync(request)
         guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
         return try response.decodeResult(RemoveLegacyGlobalHooksResult.self)
     }
