@@ -119,13 +119,12 @@ public struct AgentWorktreeCollector: Sendable {
             logger.debug("gc: keep \(c.path, privacy: .public) — locked")
             return .keep(reason: "locked")
         }
-        let wt = c.path
-        if liveCWDs.contains(where: { $0 == wt || $0.hasPrefix(wt + "/") }) {
+        if Self.liveCWDsContain(liveCWDs, path: c.path) {
             logger.debug("gc: keep \(c.path, privacy: .public) — live cwd")
             return .keep(reason: "live-cwd")
         }
         let nowDate = now()
-        let age = nowDate.timeIntervalSince(Self.lastActivity(worktreePath: wt, now: nowDate))
+        let age = nowDate.timeIntervalSince(Self.lastActivity(worktreePath: c.path, now: nowDate))
         if age < Double(graceSeconds) {
             logger.debug("gc: keep \(c.path, privacy: .public) — within grace (age=\(age, privacy: .public)s)")
             return .keep(reason: "grace")
@@ -134,15 +133,51 @@ public struct AgentWorktreeCollector: Sendable {
         return .reap(c)
     }
 
-    /// Executes one reap: snapshot-first (any throw here means "keep, don't
-    /// touch the directory"), then measure, then delete, then verify the
-    /// delete actually took, and only then prune git's stale registration.
+    /// Executes one reap: a final pre-rm re-check (fresh lock/listed state +
+    /// fresh live-cwd), then snapshot-first (any throw here means "keep,
+    /// don't touch the directory"), then measure, then delete, then verify
+    /// the delete actually took, and only then prune git's stale
+    /// registration.
     ///
-    /// Returns the `ReapRecord` for the caller to persist, or `nil` if a late
-    /// gate refused — either the snapshot step threw (kept, nothing was
-    /// deleted) or the removal didn't actually take (kept for a retry on the
-    /// next sweep).
-    public func reap(_ c: AgentWorktreeCandidate) async -> ReapRecord? {
+    /// `decide(_:liveCWDs:graceSeconds:)` gates on lock/lsof data captured at
+    /// sweep start, which can be minutes stale by the time a given
+    /// candidate's turn to reap comes up on a large sweep (TOCTOU). The
+    /// re-check here re-fetches both right before anything destructive
+    /// happens, closing that window down to the instant between the
+    /// re-check and the `removeItem` call below. It runs BEFORE the
+    /// snapshot step (not after) because `snapshotIfNeeded` itself can write
+    /// into the doomed worktree's git index — nothing should mutate the
+    /// candidate until the re-check has cleared.
+    ///
+    /// `freshLiveCWDs` mirrors `OrphanGC`'s sweep-level live-cwd provider:
+    /// `nil` means "live cwds could not be determined this instant", which
+    /// keeps (same sentinel semantics as a sweep-wide lsof failure) rather
+    /// than being treated as "no live processes".
+    ///
+    /// Returns the `ReapRecord` for the caller to persist, or `nil` if any
+    /// gate — the re-check, the snapshot step, or the post-delete
+    /// verification — refused.
+    public func reap(_ c: AgentWorktreeCandidate, freshLiveCWDs: @Sendable () async -> [String]?) async -> ReapRecord? {
+        guard let freshEntries = try? await git.worktreeListDetailed(repoPath: c.repoPath) else {
+            logger.debug("gc: kept \(c.path, privacy: .public) — re-check locked/missing")
+            return nil
+        }
+        let freshByPath = Dictionary(
+            freshEntries.map { (Self.canon($0.path), $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        guard let freshEntry = freshByPath[c.path], !freshEntry.locked else {
+            logger.debug("gc: kept \(c.path, privacy: .public) — re-check locked/missing")
+            return nil
+        }
+        guard let freshLive = await freshLiveCWDs() else {
+            logger.debug("gc: kept \(c.path, privacy: .public) — re-check lsof unavailable")
+            return nil
+        }
+        guard !Self.liveCWDsContain(freshLive, path: c.path) else {
+            logger.debug("gc: kept \(c.path, privacy: .public) — re-check live-cwd")
+            return nil
+        }
+
         let name = (c.path as NSString).lastPathComponent
         let ref: String?
         do {
@@ -178,6 +213,15 @@ public struct AgentWorktreeCollector: Sendable {
     }
 
     // MARK: - Helpers
+
+    /// True when `liveCWDs` contains `path` itself or any path strictly below
+    /// it (prefix-boundary match on `path + "/"`, not a bare string prefix —
+    /// so `/tmp/wt-2` does not false-positive against a candidate `/tmp/wt`).
+    /// Shared by `decide(_:liveCWDs:graceSeconds:)` and `reap(_:freshLiveCWDs:)`'s
+    /// pre-rm re-check so both use identical matching semantics.
+    static func liveCWDsContain(_ liveCWDs: [String], path: String) -> Bool {
+        liveCWDs.contains { $0 == path || $0.hasPrefix(path + "/") }
+    }
 
     /// Resolves `path` through POSIX `realpath()`, following every symlink
     /// component (including macOS's `/var` -> `/private/var`, which

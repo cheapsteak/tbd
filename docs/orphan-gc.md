@@ -53,10 +53,21 @@ gate fails toward keeping** — a `nil`/error/timeout anywhere means "don't touc
 4. **Grace window** — HEAD/index mtime older than `gcGraceSeconds` (default 3600s /
    1h). A settling buffer for the gap between unlock and sweep, and for a human still
    poking around right after a run — not an idle policy.
-5. **Reap** — snapshot first if needed (see below), `du -sk` for the disk-usage
-   estimate, `rm -rf`, verify the removal actually took, then `git worktree prune`.
-   **The branch is never deleted** — branch cleanup stays a human / `clean_gone`
-   concern.
+5. **Reap** — a pre-rm re-check first (see below), then snapshot if needed (see
+   below), `du -sk` for the disk-usage estimate, `rm -rf`, verify the removal actually
+   took, then `git worktree prune`. **The branch is never deleted** — branch cleanup
+   stays a human / `clean_gone` concern.
+
+**TOCTOU: pre-rm re-check.** Gates 2–4 run once, against lock/`lsof` data captured at
+sweep start; on a large sweep a given candidate's turn to actually reap can come up
+minutes later, so that data can be stale by the time it matters. Immediately before
+anything destructive happens — before even the snapshot step, since snapshotting
+writes into the doomed worktree's git index — the reap step re-fetches both the lock
+state and a fresh `lsof` pass and re-applies the same lock/live-cwd checks. A `nil`
+from the fresh `lsof` pass fails toward keeping, same sentinel semantics as the
+sweep-level pass. This closes the staleness window down to the instant between the
+re-check and the `rm -rf`/`removeItem` call — a race an external process would have to
+land in to defeat it, not the minutes-wide window gates 2–4 alone left open.
 
 ## Snapshot & restore
 

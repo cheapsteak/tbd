@@ -137,7 +137,7 @@ public actor OrphanGC {
                     // The outer `gcEnabled || dryRun` guard means a non-dry
                     // run here always has gcEnabled == true.
                     guard !dryRun else { continue }
-                    if let record = await agentCollector.reap(candidate) {
+                    if let record = await agentCollector.reap(candidate, freshLiveCWDs: { await self.liveCWDs() }) {
                         await insertReapRecord(record)
                         reaped += 1
                         logger.info("""

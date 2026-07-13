@@ -195,7 +195,7 @@ struct AgentWorktreeCollectorTests {
             return
         }
 
-        let record = try #require(await collector.reap(reapCandidate))
+        let record = try #require(await collector.reap(reapCandidate, freshLiveCWDs: { [] }))
         #expect(record.kind == .agentWorktree)
         #expect(record.snapshotRef == nil)
         #expect(record.worktreePath == c.path)
@@ -228,7 +228,7 @@ struct AgentWorktreeCollectorTests {
             return
         }
 
-        let record = try #require(await collector.reap(reapCandidate))
+        let record = try #require(await collector.reap(reapCandidate, freshLiveCWDs: { [] }))
         let ref = try #require(record.snapshotRef)
         #expect(!FileManager.default.fileExists(atPath: c.path))
 
@@ -262,9 +262,92 @@ struct AgentWorktreeCollectorTests {
             path: real.path, repoPath: real.repoPath, branch: real.branch, headSHA: bogusSHA, locked: real.locked
         )
 
-        let record = await collector.reap(bogus)
+        let record = await collector.reap(bogus, freshLiveCWDs: { [] })
         #expect(record == nil)
         #expect(FileManager.default.fileExists(atPath: real.path))
+    }
+
+    // MARK: - Reap: pre-rm TOCTOU re-check (Medium review finding)
+    //
+    // `decide(_:liveCWDs:graceSeconds:)` gates on lock/lsof data captured at
+    // sweep start, which can go stale by the time a candidate's turn to reap
+    // comes up on a large sweep. `reap(_:freshLiveCWDs:)` re-checks both
+    // right before doing anything destructive (and before the snapshot step,
+    // which itself mutates the doomed worktree's git index). These tests
+    // drive `reap(_:freshLiveCWDs:)` directly with a candidate that already
+    // cleared `decide`, then falsify the re-check to prove it still keeps.
+
+    @Test func reapKeepsWhenCandidateBecameLockedSinceDecide() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await makeAgentWorktree(repo: repo, name: "agent-t1")
+
+        let collector = makeCollector()
+        let c = try #require(await collector.candidates(repoPath: repo.path).first)
+
+        let decision = await collector.decide(c, liveCWDs: [], graceSeconds: 0)
+        guard case .reap(let reapCandidate) = decision else {
+            Issue.record("expected .reap for a clean, unlocked, non-live, out-of-grace worktree, got \(decision)")
+            return
+        }
+
+        // Simulate the TOCTOU window: something locked the worktree after
+        // `decide` ran but before `reap` got to it.
+        try await shell("git worktree lock .claude/worktrees/agent-t1", at: repo)
+
+        let record = await collector.reap(reapCandidate, freshLiveCWDs: { [] })
+        #expect(record == nil)
+        #expect(FileManager.default.fileExists(atPath: c.path))
+
+        let git = GitManager()
+        let remaining = try await git.worktreeListDetailed(repoPath: repo.path)
+        #expect(remaining.contains { $0.path == c.path })
+    }
+
+    @Test func reapKeepsWhenFreshLiveCWDsFindsCwdInsideWorktree() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await makeAgentWorktree(repo: repo, name: "agent-t1")
+
+        let collector = makeCollector()
+        let c = try #require(await collector.candidates(repoPath: repo.path).first)
+
+        let decision = await collector.decide(c, liveCWDs: [], graceSeconds: 0)
+        guard case .reap(let reapCandidate) = decision else {
+            Issue.record("expected .reap for a clean, unlocked, non-live, out-of-grace worktree, got \(decision)")
+            return
+        }
+
+        // Simulate the TOCTOU window: an agent attached a live cwd under the
+        // worktree between `decide` and `reap`.
+        let record = await collector.reap(reapCandidate, freshLiveCWDs: { [c.path + "/subdir"] })
+        #expect(record == nil)
+        #expect(FileManager.default.fileExists(atPath: c.path))
+    }
+
+    @Test func reapKeepsWhenFreshLiveCWDsUnavailable() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await makeAgentWorktree(repo: repo, name: "agent-t1")
+
+        let collector = makeCollector()
+        let c = try #require(await collector.candidates(repoPath: repo.path).first)
+
+        let decision = await collector.decide(c, liveCWDs: [], graceSeconds: 0)
+        guard case .reap(let reapCandidate) = decision else {
+            Issue.record("expected .reap for a clean, unlocked, non-live, out-of-grace worktree, got \(decision)")
+            return
+        }
+
+        // `nil` means the re-check's lsof pass couldn't determine live cwds
+        // this instant — same fail-toward-keep sentinel as a sweep-wide lsof
+        // failure, not "no live processes".
+        let record = await collector.reap(reapCandidate, freshLiveCWDs: { nil })
+        #expect(record == nil)
+        #expect(FileManager.default.fileExists(atPath: c.path))
     }
 
     // MARK: - Symlinked parent path robustness
