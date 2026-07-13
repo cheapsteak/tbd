@@ -849,13 +849,21 @@ public struct WorktreeListParams: Codable, Sendable {
     /// Note `repoID: nil` means "no repo filter" (every repo plus scratch),
     /// NOT "scratch only" — this flag is the only way to get scratch-only rows.
     public let scratchOnly: Bool?
+    /// When false, the daemon skips per-row live session-file counting for the
+    /// archived listing (an expensive `~/.claude/projects/*` scan per row). The
+    /// deep-link archived lookup opts out with `false` because it only needs the
+    /// row's identity, not its session count. Optional (nil == true) for
+    /// backward compatibility — old daemons ignore the unknown key and always
+    /// enrich; old clients omit it and get the enriched default.
+    public let includeSessionCounts: Bool?
     public init(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         limit: Int? = nil,
         offset: Int? = nil,
         excludeArchived: Bool? = nil,
-        scratchOnly: Bool? = nil
+        scratchOnly: Bool? = nil,
+        includeSessionCounts: Bool? = nil
     ) {
         self.repoID = repoID
         self.status = status
@@ -863,6 +871,7 @@ public struct WorktreeListParams: Codable, Sendable {
         self.offset = offset
         self.excludeArchived = excludeArchived
         self.scratchOnly = scratchOnly
+        self.includeSessionCounts = includeSessionCounts
     }
 }
 

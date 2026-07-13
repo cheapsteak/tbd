@@ -96,7 +96,11 @@ extension RPCRouter {
         // cleaned up. Negative scan results are not cached, so without this
         // guard the poll re-scans the entire projects directory every 2s,
         // pegging the daemon at ~95% CPU.
-        if params.status == .archived {
+        //
+        // The deep-link archived lookup opts out via `includeSessionCounts ==
+        // false`: it only needs the target row's identity, not its session
+        // count, and enriching all archived rows made that lookup take ~19s.
+        if params.status == .archived && (params.includeSessionCounts ?? true) {
             for i in worktrees.indices where worktrees[i].status == .archived {
                 if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].path) {
                     worktrees[i].liveClaudeSessionCount = ClaudeSessionScanner.countSessionFiles(projectDir: dir)

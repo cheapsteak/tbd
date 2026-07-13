@@ -474,39 +474,89 @@ extension AppState {
     }
 
     /// Archived-worktree path for deep-link navigation. Async — issues an RPC
-    /// to find the worktree across all archived ones, then opens the
-    /// archived pane and flashes the row.
+    /// to find the worktree across all archived ones, then navigates to the
+    /// archive entry immediately and shows a brief auto-dismissing notice
+    /// explaining that the target is archived
+    /// (spec: 2026-07-13-deeplink-archived-toast-design.md).
+    /// Lookup failures and unknown UUIDs surface as error toasts (previously
+    /// silent).
     @MainActor
     func navigateToArchivedWorktree(_ id: UUID) async {
+        // Request-generation guard (F1). Two deep links (A then B) can have
+        // overlapping lookups that resolve out of order; without this, A's
+        // late resolution would replace B's toast (even one the user
+        // hover-cancelled) and navigate to A. Stamp a fresh token now and
+        // drop any resolution that isn't the newest request. Mirrors the
+        // `revivingArchived[id] == nil` re-entrancy guard used for revive.
+        let myRequestID = UUID()
+        deepLinkRequestID = myRequestID
+
         let archived: [Worktree]
-        if let override = archivedLookupOverride {
-            archived = await override(id)
-        } else {
-            do {
+        do {
+            if let override = archivedLookupOverride {
+                archived = try await override(id)
+            } else {
                 archived = try await daemonClient.listWorktrees(
-                    repoID: nil, status: .archived
+                    repoID: nil, status: .archived, includeSessionCounts: false
                 )
-            } catch {
-                logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
-                return
             }
+        } catch {
+            // Drop a stale failure before it clobbers a newer link's toast.
+            guard deepLinkRequestID == myRequestID else { return }
+            logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
+            showErrorToast("Couldn't look up the worktree: \(error.localizedDescription)")
+            return
         }
+
+        // Out-of-order RPC resolution: a newer deep link superseded this one
+        // while its lookup was in flight. Drop this stale resolution before it
+        // touches any toast/navigation state. (The toastID mechanism already
+        // covers post-toast staleness; this guard only covers the
+        // RPC-resolution window.)
+        guard deepLinkRequestID == myRequestID else { return }
 
         guard let wt = archived.first(where: { $0.id == id }) else {
             logger.warning("Deep link references unknown worktree \(id.uuidString, privacy: .public)")
+            showErrorToast("Worktree not found — it may have been deleted.")
             return
         }
         // Archived flows are repo-only — a scratch space has no archived view to deep-link into.
-        guard let rid = wt.repoID else { return }
+        guard let rid = wt.repoID else {
+            dismissToast()
+            return
+        }
 
+        // Navigate immediately, then show a brief auto-dismissing notice so
+        // landing in the archive view is explained rather than surprising.
+        showTransientToast(
+            "“\(wt.displayName)” is archived — showing its archive entry",
+            style: .notice
+        )
+        performArchivedNavigation(worktreeID: id, repoID: rid, archived: archived)
+    }
+
+    /// The navigation tail: select the repo, populate its archived rows, and
+    /// flash-highlight the target. Runs immediately once the lookup resolves.
+    @MainActor
+    private func performArchivedNavigation(worktreeID: UUID, repoID: UUID, archived: [Worktree]) {
         selectedWorktreeIDs = []
-        selectedRepoID = rid
+        selectedRepoID = repoID
         selectedScratchSection = false
-        archivedWorktrees[rid] = archived.filter { $0.repoID == rid }
-        archivedWorktreesHasMore[rid] = false
-        highlightedArchivedWorktreeID = id
-        if NSApplication.shared.isRunning {
-            NSApplication.shared.activate(ignoringOtherApps: true)
+        archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
+        archivedWorktreesHasMore[repoID] = false
+        highlightedArchivedWorktreeID = worktreeID
+        // Reconcile with fresh data (F2). The captured `archived` snapshot can
+        // be minutes old when the user hover-cancels and clicks the CTA later,
+        // leaving ghost rows for since-deleted/revived worktrees. The refresh
+        // also restores the per-row session-count enrichment the fast
+        // deep-link lookup skips (includeSessionCounts: false).
+        //
+        // Suppressed when the test seam is active: `archivedLookupOverride`
+        // replaces the archived-lookup daemon roundtrip, and this reconcile is
+        // a *second* daemon roundtrip that tests neither provide nor want
+        // touching the real daemon (CLAUDE.md: tests must not touch ~/tbd).
+        if archivedLookupOverride == nil {
+            Task { await self.refreshArchivedWorktrees(repoID: repoID) }
         }
     }
 
@@ -531,6 +581,12 @@ extension AppState {
         if activeMatch {
             navigateToActiveWorktree(id, terminalID: terminalID)
         } else {
+            // Foreground the app *before* the async lookup so the progress
+            // toast is actually visible (guarded: NSApp is nil under tests).
+            if NSApplication.shared.isRunning {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            showToast(Toast(id: UUID(), message: "Looking for worktree…", style: .progress))
             Task { await navigateToArchivedWorktree(id) }
         }
     }

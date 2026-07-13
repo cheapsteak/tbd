@@ -214,6 +214,21 @@ final class AppState: ObservableObject {
     /// row, then clears the value after the flash animation completes.
     @Published var highlightedArchivedWorktreeID: UUID?
 
+    // MARK: - Toast (deep-link feedback)
+
+    /// The single visible in-app toast; nil when hidden. See AppState+Toast.swift.
+    @Published var activeToast: Toast?
+    /// One auto-dismiss tick. Tests shrink this to milliseconds.
+    var toastTickDuration: Duration = .seconds(1)
+    /// In-flight auto-dismiss task for `activeToast`.
+    var toastDismissTask: Task<Void, Never>?
+
+    /// Request-generation token for archived deep-link lookups. Stamped fresh
+    /// at the start of every `navigateToArchivedWorktree(_:)`; a lookup that
+    /// resolves after a newer deep link superseded it is dropped. Guards
+    /// out-of-order RPC resolution (deep link A then B, A resolves late).
+    var deepLinkRequestID: UUID?
+
     /// Set briefly when external navigation (notification click, deep link,
     /// jump menu) lands on an active worktree. `SidebarView` observes this
     /// to scroll the worktree row into view, then clears the value.
@@ -222,8 +237,8 @@ final class AppState: ObservableObject {
     /// Test seam: when set, replaces the daemon roundtrip for archived
     /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
     /// this nil; tests assign a closure returning a deterministic worktree
-    /// list.
-    var archivedLookupOverride: ((UUID) async -> [Worktree])?
+    /// list — or one that throws, to exercise the RPC-failure toast branch.
+    var archivedLookupOverride: ((UUID) async throws -> [Worktree])?
 
     /// Test seam: when set, replaces the daemon rename RPC in
     /// `renameWorktree(id:displayName:)`. Production code leaves this nil;
