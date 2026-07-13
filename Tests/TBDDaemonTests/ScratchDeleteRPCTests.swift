@@ -85,6 +85,77 @@ struct ScratchDeleteRPCTests {
         #expect(FileManager.default.fileExists(atPath: wt.path))  // folder untouched
     }
 
+    /// Medium-1 review finding: `scratch.delete` must reclaim the scratch
+    /// space's Claude Code scratchpad before the row disappears — once the
+    /// row is gone, reconciliation has no path left to resolve it by.
+    @Test func deletesAssociatedScratchpadWhenGCEnabled() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date())
+
+        let scratchpadBase = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-scratchdel-claudebase-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratchpadBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratchpadBase) }
+        router.orphanGC = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: scratchpadBase)
+
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-claude-scratchpad")))
+        let wt = try created.decodeResult(Worktree.self)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: wt.path)
+        let claudeScratchDir = scratchpadBase.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: claudeScratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: claudeScratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let del = await router.handle(try RPCRequest(method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
+        #expect(del.success)
+        #expect(
+            !FileManager.default.fileExists(atPath: claudeScratchDir.path),
+            "the Claude Code scratchpad must be reclaimed, not left orphaned once the row is gone"
+        )
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.contains { $0.kind == .scratchpad && $0.worktreePath == claudeScratchDir.path })
+    }
+
+    /// The `gcEnabled` master switch must suppress this event-driven cleanup
+    /// too, same as every other GC deletion path.
+    @Test func leavesScratchpadIntactWhenGCDisabled() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(false)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date())
+
+        let scratchpadBase = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-scratchdel-claudebase-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratchpadBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratchpadBase) }
+        router.orphanGC = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: scratchpadBase)
+
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-claude-scratchpad-disabled")))
+        let wt = try created.decodeResult(Worktree.self)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: wt.path)
+        let claudeScratchDir = scratchpadBase.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: claudeScratchDir, withIntermediateDirectories: true)
+
+        let del = await router.handle(try RPCRequest(method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
+        #expect(del.success)
+        #expect(
+            FileManager.default.fileExists(atPath: claudeScratchDir.path),
+            "gcEnabled=false must suppress the scratchpad cleanup too"
+        )
+    }
+
     @Test func rejectsNonScratchWorktree() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
