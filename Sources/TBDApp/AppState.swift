@@ -214,6 +214,17 @@ final class AppState: ObservableObject {
     /// row, then clears the value after the flash animation completes.
     @Published var highlightedArchivedWorktreeID: UUID?
 
+    // MARK: - Toast (deep-link feedback)
+
+    /// The single visible in-app toast; nil when hidden. See AppState+Toast.swift.
+    @Published var activeToast: Toast?
+    /// Action for the toast's CTA button (`.action` style). Cleared on dismiss/replace.
+    var toastCTAAction: (() -> Void)?
+    /// One countdown/auto-dismiss tick. Tests shrink this to milliseconds.
+    var toastTickDuration: Duration = .seconds(1)
+    /// In-flight countdown or auto-dismiss task for `activeToast`.
+    var toastCountdownTask: Task<Void, Never>?
+
     /// Set briefly when external navigation (notification click, deep link,
     /// jump menu) lands on an active worktree. `SidebarView` observes this
     /// to scroll the worktree row into view, then clears the value.

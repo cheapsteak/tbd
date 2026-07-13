@@ -1,0 +1,21 @@
+import Foundation
+
+/// A transient in-app toast. One toast is visible at a time
+/// (`AppState.activeToast`); showing a new one replaces the current.
+/// First client: deep-link navigation to archived worktrees.
+struct Toast: Equatable, Identifiable {
+    enum Style: Equatable {
+        /// Indeterminate work in progress (spinner).
+        case progress
+        /// Live countdown before an announced action runs.
+        case countdown(secondsRemaining: Int)
+        /// Countdown cancelled — explicit CTA + dismiss buttons.
+        case action(ctaLabel: String)
+        /// Failure notice; auto-dismisses.
+        case error
+    }
+
+    let id: UUID
+    var message: String
+    var style: Style
+}
