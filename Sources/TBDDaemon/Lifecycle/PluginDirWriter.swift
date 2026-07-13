@@ -101,6 +101,7 @@ struct PluginDirWriter {
         // is installed but NEVER auto-loaded — durable scheduling is opt-in via
         // `scheduler.sh enable`.
         for (name, body) in [("tick.py", NightwatchSkillContent.tickPy),
+                             ("wake.py", NightwatchSkillContent.wakePy),
                              ("judge.py", NightwatchSkillContent.judgePy),
                              ("tick-cron.sh", NightwatchSkillContent.tickCronSh),
                              ("scheduler.sh", NightwatchSkillContent.schedulerSh)] {

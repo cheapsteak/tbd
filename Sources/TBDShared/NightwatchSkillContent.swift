@@ -46,19 +46,40 @@ python3 scripts/tick.py --prs  # also gate open PRs (wraps loop_perfect_sweep.py
 
 Only when `tick.py` exits 10 (or on the 2-hour deep-review window): read `queue/decisions.jsonl`, resolve each genuine decision (what Adam would decide; sensitive/personal/access → `for-adam.md`, don't auto-fire), then clear the drained lines. This is the only step that should consume Opus.
 
+## Waking hibernated terminals (wake.py — never compose wake premises by hand)
+
+A hibernated terminal's snapshot/reason describes the world at hibernation time; PRs merge,
+checks go green, and branches land while it sleeps. Composing a wake prompt from that
+snapshot ships a stale premise (2026-07-13: a session was woken to "fix FAILING checks" on
+a PR that had merged three days earlier). **Every wake goes through the verifier:**
+
+```
+python3 scripts/wake.py            # dry-run: live-verified wake plan for all hibernated terminals
+python3 scripts/wake.py --act      # dispatch the verified prompts (tbd terminal send --submit)
+python3 scripts/wake.py --tid ID   # one terminal · --no-fetch during a GitHub-rate crunch
+```
+
+Per terminal it re-derives truth AT WAKE TIME — live PR state for any PR number in the
+hibernate reason (MERGED/CLOSED never yields a "fix your PR" wake), the checked-out branch's
+actual open PR + failing checks, and unmerged-commit state vs origin/main — then classifies
+(DONE → /closeout · RESUME_FAILING/OPEN · UNSUBMITTED_WORK · UNVERIFIED → neutral "verify
+first" prompt) and writes `queue/wake-plan.json`. First real sweep: 24/24 hibernated
+terminals verified DONE — every hand-composed "resume" wake would have been stale.
+
 ## The gate (never automate past this)
 
 A PR may only be enqueued when **claude-review = APPROVED on the current SHA + checks clean**. Human approval never substitutes. `gh pr merge` is NOT a safe-wedge — it always escalates. nightwatch's job is to get PRs *ready*; the human merges.
 
-## Operating rules (hard-won via incidents)
-
-**REBALANCE FIRST on saturation** — A capacity crunch is usually too many sessions piled on ONE rate-capped account, not global scarcity. Swap stuck (STRANDED/RATE/ERROR) sessions onto an emptier account via `tbd terminal swap-profile --terminal <tid> --profile <name>` (parked=cold/cheap, awake=respawn). Passive holding just freezes them. *(Incident 2026-07-10: 14 of 19 stuck sessions were piled on one account; the watcher held instead of rebalancing and the whole fleet stalled overnight until rebalanced.)*
-
-**READ context before nudging** — Capture the worker's actual conversation (`tbd terminal conversation --terminal <tid>` or the pane) and give a SPECIFIC next step, not a blanket "continue" (which just makes agents re-idle).
-
-**FOLLOW UP in ~90s** — After nudging (background sleep), re-check in ~90 seconds rather than waiting for the next tick. Catches agents mid-action at confirm/permission prompts that would otherwise hang the whole cycle.
-
-**ALWAYS SIGN commits** — Never use `gpgsign=false`; some repos (longeye-ai/monorepo) silently reject unsigned commits.
+**Send-time verification — the wake.py rule applies to EVERY PR-state message, not just wakes.**
+Before dispatching any message that asserts PR state (a gate denial, a "checks failing" nudge, a
+"needs review" ping), re-read live state *in the same breath as the send*: `gh pr view N --json
+state,headRefOid,mergeStateStatus`. If `state` is MERGED/CLOSED, or the head SHA moved since the
+sweep, drop or recompose the message — never dispatch a fact older than the current tool call.
+(2026-07-13: two gate denials landed in a session's inbox describing PRs that had already merged
+or were already sitting in the merge queue — same stale-premise class the wake verifier was built
+for.) And phrase gate outcomes honestly: nightwatch cannot deny a GitHub enqueue; its gate is
+*stricter than the org's required checks* (AI Review is advisory until the ADR-0013 apply), so a
+bot-verdict shortfall on a human-approved PR is an **advisory heads-up**, not a "denied".
 
 ## Config (`config/`)
 - `priorities.txt` — must-keep-moving worktrees (flagged ★, reported first)
@@ -88,6 +109,210 @@ When enabled, launchd runs `tick.py` on the interval ($0, no model), stays silen
 and on exit 10 (judgment queued) records a marker + fires `tbd notify`. This is the durable,
 quota-free replacement for waking Opus on a timer. It is intentionally NOT loaded by the
 plugin installer — you turn it on only where you want a fleet babysat.
+"""#
+
+    public static let wakePy: String = #"""
+#!/usr/bin/env python3
+"""
+nightwatch wake — pre-wake verifier for hibernated terminals. NO model, NO stale state.
+
+The 2026-07-13 lesson: wake prompts composed from hibernation-time snapshots carry
+stale premises (a session was woken to "fix FAILING checks" on a PR that had merged
+three days earlier). This script makes the wake premise DETERMINISTIC and LIVE:
+for every hibernated terminal it re-derives the truth from git + gh AT WAKE TIME,
+classifies the work, and composes the wake prompt from verified facts only.
+
+Rules it enforces:
+  - A PR named in a wake premise is checked live (`gh pr view --json state`);
+    MERGED/CLOSED PRs never produce a "fix your PR" wake — they produce /closeout.
+  - A local branch name is NOT evidence of unfinished work: if the branch has no
+    unmerged commits vs origin/main (or its PR merged), the work is DONE.
+  - Anything unverifiable (gh failure, no repo, detached head) wakes NEUTRAL —
+    "verify live state first" — never with an asserted premise.
+
+Usage:
+  wake.py               # dry-run: verified wake plan for ALL hibernated terminals
+  wake.py --tid <ID>    # limit to one terminal
+  wake.py --act         # dispatch wake prompts via `tbd terminal send --submit`
+  wake.py --no-fetch    # skip `git fetch` (offline / GitHub rate crunch)
+
+Exit 0 always (a wake plan is informational); per-item status is in the output
+and queue/wake-plan.json.
+"""
+import subprocess, os, re, json, time, sys
+
+HOME = os.path.expanduser("~")
+DB = f"{HOME}/tbd/state.db"
+SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+QUEUE = f"{SKILL}/queue"
+
+STANDING_RULE = ("If the task is complete, run /closeout. Resume only if genuinely "
+                 "unfinished. Do NOT merge — the human merges.")
+
+
+def sh(args, t=20, cwd=None):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=t, cwd=cwd)
+        return r.stdout.strip(), r.returncode
+    except Exception:
+        return "", 1
+
+
+def gh(args, t=25, cwd=None):
+    # gh transits the cache proxy via the shell function, not env — plain exec is direct.
+    return sh(["gh", *args], t=t, cwd=cwd)
+
+
+def hibernated(only_tid=None):
+    q = ("SELECT t.id, w.displayName, w.path, w.branch, t.hibernatedAt, "
+         "COALESCE(t.hibernateReason,'') FROM terminal t "
+         "JOIN worktree w ON w.id=t.worktreeID "
+         "WHERE w.status='active' AND t.kind='claude' AND t.hibernatedAt IS NOT NULL")
+    out, _ = sh(["sqlite3", "-separator", "\t", DB, q + ";"])
+    items = []
+    for l in out.splitlines():
+        p = l.split("\t")
+        if len(p) < 6: continue
+        tid, name, path, db_branch, hib_at, reason = p[0], p[1], p[2], p[3], p[4], p[5]
+        if only_tid and tid != only_tid: continue
+        items.append({"tid": tid, "name": name, "path": path,
+                      "db_branch": db_branch, "hibernated_at": hib_at, "reason": reason})
+    return items
+
+
+def verify(item, fetch=True):
+    """Re-derive live truth for one hibernated terminal. Returns a verdict dict."""
+    path = item["path"]
+    facts: list = []
+    v = {"tid": item["tid"], "name": item["name"], "path": path,
+         "classification": "UNVERIFIED", "facts": facts, "pr": None}
+    if not os.path.isdir(path):
+        facts.append("worktree path missing on disk")
+        return v
+
+    branch, rc = sh(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
+    if rc != 0 or not branch or branch == "HEAD":
+        facts.append("no branch (detached or not a repo)")
+        return v
+    v["branch"] = branch
+    if fetch:
+        sh(["git", "-C", path, "fetch", "origin", "main"], t=30)
+
+    dirty, _ = sh(["git", "-C", path, "status", "--porcelain"])
+    v["dirty"] = bool(dirty)
+
+    # Unmerged commits vs origin/main — squash-merge aware (`git cherry` patch-id match).
+    cherry, rc = sh(["git", "-C", path, "cherry", "origin/main"])
+    unmerged = [l for l in cherry.splitlines() if l.startswith("+")] if rc == 0 else None
+    v["unmerged_commits"] = len(unmerged) if unmerged is not None else None
+
+    # THE core check: any PR number named in the hibernate reason is verified LIVE.
+    stale_prs = []
+    for num in re.findall(r"#(\d{3,6})", item["reason"]):
+        out, rc = gh(["pr", "view", num, "--json", "state,headRefName"], cwd=path)
+        if rc != 0: continue
+        try: j = json.loads(out)
+        except Exception: continue
+        if j.get("state") != "OPEN" or j.get("headRefName") != branch:
+            stale_prs.append(f"#{num} is {j.get('state')} (head {j.get('headRefName')}) "
+                             f"— hibernate-time premise is stale")
+    facts.extend(stale_prs)
+
+    # Live PR for the ACTUAL checked-out branch (any state).
+    out, rc = gh(["pr", "list", "--head", branch, "--state", "all",
+                  "--json", "number,state,title", "--limit", "5"], cwd=path)
+    prs = []
+    if rc == 0 and out:
+        try: prs = json.loads(out)
+        except Exception: pass
+    elif rc != 0:
+        facts.append("gh unavailable — PR state NOT verified")
+        return v
+    open_pr = next((p for p in prs if p["state"] == "OPEN"), None)
+    merged_pr = next((p for p in prs if p["state"] == "MERGED"), None)
+
+    if open_pr:
+        v["pr"] = open_pr["number"]
+        checks, _ = gh(["pr", "checks", str(open_pr["number"])], cwd=path)
+        failing = [l.split("\t")[0] for l in checks.splitlines()
+                   if "\tfail" in l or "\tfailure" in l]
+        v["failing_checks"] = failing
+        v["classification"] = "RESUME_FAILING" if failing else "RESUME_OPEN"
+        facts.append(f"open PR #{open_pr['number']}"
+                     + (f", failing: {', '.join(failing[:4])}" if failing else ", checks not failing"))
+    elif merged_pr or unmerged is not None and not unmerged:
+        v["classification"] = "DONE"
+        facts.append(f"PR #{merged_pr['number']} MERGED" if merged_pr
+                     else "no unmerged commits vs origin/main")
+    elif unmerged:
+        v["classification"] = "UNSUBMITTED_WORK"
+        facts.append(f"{len(unmerged)} commit(s) not in origin/main, no PR")
+    else:
+        v["classification"] = "DONE" if not v["dirty"] else "UNVERIFIED"
+        if v["dirty"]: facts.append("dirty working tree, merge state unknown")
+    if v["dirty"] and v["classification"] == "DONE":
+        facts.append("note: dirty working tree — closeout should triage it")
+    return v
+
+
+def compose(v):
+    """Wake prompt from verified facts ONLY. Never assert a premise wake-time data disproves."""
+    facts = "; ".join(v["facts"]) or "no live facts derivable"
+    c = v["classification"]
+    if c == "DONE":
+        return (f"Nightwatch wake (state verified live): your work here appears COMPLETE "
+                f"({facts}). Run /closeout now. {STANDING_RULE}")
+    if c == "RESUME_FAILING":
+        return (f"Nightwatch wake (state verified live): PR #{v['pr']} on branch {v.get('branch')} "
+                f"has failing checks ({facts}). Diagnose, fix, push, drive to checks-green + "
+                f"claude-review approved on the current SHA. {STANDING_RULE}")
+    if c == "RESUME_OPEN":
+        return (f"Nightwatch wake (state verified live): PR #{v['pr']} on branch {v.get('branch')} "
+                f"is open ({facts}). Drive it to ready (checks green + claude-review approved) or "
+                f"/closeout if it's actually done. {STANDING_RULE}")
+    if c == "UNSUBMITTED_WORK":
+        return (f"Nightwatch wake (state verified live): branch {v.get('branch')} has {facts}. "
+                f"Decide: finish and open a PR, or /closeout and abandon. {STANDING_RULE}")
+    return (f"Nightwatch wake: live state could NOT be verified ({facts}). Before doing anything, "
+            f"verify with git/gh what is actually outstanding — do not trust any earlier premise. "
+            f"{STANDING_RULE}")
+
+
+def main():
+    act = "--act" in sys.argv
+    fetch = "--no-fetch" not in sys.argv
+    tid = None
+    if "--tid" in sys.argv:
+        i = sys.argv.index("--tid")
+        tid = sys.argv[i + 1] if i + 1 < len(sys.argv) else None
+    items = hibernated(tid)
+    print(f"=== nightwatch wake @ {time.strftime('%H:%M:%S')} "
+          f"{'[ACT]' if act else '[dry-run]'} — {len(items)} hibernated ===")
+    plan = []
+    for it in items:
+        v = verify(it, fetch=fetch)
+        v["wake_text"] = compose(v)
+        plan.append(v)
+        print(f"  ▸ {it['name']} ({it['tid'][:8]}): {v['classification']} — "
+              + ("; ".join(v["facts"])[:110] or "-"))
+        if act:
+            _, rc = sh(["tbd", "terminal", "send", "--terminal", it["tid"],
+                        "--submit", "--text", v["wake_text"]], t=30)
+            v["dispatched"] = rc == 0
+            with open(f"{QUEUE}/acted.jsonl", "a") as f:
+                f.write(json.dumps({"kind": "wake-dispatch", "tid": it["tid"],
+                                    "name": it["name"], "classification": v["classification"],
+                                    "ok": rc == 0, "ts": int(time.time())}) + "\n")
+    os.makedirs(QUEUE, exist_ok=True)
+    json.dump({"ts": int(time.time()), "plan": plan},
+              open(f"{QUEUE}/wake-plan.json", "w"), indent=2)
+    done = sum(1 for v in plan if v["classification"] == "DONE")
+    print(f"\n→ {done}/{len(plan)} verified DONE (would have been stale 'resume' wakes without "
+          f"verification). Plan: queue/wake-plan.json")
+
+
+if __name__ == "__main__":
+    main()
 """#
 
     public static let tickPy: String = #"""

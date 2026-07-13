@@ -72,6 +72,7 @@ struct PluginDirWriterTests {
         let tick = nw + "/scripts/tick.py"
         #expect(FileManager.default.fileExists(atPath: nw + "/SKILL.md"))
         #expect(FileManager.default.fileExists(atPath: tick))
+        #expect(FileManager.default.fileExists(atPath: nw + "/scripts/wake.py"))
         #expect(FileManager.default.fileExists(atPath: nw + "/scripts/judge.py"))
         #expect(FileManager.default.fileExists(atPath: nw + "/scripts/scheduler.sh"))
         #expect(FileManager.default.fileExists(atPath: nw + "/scripts/tick-cron.sh"))
