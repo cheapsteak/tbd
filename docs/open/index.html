@@ -89,12 +89,17 @@
       //     including when TBD activates without occluding it. This catches
       //     the partial-occlusion case visibilitychange misses.
       //
-      // Accepted trade-off: blur is also fired by the browser's
-      // "Open TBD.app?" confirmation dialog, even if the user cancels it —
-      // so a user who gets that dialog and cancels will still be bounced
-      // back to the previous page. We accept that: it only affects the
-      // one-time-confirmation path, while the visibility-only approach
-      // missed real successes every time on large monitors.
+      // Known wrinkle: blur is also fired by the browser's "Open TBD.app?"
+      // confirmation dialog the moment it OPENS — before the user has
+      // decided anything. So the blur path returns on its own, longer
+      // schedule (BLUR_RETURN_DELAY_MS) that outlasts most dialog
+      // interactions, and re-checks document.hasFocus() at fire time: if
+      // the page has focus again (dialog cancelled, or the user came back
+      // deliberately), the auto-return is skipped instead of navigating
+      // away mid-flow. Residual gap, accepted honestly: a user who takes
+      // longer than ~4s to click "Allow" could still have the return fire
+      // while the dialog is up. The 'hidden' path has no such race (the
+      // dialog never hides the document) and keeps its short delay.
       //
       // Accepted trade-off: neither signal proves the handler exists, so if
       // TBD is NOT installed, an incidental hide or blur within the 3s
@@ -105,6 +110,7 @@
       // why the cancel path was removed.
       var DETECT_WINDOW_MS = 3000;
       var RETURN_DELAY_MS = 600;
+      var BLUR_RETURN_DELAY_MS = 4000;
       var armedUntil = 0;
       var returned = false;
       var returnTimer = null;
@@ -119,10 +125,14 @@
         if (returned) return; // guard against double-fire
         returned = true;
         var canGoBack = history.length > 1;
+        // 'hidden' is unambiguous — return quickly. 'blur' may just be the
+        // "Open TBD.app?" dialog opening, so give it long enough to outlast
+        // most dialog interactions before we decide.
+        var delay = signal === 'blur' ? BLUR_RETURN_DELAY_MS : RETURN_DELAY_MS;
         console.log('[tbd-open] onOpened(): signal =', signal,
           '; history.length =', history.length,
           '— will', canGoBack ? 'history.back()' : 'window.close()',
-          'in', RETURN_DELAY_MS + 'ms');
+          'in', delay + 'ms');
         status.textContent = canGoBack
           ? 'Opened in TBD — taking you back…'
           : 'TBD opened — you can close this tab.';
@@ -131,6 +141,16 @@
         // the return proceeds even if it's visible again by then.)
         returnTimer = setTimeout(function () {
           returnTimer = null;
+          if (signal === 'blur' && document.hasFocus()) {
+            // The blur was likely the confirmation dialog opening and the
+            // user cancelled — or they deliberately came back to this page.
+            // Navigating now would yank them away (and, mid-dialog, kill
+            // the launch), so stay put and let them retry manually.
+            console.log('[tbd-open] skipping auto-return: page has focus at fire time (dialog cancelled or user returned)');
+            returned = false; // allow the manual button / a later signal to retry cleanly
+            status.textContent = 'TBD may not have opened — use the button below.';
+            return;
+          }
           if (canGoBack) {
             console.log('[tbd-open] calling history.back() now');
             history.back();
@@ -145,7 +165,7 @@
               console.log('[tbd-open] window.close() was ignored by the browser — tab still alive');
             }, 500);
           }
-        }, RETURN_DELAY_MS);
+        }, delay);
       }
 
       document.addEventListener('visibilitychange', function () {
