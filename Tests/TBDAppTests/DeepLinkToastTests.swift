@@ -83,8 +83,9 @@ struct DeepLinkToastTests {
         await withState { state in
             state.showErrorToast("Worktree not found — it may have been deleted.")
             #expect(state.activeToast?.style == .error)
-            let dismissed = await waitUntil { state.activeToast == nil }
-            #expect(dismissed)
+            #expect(state.toastDismissTask != nil)
+            await state.toastDismissTask?.value
+            #expect(state.activeToast == nil)
         }
     }
 
@@ -92,8 +93,9 @@ struct DeepLinkToastTests {
         await withState { state in
             state.showTransientToast("heads up", style: .notice)
             #expect(state.activeToast?.style == .notice)
-            let dismissed = await waitUntil { state.activeToast == nil }
-            #expect(dismissed)
+            #expect(state.toastDismissTask != nil)
+            await state.toastDismissTask?.value
+            #expect(state.activeToast == nil)
         }
     }
 
@@ -117,8 +119,9 @@ struct DeepLinkToastTests {
             #expect(state.activeToast?.message.contains("Fix Login") == true)
             #expect(state.activeToast?.message.contains("archived") == true)
             // The notice auto-dismisses.
-            let dismissed = await waitUntil { state.activeToast == nil }
-            #expect(dismissed)
+            #expect(state.toastDismissTask != nil)
+            await state.toastDismissTask?.value
+            #expect(state.activeToast == nil)
         }
     }
 
@@ -130,8 +133,9 @@ struct DeepLinkToastTests {
 
             #expect(state.activeToast?.style == .error)
             #expect(state.activeToast?.message == "Worktree not found — it may have been deleted.")
-            let dismissed = await waitUntil { state.activeToast == nil }
-            #expect(dismissed)
+            #expect(state.toastDismissTask != nil)
+            await state.toastDismissTask?.value
+            #expect(state.activeToast == nil)
         }
     }
 
@@ -266,8 +270,9 @@ struct DeepLinkToastTests {
 
             #expect(state.activeToast?.style == .error)
             #expect(state.activeToast?.message.hasPrefix("Couldn't look up the worktree") == true)
-            let dismissed = await waitUntil { state.activeToast == nil }
-            #expect(dismissed)
+            #expect(state.toastDismissTask != nil)
+            await state.toastDismissTask?.value
+            #expect(state.activeToast == nil)
         }
     }
 }
