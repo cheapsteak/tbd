@@ -138,7 +138,9 @@
           : 'TBD opened — you can close this tab.';
         // Short delay so the scheme launch isn't interrupted by navigating
         // away. (The tab is usually backgrounded here, but not guaranteed —
-        // the return proceeds even if it's visible again by then.)
+        // the return proceeds even if the tab is visible again by then,
+        // except on the blur path, which skips at fire time when the page
+        // has regained focus.)
         returnTimer = setTimeout(function () {
           returnTimer = null;
           if (signal === 'blur' && document.hasFocus()) {
