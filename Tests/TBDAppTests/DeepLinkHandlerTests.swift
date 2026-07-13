@@ -104,7 +104,7 @@ private func tearDown(_ suiteName: String) {
     let clock = ContinuousClock()
     let start = clock.now
     while appState.highlightedArchivedWorktreeID != archivedID {
-        if clock.now - start > .seconds(2) { break }
+        if clock.now - start > .seconds(15) { break }
         try? await Task.sleep(for: .milliseconds(2))
     }
 

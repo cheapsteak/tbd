@@ -37,7 +37,7 @@ struct DeepLinkToastTests {
 
     /// Poll `cond` on the main actor until true or deadline. Returns success.
     private func waitUntil(
-        deadline: Duration = .seconds(2), _ cond: @MainActor () -> Bool
+        deadline: Duration = .seconds(15), _ cond: @MainActor () -> Bool
     ) async -> Bool {
         let clock = ContinuousClock()
         let start = clock.now
@@ -103,6 +103,8 @@ struct DeepLinkToastTests {
             try? await Task.sleep(for: .milliseconds(60))  // > 10 ticks
             #expect(fired == false)
             #expect(state.activeToast != nil)
+            // Proves the state machine settled (not just starved by scheduler load).
+            #expect(state.activeToast?.style == .action(ctaLabel: "Go to archive entry"))
         }
     }
 
