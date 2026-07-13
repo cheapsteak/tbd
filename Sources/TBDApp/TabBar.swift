@@ -881,15 +881,7 @@ private struct TabBarItem: View {
             case .wake:
                 Button {
                     guard let terminalID = terminal?.id else { return }
-                    Task {
-                        // Explicit user action → surface the failure (single
-                        // wake, so the coalescer yields the bare message).
-                        if let failure = await appState.wakeTerminal(
-                            terminalID: terminalID, worktreeID: worktreeID, userInitiated: true
-                        ), let message = AppState.coalescedWakeFailureMessage(failures: [failure]) {
-                            appState.showAlert(message, isError: true)
-                        }
-                    }
+                    Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminalID, worktreeID: worktreeID) }
                 } label: {
                     Label("Wake", systemImage: "sun.max")
                 }

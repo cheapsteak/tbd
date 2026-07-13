@@ -394,18 +394,7 @@ struct PanePlaceholder: View {
                     // only consumes Cmd+clicks that resolve a file path.
                     if ParkedPaneWakeModel.showsWakeOverlay(for: terminal) {
                         Button {
-                            Task {
-                                // Wake is the single resume path for parked
-                                // sessions (hibernated or legacy-suspended).
-                                // Singleflighted in AppState; explicit user
-                                // action → surface the failure (single wake,
-                                // so the coalescer yields the bare message).
-                                if let failure = await appState.wakeTerminal(
-                                    terminalID: terminal.id, worktreeID: worktree.id, userInitiated: true
-                                ), let message = AppState.coalescedWakeFailureMessage(failures: [failure]) {
-                                    appState.showAlert(message, isError: true)
-                                }
-                            }
+                            Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminal.id, worktreeID: worktree.id) }
                         } label: {
                             Color.clear
                                 .contentShape(Rectangle())

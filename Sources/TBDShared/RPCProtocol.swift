@@ -34,18 +34,24 @@ public struct RPCResponse: Codable, Sendable {
     public let success: Bool
     public let result: String?
     public let error: String?
+    /// Machine-readable code carried alongside `error`'s human string,
+    /// so the app can branch on a specific failure without matching message text.
+    /// Optional on the wire — nil for errors that carry no code.
+    public let errorCode: String?
 
     public init<R: Encodable>(result: R) throws {
         self.success = true
         let data = try JSONEncoder().encode(result)
         self.result = String(data: data, encoding: .utf8)
         self.error = nil
+        self.errorCode = nil
     }
 
-    public init(error: String) {
+    public init(error: String, code: String? = nil) {
         self.success = false
         self.result = nil
         self.error = error
+        self.errorCode = code
     }
 
     /// Convenience for success responses with no meaningful result payload.
@@ -57,6 +63,7 @@ public struct RPCResponse: Codable, Sendable {
         self.success = true
         self.result = nil
         self.error = nil
+        self.errorCode = nil
     }
 
     /// Decode the result payload into the expected type.
@@ -71,6 +78,16 @@ public struct RPCResponse: Codable, Sendable {
 
 public enum RPCError: Error, Sendable {
     case noResultData
+}
+
+/// Machine-readable code carried alongside `RPCResponse.error`'s human string,
+/// so the app can branch on a specific failure (e.g. offer a fallback) without
+/// matching message text. Optional on the wire — nil for errors that carry no code.
+public enum RPCErrorCode: String, Sendable {
+    /// A parked terminal's pinned model profile no longer resolves; the wake was
+    /// refused. The app offers a default-account fallback retry
+    /// (`TerminalWakeParams.fallbackToDefaultProfile`).
+    case profileMissing
 }
 
 // MARK: - RPC Method Names
