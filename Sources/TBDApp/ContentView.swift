@@ -315,7 +315,7 @@ struct ContentView: View {
             StatusBarView()
         }
         .frame(minWidth: 800, minHeight: 500)
-        .overlay(alignment: .bottom) { ToastOverlay() }
+        .overlay(alignment: .bottomTrailing) { ToastOverlay() }
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
             overlayCoordinator.close()
             markSelectedWorktreesAsRead(newSelection)

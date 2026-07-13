@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Renders `AppState.activeToast` as a bottom-anchored floating capsule.
+/// Renders `AppState.activeToast` as a bottom-right-anchored floating capsule.
 /// Purely presentational: every interaction (hover, CTA, dismiss) is
 /// forwarded to the AppState toast state machine (AppState+Toast.swift),
 /// which owns the countdown task and all transitions.
@@ -11,7 +11,7 @@ struct ToastOverlay: View {
         Group {
             if let toast = appState.activeToast {
                 ToastCard(toast: toast)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .animation(.spring(duration: 0.3), value: appState.activeToast)
@@ -37,7 +37,8 @@ private struct ToastCard: View {
                 .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
-        .padding(.bottom, 16)
+        .padding(.trailing, 16)
+        .padding(.bottom, 34)
         .onHover { appState.toastHoverChanged($0) }
         .accessibilityElement(children: .combine)
     }
