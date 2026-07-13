@@ -21,6 +21,20 @@ struct ReapRecordsStateTests {
         body(AppState(userDefaults: defaults))
     }
 
+    private func archivedWorktree(id: UUID, repoID: UUID, archivedAt: Date) -> Worktree {
+        Worktree(
+            id: id,
+            repoID: repoID,
+            name: "test-\(id.uuidString.prefix(8))",
+            displayName: "Test \(id.uuidString.prefix(8))",
+            branch: "main",
+            path: "/tmp/test",
+            status: .archived,
+            archivedAt: archivedAt,
+            tmuxServer: "test-server"
+        )
+    }
+
     private func record(
         kind: ReapKind,
         worktreePath: String = "/tmp/wt",
@@ -141,6 +155,97 @@ struct ReapRecordsStateTests {
             #expect(app.reapRecords[repoA]?.count == 1)
             #expect(app.reapRecords[repoB]?.isEmpty == true)
             #expect(app.reapRecords[UUID()] == nil)
+        }
+    }
+
+    // MARK: - Archived/Reclaimed selection exclusivity
+    //
+    // ArchivedWorktreesView's "Reclaimed" section used to hold its selection
+    // in view-local @State, documented as mutually exclusive with
+    // `selectedArchivedWorktreeIDs[repoID]` but with no way to enforce that
+    // from `ensureArchivedSelectionValid`'s fallback auto-pick, which could
+    // steal the highlight out from under a deliberate Reclaimed selection.
+    // The fix lifts both selections into AppState (`selectedReapRecordIDs` +
+    // `selectedArchivedWorktreeIDs`) so every entry point can respect the
+    // invariant. These tests cover that invariant directly.
+
+    @Test func ensureArchivedSelectionValidDoesNotAutoPickWhenReapSelectionExists() {
+        withAppState { app in
+            let repoID = UUID()
+            let worktreeID = UUID()
+            app.archivedWorktrees[repoID] = [
+                archivedWorktree(id: worktreeID, repoID: repoID, archivedAt: Date())
+            ]
+            app.selectedReapRecordIDs[repoID] = UUID()
+
+            app.ensureArchivedSelectionValid(repoID: repoID)
+
+            #expect(app.selectedArchivedWorktreeIDs[repoID] == nil)
+            #expect(app.selectedReapRecordIDs[repoID] != nil)
+        }
+    }
+
+    @Test func ensureArchivedSelectionValidStillAutoPicksWhenNoReapSelection() {
+        withAppState { app in
+            let repoID = UUID()
+            let older = archivedWorktree(id: UUID(), repoID: repoID, archivedAt: Date().addingTimeInterval(-100))
+            let newer = archivedWorktree(id: UUID(), repoID: repoID, archivedAt: Date())
+            app.archivedWorktrees[repoID] = [older, newer]
+
+            app.ensureArchivedSelectionValid(repoID: repoID)
+
+            #expect(app.selectedArchivedWorktreeIDs[repoID] == newer.id)
+        }
+    }
+
+    @Test func ensureArchivedSelectionValidClearsWhenNothingArchivedAndNoReapSelection() {
+        withAppState { app in
+            let repoID = UUID()
+            app.archivedWorktrees[repoID] = []
+
+            app.ensureArchivedSelectionValid(repoID: repoID)
+
+            #expect(app.selectedArchivedWorktreeIDs[repoID] == nil)
+        }
+    }
+
+    @Test func selectArchivedWorktreeClearsReapSelectionForSameRepo() {
+        withAppState { app in
+            let repoID = UUID()
+            let worktreeID = UUID()
+            app.selectedReapRecordIDs[repoID] = UUID()
+
+            app.selectArchivedWorktree(worktreeID, repoID: repoID)
+
+            #expect(app.selectedArchivedWorktreeIDs[repoID] == worktreeID)
+            #expect(app.selectedReapRecordIDs[repoID] == nil)
+        }
+    }
+
+    @Test func selectReapRecordClearsArchivedSelectionForSameRepo() {
+        withAppState { app in
+            let repoID = UUID()
+            let recordID = UUID()
+            app.selectedArchivedWorktreeIDs[repoID] = UUID()
+
+            app.selectReapRecord(recordID, repoID: repoID)
+
+            #expect(app.selectedReapRecordIDs[repoID] == recordID)
+            #expect(app.selectedArchivedWorktreeIDs[repoID] == nil)
+        }
+    }
+
+    @Test func selectionHelpersScopeToTheirOwnRepoOnly() {
+        withAppState { app in
+            let repoA = UUID()
+            let repoB = UUID()
+            app.selectedReapRecordIDs[repoB] = UUID()
+
+            app.selectArchivedWorktree(UUID(), repoID: repoA)
+
+            // Selecting an archived row in repoA must not disturb repoB's
+            // independent reap selection.
+            #expect(app.selectedReapRecordIDs[repoB] != nil)
         }
     }
 }

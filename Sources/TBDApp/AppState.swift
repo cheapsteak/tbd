@@ -600,6 +600,14 @@ final class AppState: ObservableObject {
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
     @Published var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
 
+    /// Selected "Reclaimed" (orphan-GC reap record) row per repo, in the same
+    /// left rail as `selectedArchivedWorktreeIDs`. The two are mutually
+    /// exclusive per repo — use `selectArchivedWorktree(_:repoID:)` /
+    /// `selectReapRecord(_:repoID:)` (AppState+Worktrees.swift) to change
+    /// either, which keep that invariant instead of mutating these
+    /// dictionaries directly.
+    @Published var selectedReapRecordIDs: [UUID: UUID] = [:]
+
     /// Worktrees the user just revived from the archived view. Keeps the row
     /// visible with a status indicator until the user navigates away from the
     /// archived section. Cleared by `AppState+Navigation` when the active

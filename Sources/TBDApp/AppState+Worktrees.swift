@@ -644,7 +644,15 @@ extension AppState {
     /// actually exists in the archived list (or in `revivingArchived` for that
     /// repo). If unset or stale, set it to the most-recently-archived row.
     /// Also kicks off the session fetch for the newly-selected worktree.
-    private func ensureArchivedSelectionValid(repoID: UUID) {
+    ///
+    /// A deliberate Reclaimed-row selection (`selectedReapRecordIDs[repoID]`)
+    /// must not be stolen by this fallback maintenance — see
+    /// `ArchivedWorktreesView`/`ReclaimedSectionView` for the UI side of the
+    /// mutual-exclusivity contract. `internal` (not `private`) so tests can
+    /// drive it directly.
+    func ensureArchivedSelectionValid(repoID: UUID) {
+        guard selectedReapRecordIDs[repoID] == nil else { return }
+
         let archived = (archivedWorktrees[repoID] ?? [])
         let lingering = revivingArchived.values
             .map(\.snapshot)
@@ -659,11 +667,35 @@ extension AppState {
             .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
             .first
         if let pick = mostRecent {
-            selectedArchivedWorktreeIDs[repoID] = pick.id
+            selectArchivedWorktree(pick.id, repoID: repoID)
             Task { await fetchSessions(worktreeID: pick.id) }
+        } else {
+            selectArchivedWorktree(nil, repoID: repoID)
+        }
+    }
+
+    /// Select an archived-worktree row for `repoID`, clearing any Reclaimed
+    /// (reap-record) selection for the same repo — the two are mutually
+    /// exclusive per repo. Pass `nil` to clear the archived selection.
+    func selectArchivedWorktree(_ id: UUID?, repoID: UUID) {
+        if let id {
+            selectedArchivedWorktreeIDs[repoID] = id
         } else {
             selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
         }
+        selectedReapRecordIDs.removeValue(forKey: repoID)
+    }
+
+    /// Select a Reclaimed (reap-record) row for `repoID`, clearing any
+    /// archived-worktree selection for the same repo. Mirrors
+    /// `selectArchivedWorktree(_:repoID:)`. Pass `nil` to clear the reap selection.
+    func selectReapRecord(_ id: UUID?, repoID: UUID) {
+        if let id {
+            selectedReapRecordIDs[repoID] = id
+        } else {
+            selectedReapRecordIDs.removeValue(forKey: repoID)
+        }
+        selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
     }
 
     // MARK: - Reorder top-level

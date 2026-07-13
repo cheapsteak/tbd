@@ -9,7 +9,6 @@ import TBDShared
 /// `appState.reapRecords[repoID]` is non-empty.
 struct ReclaimedSectionView: View {
     let repoID: UUID
-    @Binding var selectedReapRecordID: UUID?
     @EnvironmentObject var appState: AppState
 
     @State private var isExpanded = false
@@ -20,6 +19,10 @@ struct ReclaimedSectionView: View {
 
     private var summary: ReclaimedSummary {
         ReclaimedSummary(records: appState.reapRecords[repoID] ?? [])
+    }
+
+    private var selectedReapRecordID: UUID? {
+        appState.selectedReapRecordIDs[repoID]
     }
 
     var body: some View {
@@ -88,8 +91,7 @@ struct ReclaimedSectionView: View {
     /// selection above it — clear the archived selection so the right pane
     /// unambiguously shows this record's detail.
     private func select(_ record: ReapRecord) {
-        selectedReapRecordID = record.id
-        appState.selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
+        appState.selectReapRecord(record.id, repoID: repoID)
     }
 
     static func byteString(_ bytes: Int64) -> String {

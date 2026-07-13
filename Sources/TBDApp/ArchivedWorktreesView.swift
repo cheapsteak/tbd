@@ -8,11 +8,6 @@ struct ArchivedWorktreesView: View {
     @State private var listWidth: CGFloat = 280
     @State private var dragStartWidth: CGFloat? = nil
     @AppStorage("archived.hideEmpty") private var hideEmpty: Bool = true
-    /// Selection for the "Reclaimed" section (Task 12), mutually exclusive
-    /// with `appState.selectedArchivedWorktreeIDs[repoID]` — selecting a reap
-    /// row clears the archived-row selection and vice versa (see `select(_:)`
-    /// and `ReclaimedSectionView.select(_:)`).
-    @State private var selectedReapRecordID: UUID?
 
     /// All archived rows for this repo (∪ lingering revive snapshots), unfiltered.
     /// Used for the unfiltered count and to back the filter visibility decision.
@@ -44,6 +39,13 @@ struct ArchivedWorktreesView: View {
 
     private var selectedID: UUID? {
         appState.selectedArchivedWorktreeIDs[repoID]
+    }
+
+    /// "Reclaimed" section selection, mutually exclusive with `selectedID`
+    /// (see `AppState.selectArchivedWorktree(_:repoID:)` /
+    /// `selectReapRecord(_:repoID:)`).
+    private var selectedReapID: UUID? {
+        appState.selectedReapRecordIDs[repoID]
     }
 
     private var hasMore: Bool {
@@ -173,15 +175,11 @@ struct ArchivedWorktreesView: View {
             }
 
             if appState.reapRecords[repoID]?.isEmpty == false {
-                ReclaimedSectionView(repoID: repoID, selectedReapRecordID: $selectedReapRecordID)
+                ReclaimedSectionView(repoID: repoID)
             }
         }
         .onAppear { reconcileSelection() }
         .onChange(of: hideEmpty) { _, _ in reconcileSelection() }
-        // This view isn't .id(repoID)-keyed, so @State survives repo switches
-        // (see RepoDetailView note) — a reap selection must not leak into
-        // another repo's Reclaimed section.
-        .onChange(of: repoID) { _, _ in selectedReapRecordID = nil }
     }
 
     /// Make sure `selectedArchivedWorktreeIDs[repoID]` points to a row that
@@ -190,15 +188,15 @@ struct ArchivedWorktreesView: View {
     /// fetch for any newly-selected row.
     private func reconcileSelection() {
         // A deliberate Reclaimed-row selection must not be stolen by the
-        // archived auto-select (mutual exclusivity with selectedReapRecordID).
-        if selectedReapRecordID != nil { return }
+        // archived auto-select (mutual exclusivity with selectedReapID).
+        if selectedReapID != nil { return }
         let visibleIDs = Set(rows.map(\.id))
         if let current = selectedID, visibleIDs.contains(current) { return }
         if let first = rows.first(where: { $0.reviveState == nil })?.worktree {
-            appState.selectedArchivedWorktreeIDs[repoID] = first.id
+            appState.selectArchivedWorktree(first.id, repoID: repoID)
             Task { await appState.fetchSessions(worktreeID: first.id) }
         } else {
-            appState.selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
+            appState.selectArchivedWorktree(nil, repoID: repoID)
         }
     }
 
@@ -223,7 +221,7 @@ struct ArchivedWorktreesView: View {
 
     @ViewBuilder
     private var rightPane: some View {
-        if let reapID = selectedReapRecordID,
+        if let reapID = selectedReapID,
            let record = (appState.reapRecords[repoID] ?? []).first(where: { $0.id == reapID }) {
             ReclaimedDetailView(record: record, repoID: repoID)
         } else if let id = selectedID,
@@ -279,8 +277,7 @@ struct ArchivedWorktreesView: View {
     private func select(_ row: ArchivedRow) {
         // In-flight revives are non-selectable; .done rows are fine to browse.
         if case .inFlight = row.reviveState { return }
-        selectedReapRecordID = nil
-        appState.selectedArchivedWorktreeIDs[repoID] = row.id
+        appState.selectArchivedWorktree(row.id, repoID: repoID)
         Task { await appState.fetchSessions(worktreeID: row.id) }
     }
 
