@@ -83,6 +83,24 @@ struct ScratchpadCollectorTests: ~Copyable {
         #expect(record?.repoPath == "")
     }
 
+    @Test("cleanUp refuses to remove the base directory itself for a degenerate empty worktreePath")
+    func testCleanUpRefusesAnchorViolation() async {
+        let collector = ScratchpadCollector(base: tmpDir)
+        // A marker file proves `cleanUp` did not touch `tmpDir` itself: an
+        // empty `worktreePath` collapses (via `slug`) to an empty path
+        // component, so `base.appendingPathComponent("")` resolves to `base`
+        // — without the anchor guard this would `removeItem` the entire
+        // scratchpad base.
+        let marker = tmpDir.appendingPathComponent("marker.txt")
+        try? "keep".write(to: marker, atomically: true, encoding: .utf8)
+
+        let record = await collector.cleanUp(forRemovedWorktreePath: "", repoPath: "/repo", now: Date())
+
+        #expect(record == nil)
+        #expect(fm.fileExists(atPath: tmpDir.path), "the scratchpad base directory itself must never be removed")
+        #expect(fm.fileExists(atPath: marker.path), "the base directory's contents must be untouched")
+    }
+
     @Test("cleanUp returns nil when scratchpad does not exist")
     func testCleanUpNonExistent() async {
         let collector = ScratchpadCollector(base: tmpDir)

@@ -127,7 +127,7 @@ struct AgentWorktreeCollectorTests {
             path: wtPath, repoPath: repo.path, branch: entry.branch, headSHA: entry.headSHA, locked: entry.locked
         )
 
-        let baseline = AgentWorktreeCollector.lastActivity(worktreePath: wtPath)
+        let baseline = AgentWorktreeCollector.lastActivity(worktreePath: wtPath, now: Date())
 
         // Well within a 1-hour grace window: kept.
         let recentCollector = AgentWorktreeCollector(
@@ -145,6 +145,37 @@ struct AgentWorktreeCollectorTests {
             Issue.record("expected .reap once past the grace window, got \(reapDecision)")
             return
         }
+    }
+
+    // MARK: - lastActivity fail-toward-keep (Minor-g review finding)
+
+    @Test func lastActivityReturnsNowWhenNeitherMtimeIsReadable() {
+        // A path with no `.git` file at all (and therefore no gitdir/index
+        // to read either) — both mtime lookups fail.
+        let unreadablePath = "/nonexistent/gc-lastactivity-test-\(UUID().uuidString)"
+        let now = Date()
+
+        let activity = AgentWorktreeCollector.lastActivity(worktreePath: unreadablePath, now: now)
+
+        // Must be `now`, not `Date.distantPast`: distantPast would make the
+        // grace-window age computation enormous, fast-tracking an
+        // unreadable worktree for reap instead of keeping it like every
+        // other uncertain case.
+        #expect(activity == now)
+    }
+
+    @Test func lastActivityFailureKeepsWithinGraceWindow() async throws {
+        // End-to-end through `decide(_:liveCWDs:graceSeconds:)`: an
+        // unreadable candidate path must be kept by the grace gate, not
+        // treated as ancient/stale and reaped.
+        let unreadablePath = "/nonexistent/gc-lastactivity-decide-test-\(UUID().uuidString)"
+        let candidate = AgentWorktreeCandidate(
+            path: unreadablePath, repoPath: "/nonexistent/gc-lastactivity-repo",
+            branch: "b", headSHA: String(repeating: "0", count: 40), locked: false
+        )
+        let collector = makeCollector()
+        let decision = await collector.decide(candidate, liveCWDs: [], graceSeconds: 3600)
+        #expect(decision == .keep(reason: "grace"))
     }
 
     // MARK: - Reap: clean orphan

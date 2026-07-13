@@ -39,6 +39,22 @@ public struct ScratchpadCollector: Sendable {
             return nil
         }
 
+        // Defensive anchor guard, right before the recursive delete below:
+        // `dir` must resolve to a path strictly *under* `base`. Normally
+        // this is guaranteed by `slug` collapsing every `/` in `path` to
+        // `-`, so `dir` is always exactly one path component below `base` —
+        // but a degenerate input (e.g. an empty `path`) collapses to an
+        // empty slug, making `appendingPathComponent` a no-op and `dir ==
+        // base` itself. Never trust that invariant blindly this close to
+        // `removeItem`; fail toward keeping instead.
+        guard dir.path.hasPrefix(base.path + "/") else {
+            logger.warning("""
+            gc: refusing to remove \(dir.path, privacy: .public) — not strictly under scratchpad base \
+            \(base.path, privacy: .public)
+            """)
+            return nil
+        }
+
         let bytes = await GCDiskUsage.apparentBytes(path: dir.path)
 
         do {

@@ -86,7 +86,12 @@ public struct AgentWorktreeCollector: Sendable {
         let base = repoPath + "/.claude/worktrees"
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: base) else { return [] }
         guard let entries = try? await git.worktreeListDetailed(repoPath: repoPath) else { return [] }
-        let byPath = Dictionary(uniqueKeysWithValues: entries.map { (Self.canon($0.path), $0) })
+        // `uniquingKeysWith:` rather than `uniqueKeysWithValues:` — this is
+        // fail-soft, best-effort GC code, so a duplicate canonicalized path
+        // (e.g. two `git worktree list` entries somehow resolving to the
+        // same realpath) must never crash the sweep; keep the first entry
+        // seen and move on.
+        let byPath = Dictionary(entries.map { (Self.canon($0.path), $0) }, uniquingKeysWith: { first, _ in first })
         var out: [AgentWorktreeCandidate] = []
         for name in names {
             let p = Self.canon(base + "/" + name)
@@ -119,7 +124,8 @@ public struct AgentWorktreeCollector: Sendable {
             logger.debug("gc: keep \(c.path, privacy: .public) — live cwd")
             return .keep(reason: "live-cwd")
         }
-        let age = now().timeIntervalSince(Self.lastActivity(worktreePath: wt))
+        let nowDate = now()
+        let age = nowDate.timeIntervalSince(Self.lastActivity(worktreePath: wt, now: nowDate))
         if age < Double(graceSeconds) {
             logger.debug("gc: keep \(c.path, privacy: .public) — within grace (age=\(age, privacy: .public)s)")
             return .keep(reason: "grace")
@@ -188,22 +194,35 @@ public struct AgentWorktreeCollector: Sendable {
     /// actually used: the `<worktreePath>/.git` file itself (rewritten by
     /// some git operations) and the admin gitdir's `index` file (rewritten by
     /// almost every git operation that touches the working tree — status,
-    /// add, commit, checkout). Either file missing contributes
-    /// `Date.distantPast` rather than failing the whole computation.
-    static func lastActivity(worktreePath: String) -> Date {
+    /// add, commit, checkout). Either file missing (but not both) still
+    /// contributes what's readable via `max`.
+    ///
+    /// If NEITHER mtime is readable at all (both the `.git` file and the
+    /// admin index are unreadable/missing), this returns `now` rather than
+    /// `Date.distantPast`. `Date.distantPast` would make `decide(_:)`'s age
+    /// computation enormous, making an unreadable worktree immediately
+    /// grace-*eligible* for reap — exactly backwards for keep-biased GC.
+    /// Returning `now` instead makes age ≈ 0, so an unreadable worktree is
+    /// treated the same as one just touched: kept by the grace window like
+    /// everything else uncertain, not silently fast-tracked for deletion.
+    static func lastActivity(worktreePath: String, now: Date) -> Date {
         let gitFile = worktreePath + "/.git"
-        let gitFileMtime = mtime(gitFile) ?? .distantPast
+        let gitFileMtime = mtime(gitFile)
 
-        var indexMtime = Date.distantPast
+        var indexMtime: Date?
         if let contents = try? String(contentsOfFile: gitFile, encoding: .utf8) {
             let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
             let prefix = "gitdir: "
             if trimmed.hasPrefix(prefix) {
                 let gitdir = String(trimmed.dropFirst(prefix.count))
-                indexMtime = mtime(gitdir + "/index") ?? .distantPast
+                indexMtime = mtime(gitdir + "/index")
             }
         }
-        return max(gitFileMtime, indexMtime)
+
+        guard gitFileMtime != nil || indexMtime != nil else {
+            return now
+        }
+        return max(gitFileMtime ?? .distantPast, indexMtime ?? .distantPast)
     }
 
     private static func mtime(_ path: String) -> Date? {
