@@ -91,16 +91,15 @@ private func tearDown(_ suiteName: String) {
     // Test seam: short-circuit the daemon RPC.
     appState.archivedLookupOverride = { _ in [archivedWT] }
     appState.worktrees = [:] // active miss
-    // Archived deep links now announce via a cancellable countdown toast
-    // before navigating; shrink the tick so the test doesn't wait 5 real
-    // seconds for the deferred navigation to fire.
+    // Archived deep links navigate immediately and show a brief auto-dismissing
+    // notice; shrink the tick so the notice's dismiss task doesn't linger.
     appState.toastTickDuration = .milliseconds(5)
 
     let url = DeepLink.makeOpenWorktreeURL(archivedID)
     DeepLinkHandler.handle(url, appState: appState)
 
-    // navigateToArchivedWorktree is async and navigation is deferred behind
-    // the countdown — poll until the countdown expires and navigates.
+    // navigateToArchivedWorktree is async (spawned in its own Task) — poll
+    // until its lookup resolves and it navigates immediately.
     let clock = ContinuousClock()
     let start = clock.now
     while appState.highlightedArchivedWorktreeID != archivedID {

@@ -218,12 +218,10 @@ final class AppState: ObservableObject {
 
     /// The single visible in-app toast; nil when hidden. See AppState+Toast.swift.
     @Published var activeToast: Toast?
-    /// Action for the toast's CTA button (`.action` style). Cleared on dismiss/replace.
-    var toastCTAAction: (() -> Void)?
-    /// One countdown/auto-dismiss tick. Tests shrink this to milliseconds.
+    /// One auto-dismiss tick. Tests shrink this to milliseconds.
     var toastTickDuration: Duration = .seconds(1)
-    /// In-flight countdown or auto-dismiss task for `activeToast`.
-    var toastCountdownTask: Task<Void, Never>?
+    /// In-flight auto-dismiss task for `activeToast`.
+    var toastDismissTask: Task<Void, Never>?
 
     /// Request-generation token for archived deep-link lookups. Stamped fresh
     /// at the start of every `navigateToArchivedWorktree(_:)`; a lookup that

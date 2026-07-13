@@ -7,7 +7,7 @@ import TBDShared
 ///
 /// Every test constructs `AppState(userDefaults:)` against a throwaway suite —
 /// `UserDefaults.standard` on this unbundled executable is the developer's
-/// real `TBDApp.plist`. Countdown ticks are shrunk to 5ms via
+/// real `TBDApp.plist`. Auto-dismiss ticks are shrunk to 5ms via
 /// `toastTickDuration` so no test sleeps for real seconds.
 @MainActor
 @Suite("Deep-link toast")
@@ -58,77 +58,26 @@ struct DeepLinkToastTests {
         }
     }
 
-    @Test func dismissToast_clearsToastAndCTA() async {
+    @Test func dismissToast_clearsToast() async {
         await withState { state in
             state.showToast(Toast(id: UUID(), message: "m", style: .progress))
-            state.toastCTAAction = {}
             state.dismissToast()
             #expect(state.activeToast == nil)
-            #expect(state.toastCTAAction == nil)
         }
     }
 
-    // MARK: - Countdown
-
-    @Test func startToastCountdown_beginsAtFullSeconds() async {
+    @Test func newToast_replacesOldAndCancelsItsDismissTask() async {
         await withState { state in
-            state.showToast(Toast(id: UUID(), message: "m", style: .progress))
-            state.startToastCountdown(onExpiry: {})
-            #expect(state.activeToast?.style == .countdown(secondsRemaining: 5))
-        }
-    }
-
-    @Test func countdownExpiry_firesOnExpiryOnceAndDismisses() async {
-        await withState { state in
-            var fired = 0
-            state.showToast(Toast(id: UUID(), message: "m", style: .progress))
-            state.startToastCountdown(onExpiry: { fired += 1 })
-            let expired = await waitUntil { state.activeToast == nil }
-            #expect(expired)
-            // Drain a few more ticks to prove it fires exactly once.
-            try? await Task.sleep(for: .milliseconds(50))
-            #expect(fired == 1)
-        }
-    }
-
-    @Test func hoverDuringCountdown_cancelsPermanentlyAndShowsCTA() async {
-        await withState { state in
-            var fired = false
-            state.showToast(Toast(id: UUID(), message: "m", style: .progress))
-            state.startToastCountdown(onExpiry: { fired = true })
-            state.toastHoverChanged(true)
-            #expect(state.activeToast?.style == .action(ctaLabel: "Go to archive entry"))
-            // Mouse leaves — countdown must NOT resume.
-            state.toastHoverChanged(false)
-            try? await Task.sleep(for: .milliseconds(60))  // > 10 ticks
-            #expect(fired == false)
-            #expect(state.activeToast != nil)
-            // Proves the state machine settled (not just starved by scheduler load).
-            #expect(state.activeToast?.style == .action(ctaLabel: "Go to archive entry"))
-        }
-    }
-
-    @Test func hoverOutsideCountdownState_isIgnored() async {
-        await withState { state in
-            state.showToast(Toast(id: UUID(), message: "m", style: .progress))
-            state.toastHoverChanged(true)
-            #expect(state.activeToast?.style == .progress)
-        }
-    }
-
-    @Test func newToast_replacesOldAndCancelsItsCountdown() async {
-        await withState { state in
-            var fired = false
-            state.showToast(Toast(id: UUID(), message: "old", style: .progress))
-            state.startToastCountdown(onExpiry: { fired = true })
+            // The old transient toast schedules an auto-dismiss ~4 ticks out.
+            state.showTransientToast("old", style: .notice)
+            // Replacing it must cancel that task so it can't clear the new one.
             state.showToast(Toast(id: UUID(), message: "new", style: .progress))
-            try? await Task.sleep(for: .milliseconds(60))
-            #expect(fired == false)
+            try? await Task.sleep(for: .milliseconds(60))  // > old's ~4-tick deadline
             #expect(state.activeToast?.message == "new")
         }
     }
 
-    // MARK: - Error toast
+    // MARK: - Transient (notice / error) toast auto-dismiss
 
     @Test func errorToast_autoDismisses() async {
         await withState { state in
@@ -139,9 +88,18 @@ struct DeepLinkToastTests {
         }
     }
 
+    @Test func noticeToast_autoDismisses() async {
+        await withState { state in
+            state.showTransientToast("heads up", style: .notice)
+            #expect(state.activeToast?.style == .notice)
+            let dismissed = await waitUntil { state.activeToast == nil }
+            #expect(dismissed)
+        }
+    }
+
     // MARK: - Deep-link archived flow
 
-    @Test func archivedHit_showsCountdownToastWithDisplayName() async {
+    @Test func archivedHit_navigatesImmediatelyWithNoticeToast() async {
         await withState { state in
             let repoID = UUID()
             let id = UUID()
@@ -149,65 +107,18 @@ struct DeepLinkToastTests {
 
             await state.navigateToArchivedWorktree(id)
 
-            #expect(state.activeToast?.style == .countdown(secondsRemaining: 5))
-            #expect(state.activeToast?.message.contains("Fix Login") == true)
-            #expect(state.activeToast?.message.contains("archived") == true)
-            // Navigation deferred: nothing selected yet.
-            #expect(state.selectedRepoID == nil)
-            #expect(state.highlightedArchivedWorktreeID == nil)
-        }
-    }
-
-    @Test func archivedCountdownExpiry_navigatesToArchiveEntry() async {
-        await withState { state in
-            let repoID = UUID()
-            let id = UUID()
-            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
-
-            await state.navigateToArchivedWorktree(id)
-
-            let navigated = await waitUntil {
-                state.highlightedArchivedWorktreeID == id && state.activeToast == nil
-            }
-            #expect(navigated)
-            #expect(state.selectedRepoID == repoID)
-            #expect(state.selectedWorktreeIDs.isEmpty)
-            #expect(state.archivedWorktrees[repoID]?.map(\.id) == [id])
-        }
-    }
-
-    @Test func archivedHoverThenCTA_navigatesImmediately() async {
-        await withState { state in
-            let repoID = UUID()
-            let id = UUID()
-            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
-
-            await state.navigateToArchivedWorktree(id)
-            state.toastHoverChanged(true)
-            #expect(state.activeToast?.style == .action(ctaLabel: "Go to archive entry"))
-
-            state.toastCTAAction?()
-
+            // Navigation is immediate — no countdown, no deferral.
             #expect(state.selectedRepoID == repoID)
             #expect(state.highlightedArchivedWorktreeID == id)
-            #expect(state.activeToast == nil)
-        }
-    }
-
-    @Test func archivedHoverThenDismiss_neverNavigates() async {
-        await withState { state in
-            let repoID = UUID()
-            let id = UUID()
-            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
-
-            await state.navigateToArchivedWorktree(id)
-            state.toastHoverChanged(true)
-            state.dismissToast()
-            try? await Task.sleep(for: .milliseconds(60))
-
-            #expect(state.selectedRepoID == nil)
-            #expect(state.highlightedArchivedWorktreeID == nil)
-            #expect(state.activeToast == nil)
+            #expect(state.selectedWorktreeIDs.isEmpty)
+            #expect(state.archivedWorktrees[repoID]?.map(\.id) == [id])
+            // And a brief notice explains the archive landing.
+            #expect(state.activeToast?.style == .notice)
+            #expect(state.activeToast?.message.contains("Fix Login") == true)
+            #expect(state.activeToast?.message.contains("archived") == true)
+            // The notice auto-dismisses.
+            let dismissed = await waitUntil { state.activeToast == nil }
+            #expect(dismissed)
         }
     }
 
@@ -271,10 +182,10 @@ struct DeepLinkToastTests {
 
     // MARK: - Request-generation guard (F1/F5)
 
-    /// F5 (spec line ~68): a second deep link mid-countdown restarts the state
-    /// machine for the new UUID. The toast retargets to B, and only B's repo is
-    /// ever navigated to — A's countdown is cancelled by the replacing toast.
-    @Test func secondDeepLinkMidCountdown_restartsForNewUUID() async {
+    /// F5: a second deep link supersedes the first. With auto-navigation each
+    /// link navigates immediately, so B's navigation simply wins — only B's
+    /// repo is ever selected.
+    @Test func secondDeepLink_navigatesToNewUUID() async {
         await withState { state in
             let repoA = UUID(), idA = UUID()
             let repoB = UUID(), idB = UUID()
@@ -288,26 +199,20 @@ struct DeepLinkToastTests {
             }
 
             await state.navigateToArchivedWorktree(idA)
-            #expect(state.activeToast?.message.contains("Fix Login") == true)
+            #expect(state.selectedRepoID == repoA)
 
             await state.navigateToArchivedWorktree(idB)
-            // Toast now names B, countdown restarted.
-            #expect(state.activeToast?.message.contains("Refactor DB") == true)
-            #expect(state.activeToast?.style == .countdown(secondsRemaining: 5))
-
-            let navigated = await waitUntil {
-                state.highlightedArchivedWorktreeID == idB && state.activeToast == nil
-            }
-            #expect(navigated)
+            // B navigated last; its repo is selected and its notice shown.
             #expect(state.selectedRepoID == repoB)
-            // A must never have been navigated to.
-            #expect(state.selectedRepoID != repoA)
+            #expect(state.highlightedArchivedWorktreeID == idB)
+            #expect(state.activeToast?.message.contains("Refactor DB") == true)
+            #expect(state.activeToast?.style == .notice)
         }
     }
 
     /// F1: two overlapping lookups (A slow, B fast) that resolve out of order.
     /// A's late resolution must be dropped by the request-generation guard so
-    /// it can't clobber B's toast/navigation.
+    /// it can't clobber B's navigation — no navigation to A, no A toast.
     @Test func staleLookupResolution_doesNotClobberNewerRequest() async {
         await withState { state in
             let repoA = UUID(), idA = UUID()
@@ -331,20 +236,20 @@ struct DeepLinkToastTests {
             // inverting the stamp order this guard depends on.
             let taskA = Task { await state.navigateToArchivedWorktree(idA) }
             try? await Task.sleep(for: .milliseconds(10))
-            // B supersedes A (newest request); its lookup resolves immediately.
+            // B supersedes A (newest request); its lookup resolves immediately
+            // and navigates right away.
             await state.navigateToArchivedWorktree(idB)
+            #expect(state.selectedRepoID == repoB)
+            #expect(state.highlightedArchivedWorktreeID == idB)
             #expect(state.activeToast?.message.contains("Refactor DB") == true)
 
             // Let A's slow lookup resolve — the guard must drop it.
             _ = await taskA.value
 
-            let navigated = await waitUntil {
-                state.highlightedArchivedWorktreeID == idB && state.activeToast == nil
-            }
-            #expect(navigated)
+            // A's late resolution never navigated to A nor showed A's toast.
             #expect(state.selectedRepoID == repoB)
-            // A's late resolution never navigated to A or showed A's toast.
-            #expect(state.highlightedArchivedWorktreeID != idA)
+            #expect(state.highlightedArchivedWorktreeID == idB)
+            #expect(state.activeToast?.message.contains("Fix Login") != true)
         }
     }
 

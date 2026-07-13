@@ -7,10 +7,8 @@ struct Toast: Equatable, Identifiable {
     enum Style: Equatable {
         /// Indeterminate work in progress (spinner).
         case progress
-        /// Live countdown before an announced action runs.
-        case countdown(secondsRemaining: Int)
-        /// Countdown cancelled — explicit CTA + dismiss buttons.
-        case action(ctaLabel: String)
+        /// Informational notice (archivebox icon); auto-dismisses.
+        case notice
         /// Failure notice; auto-dismisses.
         case error
     }

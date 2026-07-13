@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Renders `AppState.activeToast` as a bottom-right-anchored floating capsule.
-/// Purely presentational: every interaction (hover, CTA, dismiss) is
-/// forwarded to the AppState toast state machine (AppState+Toast.swift),
-/// which owns the countdown task and all transitions.
+/// Purely presentational: it only reflects the current toast style. All
+/// transitions and auto-dismiss timing are owned by the AppState toast state
+/// machine (AppState+Toast.swift).
 struct ToastOverlay: View {
     @EnvironmentObject var appState: AppState
 
@@ -19,7 +19,6 @@ struct ToastOverlay: View {
 }
 
 private struct ToastCard: View {
-    @EnvironmentObject var appState: AppState
     let toast: Toast
 
     var body: some View {
@@ -27,7 +26,6 @@ private struct ToastCard: View {
             leadingIndicator
             Text(toast.message)
                 .lineLimit(2)
-            trailingControls
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -39,7 +37,6 @@ private struct ToastCard: View {
         .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
         .padding(.trailing, 16)
         .padding(.bottom, 34)
-        .onHover { appState.toastHoverChanged($0) }
         .accessibilityElement(children: .combine)
     }
 
@@ -48,35 +45,12 @@ private struct ToastCard: View {
         switch toast.style {
         case .progress:
             ProgressView().controlSize(.small)
-        case .countdown, .action:
+        case .notice:
             Image(systemName: "archivebox")
                 .foregroundStyle(.secondary)
         case .error:
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(.yellow)
-        }
-    }
-
-    @ViewBuilder
-    private var trailingControls: some View {
-        switch toast.style {
-        case .countdown(let secondsRemaining):
-            Text("in \(secondsRemaining)…")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-        case .action(let ctaLabel):
-            Button(ctaLabel) { appState.toastCTAAction?() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            Button {
-                appState.dismissToast()
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.borderless)
-            .help("Dismiss")
-        case .progress, .error:
-            EmptyView()
         }
     }
 }

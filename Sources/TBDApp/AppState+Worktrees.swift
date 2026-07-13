@@ -474,12 +474,12 @@ extension AppState {
     }
 
     /// Archived-worktree path for deep-link navigation. Async — issues an RPC
-    /// to find the worktree across all archived ones, then announces the
-    /// upcoming navigation via a countdown toast instead of yanking the user
-    /// immediately (spec: 2026-07-13-deeplink-archived-toast-design.md).
-    /// Hovering the toast cancels the countdown permanently and leaves an
-    /// explicit "Go to archive entry" CTA. Lookup failures and unknown UUIDs
-    /// surface as error toasts (previously silent).
+    /// to find the worktree across all archived ones, then navigates to the
+    /// archive entry immediately and shows a brief auto-dismissing notice
+    /// explaining that the target is archived
+    /// (spec: 2026-07-13-deeplink-archived-toast-design.md).
+    /// Lookup failures and unknown UUIDs surface as error toasts (previously
+    /// silent).
     @MainActor
     func navigateToArchivedWorktree(_ id: UUID) async {
         // Request-generation guard (F1). Two deep links (A then B) can have
@@ -526,23 +526,17 @@ extension AppState {
             return
         }
 
-        showToast(Toast(
-            id: UUID(),
-            message: "“\(wt.displayName)” is archived — showing its archive entry",
-            style: .progress
-        ))
-        let navigate: @MainActor () -> Void = { [weak self] in
-            self?.performArchivedNavigation(worktreeID: id, repoID: rid, archived: archived)
-        }
-        toastCTAAction = { [weak self] in
-            self?.dismissToast()
-            navigate()
-        }
-        startToastCountdown(onExpiry: navigate)
+        // Navigate immediately, then show a brief auto-dismissing notice so
+        // landing in the archive view is explained rather than surprising.
+        showTransientToast(
+            "“\(wt.displayName)” is archived — showing its archive entry",
+            style: .notice
+        )
+        performArchivedNavigation(worktreeID: id, repoID: rid, archived: archived)
     }
 
-    /// The pre-toast navigation tail: select the repo, populate its archived
-    /// rows, and flash-highlight the target. Runs on countdown expiry or CTA.
+    /// The navigation tail: select the repo, populate its archived rows, and
+    /// flash-highlight the target. Runs immediately once the lookup resolves.
     @MainActor
     private func performArchivedNavigation(worktreeID: UUID, repoID: UUID, archived: [Worktree]) {
         selectedWorktreeIDs = []
