@@ -177,10 +177,30 @@ struct OpenInEditorButton: View {
     }
 
     private func open(entry: (editor: ExternalEditor, appURL: URL)) {
-        beforeOpen?()
-        openInEditor(path: path, bundleID: entry.editor.bundleID)
+        Self.performOpen(
+            beforeOpen: beforeOpen,
+            path: path,
+            bundleID: entry.editor.bundleID,
+            openWith: openInEditor
+        )
         recordUsed(bundleID: entry.editor.bundleID, repoID: repoID)
         recentBundleIDs = loadRecentBundleIDs(repoID: repoID)
+    }
+
+    /// The ordered open sequence shared by the pinned-icon and overflow-menu
+    /// paths: `beforeOpen` must complete before the editor is asked to open
+    /// `path`, because the hook may create the very file being opened (see
+    /// `NotepadPopoverView`). Internal, with `openWith` injected, so tests can
+    /// pin the ordering without launching real apps or touching
+    /// `UserDefaults.standard` (see `OpenInEditorButtonBeforeOpenTests`).
+    static func performOpen(
+        beforeOpen: (() -> Void)?,
+        path: String,
+        bundleID: String,
+        openWith: (_ path: String, _ bundleID: String) -> Void
+    ) {
+        beforeOpen?()
+        openWith(path, bundleID)
     }
 
     private func showOverflowMenu() {
