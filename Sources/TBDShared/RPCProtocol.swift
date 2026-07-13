@@ -188,6 +188,10 @@ public enum RPCMethod {
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
+    public static let gcList = "gc.list"
+    public static let gcRestore = "gc.restore"
+    public static let gcSweepNow = "gc.sweepNow"
+    public static let configSetGCEnabled = "config.setGCEnabled"
 }
 
 // MARK: - Branch Listing
@@ -508,6 +512,8 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let nightwatchMode: NightwatchMode
     public let autoResumeOnLimitReset: Bool
     public let autoResumeOnApiError: Bool
+    /// The orphan-GC master switch (config mirror, default true).
+    public let gcEnabled: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -517,7 +523,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoHibernateOnMergeDefault: Bool = false,
         nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
-        autoResumeOnApiError: Bool = false
+        autoResumeOnApiError: Bool = false,
+        gcEnabled: Bool = true
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -528,6 +535,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.nightwatchMode = nightwatchMode
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
+        self.gcEnabled = gcEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -552,6 +560,7 @@ public struct ModelProfileListResult: Codable, Sendable {
             Bool.self, forKey: .autoResumeOnLimitReset) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
+        gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
     }
 }
 
@@ -845,6 +854,45 @@ public struct WorktreeArchiveParams: Codable, Sendable {
     public let force: Bool
     public init(worktreeID: UUID, force: Bool = false) {
         self.worktreeID = worktreeID; self.force = force
+    }
+}
+
+/// Params for `gc.list` — lists reaped `ReapRecord`s, optionally scoped to
+/// one repo (`nil` == every repo, including scratch reap records).
+public struct GCListParams: Codable, Sendable {
+    public var repoPath: String?
+    public init(repoPath: String? = nil) {
+        self.repoPath = repoPath
+    }
+}
+
+/// Params for `gc.restore` — restores a swept `ReapRecord` by id.
+public struct GCRestoreParams: Codable, Sendable {
+    public var recordID: UUID
+    public init(recordID: UUID) {
+        self.recordID = recordID
+    }
+}
+
+/// Params for `gc.sweepNow` — triggers an out-of-band sweep. `dryRun: true`
+/// plans without reaping.
+public struct GCSweepNowParams: Codable, Sendable {
+    public var dryRun: Bool
+    public init(dryRun: Bool = false) {
+        self.dryRun = dryRun
+    }
+}
+
+/// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return
+/// type of `OrphanGC.sweep(dryRun:)` in TBDDaemon — one type, no daemon-side
+/// mirror.
+public struct GCSweepResult: Codable, Sendable, Equatable {
+    /// Human-readable plan lines, e.g. "REAP agent-worktree /path …", "KEEP locked /path".
+    public var planned: [String]
+    public var reaped: Int
+    public init(planned: [String], reaped: Int) {
+        self.planned = planned
+        self.reaped = reaped
     }
 }
 
@@ -1181,6 +1229,12 @@ public struct ConfigSetControlModeParams: Codable, Sendable {
 /// hibernation sweep; no daemon restart required.
 public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
     public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCEnabled` — the orphan-GC master switch.
+public struct ConfigSetGCEnabledParams: Codable, Sendable {
+    public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
 

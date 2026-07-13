@@ -61,6 +61,13 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
+    /// Orphan-GC hourly sweep task (agent worktrees + scratchpads). `nil` in
+    /// mock mode. See `orphanGC` for the actor it drives.
+    public nonisolated(unsafe) var gcTask: Task<Void, Never>?
+    /// Orphan-GC actor. Owned here so `gc.*` RPC handlers (Task 9) can reach
+    /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
+    /// in mock mode (never constructed).
+    public nonisolated(unsafe) var orphanGC: OrphanGC?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -360,6 +367,22 @@ public final class Daemon: Sendable {
             pendingQuestions: pendingQuestions
         )
         lifecycle.controlMode = controlModeBridge
+
+        // Orphan-GC: constructed here — before `lifecycle` gets copied into
+        // the RPC router / auto-archive coordinator below (both take a
+        // value-type snapshot at their own init) — so the archive-event
+        // callback reaches every consumer of `lifecycle`. `nil` in mock mode,
+        // mirroring every other background-task guard in this method; the
+        // periodic sweep task itself is started later, alongside the reaper,
+        // inside the main `if mockMode == nil` block.
+        if mockMode == nil {
+            let gc = OrphanGC(db: database, git: git, broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            self.orphanGC = gc
+            lifecycle.onWorktreeRemoved = { [gc] path, repoPath in
+                await gc.scratchpadCleanup(forRemovedWorktreePath: path, repoPath: repoPath)
+            }
+        }
+
         let prManager = PRStatusManager()
 
         // Hydrate PR status cache from the DB so PR icons survive restart, then
@@ -473,6 +496,11 @@ public final class Daemon: Sendable {
         }
 
         self.router = rpcRouter
+        // Post-construction wiring, same shape as `claudeUsagePoller` below:
+        // `orphanGC` was constructed earlier (before `lifecycle`) so the
+        // archive-event callback could reach it; the `gc.*` handlers reach it
+        // through the router the same way they reach `hibernationCoordinator`.
+        rpcRouter.orphanGC = orphanGC
 
         // Shared foreground gate: the app reports its active/inactive state via
         // `app.setForegroundState`; the periodic git tasks below slow their
@@ -542,6 +570,24 @@ public final class Daemon: Sendable {
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
                     await reaper.sweep(servers: await ownedServers())
+                }
+            }
+
+            // 11a-gc. Orphan-GC: reap abandoned agent worktrees + scratchpads
+            // (event-driven cleanup already runs via `lifecycle.onWorktreeRemoved`
+            // above; this periodic sweep catches everything else — worktrees
+            // orphaned outside a TBD-initiated remove, e.g. manual `rm -rf`).
+            // Constructed above (guarded the same `mockMode == nil` check), so
+            // `orphanGC` is always non-nil here.
+            if let orphanGC {
+                self.gcTask = Task {
+                    // Sweep once immediately (cold recovery), then every hour.
+                    _ = await orphanGC.sweep()
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(3600))
+                        guard !Task.isCancelled else { break }
+                        _ = await orphanGC.sweep()
+                    }
                 }
             }
 
@@ -779,6 +825,7 @@ public final class Daemon: Sendable {
         gitStatusTask?.cancel()
         reaperTask?.cancel()
         hibernationSweepTask?.cancel()
+        gcTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {

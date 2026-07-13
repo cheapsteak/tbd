@@ -114,6 +114,20 @@ extension RPCRouter {
             }
         }
 
+        // The folder at `wt.path` is now gone — trashed just above, already
+        // relocated by promotion (skip-trash branch), or never existed — so
+        // this is the last moment anything can attribute a leftover Claude
+        // Code scratchpad to this row: once it's deleted below, the sweep's
+        // reconciliation has no path left to resolve it by. Scratch spaces
+        // have no owning repo, so repoPath is "" — the same
+        // unresolvable-repo convention `OrphanGC`'s own reconciliation uses.
+        // `scratchpadCleanup` re-verifies the directory is gone and is
+        // gated by `gcEnabled` internally, so this is safe to call
+        // unconditionally.
+        if let orphanGC {
+            await orphanGC.scratchpadCleanup(forRemovedWorktreePath: wt.path, repoPath: "")
+        }
+
         try await db.worktrees.delete(id: wt.id)
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
         return .ok()

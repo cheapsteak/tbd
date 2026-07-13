@@ -144,6 +144,12 @@ struct GeneralSettingsTab: View {
 
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
+
+                Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
+                    get: { appState.gcEnabled },
+                    set: { newValue in Task { await appState.setGCEnabled(newValue) } }
+                ))
+                .help("Reaps Claude agent worktrees whose run has ended, snapshot-first. Restore from History → Reclaimed.")
             }
 
             Section("Claude") {

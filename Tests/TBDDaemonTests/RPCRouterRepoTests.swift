@@ -102,6 +102,91 @@ extension RPCRouterTests {
         #expect(response.error?.contains("active worktree") == true)
     }
 
+    /// Medium-2 review finding: `repo.remove` hard-deletes every worktree
+    /// row for the repo (`deleteForRepo`, all statuses) with no chance for
+    /// the sweep's own reconciliation to catch up afterward — the rows are
+    /// gone. Verifies the RPC path reclaims an archived row's scratchpad
+    /// before the delete, wired through a real `OrphanGC` with an injected
+    /// scratchpad base (mirrors `GCHandlersTests.makeGC`).
+    @Test("repo.remove reclaims scratchpads for gone worktree rows before deleting them")
+    func repoRemoveReclaimsScratchpadsBeforeDeletingRows() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("repo-remove-scratchpad-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date())
+        router.orphanGC = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: base)
+
+        let repo = try await db.repos.create(
+            path: sandbox.appendingPathComponent("repo").path, displayName: "acme", defaultBranch: "main"
+        )
+        let goneWorktreePath = sandbox.appendingPathComponent("gone-wt").path
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "gone-wt", branch: "gone-wt",
+            path: goneWorktreePath, tmuxServer: "test-server"
+        )
+        try await db.worktrees.archive(id: row.id)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: goneWorktreePath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+
+        let request = try RPCRequest(method: RPCMethod.repoRemove, params: RepoRemoveParams(repoID: repo.id, force: true))
+        let response = await router.handle(request)
+        #expect(response.success)
+
+        #expect(!FileManager.default.fileExists(atPath: scratchDir.path),
+                "the archived row's scratchpad must be reclaimed before its row disappears")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.contains { $0.kind == .scratchpad && $0.worktreePath == scratchDir.path && $0.repoPath == repo.path })
+    }
+
+    @Test("repo.remove with gcEnabled=false leaves scratchpads untouched")
+    func repoRemoveLeavesScratchpadsWhenGCDisabled() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("repo-remove-scratchpad-disabled-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(false)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date())
+        router.orphanGC = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: base)
+
+        let repo = try await db.repos.create(
+            path: sandbox.appendingPathComponent("repo").path, displayName: "acme", defaultBranch: "main"
+        )
+        let goneWorktreePath = sandbox.appendingPathComponent("gone-wt").path
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "gone-wt", branch: "gone-wt",
+            path: goneWorktreePath, tmuxServer: "test-server"
+        )
+        try await db.worktrees.archive(id: row.id)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: goneWorktreePath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+
+        let request = try RPCRequest(method: RPCMethod.repoRemove, params: RepoRemoveParams(repoID: repo.id, force: true))
+        let response = await router.handle(request)
+        #expect(response.success)
+
+        #expect(FileManager.default.fileExists(atPath: scratchDir.path),
+                "gcEnabled=false must suppress repo-removal scratchpad reconciliation too")
+    }
+
     // MARK: - Repo Instructions Tests
 
     @Test("repo.updateInstructions stores and retrieves instructions")

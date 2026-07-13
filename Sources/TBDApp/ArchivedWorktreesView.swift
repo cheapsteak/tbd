@@ -41,6 +41,13 @@ struct ArchivedWorktreesView: View {
         appState.selectedArchivedWorktreeIDs[repoID]
     }
 
+    /// "Reclaimed" section selection, mutually exclusive with `selectedID`
+    /// (see `AppState.selectArchivedWorktree(_:repoID:)` /
+    /// `selectReapRecord(_:repoID:)`).
+    private var selectedReapID: UUID? {
+        appState.selectedReapRecordIDs[repoID]
+    }
+
     private var hasMore: Bool {
         appState.archivedWorktreesHasMore[repoID] == true
     }
@@ -166,6 +173,10 @@ struct ArchivedWorktreesView: View {
                     }
                 }
             }
+
+            if appState.reapRecords[repoID]?.isEmpty == false {
+                ReclaimedSectionView(repoID: repoID)
+            }
         }
         .onAppear { reconcileSelection() }
         .onChange(of: hideEmpty) { _, _ in reconcileSelection() }
@@ -176,13 +187,16 @@ struct ArchivedWorktreesView: View {
     /// unset or stale; clears when nothing is visible. Triggers a session
     /// fetch for any newly-selected row.
     private func reconcileSelection() {
+        // A deliberate Reclaimed-row selection must not be stolen by the
+        // archived auto-select (mutual exclusivity with selectedReapID).
+        if selectedReapID != nil { return }
         let visibleIDs = Set(rows.map(\.id))
         if let current = selectedID, visibleIDs.contains(current) { return }
         if let first = rows.first(where: { $0.reviveState == nil })?.worktree {
-            appState.selectedArchivedWorktreeIDs[repoID] = first.id
+            appState.selectArchivedWorktree(first.id, repoID: repoID)
             Task { await appState.fetchSessions(worktreeID: first.id) }
         } else {
-            appState.selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
+            appState.selectArchivedWorktree(nil, repoID: repoID)
         }
     }
 
@@ -207,7 +221,10 @@ struct ArchivedWorktreesView: View {
 
     @ViewBuilder
     private var rightPane: some View {
-        if let id = selectedID,
+        if let reapID = selectedReapID,
+           let record = (appState.reapRecords[repoID] ?? []).first(where: { $0.id == reapID }) {
+            ReclaimedDetailView(record: record, repoID: repoID)
+        } else if let id = selectedID,
            let row = rows.first(where: { $0.id == id }) {
             if row.effectiveSessionCount == 0 {
                 noSessionsState(for: row.worktree)
@@ -260,7 +277,7 @@ struct ArchivedWorktreesView: View {
     private func select(_ row: ArchivedRow) {
         // In-flight revives are non-selectable; .done rows are fine to browse.
         if case .inFlight = row.reviveState { return }
-        appState.selectedArchivedWorktreeIDs[repoID] = row.id
+        appState.selectArchivedWorktree(row.id, repoID: repoID)
         Task { await appState.fetchSessions(worktreeID: row.id) }
     }
 

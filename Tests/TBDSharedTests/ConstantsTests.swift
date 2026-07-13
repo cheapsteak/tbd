@@ -78,6 +78,23 @@ import Foundation
         let path = TBDConstants.scratchDir(environment: [:]).path
         #expect(path.hasSuffix("/tbd/scratch"))
     }
+
+    @Test func claudeScratchpadBaseDefaultsToPrivateTmpClaudeUID() {
+        let url = TBDConstants.claudeScratchpadBase(environment: [:])
+        #expect(url.path == "/private/tmp/claude-\(getuid())")
+    }
+
+    @Test func claudeScratchpadBaseHonorsOverride() {
+        let url = TBDConstants.claudeScratchpadBase(
+            environment: ["TBD_CLAUDE_SCRATCH_BASE": "/tmp/claude-scratch-test"]
+        )
+        #expect(url.path == "/tmp/claude-scratch-test")
+    }
+
+    @Test func emptyClaudeScratchpadBaseOverrideIsTreatedAsUnset() {
+        let url = TBDConstants.claudeScratchpadBase(environment: ["TBD_CLAUDE_SCRATCH_BASE": ""])
+        #expect(url.path == "/private/tmp/claude-\(getuid())")
+    }
 }
 
 /// Smoke-tests that the production computed vars are correctly wired to the

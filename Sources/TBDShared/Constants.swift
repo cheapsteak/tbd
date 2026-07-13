@@ -71,6 +71,23 @@ public enum TBDConstants {
     }
     public static var scratchDir: URL { scratchDir(environment: ProcessInfo.processInfo.environment) }
 
+    /// Base directory for Claude Code scratchpads resolved from the given environment dictionary.
+    /// Honors `TBD_CLAUDE_SCRATCH_BASE`; falls back to `/private/tmp/claude-<uid>` when the key
+    /// is absent or empty.
+    public static func claudeScratchpadBase(environment: [String: String]) -> URL {
+        if let override = environment["TBD_CLAUDE_SCRATCH_BASE"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        let uid = getuid()
+        return URL(fileURLWithPath: "/private/tmp/claude-\(uid)", isDirectory: true)
+    }
+
+    /// Base directory for Claude Code scratchpads. Resolves `TBD_CLAUDE_SCRATCH_BASE` env var
+    /// on every access so a process that sets the env after first read (e.g. a SwiftTesting
+    /// suite trait) gets the new value. Falls back to `/private/tmp/claude-<uid>` when the env
+    /// is unset or empty, preserving production behavior.
+    public static var claudeScratchpadBase: URL { claudeScratchpadBase(environment: ProcessInfo.processInfo.environment) }
+
     public static func hookPath(repoID: UUID, eventName: String, environment: [String: String]) -> String {
         reposDir(environment: environment)
             .appendingPathComponent(repoID.uuidString)

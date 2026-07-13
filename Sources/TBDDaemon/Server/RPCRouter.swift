@@ -19,6 +19,11 @@ public final class RPCRouter: Sendable {
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    /// Orphan-GC actor. `nil` in mock mode / unit tests that don't need it;
+    /// set post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`).
+    /// The `gc.*` handlers return an error response rather than crashing when
+    /// this is nil.
+    public nonisolated(unsafe) var orphanGC: OrphanGC?
     /// In-memory per-profile OAuth usage poller. Wired post-construction by
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
     /// mode, where usage snapshots are simply absent.
@@ -356,6 +361,14 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetHibernateInputVeto:
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
+            case RPCMethod.configSetGCEnabled:
+                return try await handleConfigSetGCEnabled(request.paramsData)
+            case RPCMethod.gcList:
+                return try await handleGCList(request.paramsData)
+            case RPCMethod.gcRestore:
+                return try await handleGCRestore(request.paramsData)
+            case RPCMethod.gcSweepNow:
+                return try await handleGCSweepNow(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
