@@ -76,15 +76,28 @@
 
       // Success detection: navigating to a custom scheme does NOT unload this
       // page — the tab stays here. We can't observe the handler directly, but
-      // when TBD activates, macOS brings it frontmost and the tab becomes
-      // hidden. So: document.hidden flipping true within a short window of
-      // firing the redirect means the handler opened. window.blur alone is a
-      // false-positive signal — the browser's "Open TBD.app?" confirmation
-      // dialog blurs the window even if the user cancels — but that dialog
-      // does not hide the document, so visibilitychange is safe.
+      // when TBD activates, macOS brings it frontmost. We accept TWO signals
+      // within a short window of firing the redirect:
       //
-      // Accepted trade-off: document.hidden is the ONLY success signal we
-      // have, so if TBD is NOT installed, an incidental hide within the 3s
+      //   - visibilitychange → document.hidden: fires when the tab is
+      //     switched away, minimized, or fully occluded. Reliable when it
+      //     fires — but Chrome does NOT flip visibility when TBD's window
+      //     only partially covers the browser (the common big-monitor,
+      //     side-by-side case), so relying on it alone made detection
+      //     silently miss even though the handler launched.
+      //   - window blur: fires whenever the browser window loses focus,
+      //     including when TBD activates without occluding it. This catches
+      //     the partial-occlusion case visibilitychange misses.
+      //
+      // Accepted trade-off: blur is also fired by the browser's
+      // "Open TBD.app?" confirmation dialog, even if the user cancels it —
+      // so a user who gets that dialog and cancels will still be bounced
+      // back to the previous page. We accept that: it only affects the
+      // one-time-confirmation path, while the visibility-only approach
+      // missed real successes every time on large monitors.
+      //
+      // Accepted trade-off: neither signal proves the handler exists, so if
+      // TBD is NOT installed, an incidental hide or blur within the 3s
       // window (alt-tab, clicking a notification) is a false positive and
       // will navigate the user away from this fallback/install page. We
       // accept that: cancelling the return when the tab became visible
@@ -102,11 +115,12 @@
           '(' + DETECT_WINDOW_MS + 'ms from now)');
       }
 
-      function onOpened() {
+      function onOpened(signal) {
         if (returned) return; // guard against double-fire
         returned = true;
         var canGoBack = history.length > 1;
-        console.log('[tbd-open] onOpened(): history.length =', history.length,
+        console.log('[tbd-open] onOpened(): signal =', signal,
+          '; history.length =', history.length,
           '— will', canGoBack ? 'history.back()' : 'window.close()',
           'in', RETURN_DELAY_MS + 'ms');
         status.textContent = canGoBack
@@ -141,7 +155,7 @@
           '; inside armed window =', inWindow);
         if (document.hidden) {
           if (inWindow) {
-            onOpened();
+            onOpened('hidden');
           } else if (armedUntil > 0) {
             // Hidden arrived after the window expired — classic symptom of the
             // user taking >3s on the "Open TBD.app?" permission dialog.
@@ -153,6 +167,21 @@
           // cancel here — once onOpened() has fired, the auto-return proceeds
           // regardless (glancing back at the tab must not defeat the return).
           console.log('[tbd-open] tab visible again while return pending — continuing anyway');
+        }
+      });
+
+      window.addEventListener('blur', function () {
+        var now = Date.now();
+        var inWindow = now <= armedUntil;
+        console.log('[tbd-open] blur: inside armed window =', inWindow);
+        if (inWindow) {
+          onOpened('blur');
+        } else if (armedUntil > 0) {
+          // Blur arrived after the window expired — same late-arrival symptom
+          // as the visibilitychange case above (e.g. the user taking >3s on
+          // the "Open TBD.app?" permission dialog).
+          console.log('[tbd-open] blur arrived', now - armedUntil,
+            'ms after the detection window expired — no auto-return');
         }
       });
 
