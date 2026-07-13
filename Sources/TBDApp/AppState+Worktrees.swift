@@ -482,20 +482,38 @@ extension AppState {
     /// surface as error toasts (previously silent).
     @MainActor
     func navigateToArchivedWorktree(_ id: UUID) async {
+        // Request-generation guard (F1). Two deep links (A then B) can have
+        // overlapping lookups that resolve out of order; without this, A's
+        // late resolution would replace B's toast (even one the user
+        // hover-cancelled) and navigate to A. Stamp a fresh token now and
+        // drop any resolution that isn't the newest request. Mirrors the
+        // `revivingArchived[id] == nil` re-entrancy guard used for revive.
+        let myRequestID = UUID()
+        deepLinkRequestID = myRequestID
+
         let archived: [Worktree]
-        if let override = archivedLookupOverride {
-            archived = await override(id)
-        } else {
-            do {
+        do {
+            if let override = archivedLookupOverride {
+                archived = try await override(id)
+            } else {
                 archived = try await daemonClient.listWorktrees(
                     repoID: nil, status: .archived, includeSessionCounts: false
                 )
-            } catch {
-                logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
-                showErrorToast("Couldn't look up the worktree: \(error.localizedDescription)")
-                return
             }
+        } catch {
+            // Drop a stale failure before it clobbers a newer link's toast.
+            guard deepLinkRequestID == myRequestID else { return }
+            logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
+            showErrorToast("Couldn't look up the worktree: \(error.localizedDescription)")
+            return
         }
+
+        // Out-of-order RPC resolution: a newer deep link superseded this one
+        // while its lookup was in flight. Drop this stale resolution before it
+        // touches any toast/navigation state. (The toastID mechanism already
+        // covers post-toast staleness; this guard only covers the
+        // RPC-resolution window.)
+        guard deepLinkRequestID == myRequestID else { return }
 
         guard let wt = archived.first(where: { $0.id == id }) else {
             logger.warning("Deep link references unknown worktree \(id.uuidString, privacy: .public)")
@@ -533,6 +551,19 @@ extension AppState {
         archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
         archivedWorktreesHasMore[repoID] = false
         highlightedArchivedWorktreeID = worktreeID
+        // Reconcile with fresh data (F2). The captured `archived` snapshot can
+        // be minutes old when the user hover-cancels and clicks the CTA later,
+        // leaving ghost rows for since-deleted/revived worktrees. The refresh
+        // also restores the per-row session-count enrichment the fast
+        // deep-link lookup skips (includeSessionCounts: false).
+        //
+        // Suppressed when the test seam is active: `archivedLookupOverride`
+        // replaces the archived-lookup daemon roundtrip, and this reconcile is
+        // a *second* daemon roundtrip that tests neither provide nor want
+        // touching the real daemon (CLAUDE.md: tests must not touch ~/tbd).
+        if archivedLookupOverride == nil {
+            Task { await self.refreshArchivedWorktrees(repoID: repoID) }
+        }
     }
 
     /// Public entry point for deep-link navigation. Synchronous fast path

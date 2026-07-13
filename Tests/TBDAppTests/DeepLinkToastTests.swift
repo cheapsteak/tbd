@@ -268,4 +268,101 @@ struct DeepLinkToastTests {
             #expect(state.selectedWorktreeIDs == [id])
         }
     }
+
+    // MARK: - Request-generation guard (F1/F5)
+
+    /// F5 (spec line ~68): a second deep link mid-countdown restarts the state
+    /// machine for the new UUID. The toast retargets to B, and only B's repo is
+    /// ever navigated to — A's countdown is cancelled by the replacing toast.
+    @Test func secondDeepLinkMidCountdown_restartsForNewUUID() async {
+        await withState { state in
+            let repoA = UUID(), idA = UUID()
+            let repoB = UUID(), idB = UUID()
+            let a = makeArchived(id: idA, repoID: repoA)  // displayName "Fix Login"
+            var b = makeArchived(id: idB, repoID: repoB)
+            b.displayName = "Refactor DB"
+            state.archivedLookupOverride = { reqID in
+                if reqID == idA { return [a] }
+                if reqID == idB { return [b] }
+                return []
+            }
+
+            await state.navigateToArchivedWorktree(idA)
+            #expect(state.activeToast?.message.contains("Fix Login") == true)
+
+            await state.navigateToArchivedWorktree(idB)
+            // Toast now names B, countdown restarted.
+            #expect(state.activeToast?.message.contains("Refactor DB") == true)
+            #expect(state.activeToast?.style == .countdown(secondsRemaining: 5))
+
+            let navigated = await waitUntil {
+                state.highlightedArchivedWorktreeID == idB && state.activeToast == nil
+            }
+            #expect(navigated)
+            #expect(state.selectedRepoID == repoB)
+            // A must never have been navigated to.
+            #expect(state.selectedRepoID != repoA)
+        }
+    }
+
+    /// F1: two overlapping lookups (A slow, B fast) that resolve out of order.
+    /// A's late resolution must be dropped by the request-generation guard so
+    /// it can't clobber B's toast/navigation.
+    @Test func staleLookupResolution_doesNotClobberNewerRequest() async {
+        await withState { state in
+            let repoA = UUID(), idA = UUID()
+            let repoB = UUID(), idB = UUID()
+            let a = makeArchived(id: idA, repoID: repoA)  // displayName "Fix Login"
+            var b = makeArchived(id: idB, repoID: repoB)
+            b.displayName = "Refactor DB"
+            state.archivedLookupOverride = { reqID in
+                if reqID == idA {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    return [a]
+                }
+                if reqID == idB { return [b] }
+                return []
+            }
+
+            // A's lookup starts first (production spawns each deep link in its
+            // own Task, so requests stamp their generation token in arrival
+            // order). Let A stamp its token and enter its slow lookup before B
+            // starts — otherwise B's own await would yield the actor back to A,
+            // inverting the stamp order this guard depends on.
+            let taskA = Task { await state.navigateToArchivedWorktree(idA) }
+            try? await Task.sleep(for: .milliseconds(10))
+            // B supersedes A (newest request); its lookup resolves immediately.
+            await state.navigateToArchivedWorktree(idB)
+            #expect(state.activeToast?.message.contains("Refactor DB") == true)
+
+            // Let A's slow lookup resolve — the guard must drop it.
+            _ = await taskA.value
+
+            let navigated = await waitUntil {
+                state.highlightedArchivedWorktreeID == idB && state.activeToast == nil
+            }
+            #expect(navigated)
+            #expect(state.selectedRepoID == repoB)
+            // A's late resolution never navigated to A or showed A's toast.
+            #expect(state.highlightedArchivedWorktreeID != idA)
+        }
+    }
+
+    // MARK: - RPC-failure branch (F4)
+
+    /// F4: a thrown lookup error exercises the same error-toast branch as a real
+    /// RPC failure. Previously the seam was non-throwing and this was untestable.
+    @Test func lookupThrows_showsErrorToast() async {
+        await withState { state in
+            struct LookupError: Error {}
+            state.archivedLookupOverride = { _ in throw LookupError() }
+
+            await state.navigateToArchivedWorktree(UUID())
+
+            #expect(state.activeToast?.style == .error)
+            #expect(state.activeToast?.message.hasPrefix("Couldn't look up the worktree") == true)
+            let dismissed = await waitUntil { state.activeToast == nil }
+            #expect(dismissed)
+        }
+    }
 }
