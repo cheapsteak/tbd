@@ -120,6 +120,29 @@ sweep does nothing at all — not even the `lsof` pass. Toggle it in Settings
 ("Automatically clean up orphaned agent worktrees") or via the `config.setGCEnabled`
 RPC.
 
+### Why default-on, despite the default-off house rule
+
+CLAUDE.md's "large or risky new behavior ships behind a default-off flag" rule names
+exactly this shape (background timer, deletes persisted state), and the
+`auto_hibernate_enabled` precedent (shipped on, force-disabled in v50) is the cautionary
+tale. This feature is judged exempt, deliberately, per the design spec's brainstorm
+decision (`docs/superpowers/specs/2026-07-10-orphan-gc-design.md` §Config):
+
+- **Deletion here is not lossy by construction.** Nothing is deleted without a
+  snapshot ref written *and verified* in the shared repo first; branches are never
+  deleted; every reap is restorable from History/CLI for `gcSnapshotRetentionDays`.
+  The un-gated failure mode of auto-hibernate (losing live session state) has no
+  analog: the worst outcome of a wrong reap is one click to restore.
+- **Orphan-only, never idle.** Every gate must *prove* the owner is gone (linkage,
+  lock, live-cwd, grace) and every gate/error direction fails toward keeping — each
+  direction carries a dedicated test, including the both-branch `gcEnabled` tests the
+  house rule requires.
+- **Default-off would un-ship the feature.** The entire point is unattended cleanup of
+  worktrees nothing else GCs; the population it protects against grows silently
+  (81-worktree incident). A soak already happened live during development: the first
+  boot sweep reaped 11 real orphaned agent worktrees on the dev machine, all
+  restorable, gates verifiably keeping every busy worktree.
+
 The sweep itself runs:
 - **Once immediately at daemon boot** (cold-start recovery), then
 - **Every hour** thereafter, for as long as the daemon runs.
