@@ -76,15 +76,38 @@
 
       // Success detection: navigating to a custom scheme does NOT unload this
       // page — the tab stays here. We can't observe the handler directly, but
-      // when TBD activates, macOS brings it frontmost and the tab becomes
-      // hidden. So: document.hidden flipping true within a short window of
-      // firing the redirect means the handler opened. window.blur alone is a
-      // false-positive signal — the browser's "Open TBD.app?" confirmation
-      // dialog blurs the window even if the user cancels — but that dialog
-      // does not hide the document, so visibilitychange is safe.
+      // when TBD activates, macOS brings it frontmost. We accept TWO signals
+      // within a short window of firing the redirect:
       //
-      // Accepted trade-off: document.hidden is the ONLY success signal we
-      // have, so if TBD is NOT installed, an incidental hide within the 3s
+      //   - visibilitychange → document.hidden: fires when the tab is
+      //     switched away, minimized, or fully occluded. Reliable when it
+      //     fires — but Chrome does NOT flip visibility when TBD's window
+      //     only partially covers the browser (the common big-monitor,
+      //     side-by-side case), so relying on it alone made detection
+      //     silently miss even though the handler launched.
+      //   - window blur: fires whenever the browser window loses focus,
+      //     including when TBD activates without occluding it. This catches
+      //     the partial-occlusion case visibilitychange misses. Note blur
+      //     fires BEFORE hidden even in the full-occlusion/minimize case
+      //     (OS focus loss precedes the browser's occlusion recompute), so
+      //     the first signal to arrive is almost always blur — a later
+      //     'hidden' therefore upgrades a pending blur-scheduled return to
+      //     the fast path instead of being ignored (see onOpened()).
+      //
+      // Known wrinkle: blur is also fired by the browser's "Open TBD.app?"
+      // confirmation dialog the moment it OPENS — before the user has
+      // decided anything. So the blur path returns on its own, longer
+      // schedule (BLUR_RETURN_DELAY_MS) that outlasts most dialog
+      // interactions, and re-checks document.hasFocus() at fire time: if
+      // the page has focus again (dialog cancelled, or the user came back
+      // deliberately), the auto-return is skipped instead of navigating
+      // away mid-flow. Residual gap, accepted honestly: a user who takes
+      // longer than ~4s to click "Allow" could still have the return fire
+      // while the dialog is up. The 'hidden' path has no such race (the
+      // dialog never hides the document) and keeps its short delay.
+      //
+      // Accepted trade-off: neither signal proves the handler exists, so if
+      // TBD is NOT installed, an incidental hide or blur within the 3s
       // window (alt-tab, clicking a notification) is a false positive and
       // will navigate the user away from this fallback/install page. We
       // accept that: cancelling the return when the tab became visible
@@ -92,9 +115,13 @@
       // why the cancel path was removed.
       var DETECT_WINDOW_MS = 3000;
       var RETURN_DELAY_MS = 600;
+      var BLUR_RETURN_DELAY_MS = 4000;
       var armedUntil = 0;
       var returned = false;
       var returnTimer = null;
+      // Which signal scheduled the currently pending returnTimer — lets a
+      // later 'hidden' recognize (and upgrade) a blur-scheduled return.
+      var pendingSignal = null;
 
       function arm() {
         armedUntil = Date.now() + DETECT_WINDOW_MS;
@@ -102,21 +129,33 @@
           '(' + DETECT_WINDOW_MS + 'ms from now)');
       }
 
-      function onOpened() {
-        if (returned) return; // guard against double-fire
-        returned = true;
-        var canGoBack = history.length > 1;
-        console.log('[tbd-open] onOpened(): history.length =', history.length,
+      function scheduleReturn(signal, canGoBack) {
+        // 'hidden' is unambiguous — return quickly. 'blur' may just be the
+        // "Open TBD.app?" dialog opening, so give it long enough to outlast
+        // most dialog interactions before we decide.
+        var delay = signal === 'blur' ? BLUR_RETURN_DELAY_MS : RETURN_DELAY_MS;
+        console.log('[tbd-open] scheduleReturn(): signal =', signal,
           '— will', canGoBack ? 'history.back()' : 'window.close()',
-          'in', RETURN_DELAY_MS + 'ms');
-        status.textContent = canGoBack
-          ? 'Opened in TBD — taking you back…'
-          : 'TBD opened — you can close this tab.';
+          'in', delay + 'ms');
+        pendingSignal = signal;
         // Short delay so the scheme launch isn't interrupted by navigating
         // away. (The tab is usually backgrounded here, but not guaranteed —
-        // the return proceeds even if it's visible again by then.)
+        // the return proceeds even if the tab is visible again by then,
+        // except on the blur path, which skips at fire time when the page
+        // has regained focus.)
         returnTimer = setTimeout(function () {
           returnTimer = null;
+          pendingSignal = null;
+          if (signal === 'blur' && document.hasFocus()) {
+            // The blur was likely the confirmation dialog opening and the
+            // user cancelled — or they deliberately came back to this page.
+            // Navigating now would yank them away (and, mid-dialog, kill
+            // the launch), so stay put and let them retry manually.
+            console.log('[tbd-open] skipping auto-return: page has focus at fire time (dialog cancelled or user returned)');
+            returned = false; // allow the manual button / a later signal to retry cleanly
+            status.textContent = 'TBD may not have opened — use the button below.';
+            return;
+          }
           if (canGoBack) {
             console.log('[tbd-open] calling history.back() now');
             history.back();
@@ -131,7 +170,35 @@
               console.log('[tbd-open] window.close() was ignored by the browser — tab still alive');
             }, 500);
           }
-        }, RETURN_DELAY_MS);
+        }, delay);
+      }
+
+      function onOpened(signal) {
+        if (returned) {
+          // blur fires before hidden even in the full-occlusion/minimize
+          // case, so a blur-scheduled return is usually already pending when
+          // 'hidden' arrives. 'hidden' is the unambiguous signal (the
+          // confirmation dialog never hides the document), so let it preempt
+          // the slow blur path and upgrade to the fast unconditional return.
+          if (signal === 'hidden' && pendingSignal === 'blur' && returnTimer !== null) {
+            console.log('[tbd-open] hidden signal upgrading pending blur return to the fast unconditional path');
+            clearTimeout(returnTimer);
+            returnTimer = null;
+            pendingSignal = null;
+            // Status text was already set by the first onOpened — no need
+            // to set it again here.
+            scheduleReturn('hidden', history.length > 1);
+          }
+          return; // guard against double-fire
+        }
+        returned = true;
+        var canGoBack = history.length > 1;
+        console.log('[tbd-open] onOpened(): signal =', signal,
+          '; history.length =', history.length);
+        status.textContent = canGoBack
+          ? 'Opened in TBD — taking you back…'
+          : 'TBD opened — you can close this tab.';
+        scheduleReturn(signal, canGoBack);
       }
 
       document.addEventListener('visibilitychange', function () {
@@ -141,7 +208,7 @@
           '; inside armed window =', inWindow);
         if (document.hidden) {
           if (inWindow) {
-            onOpened();
+            onOpened('hidden');
           } else if (armedUntil > 0) {
             // Hidden arrived after the window expired — classic symptom of the
             // user taking >3s on the "Open TBD.app?" permission dialog.
@@ -156,6 +223,21 @@
         }
       });
 
+      window.addEventListener('blur', function () {
+        var now = Date.now();
+        var inWindow = now <= armedUntil;
+        console.log('[tbd-open] blur: inside armed window =', inWindow);
+        if (inWindow) {
+          onOpened('blur');
+        } else if (armedUntil > 0) {
+          // Blur arrived after the window expired — same late-arrival symptom
+          // as the visibilitychange case above (e.g. the user taking >3s on
+          // the "Open TBD.app?" permission dialog).
+          console.log('[tbd-open] blur arrived', now - armedUntil,
+            'ms after the detection window expired — no auto-return');
+        }
+      });
+
       // The manual button fires the same tbd:// URL — arm the same
       // success-detection/auto-return logic on click. A manual retry
       // explicitly supersedes any in-flight auto-return: cancel the pending
@@ -167,6 +249,7 @@
           console.log('[tbd-open] pending return timer cancelled by manual click');
           clearTimeout(returnTimer);
           returnTimer = null;
+          pendingSignal = null;
         }
         // Reset so a retry after a false positive (whose window.close() was
         // ignored) can trigger the status update and auto-return again.
