@@ -86,6 +86,13 @@ extension RPCRouter {
             }
         }
 
+        // Reclaim scratchpads for EVERY worktree row this repo owns (every
+        // status, including archived) before the rows below vanish — once
+        // they're gone, reconciliation has no path left to resolve them by.
+        if let orphanGC {
+            await orphanGC.reconcileScratchpadsBeforeRepoRemoval(repoID: repo.id, repoPath: repo.path)
+        }
+
         // Delete any remaining worktrees (e.g. main worktree) for this repo
         try await db.worktrees.deleteForRepo(repoID: params.repoID)
 

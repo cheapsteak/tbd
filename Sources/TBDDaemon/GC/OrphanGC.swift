@@ -138,7 +138,7 @@ public actor OrphanGC {
                     // run here always has gcEnabled == true.
                     guard !dryRun else { continue }
                     if let record = await agentCollector.reap(candidate) {
-                        try? await db.reapRecords.insert(record)
+                        await insertReapRecord(record)
                         reaped += 1
                         logger.info("""
                         gc: reaped agent worktree \(candidate.path, privacy: .public) \
@@ -149,7 +149,7 @@ public actor OrphanGC {
                         if let scratchRecord = await scratchpadCollector.cleanUp(
                             forRemovedWorktreePath: candidate.path, repoPath: candidate.repoPath, now: now()
                         ) {
-                            try? await db.reapRecords.insert(scratchRecord)
+                            await insertReapRecord(scratchRecord)
                             reaped += 1
                             planned.append("REAP scratchpad \(scratchRecord.worktreePath)")
                         }
@@ -181,6 +181,13 @@ public actor OrphanGC {
     /// DB round trip; a row with no resolvable repo (deleted repo, no
     /// `repoID`) stamps `""` — fails toward the previous behavior rather than
     /// dropping the record.
+    ///
+    /// The mutating work is delegated to `ScratchpadCollector.reconcile` (the
+    /// same entry point `reconcileScratchpadsBeforeRepoRemoval` uses) so
+    /// there is exactly one implementation of "delete a scratchpad whose
+    /// worktree is gone". `dryRun` short-circuits before calling it —
+    /// `reconcile` always mutates, so dry-run planning recomputes the
+    /// candidate list read-only instead.
     private func reconcileScratchpads(
         repos: [Repo], dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
@@ -189,21 +196,58 @@ public actor OrphanGC {
         let gone = archived
             .filter { !FileManager.default.fileExists(atPath: $0.path) }
             .map { (worktreePath: $0.path, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
-        for entry in gone {
-            let slug = ScratchpadCollector.slug(forWorktreePath: entry.worktreePath)
-            let dir = scratchpadBase.appendingPathComponent(slug)
-            guard FileManager.default.fileExists(atPath: dir.path) else { continue }
-            planned.append("REAP scratchpad \(dir.path)")
-            // The outer `gcEnabled || dryRun` guard means a non-dry run here
-            // always has gcEnabled == true.
-            guard !dryRun else { continue }
-            if let record = await scratchpadCollector.cleanUp(
-                forRemovedWorktreePath: entry.worktreePath, repoPath: entry.repoPath, now: now()
-            ) {
-                try? await db.reapRecords.insert(record)
-                reaped += 1
-                logger.info("gc: reaped scratchpad \(record.worktreePath, privacy: .public)")
+
+        guard !dryRun else {
+            for entry in gone {
+                let slug = ScratchpadCollector.slug(forWorktreePath: entry.worktreePath)
+                let dir = scratchpadBase.appendingPathComponent(slug)
+                guard FileManager.default.fileExists(atPath: dir.path) else { continue }
+                planned.append("REAP scratchpad \(dir.path)")
             }
+            return
+        }
+
+        // The outer `gcEnabled || dryRun` guard means a non-dry run here
+        // always has gcEnabled == true.
+        let records = await scratchpadCollector.reconcile(knownPaths: gone, now: now())
+        for record in records {
+            await insertReapRecord(record)
+            reaped += 1
+            planned.append("REAP scratchpad \(record.worktreePath)")
+            logger.info("gc: reaped scratchpad \(record.worktreePath, privacy: .public)")
+        }
+    }
+
+    /// Entry point for `repo.remove` (review Medium 2): `db.worktrees.deleteForRepo`
+    /// deletes EVERY worktree row for `repoID` — every status, including
+    /// archived — with no further chance for the sweep's own reconciliation
+    /// to catch up: once the rows are gone, nothing can resolve their paths
+    /// to a scratchpad slug again. Fetches every row up front and runs them
+    /// through the same `ScratchpadCollector.reconcile` the sweep's own
+    /// reconciliation uses, stamped with `repoPath` (the caller already has
+    /// the `Repo` in scope) so reclaimed scratchpads still surface in that
+    /// repo's History UI even after the repo itself is gone. Call this
+    /// BEFORE `db.worktrees.deleteForRepo`.
+    ///
+    /// Gated by `gcEnabled`, same as every other GC deletion path; a config
+    /// read failure fails toward keeping (skip), and a worktree-list read
+    /// failure likewise skips rather than risking a partial reconciliation.
+    public func reconcileScratchpadsBeforeRepoRemoval(repoID: UUID, repoPath: String) async {
+        guard let config = try? await db.config.get(), config.gcEnabled else {
+            logger.debug("""
+            gc: repo-removal scratchpad reconciliation skipped for \(repoPath, privacy: .public) — gc disabled
+            """)
+            return
+        }
+        guard let rows = try? await db.worktrees.list(repoID: repoID) else { return }
+        let pairs = rows.map { (worktreePath: $0.path, repoPath: repoPath) }
+        let records = await scratchpadCollector.reconcile(knownPaths: pairs, now: now())
+        for record in records {
+            await insertReapRecord(record)
+            logger.info("gc: reaped scratchpad (repo removal) \(record.worktreePath, privacy: .public)")
+        }
+        if !records.isEmpty {
+            broadcast(.reapRecordsChanged)
         }
     }
 
@@ -297,9 +341,26 @@ public actor OrphanGC {
         ) else {
             return
         }
-        try? await db.reapRecords.insert(record)
+        await insertReapRecord(record)
         logger.info("gc: reaped scratchpad (event) \(record.worktreePath, privacy: .public)")
         broadcast(.reapRecordsChanged)
+    }
+
+    /// Persists a `ReapRecord`, never failing the caller: by the time this is
+    /// called the disk reclaim already happened, so there is nothing left to
+    /// roll back. A failure here only loses the *record* of what was
+    /// reclaimed (and, for agent worktrees, the restorability pointer) — bad
+    /// enough to log at `.error`, not bad enough to undo a deletion that
+    /// already succeeded.
+    private func insertReapRecord(_ record: ReapRecord) async {
+        do {
+            try await db.reapRecords.insert(record)
+        } catch {
+            logger.error("""
+            gc: failed to persist reap record for \(record.worktreePath, privacy: .public) \
+            (kind=\(record.kind.rawValue, privacy: .public)): \(String(describing: error), privacy: .public)
+            """)
+        }
     }
 
     // MARK: - Live cwds (one lsof pass per sweep)

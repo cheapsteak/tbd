@@ -471,6 +471,107 @@ struct OrphanGCTests {
         #expect(broadcaster.snapshot().isEmpty)
     }
 
+    // MARK: - Repo-removal scratchpad reconciliation
+
+    /// Medium-2 review finding: `repo.remove` deletes ALL worktree rows for
+    /// a repo (every status, incl. archived) via `deleteForRepo`, with no
+    /// chance for the sweep's own reconciliation to catch up afterward.
+    /// `reconcileScratchpadsBeforeRepoRemoval` must be called first and
+    /// reclaim every row's scratchpad while the rows still resolve to a path.
+    @Test func reconcileScratchpadsBeforeRepoRemovalReapsGoneRowsAcrossStatuses() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-repo-removal-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: sandbox.appendingPathComponent("repo").path, displayName: "acme", defaultBranch: "main"
+        )
+
+        // Archived row whose worktree dir is gone — its scratchpad survives.
+        let archivedPath = sandbox.appendingPathComponent("archived-wt").path
+        let archivedRow = try await db.worktrees.create(
+            repoID: repo.id, name: "archived-wt", branch: "archived-wt",
+            path: archivedPath, tmuxServer: "test-server"
+        )
+        try await db.worktrees.archive(id: archivedRow.id)
+
+        // Active row whose worktree dir still exists on disk — its
+        // scratchpad must be left alone (mirrors `reconcile`'s own
+        // gone-only filter).
+        let activePath = sandbox.appendingPathComponent("active-wt").path
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: activePath), withIntermediateDirectories: true)
+        _ = try await db.worktrees.create(
+            repoID: repo.id, name: "active-wt", branch: "active-wt",
+            path: activePath, tmuxServer: "test-server"
+        )
+
+        let archivedSlug = ScratchpadCollector.slug(forWorktreePath: archivedPath)
+        let archivedScratchDir = base.appendingPathComponent(archivedSlug)
+        try FileManager.default.createDirectory(at: archivedScratchDir, withIntermediateDirectories: true)
+        try "hi".write(to: archivedScratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+
+        let activeSlug = ScratchpadCollector.slug(forWorktreePath: activePath)
+        let activeScratchDir = base.appendingPathComponent(activeSlug)
+        try FileManager.default.createDirectory(at: activeScratchDir, withIntermediateDirectories: true)
+
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        await gc.reconcileScratchpadsBeforeRepoRemoval(repoID: repo.id, repoPath: repo.path)
+
+        #expect(!FileManager.default.fileExists(atPath: archivedScratchDir.path),
+                "the archived row's gone-worktree scratchpad must be reclaimed before the row disappears")
+        #expect(FileManager.default.fileExists(atPath: activeScratchDir.path),
+                "a scratchpad whose worktree dir still exists must be left alone")
+
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.count == 1)
+        #expect(records.first?.kind == .scratchpad)
+        #expect(records.first?.worktreePath == archivedScratchDir.path)
+        #expect(records.first?.repoPath == repo.path, "must stamp the caller's repoPath, not a resolved one")
+
+        let deltas = broadcaster.snapshot()
+        #expect(deltas.contains { if case .reapRecordsChanged = $0 { return true }; return false })
+    }
+
+    @Test func reconcileScratchpadsBeforeRepoRemovalDisabledDoesNothing() async throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("orphan-gc-repo-removal-disabled-test-\(UUID().uuidString)")
+        let base = sandbox.appendingPathComponent("base")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(false)
+        let repo = try await db.repos.create(
+            path: sandbox.appendingPathComponent("repo").path, displayName: "acme", defaultBranch: "main"
+        )
+        let goneWorktreePath = sandbox.appendingPathComponent("gone-wt").path
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "gone-wt", branch: "gone-wt",
+            path: goneWorktreePath, tmuxServer: "test-server"
+        )
+        try await db.worktrees.archive(id: row.id)
+
+        let slug = ScratchpadCollector.slug(forWorktreePath: goneWorktreePath)
+        let scratchDir = base.appendingPathComponent(slug)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+
+        let broadcaster = BroadcastDeltas()
+        let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
+
+        await gc.reconcileScratchpadsBeforeRepoRemoval(repoID: repo.id, repoPath: repo.path)
+
+        #expect(FileManager.default.fileExists(atPath: scratchDir.path),
+                "the gcEnabled master switch must suppress repo-removal reconciliation too")
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.isEmpty)
+        #expect(broadcaster.snapshot().isEmpty)
+    }
+
     @Test func scratchpadEventCleanupDisabledDoesNothing() async throws {
         let sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("orphan-gc-scratch-disabled-test-\(UUID().uuidString)")
