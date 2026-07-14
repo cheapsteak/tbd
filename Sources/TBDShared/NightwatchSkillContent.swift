@@ -60,8 +60,10 @@ python3 scripts/wake.py --tid ID   # one terminal · --no-fetch during a GitHub-
 ```
 
 Per terminal it re-derives truth AT WAKE TIME — live PR state for any PR number in the
-hibernate reason (MERGED/CLOSED never yields a "fix your PR" wake), the checked-out branch's
-actual open PR + failing checks, and unmerged-commit state vs origin/main — then classifies
+hibernation context (`hibernateReason` is a closed enum; the narrative, including "fix PR #N"
+premises, lives in the `suspendedSnapshot` pane text, which wake.py scans ANSI-stripped;
+MERGED/CLOSED never yields a "fix your PR" wake), the checked-out branch's actual open PR +
+failing checks, and unmerged-commit state vs origin/main — then classifies
 (DONE → /closeout · RESUME_FAILING/OPEN · UNSUBMITTED_WORK · UNVERIFIED → neutral "verify
 first" prompt) and writes `queue/wake-plan.json`. First real sweep: 24/24 hibernated
 terminals verified DONE — every hand-composed "resume" wake would have been stale.
@@ -80,6 +82,16 @@ or were already sitting in the merge queue — same stale-premise class the wake
 for.) And phrase gate outcomes honestly: nightwatch cannot deny a GitHub enqueue; its gate is
 *stricter than the org's required checks* (AI Review is advisory until the ADR-0013 apply), so a
 bot-verdict shortfall on a human-approved PR is an **advisory heads-up**, not a "denied".
+
+## Operating rules (hard-won via incidents)
+
+**REBALANCE FIRST on saturation** — A capacity crunch is usually too many sessions piled on ONE rate-capped account, not global scarcity. Swap stuck (STRANDED/RATE/ERROR) sessions onto an emptier account via `tbd terminal swap-profile --terminal <tid> --profile <name>` (parked=cold/cheap, awake=respawn). Passive holding just freezes them. *(Incident 2026-07-10: 14 of 19 stuck sessions were piled on one account; the watcher held instead of rebalancing and the whole fleet stalled overnight until rebalanced.)*
+
+**READ context before nudging** — Capture the worker's actual conversation (`tbd terminal conversation --terminal <tid>` or the pane) and give a SPECIFIC next step, not a blanket "continue" (which just makes agents re-idle).
+
+**FOLLOW UP in ~90s** — After nudging (background sleep), re-check in ~90 seconds rather than waiting for the next tick. Catches agents mid-action at confirm/permission prompts that would otherwise hang the whole cycle.
+
+**ALWAYS SIGN commits** — Never use `gpgsign=false`; some repos (longeye-ai/monorepo) silently reject unsigned commits.
 
 ## Config (`config/`)
 - `priorities.txt` — must-keep-moving worktrees (flagged ★, reported first)
@@ -163,20 +175,34 @@ def gh(args, t=25, cwd=None):
     return sh(["gh", *args], t=t, cwd=cwd)
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
 def hibernated(only_tid=None):
-    q = ("SELECT t.id, w.displayName, w.path, w.branch, t.hibernatedAt, "
-         "COALESCE(t.hibernateReason,'') FROM terminal t "
+    # hibernateReason is a closed enum (auto/manual/recovery/merged) — the narrative
+    # context (what the session was doing, PR numbers) lives in suspendedSnapshot.
+    # JSON output mode: suspendedSnapshot is multi-line, so -separator parsing breaks.
+    q = ("SELECT t.id AS tid, w.displayName AS name, w.path AS path, "
+         "w.branch AS db_branch, t.hibernatedAt AS hib_at, "
+         "COALESCE(t.hibernateReason,'') AS reason, "
+         "COALESCE(t.suspendedSnapshot,'') AS snapshot FROM terminal t "
          "JOIN worktree w ON w.id=t.worktreeID "
          "WHERE w.status='active' AND t.kind='claude' AND t.hibernatedAt IS NOT NULL")
-    out, _ = sh(["sqlite3", "-separator", "\t", DB, q + ";"])
+    out, rc = sh(["sqlite3", "-json", DB, q + ";"])
+    if rc != 0:
+        return []
+    try:
+        rows = json.loads(out) if out else []
+    except Exception:
+        return []
     items = []
-    for l in out.splitlines():
-        p = l.split("\t")
-        if len(p) < 6: continue
-        tid, name, path, db_branch, hib_at, reason = p[0], p[1], p[2], p[3], p[4], p[5]
-        if only_tid and tid != only_tid: continue
-        items.append({"tid": tid, "name": name, "path": path,
-                      "db_branch": db_branch, "hibernated_at": hib_at, "reason": reason})
+    for r in rows:
+        if only_tid and r["tid"] != only_tid: continue
+        # Strip ANSI, keep the tail — the most recent (most relevant) pane state.
+        snapshot = ANSI.sub("", r.get("snapshot") or "")[-4000:]
+        items.append({"tid": r["tid"], "name": r["name"], "path": r["path"],
+                      "db_branch": r["db_branch"], "hibernated_at": r["hib_at"],
+                      "reason": r["reason"], "snapshot": snapshot})
     return items
 
 
@@ -201,14 +227,22 @@ def verify(item, fetch=True):
     dirty, _ = sh(["git", "-C", path, "status", "--porcelain"])
     v["dirty"] = bool(dirty)
 
-    # Unmerged commits vs origin/main — squash-merge aware (`git cherry` patch-id match).
+    # Unmerged commits vs origin/main — patch-id match (`git cherry`). NOT fully
+    # squash-aware: N commits squashed into one won't match; DONE detection also
+    # leans on merged-PR state below. A cherry failure means merge state is
+    # UNVERIFIABLE — record it and never let it default to DONE.
     cherry, rc = sh(["git", "-C", path, "cherry", "origin/main"])
     unmerged = [l for l in cherry.splitlines() if l.startswith("+")] if rc == 0 else None
     v["unmerged_commits"] = len(unmerged) if unmerged is not None else None
+    if unmerged is None:
+        facts.append("unmerged-commit state NOT verified (git cherry failed)")
 
-    # THE core check: any PR number named in the hibernate reason is verified LIVE.
+    # THE core check: any PR number in the hibernation context is verified LIVE.
+    # hibernateReason is a closed enum and never names a PR — the snapshot (pane
+    # text at hibernation) is where a "fix PR #N" premise survives.
+    mentioned = re.findall(r"#(\d{3,6})", item["reason"] + " " + item.get("snapshot", ""))
     stale_prs = []
-    for num in re.findall(r"#(\d{3,6})", item["reason"]):
+    for num in list(dict.fromkeys(mentioned))[:8]:
         out, rc = gh(["pr", "view", num, "--json", "state,headRefName"], cwd=path)
         if rc != 0: continue
         try: j = json.loads(out)
@@ -222,12 +256,14 @@ def verify(item, fetch=True):
     out, rc = gh(["pr", "list", "--head", branch, "--state", "all",
                   "--json", "number,state,title", "--limit", "5"], cwd=path)
     prs = []
-    if rc == 0 and out:
-        try: prs = json.loads(out)
-        except Exception: pass
-    elif rc != 0:
+    if rc != 0:
         facts.append("gh unavailable — PR state NOT verified")
         return v
+    if out:
+        try: prs = json.loads(out)
+        except Exception:
+            facts.append("gh output unparseable — PR state NOT verified")
+            return v
     open_pr = next((p for p in prs if p["state"] == "OPEN"), None)
     merged_pr = next((p for p in prs if p["state"] == "MERGED"), None)
 
@@ -248,7 +284,9 @@ def verify(item, fetch=True):
         v["classification"] = "UNSUBMITTED_WORK"
         facts.append(f"{len(unmerged)} commit(s) not in origin/main, no PR")
     else:
-        v["classification"] = "DONE" if not v["dirty"] else "UNVERIFIED"
+        # unmerged is None here (cherry failed, fact already recorded) — merge
+        # state is unverifiable, so NEVER default to DONE: that would assert the
+        # exact kind of unverified premise this script exists to eliminate.
         if v["dirty"]: facts.append("dirty working tree, merge state unknown")
     if v["dirty"] and v["classification"] == "DONE":
         facts.append("note: dirty working tree — closeout should triage it")
