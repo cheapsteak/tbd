@@ -2,53 +2,62 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 
-/// Records the nanosecond durations requested from the injected sleeper.
-private actor SleepRecorder {
-    var calls: [UInt64] = []
-    func record(_ ns: UInt64) { calls.append(ns) }
+/// Fake wall clock + recording sleeper for `SystemPollerClock`'s injection seams.
+/// The sleeper records each requested duration and advances the fake clock by exactly
+/// that amount, returning immediately — no real sleeping, so tests are CI-load independent.
+private final class FakeClock: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "FakeClock")
+    private var _now: Date
+    private var _calls: [UInt64] = []
+
+    init(start: Date) { _now = start }
+
+    var now: Date { queue.sync { _now } }
+    var calls: [UInt64] { queue.sync { _calls } }
+
+    func sleep(_ ns: UInt64) {
+        queue.sync {
+            _calls.append(ns)
+            _now = _now.addingTimeInterval(Double(ns) / 1_000_000_000)
+        }
+    }
 }
 
 @Suite struct SystemPollerClockTests {
     @Test func pastDeadlineReturnsImmediately() async throws {
-        let recorder = SleepRecorder()
-        let clock = SystemPollerClock(sleeper: { await recorder.record($0) })
-        try await clock.sleep(until: Date().addingTimeInterval(-10))
-        #expect(await recorder.calls.isEmpty)
-    }
-
-    @Test func shortFutureDeadlineSleepsAtLeastTheInterval() async throws {
-        let clock = SystemPollerClock()
-        let start = Date()
-        try await clock.sleep(until: start.addingTimeInterval(0.15))
-        // Lower bound only — load can't make this flake, it only slows things down.
-        #expect(Date().timeIntervalSince(start) >= 0.14)
+        let start = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let fake = FakeClock(start: start)
+        let clock = SystemPollerClock(sleeper: { fake.sleep($0) }, now: { fake.now })
+        try await clock.sleep(until: start.addingTimeInterval(-10))
+        #expect(fake.calls.isEmpty)
     }
 
     @Test func deadlineBeyondMaxChunkSleepsInBoundedChunks() async throws {
-        let recorder = SleepRecorder()
-        let maxChunk: TimeInterval = 0.02
-        let clock = SystemPollerClock(maxChunk: maxChunk, sleeper: { ns in
-            await recorder.record(ns)
-            try await Task.sleep(nanoseconds: ns)  // real sleep so the wall clock advances
-        })
-        try await clock.sleep(until: Date().addingTimeInterval(0.08))
-        let calls = await recorder.calls
-        // Pre-fix single-sleep code would make exactly one 0.08s call.
-        #expect(calls.count > 1)
-        let maxNs = UInt64((maxChunk + 0.001) * 1_000_000_000)
-        #expect(calls.allSatisfy { $0 <= maxNs })
+        // Whole-second values are exact in Double, so the chunk sequence is exact —
+        // fractional chunks (e.g. 0.03) leave fp dust that can add a spurious 0ns call.
+        let start = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let fake = FakeClock(start: start)
+        let clock = SystemPollerClock(
+            maxChunk: 30,
+            sleeper: { fake.sleep($0) },
+            now: { fake.now }
+        )
+        try await clock.sleep(until: start.addingTimeInterval(80))
+        // Pre-fix single-sleep code would make exactly one 80s call.
+        #expect(fake.calls == [30_000_000_000, 30_000_000_000, 20_000_000_000])
     }
 
-    @Test func cancellationWakesSleepPromptly() async throws {
-        let start = Date()
+    @Test func cancellationSurfacesCancellationError() async throws {
+        // Deadline 120s with default maxChunk 60s: even extreme scheduler latency
+        // can't make the cancel miss the first 60s chunk. No elapsed-time assertions —
+        // if cancellation propagation breaks, the sleep completes normally and the
+        // failure assertion below fails deterministically.
         let task = Task {
-            try await SystemPollerClock().sleep(until: Date().addingTimeInterval(30))
+            try await SystemPollerClock().sleep(until: Date().addingTimeInterval(120))
         }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await Task.sleep(nanoseconds: 50_000_000)
         task.cancel()
         let result = await task.result
-        // Must finish well before the 30s deadline (generous bound for CI load).
-        #expect(Date().timeIntervalSince(start) < 15)
         guard case .failure(let error) = result else {
             Issue.record("expected sleep to throw after cancellation")
             return
