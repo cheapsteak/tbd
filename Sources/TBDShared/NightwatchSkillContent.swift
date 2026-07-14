@@ -55,7 +55,9 @@ a PR that had merged three days earlier). **Every wake goes through the verifier
 
 ```
 python3 scripts/wake.py            # dry-run: live-verified wake plan for all hibernated terminals
-python3 scripts/wake.py --act      # dispatch the verified prompts (tbd terminal send --submit)
+python3 scripts/wake.py --act      # dispatch: `tbd terminal wake` then `tbd terminal send --submit`
+                                   # (send alone pastes into the bare post-hibernation shell — only
+                                   # the wake RPC respawns `claude --resume`)
 python3 scripts/wake.py --tid ID   # one terminal · --no-fetch during a GitHub-rate crunch
 ```
 
@@ -145,7 +147,9 @@ Rules it enforces:
 Usage:
   wake.py               # dry-run: verified wake plan for ALL hibernated terminals
   wake.py --tid <ID>    # limit to one terminal
-  wake.py --act         # dispatch wake prompts via `tbd terminal send --submit`
+  wake.py --act         # dispatch: `tbd terminal wake` (respawn claude --resume),
+                        # then `tbd terminal send --submit` — send alone pastes
+                        # into the bare post-hibernation shell, never claude
   wake.py --no-fetch    # skip `git fetch` (offline / GitHub rate crunch)
 
 Exit 0 always (a wake plan is informational); per-item status is in the output
@@ -187,7 +191,10 @@ def hibernated(only_tid=None):
          "COALESCE(t.hibernateReason,'') AS reason, "
          "COALESCE(t.suspendedSnapshot,'') AS snapshot FROM terminal t "
          "JOIN worktree w ON w.id=t.worktreeID "
-         "WHERE w.status='active' AND t.kind='claude' AND t.hibernatedAt IS NOT NULL")
+         # Parked = hibernatedAt OR legacy suspendedAt — mirrors the daemon's
+         # Terminal.isParked, so legacy-parked rows can't bypass the verifier.
+         "WHERE w.status='active' AND t.kind='claude' "
+         "AND (t.hibernatedAt IS NOT NULL OR t.suspendedAt IS NOT NULL)")
     out, rc = sh(["sqlite3", "-json", DB, q + ";"])
     if rc != 0:
         return []
@@ -244,6 +251,11 @@ def verify(item, fetch=True):
     stale_prs = []
     for num in list(dict.fromkeys(mentioned))[:8]:
         out, rc = gh(["pr", "view", num, "--json", "state,headRefName"], cwd=path)
+        # Silent continue is deliberate: snapshot text also mentions ISSUE
+        # numbers, which `gh pr view` rejects — a per-mention "NOT verified"
+        # fact would be constant noise. This loop only ADDS informational
+        # stale-premise callouts; the classification below fails closed on
+        # its own gh errors, so nothing safety-relevant is lost here.
         if rc != 0: continue
         try: j = json.loads(out)
         except Exception: continue
@@ -334,13 +346,25 @@ def main():
         print(f"  ▸ {it['name']} ({it['tid'][:8]}): {v['classification']} — "
               + ("; ".join(v["facts"])[:110] or "-"))
         if act:
-            _, rc = sh(["tbd", "terminal", "send", "--terminal", it["tid"],
-                        "--submit", "--text", v["wake_text"]], t=30)
-            v["dispatched"] = rc == 0
+            # WAKE FIRST: `terminal send` pastes into whatever the pane currently
+            # runs — after hibernation that is a bare shell, NOT claude. Only
+            # `terminal wake` (RPC terminal.wake) respawns `claude --resume`;
+            # it is idempotent (no-op on a non-hibernated terminal). Then give
+            # claude a beat to be input-ready before pasting (the daemon's own
+            # post-wake session recapture allows 5s for it to settle).
+            _, wake_rc = sh(["tbd", "terminal", "wake", "--terminal", it["tid"]], t=60)
+            if wake_rc != 0:
+                v["dispatched"] = False
+                print("    ✗ wake RPC failed — NOT sending (text would land in a dead pane)")
+            else:
+                time.sleep(8)
+                _, rc = sh(["tbd", "terminal", "send", "--terminal", it["tid"],
+                            "--submit", "--text", v["wake_text"]], t=30)
+                v["dispatched"] = rc == 0
             with open(f"{QUEUE}/acted.jsonl", "a") as f:
                 f.write(json.dumps({"kind": "wake-dispatch", "tid": it["tid"],
                                     "name": it["name"], "classification": v["classification"],
-                                    "ok": rc == 0, "ts": int(time.time())}) + "\n")
+                                    "ok": v["dispatched"], "ts": int(time.time())}) + "\n")
     os.makedirs(QUEUE, exist_ok=True)
     json.dump({"ts": int(time.time()), "plan": plan},
               open(f"{QUEUE}/wake-plan.json", "w"), indent=2)
