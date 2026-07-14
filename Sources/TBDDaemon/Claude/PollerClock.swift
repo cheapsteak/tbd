@@ -9,9 +9,18 @@ public protocol PollerClock: Sendable {
 }
 
 public struct SystemPollerClock: PollerClock {
-    private static let maxChunk: TimeInterval = 60
+    private let maxChunk: TimeInterval
+    private let sleeper: @Sendable (UInt64) async throws -> Void
 
-    public init() {}
+    /// `maxChunk` and `sleeper` are injection seams for tests; production uses the defaults.
+    public init(
+        maxChunk: TimeInterval = 60,
+        sleeper: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
+    ) {
+        self.maxChunk = maxChunk
+        self.sleeper = sleeper
+    }
+
     public func now() -> Date { Date() }
 
     /// Sleeps in bounded chunks, re-checking the wall clock each iteration.
@@ -26,7 +35,7 @@ public struct SystemPollerClock: PollerClock {
         while true {
             let interval = deadline.timeIntervalSince(Date())
             guard interval > 0 else { return }
-            try await Task.sleep(nanoseconds: UInt64(min(interval, Self.maxChunk) * 1_000_000_000))
+            try await sleeper(UInt64(min(interval, maxChunk) * 1_000_000_000))
         }
     }
 }
