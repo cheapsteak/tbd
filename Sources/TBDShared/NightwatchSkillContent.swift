@@ -281,13 +281,23 @@ def verify(item, fetch=True):
 
     if open_pr:
         v["pr"] = open_pr["number"]
-        checks, _ = gh(["pr", "checks", str(open_pr["number"])], cwd=path)
-        failing = [l.split("\t")[0] for l in checks.splitlines()
-                   if "\tfail" in l or "\tfailure" in l]
-        v["failing_checks"] = failing
-        v["classification"] = "RESUME_FAILING" if failing else "RESUME_OPEN"
-        facts.append(f"open PR #{open_pr['number']}"
-                     + (f", failing: {', '.join(failing[:4])}" if failing else ", checks not failing"))
+        checks, checks_rc = gh(["pr", "checks", str(open_pr["number"])], cwd=path)
+        # `gh pr checks` exits non-zero when checks are failing OR pending, so
+        # rc alone doesn't mean the command failed — empty output with rc!=0
+        # does. In that case the checks state is UNVERIFIED: say so, never
+        # assert "checks not failing" on data we don't have.
+        if checks_rc != 0 and not checks:
+            v["failing_checks"] = None
+            v["classification"] = "RESUME_OPEN"
+            facts.append(f"open PR #{open_pr['number']}, failing-checks state "
+                         f"NOT verified (gh pr checks failed)")
+        else:
+            failing = [l.split("\t")[0] for l in checks.splitlines()
+                       if "\tfail" in l or "\tfailure" in l]
+            v["failing_checks"] = failing
+            v["classification"] = "RESUME_FAILING" if failing else "RESUME_OPEN"
+            facts.append(f"open PR #{open_pr['number']}"
+                         + (f", failing: {', '.join(failing[:4])}" if failing else ", checks not failing"))
     elif merged_pr or unmerged is not None and not unmerged:
         v["classification"] = "DONE"
         facts.append(f"PR #{merged_pr['number']} MERGED" if merged_pr
@@ -336,6 +346,10 @@ def main():
         i = sys.argv.index("--tid")
         tid = sys.argv[i + 1] if i + 1 < len(sys.argv) else None
     items = hibernated(tid)
+    # BEFORE the loop: --act appends to queue/acted.jsonl per terminal, and a
+    # missing queue/ would crash mid-dispatch — after real side effects fired
+    # but before they were logged. (tick.py/judge.py order it the same way.)
+    os.makedirs(QUEUE, exist_ok=True)
     print(f"=== nightwatch wake @ {time.strftime('%H:%M:%S')} "
           f"{'[ACT]' if act else '[dry-run]'} — {len(items)} hibernated ===")
     plan = []
@@ -365,7 +379,6 @@ def main():
                 f.write(json.dumps({"kind": "wake-dispatch", "tid": it["tid"],
                                     "name": it["name"], "classification": v["classification"],
                                     "ok": v["dispatched"], "ts": int(time.time())}) + "\n")
-    os.makedirs(QUEUE, exist_ok=True)
     json.dump({"ts": int(time.time()), "plan": plan},
               open(f"{QUEUE}/wake-plan.json", "w"), indent=2)
     done = sum(1 for v in plan if v["classification"] == "DONE")
