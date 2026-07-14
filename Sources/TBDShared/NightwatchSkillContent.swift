@@ -55,9 +55,12 @@ a PR that had merged three days earlier). **Every wake goes through the verifier
 
 ```
 python3 scripts/wake.py            # dry-run: live-verified wake plan for all hibernated terminals
-python3 scripts/wake.py --act      # dispatch: `tbd terminal wake` then `tbd terminal send --submit`
-                                   # (send alone pastes into the bare post-hibernation shell — only
-                                   # the wake RPC respawns `claude --resume`)
+python3 scripts/wake.py --act      # dispatch: `tbd terminal wake --prompt <text>` — the wake text
+                                   # rides `claude --resume` as an argv, atomic with the respawn.
+                                   # An already-awake terminal (raced a human wake) reports
+                                   # woken:false and receives NOTHING. Never `terminal send` for
+                                   # wakes: it pastes into whatever the pane currently runs (bare
+                                   # post-hibernation shell, or a live human session).
 python3 scripts/wake.py --tid ID   # one terminal · --no-fetch during a GitHub-rate crunch
 ```
 
@@ -147,9 +150,13 @@ Rules it enforces:
 Usage:
   wake.py               # dry-run: verified wake plan for ALL hibernated terminals
   wake.py --tid <ID>    # limit to one terminal
-  wake.py --act         # dispatch: `tbd terminal wake` (respawn claude --resume),
-                        # then `tbd terminal send --submit` — send alone pastes
-                        # into the bare post-hibernation shell, never claude
+  wake.py --act         # dispatch: `tbd terminal wake --prompt <text>` — the wake
+                        # text rides the respawned `claude --resume` as an argv,
+                        # atomic with the wake. An already-awake terminal (raced a
+                        # human wake) reports woken:false and receives NOTHING.
+                        # Never `terminal send`: it pastes into whatever the pane
+                        # currently runs (bare shell, or a live human session).
+  wake.py --selftest    # offline classification-matrix test (monkeypatched git/gh)
   wake.py --no-fetch    # skip `git fetch` (offline / GitHub rate crunch)
 
 Exit 0 always (a wake plan is informational); per-item status is in the output
@@ -338,7 +345,71 @@ def compose(v):
             f"{STANDING_RULE}")
 
 
+def selftest():
+    """Offline classification-matrix test. Monkeypatches sh/gh so no git, gh,
+    sqlite3, or tbd binary is ever invoked — safe anywhere (CI runs it via
+    PluginDirWriterTests). Covers the fail-closed guarantees the docstring
+    promises: unverifiable state NEVER classifies DONE or asserts a premise."""
+    g = globals()
+    real_sh, real_gh = g["sh"], g["gh"]
+    item = {"tid": "T", "name": "t", "path": os.getcwd(), "db_branch": "b",
+            "hibernated_at": "x", "reason": "auto", "snapshot": ""}
+
+    def run(git, ghmap, snapshot=""):
+        def fake_sh(args, t=20, cwd=None):
+            assert args[0] == "git", f"unexpected non-git sh() in verify: {args}"
+            return git.get(args[3], ("", 1))
+        def fake_gh(args, t=25, cwd=None):
+            return ghmap.get(args[1], ("", 1))
+        g["sh"], g["gh"] = fake_sh, fake_gh
+        try:
+            return verify({**item, "snapshot": snapshot}, fetch=False)
+        finally:
+            g["sh"], g["gh"] = real_sh, real_gh
+
+    git_ok = {"rev-parse": ("feat", 0), "status": ("", 0), "cherry": ("", 0)}
+    open_pr = ('[{"number": 7, "state": "OPEN", "title": "t"}]', 0)
+
+    # 1. Clean tree, no unmerged commits, no PR → DONE.
+    v = run(git_ok, {"list": ("[]", 0)})
+    assert v["classification"] == "DONE", v
+    # 2. `git cherry` failure NEVER defaults to DONE — fail closed.
+    v = run({**git_ok, "cherry": ("", 1)}, {"list": ("[]", 0)})
+    assert v["classification"] == "UNVERIFIED", v
+    assert any("git cherry failed" in f for f in v["facts"]), v
+    # 3. gh failure → UNVERIFIED, premise explicitly not asserted.
+    v = run(git_ok, {"list": ("", 1)})
+    assert v["classification"] == "UNVERIFIED", v
+    assert any("gh unavailable" in f for f in v["facts"]), v
+    # 4. Unparseable gh output ≠ "no PR" → UNVERIFIED.
+    v = run(git_ok, {"list": ("gh: flaked mid-stream", 0)})
+    assert v["classification"] == "UNVERIFIED", v
+    assert any("unparseable" in f for f in v["facts"]), v
+    # 5. Open PR, `gh pr checks` dies (empty + rc!=0) → never "checks not failing".
+    v = run(git_ok, {"list": open_pr, "checks": ("", 1)})
+    assert v["classification"] == "RESUME_OPEN", v
+    assert any("NOT verified" in f for f in v["facts"]), v
+    assert "checks not failing" not in compose(v), compose(v)
+    # 6. Open PR with failing checks (rc!=0 WITH output = checks failing, not gh failing).
+    v = run(git_ok, {"list": open_pr, "checks": ("CI\tfail\t1m\turl", 1)})
+    assert v["classification"] == "RESUME_FAILING", v
+    # 7. Unmerged commits, no PR → UNSUBMITTED_WORK.
+    v = run({**git_ok, "cherry": ("+ abc123", 0)}, {"list": ("[]", 0)})
+    assert v["classification"] == "UNSUBMITTED_WORK", v
+    # 8. PR number in the SNAPSHOT (not reason — that's a closed enum) that is
+    #    MERGED → stale-premise fact; classification still independent (DONE).
+    v = run(git_ok, {"list": ("[]", 0),
+                     "view": ('{"state": "MERGED", "headRefName": "other"}', 0)},
+            snapshot="fix PR #14203 FAILING checks")
+    assert any("stale" in f for f in v["facts"]), v
+    assert v["classification"] == "DONE", v
+    print("selftest: 8/8 classification scenarios passed")
+
+
 def main():
+    if "--selftest" in sys.argv:
+        selftest()
+        return
     act = "--act" in sys.argv
     fetch = "--no-fetch" not in sys.argv
     tid = None
@@ -360,21 +431,25 @@ def main():
         print(f"  ▸ {it['name']} ({it['tid'][:8]}): {v['classification']} — "
               + ("; ".join(v["facts"])[:110] or "-"))
         if act:
-            # WAKE FIRST: `terminal send` pastes into whatever the pane currently
-            # runs — after hibernation that is a bare shell, NOT claude. Only
-            # `terminal wake` (RPC terminal.wake) respawns `claude --resume`;
-            # it is idempotent (no-op on a non-hibernated terminal). Then give
-            # claude a beat to be input-ready before pasting (the daemon's own
-            # post-wake session recapture allows 5s for it to settle).
-            _, wake_rc = sh(["tbd", "terminal", "wake", "--terminal", it["tid"]], t=60)
-            if wake_rc != 0:
-                v["dispatched"] = False
-                print("    ✗ wake RPC failed — NOT sending (text would land in a dead pane)")
-            else:
-                time.sleep(8)
-                _, rc = sh(["tbd", "terminal", "send", "--terminal", it["tid"],
-                            "--submit", "--text", v["wake_text"]], t=30)
-                v["dispatched"] = rc == 0
+            # The wake text rides `tbd terminal wake --prompt` as an argv to
+            # `claude --resume` — atomic with the respawn. NEVER `terminal
+            # send`: send pastes into whatever the pane currently runs (a bare
+            # shell after hibernation, or a LIVE human session if someone woke
+            # this terminal between our DB snapshot and now). On the idempotent
+            # no-op paths (already awake / wake in flight) the daemon reports
+            # woken:false and the prompt is not delivered anywhere. An old tbd
+            # binary without --prompt exits non-zero → fail closed, no dispatch.
+            out, wake_rc = sh(["tbd", "terminal", "wake", "--terminal", it["tid"],
+                               "--prompt", v["wake_text"], "--json"], t=60)
+            woken = False
+            if wake_rc == 0:
+                try: woken = bool(json.loads(out).get("woken"))
+                except Exception: woken = False
+            v["dispatched"] = woken
+            if not woken:
+                print("    ✗ not dispatched — " +
+                      ("terminal no longer parked (raced a live wake) — prompt withheld"
+                       if wake_rc == 0 else "wake failed or tbd binary lacks --prompt"))
             with open(f"{QUEUE}/acted.jsonl", "a") as f:
                 f.write(json.dumps({"kind": "wake-dispatch", "tid": it["tid"],
                                     "name": it["name"], "classification": v["classification"],

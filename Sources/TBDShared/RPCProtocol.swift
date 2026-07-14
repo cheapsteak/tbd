@@ -1211,12 +1211,28 @@ public struct TerminalWakeParams: Codable, Sendable {
     /// default login instead of failing with `.profileMissing`. nil == false ==
     /// strict (the default). Set true only on an explicit user retry.
     public let fallbackToDefaultProfile: Bool?
-    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool? = nil) {
+    /// Optional prompt delivered as a trailing argv to `claude --resume` —
+    /// atomic with the respawn. It reaches ONLY a session this call actually
+    /// woke; on the idempotent no-op paths (already awake / wake in flight)
+    /// it is never delivered anywhere, which is what makes it safe for
+    /// autonomous callers (nightwatch wake.py) racing a human wake.
+    public let prompt: String?
+    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool? = nil, prompt: String? = nil) {
         self.terminalID = terminalID
         self.cols = cols
         self.rows = rows
         self.fallbackToDefaultProfile = fallbackToDefaultProfile
+        self.prompt = prompt
     }
+}
+
+/// Result payload for `terminal.wake`.
+public struct TerminalWakeResult: Codable, Sendable {
+    /// true — this call respawned `claude --resume` (the terminal was parked);
+    /// false — idempotent no-op (already awake, or another wake in flight).
+    /// A `prompt` param is delivered only when true.
+    public let woken: Bool
+    public init(woken: Bool) { self.woken = woken }
 }
 
 /// Params for `terminal.setKeepWarm` — pin/unpin a terminal against

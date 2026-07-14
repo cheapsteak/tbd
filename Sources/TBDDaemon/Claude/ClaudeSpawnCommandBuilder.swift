@@ -11,6 +11,8 @@ import TBDShared
 ///
 /// Behavior:
 /// - `resumeID` non-nil → `claude --resume <id> --dangerously-skip-permissions`
+///   with optional trailing initial-prompt arg (delivered atomically with the
+///   resume — no post-spawn paste, so it can never land in the wrong process).
 /// - `freshSessionID` non-nil → `claude --session-id <id> --dangerously-skip-permissions`
 ///   with optional `--append-system-prompt` and trailing initial-prompt arg.
 /// - Otherwise → `cmd` if set, else `shellFallback`.
@@ -80,7 +82,11 @@ enum ClaudeSpawnCommandBuilder {
 
         let base: String
         if let resumeID {
-            base = "claude --resume \(resumeID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
+            var b = "claude --resume \(resumeID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
+            if let p = initialPrompt, !p.isEmpty {
+                b += " \(SystemPromptBuilder.shellEscape(p))"
+            }
+            base = b
         } else if let sessionID = freshSessionID {
             var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
             if let prompt = appendSystemPrompt {

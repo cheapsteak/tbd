@@ -158,6 +158,9 @@ struct TerminalWake: AsyncParsableCommand {
     @Option(name: .long, help: "Terminal ID")
     var terminal: String
 
+    @Option(name: .long, help: "Prompt delivered to the resumed claude as an argv (atomic with the respawn). NOT delivered when the wake is a no-op — check `woken` in the output.")
+    var prompt: String?
+
     @Flag(name: .long, help: "If the pinned account profile no longer exists, resume on the default login instead of failing")
     var fallbackToDefaultProfile = false
 
@@ -170,18 +173,22 @@ struct TerminalWake: AsyncParsableCommand {
         }
 
         let client = SocketClient()
-        try client.callVoid(
+        let result: TerminalWakeResult = try client.call(
             method: RPCMethod.terminalWake,
             params: TerminalWakeParams(
                 terminalID: terminalID,
-                fallbackToDefaultProfile: fallbackToDefaultProfile ? true : nil
-            )
+                fallbackToDefaultProfile: fallbackToDefaultProfile ? true : nil,
+                prompt: prompt
+            ),
+            resultType: TerminalWakeResult.self
         )
 
         if json {
-            printJSON(["status": "awake"])
+            printJSON(["woken": result.woken])
         } else {
-            print("Terminal awake.")
+            print(result.woken
+                ? "Terminal woken."
+                : "Terminal already awake (no-op)\(prompt != nil ? " — prompt NOT delivered" : "").")
         }
     }
 }
