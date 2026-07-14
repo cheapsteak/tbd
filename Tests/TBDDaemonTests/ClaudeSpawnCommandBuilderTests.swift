@@ -70,6 +70,23 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.command.hasSuffix(" 'do the thing'"))
     }
 
+    @Test("resume + initial prompt — argv delivery is atomic with the respawn")
+    func resumeWithInitialPrompt() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: "wake: don't trust the snapshot",
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        // Exact-match including the single-quote escaping: this argv is the
+        // mechanism nightwatch wake.py relies on to never paste into a live
+        // session, so the shape (and shellEscape) must not silently change.
+        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions 'wake: don'\\''t trust the snapshot'")
+    }
+
     @Test("cmd path returns verbatim")
     func cmdVerbatim() {
         let r = ClaudeSpawnCommandBuilder.build(

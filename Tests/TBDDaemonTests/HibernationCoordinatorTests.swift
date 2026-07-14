@@ -1007,6 +1007,80 @@ struct RPCRouterWakeErrorMappingTests {
     }
 }
 
+/// `terminal.wake` prompt delivery over RPC — the safety contract nightwatch
+/// wake.py relies on: a `prompt` reaches ONLY a session this call actually
+/// woke (`woken: true`); the idempotent no-op paths report `woken: false`
+/// and never deliver it anywhere.
+@Suite("RPCRouter terminal.wake prompt delivery")
+struct RPCRouterWakePromptDeliveryTests {
+
+    private func makeRouter(db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
+        RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager()
+        )
+    }
+
+    private func makeTerminal(db: TBDDatabase) async throws -> Terminal {
+        let repo = try await db.repos.create(path: "/tmp/wake-prompt-repo", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/wake-prompt-repo", tmuxServer: "tbd-wake-prompt"
+        )
+        return try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude
+        )
+    }
+
+    /// Parked terminal: the RPC reports `woken: true` and the respawned
+    /// `claude --resume` command carries the prompt as a trailing argv.
+    @Test func wakeOnParkedDeliversPromptAndReportsWokenTrue() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        try FileManager.default.createDirectory(atPath: "/tmp/wake-prompt-repo", withIntermediateDirectories: true)
+        let terminal = try await makeTerminal(db: db)
+        try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id, prompt: "verify live state first")
+        )
+        let resp = await makeRouter(db: db, tmux: tmux).handle(req)
+        #expect(resp.success)
+        #expect(try resp.decodeResult(TerminalWakeResult.self).woken == true)
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("claude --resume sess-1") && $0.contains("'verify live state first'") },
+                "the respawn must carry the prompt as a trailing argv; got: \(joined)")
+    }
+
+    /// Already-awake terminal (the race wake.py guards against): the RPC
+    /// reports `woken: false`, touches no tmux pane, and the prompt is
+    /// delivered NOWHERE — not typed, not pasted, not queued.
+    @Test func wakeOnAwakeNoOpsAndWithholdsPrompt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let terminal = try await makeTerminal(db: db)  // NOT hibernated
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id, prompt: "must never appear")
+        )
+        let resp = await makeRouter(db: db, tmux: tmux).handle(req)
+        #expect(resp.success, "the no-op must stay a benign success for idempotent callers")
+        #expect(try resp.decodeResult(TerminalWakeResult.self).woken == false)
+        #expect(recorded.snapshot().isEmpty,
+                "a no-op wake must not touch tmux at all; got: \(recorded.snapshot())")
+    }
+}
+
 /// Thread-safe collector of `terminalHibernationChanged` deltas published
 /// through a real `StateSubscriptionManager` — the same wire the app's
 /// subscription receives, so these tests assert the actual encoded payload.
