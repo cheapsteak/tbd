@@ -30,12 +30,17 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalWakeParams.self, from: paramsData)
         let result = await hibernationCoordinator.wake(
             terminalID: params.terminalID, cols: params.cols, rows: params.rows,
-            allowDefaultProfileFallback: params.fallbackToDefaultProfile ?? false
+            allowDefaultProfileFallback: params.fallbackToDefaultProfile ?? false,
+            initialPrompt: params.prompt
         )
         switch result {
-        case .ok, .notHibernated, .inFlight:
-            // notHibernated / inFlight are benign no-ops for an idempotent wake.
-            return .ok()
+        case .ok:
+            return try RPCResponse(result: TerminalWakeResult(woken: true))
+        case .notHibernated, .inFlight:
+            // Benign no-ops for an idempotent wake — but report woken: false so
+            // autonomous callers know their `prompt` was NOT delivered (the
+            // terminal is live; pasting into it now could hit a human session).
+            return try RPCResponse(result: TerminalWakeResult(woken: false))
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:

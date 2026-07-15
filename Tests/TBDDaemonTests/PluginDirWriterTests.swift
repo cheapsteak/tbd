@@ -72,6 +72,7 @@ struct PluginDirWriterTests {
         let tick = nw + "/scripts/tick.py"
         #expect(FileManager.default.fileExists(atPath: nw + "/SKILL.md"))
         #expect(FileManager.default.fileExists(atPath: tick))
+        #expect(FileManager.default.fileExists(atPath: nw + "/scripts/wake.py"))
         #expect(FileManager.default.fileExists(atPath: nw + "/scripts/judge.py"))
         #expect(FileManager.default.fileExists(atPath: nw + "/scripts/scheduler.sh"))
         #expect(FileManager.default.fileExists(atPath: nw + "/scripts/tick-cron.sh"))
@@ -86,6 +87,25 @@ struct PluginDirWriterTests {
         // tick.py is executable (cron/launchd run it directly)
         let perms = try FileManager.default.attributesOfItem(atPath: tick)[.posixPermissions] as? NSNumber
         #expect(perms?.int16Value ?? 0 & 0o111 != 0)
+    }
+
+    @Test("wake.py --selftest passes: classification fail-closed matrix (no git/gh/sqlite invoked)")
+    func wakePySelftest() throws {
+        let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tempRoot) }
+        try PluginDirWriter(applicationSupportRoot: tempRoot).writePlugin()
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["python3", tempRoot + "/TBD/plugin/skills/nightwatch/scripts/wake.py", "--selftest"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try proc.run()
+        proc.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(proc.terminationStatus == 0, "wake.py --selftest failed:\n\(output)")
+        #expect(output.contains("scenarios passed"))
     }
 
     @Test("nightwatch SKILL.md has a valid skill name in frontmatter")

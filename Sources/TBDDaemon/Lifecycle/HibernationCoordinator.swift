@@ -433,7 +433,7 @@ public actor HibernationCoordinator {
     /// machine reboot), the window is recreated (ensureServer + createWindow)
     /// and the same resume command spawned there; the terminal row keeps its
     /// identity and gets the new window/pane ids persisted.
-    public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false) async -> WakeResult {
+    public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
@@ -537,7 +537,11 @@ public actor HibernationCoordinator {
             resumeID: sessionID,
             freshSessionID: nil,
             appendSystemPrompt: nil,
-            initialPrompt: nil,
+            // Delivered as a trailing argv to `claude --resume` — atomic with
+            // the respawn, so it reaches ONLY a session this call actually
+            // woke (an already-awake terminal returns .notHibernated above
+            // and the prompt is never delivered anywhere).
+            initialPrompt: initialPrompt,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
             profileBaseURL: resolvedProfile?.baseURL,

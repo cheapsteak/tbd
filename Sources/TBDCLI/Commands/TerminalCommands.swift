@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
     )
 }
 
@@ -143,6 +143,52 @@ struct TerminalSend: AsyncParsableCommand {
             printJSON(["status": "sent"])
         } else {
             print("Text sent.")
+        }
+    }
+}
+
+// MARK: - terminal wake
+
+struct TerminalWake: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "wake",
+        abstract: "Wake a hibernated terminal (respawn claude --resume). Idempotent: waking a non-hibernated terminal is a no-op."
+    )
+
+    @Option(name: .long, help: "Terminal ID")
+    var terminal: String
+
+    @Option(name: .long, help: "Prompt delivered to the resumed claude as an argv (atomic with the respawn). NOT delivered when the wake is a no-op — check `woken` in the output.")
+    var prompt: String?
+
+    @Flag(name: .long, help: "If the pinned account profile no longer exists, resume on the default login instead of failing")
+    var fallbackToDefaultProfile = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        let result: TerminalWakeResult = try client.call(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(
+                terminalID: terminalID,
+                fallbackToDefaultProfile: fallbackToDefaultProfile ? true : nil,
+                prompt: prompt
+            ),
+            resultType: TerminalWakeResult.self
+        )
+
+        if json {
+            printJSON(["woken": result.woken])
+        } else {
+            print(result.woken
+                ? "Terminal woken."
+                : "Terminal already awake (no-op)\(prompt != nil ? " — prompt NOT delivered" : "").")
         }
     }
 }

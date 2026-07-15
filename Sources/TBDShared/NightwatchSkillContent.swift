@@ -46,9 +46,47 @@ python3 scripts/tick.py --prs  # also gate open PRs (wraps loop_perfect_sweep.py
 
 Only when `tick.py` exits 10 (or on the 2-hour deep-review window): read `queue/decisions.jsonl`, resolve each genuine decision (what Adam would decide; sensitive/personal/access → `for-adam.md`, don't auto-fire), then clear the drained lines. This is the only step that should consume Opus.
 
+## Waking hibernated terminals (wake.py — never compose wake premises by hand)
+
+A hibernated terminal's snapshot/reason describes the world at hibernation time; PRs merge,
+checks go green, and branches land while it sleeps. Composing a wake prompt from that
+snapshot ships a stale premise (2026-07-13: a session was woken to "fix FAILING checks" on
+a PR that had merged three days earlier). **Every wake goes through the verifier:**
+
+```
+python3 scripts/wake.py            # dry-run: live-verified wake plan for all hibernated terminals
+python3 scripts/wake.py --act      # dispatch: `tbd terminal wake --prompt <text>` — the wake text
+                                   # rides `claude --resume` as an argv, atomic with the respawn.
+                                   # An already-awake terminal (raced a human wake) reports
+                                   # woken:false and receives NOTHING. Never `terminal send` for
+                                   # wakes: it pastes into whatever the pane currently runs (bare
+                                   # post-hibernation shell, or a live human session).
+python3 scripts/wake.py --tid ID   # one terminal · --no-fetch during a GitHub-rate crunch
+```
+
+Per terminal it re-derives truth AT WAKE TIME — live PR state for any PR number in the
+hibernation context (`hibernateReason` is a closed enum; the narrative, including "fix PR #N"
+premises, lives in the `suspendedSnapshot` pane text, which wake.py scans ANSI-stripped;
+MERGED/CLOSED never yields a "fix your PR" wake), the checked-out branch's actual open PR +
+failing checks, and unmerged-commit state vs origin/main — then classifies
+(DONE → /closeout · RESUME_FAILING/OPEN · UNSUBMITTED_WORK · UNVERIFIED → neutral "verify
+first" prompt) and writes `queue/wake-plan.json`. First real sweep: 24/24 hibernated
+terminals verified DONE — every hand-composed "resume" wake would have been stale.
+
 ## The gate (never automate past this)
 
 A PR may only be enqueued when **claude-review = APPROVED on the current SHA + checks clean**. Human approval never substitutes. `gh pr merge` is NOT a safe-wedge — it always escalates. nightwatch's job is to get PRs *ready*; the human merges.
+
+**Send-time verification — the wake.py rule applies to EVERY PR-state message, not just wakes.**
+Before dispatching any message that asserts PR state (a gate denial, a "checks failing" nudge, a
+"needs review" ping), re-read live state *in the same breath as the send*: `gh pr view N --json
+state,headRefOid,mergeStateStatus`. If `state` is MERGED/CLOSED, or the head SHA moved since the
+sweep, drop or recompose the message — never dispatch a fact older than the current tool call.
+(2026-07-13: two gate denials landed in a session's inbox describing PRs that had already merged
+or were already sitting in the merge queue — same stale-premise class the wake verifier was built
+for.) And phrase gate outcomes honestly: nightwatch cannot deny a GitHub enqueue; its gate is
+*stricter than the org's required checks* (AI Review is advisory until the ADR-0013 apply), so a
+bot-verdict shortfall on a human-approved PR is an **advisory heads-up**, not a "denied".
 
 ## Operating rules (hard-won via incidents)
 
@@ -88,6 +126,343 @@ When enabled, launchd runs `tick.py` on the interval ($0, no model), stays silen
 and on exit 10 (judgment queued) records a marker + fires `tbd notify`. This is the durable,
 quota-free replacement for waking Opus on a timer. It is intentionally NOT loaded by the
 plugin installer — you turn it on only where you want a fleet babysat.
+"""#
+
+    public static let wakePy: String = #"""
+#!/usr/bin/env python3
+"""
+nightwatch wake — pre-wake verifier for hibernated terminals. NO model, NO stale state.
+
+The 2026-07-13 lesson: wake prompts composed from hibernation-time snapshots carry
+stale premises (a session was woken to "fix FAILING checks" on a PR that had merged
+three days earlier). This script makes the wake premise DETERMINISTIC and LIVE:
+for every hibernated terminal it re-derives the truth from git + gh AT WAKE TIME,
+classifies the work, and composes the wake prompt from verified facts only.
+
+Rules it enforces:
+  - A PR named in a wake premise is checked live (`gh pr view --json state`);
+    MERGED/CLOSED PRs never produce a "fix your PR" wake — they produce /closeout.
+  - A local branch name is NOT evidence of unfinished work: if the branch has no
+    unmerged commits vs origin/main (or its PR merged), the work is DONE.
+  - Anything unverifiable (gh failure, no repo, detached head) wakes NEUTRAL —
+    "verify live state first" — never with an asserted premise.
+
+Usage:
+  wake.py               # dry-run: verified wake plan for ALL hibernated terminals
+  wake.py --tid <ID>    # limit to one terminal
+  wake.py --act         # dispatch: `tbd terminal wake --prompt <text>` — the wake
+                        # text rides the respawned `claude --resume` as an argv,
+                        # atomic with the wake. An already-awake terminal (raced a
+                        # human wake) reports woken:false and receives NOTHING.
+                        # Never `terminal send`: it pastes into whatever the pane
+                        # currently runs (bare shell, or a live human session).
+  wake.py --selftest    # offline classification-matrix test (monkeypatched git/gh)
+  wake.py --no-fetch    # skip `git fetch` (offline / GitHub rate crunch)
+
+Exit 0 always (a wake plan is informational); per-item status is in the output
+and queue/wake-plan.json.
+"""
+import subprocess, os, re, json, time, sys
+
+HOME = os.path.expanduser("~")
+DB = f"{HOME}/tbd/state.db"
+SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+QUEUE = f"{SKILL}/queue"
+
+STANDING_RULE = ("If the task is complete, run /closeout. Resume only if genuinely "
+                 "unfinished. Do NOT merge — the human merges.")
+
+
+def sh(args, t=20, cwd=None):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=t, cwd=cwd)
+        return r.stdout.strip(), r.returncode
+    except Exception:
+        return "", 1
+
+
+def gh(args, t=25, cwd=None):
+    # gh transits the cache proxy via the shell function, not env — plain exec is direct.
+    return sh(["gh", *args], t=t, cwd=cwd)
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def hibernated(only_tid=None):
+    # hibernateReason is a closed enum (auto/manual/recovery/merged) — the narrative
+    # context (what the session was doing, PR numbers) lives in suspendedSnapshot.
+    # JSON output mode: suspendedSnapshot is multi-line, so -separator parsing breaks.
+    q = ("SELECT t.id AS tid, w.displayName AS name, w.path AS path, "
+         "w.branch AS db_branch, t.hibernatedAt AS hib_at, "
+         "COALESCE(t.hibernateReason,'') AS reason, "
+         "COALESCE(t.suspendedSnapshot,'') AS snapshot FROM terminal t "
+         "JOIN worktree w ON w.id=t.worktreeID "
+         # Parked = hibernatedAt OR legacy suspendedAt — mirrors the daemon's
+         # Terminal.isParked, so legacy-parked rows can't bypass the verifier.
+         "WHERE w.status='active' AND t.kind='claude' "
+         "AND (t.hibernatedAt IS NOT NULL OR t.suspendedAt IS NOT NULL)")
+    out, rc = sh(["sqlite3", "-json", DB, q + ";"])
+    if rc != 0:
+        return []
+    try:
+        rows = json.loads(out) if out else []
+    except Exception:
+        return []
+    items = []
+    for r in rows:
+        if only_tid and r["tid"] != only_tid: continue
+        # Strip ANSI, keep the tail — the most recent (most relevant) pane state.
+        snapshot = ANSI.sub("", r.get("snapshot") or "")[-4000:]
+        items.append({"tid": r["tid"], "name": r["name"], "path": r["path"],
+                      "db_branch": r["db_branch"], "hibernated_at": r["hib_at"],
+                      "reason": r["reason"], "snapshot": snapshot})
+    return items
+
+
+def verify(item, fetch=True):
+    """Re-derive live truth for one hibernated terminal. Returns a verdict dict."""
+    path = item["path"]
+    facts: list = []
+    v = {"tid": item["tid"], "name": item["name"], "path": path,
+         "classification": "UNVERIFIED", "facts": facts, "pr": None}
+    if not os.path.isdir(path):
+        facts.append("worktree path missing on disk")
+        return v
+
+    branch, rc = sh(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
+    if rc != 0 or not branch or branch == "HEAD":
+        facts.append("no branch (detached or not a repo)")
+        return v
+    v["branch"] = branch
+    if fetch:
+        sh(["git", "-C", path, "fetch", "origin", "main"], t=30)
+
+    dirty, _ = sh(["git", "-C", path, "status", "--porcelain"])
+    v["dirty"] = bool(dirty)
+
+    # Unmerged commits vs origin/main — patch-id match (`git cherry`). NOT fully
+    # squash-aware: N commits squashed into one won't match; DONE detection also
+    # leans on merged-PR state below. A cherry failure means merge state is
+    # UNVERIFIABLE — record it and never let it default to DONE.
+    cherry, rc = sh(["git", "-C", path, "cherry", "origin/main"])
+    unmerged = [l for l in cherry.splitlines() if l.startswith("+")] if rc == 0 else None
+    v["unmerged_commits"] = len(unmerged) if unmerged is not None else None
+    if unmerged is None:
+        facts.append("unmerged-commit state NOT verified (git cherry failed)")
+
+    # THE core check: any PR number in the hibernation context is verified LIVE.
+    # hibernateReason is a closed enum and never names a PR — the snapshot (pane
+    # text at hibernation) is where a "fix PR #N" premise survives.
+    mentioned = re.findall(r"#(\d{3,6})", item["reason"] + " " + item.get("snapshot", ""))
+    stale_prs = []
+    for num in list(dict.fromkeys(mentioned))[:8]:
+        out, rc = gh(["pr", "view", num, "--json", "state,headRefName"], cwd=path)
+        # Silent continue is deliberate: snapshot text also mentions ISSUE
+        # numbers, which `gh pr view` rejects — a per-mention "NOT verified"
+        # fact would be constant noise. This loop only ADDS informational
+        # stale-premise callouts; the classification below fails closed on
+        # its own gh errors, so nothing safety-relevant is lost here.
+        if rc != 0: continue
+        try: j = json.loads(out)
+        except Exception: continue
+        if j.get("state") != "OPEN" or j.get("headRefName") != branch:
+            stale_prs.append(f"#{num} is {j.get('state')} (head {j.get('headRefName')}) "
+                             f"— hibernate-time premise is stale")
+    facts.extend(stale_prs)
+
+    # Live PR for the ACTUAL checked-out branch (any state).
+    out, rc = gh(["pr", "list", "--head", branch, "--state", "all",
+                  "--json", "number,state,title", "--limit", "5"], cwd=path)
+    prs = []
+    if rc != 0:
+        facts.append("gh unavailable — PR state NOT verified")
+        return v
+    if out:
+        try: prs = json.loads(out)
+        except Exception:
+            facts.append("gh output unparseable — PR state NOT verified")
+            return v
+    open_pr = next((p for p in prs if p["state"] == "OPEN"), None)
+    merged_pr = next((p for p in prs if p["state"] == "MERGED"), None)
+
+    if open_pr:
+        v["pr"] = open_pr["number"]
+        checks, checks_rc = gh(["pr", "checks", str(open_pr["number"])], cwd=path)
+        # `gh pr checks` exits non-zero when checks are failing OR pending, so
+        # rc alone doesn't mean the command failed — empty output with rc!=0
+        # does. In that case the checks state is UNVERIFIED: say so, never
+        # assert "checks not failing" on data we don't have.
+        if checks_rc != 0 and not checks:
+            v["failing_checks"] = None
+            v["classification"] = "RESUME_OPEN"
+            facts.append(f"open PR #{open_pr['number']}, failing-checks state "
+                         f"NOT verified (gh pr checks failed)")
+        else:
+            failing = [l.split("\t")[0] for l in checks.splitlines()
+                       if "\tfail" in l or "\tfailure" in l]
+            v["failing_checks"] = failing
+            v["classification"] = "RESUME_FAILING" if failing else "RESUME_OPEN"
+            facts.append(f"open PR #{open_pr['number']}"
+                         + (f", failing: {', '.join(failing[:4])}" if failing else ", checks not failing"))
+    elif merged_pr or unmerged is not None and not unmerged:
+        v["classification"] = "DONE"
+        facts.append(f"PR #{merged_pr['number']} MERGED" if merged_pr
+                     else "no unmerged commits vs origin/main")
+    elif unmerged:
+        v["classification"] = "UNSUBMITTED_WORK"
+        facts.append(f"{len(unmerged)} commit(s) not in origin/main, no PR")
+    else:
+        # unmerged is None here (cherry failed, fact already recorded) — merge
+        # state is unverifiable, so NEVER default to DONE: that would assert the
+        # exact kind of unverified premise this script exists to eliminate.
+        if v["dirty"]: facts.append("dirty working tree, merge state unknown")
+    if v["dirty"] and v["classification"] == "DONE":
+        facts.append("note: dirty working tree — closeout should triage it")
+    return v
+
+
+def compose(v):
+    """Wake prompt from verified facts ONLY. Never assert a premise wake-time data disproves."""
+    facts = "; ".join(v["facts"]) or "no live facts derivable"
+    c = v["classification"]
+    if c == "DONE":
+        return (f"Nightwatch wake (state verified live): your work here appears COMPLETE "
+                f"({facts}). Run /closeout now. {STANDING_RULE}")
+    if c == "RESUME_FAILING":
+        return (f"Nightwatch wake (state verified live): PR #{v['pr']} on branch {v.get('branch')} "
+                f"has failing checks ({facts}). Diagnose, fix, push, drive to checks-green + "
+                f"claude-review approved on the current SHA. {STANDING_RULE}")
+    if c == "RESUME_OPEN":
+        return (f"Nightwatch wake (state verified live): PR #{v['pr']} on branch {v.get('branch')} "
+                f"is open ({facts}). Drive it to ready (checks green + claude-review approved) or "
+                f"/closeout if it's actually done. {STANDING_RULE}")
+    if c == "UNSUBMITTED_WORK":
+        return (f"Nightwatch wake (state verified live): branch {v.get('branch')} has {facts}. "
+                f"Decide: finish and open a PR, or /closeout and abandon. {STANDING_RULE}")
+    return (f"Nightwatch wake: live state could NOT be verified ({facts}). Before doing anything, "
+            f"verify with git/gh what is actually outstanding — do not trust any earlier premise. "
+            f"{STANDING_RULE}")
+
+
+def selftest():
+    """Offline classification-matrix test. Monkeypatches sh/gh so no git, gh,
+    sqlite3, or tbd binary is ever invoked — safe anywhere (CI runs it via
+    PluginDirWriterTests). Covers the fail-closed guarantees the docstring
+    promises: unverifiable state NEVER classifies DONE or asserts a premise."""
+    g = globals()
+    real_sh, real_gh = g["sh"], g["gh"]
+    item = {"tid": "T", "name": "t", "path": os.getcwd(), "db_branch": "b",
+            "hibernated_at": "x", "reason": "auto", "snapshot": ""}
+
+    def run(git, ghmap, snapshot=""):
+        def fake_sh(args, t=20, cwd=None):
+            assert args[0] == "git", f"unexpected non-git sh() in verify: {args}"
+            return git.get(args[3], ("", 1))
+        def fake_gh(args, t=25, cwd=None):
+            return ghmap.get(args[1], ("", 1))
+        g["sh"], g["gh"] = fake_sh, fake_gh
+        try:
+            return verify({**item, "snapshot": snapshot}, fetch=False)
+        finally:
+            g["sh"], g["gh"] = real_sh, real_gh
+
+    git_ok = {"rev-parse": ("feat", 0), "status": ("", 0), "cherry": ("", 0)}
+    open_pr = ('[{"number": 7, "state": "OPEN", "title": "t"}]', 0)
+
+    # 1. Clean tree, no unmerged commits, no PR → DONE.
+    v = run(git_ok, {"list": ("[]", 0)})
+    assert v["classification"] == "DONE", v
+    # 2. `git cherry` failure NEVER defaults to DONE — fail closed.
+    v = run({**git_ok, "cherry": ("", 1)}, {"list": ("[]", 0)})
+    assert v["classification"] == "UNVERIFIED", v
+    assert any("git cherry failed" in f for f in v["facts"]), v
+    # 3. gh failure → UNVERIFIED, premise explicitly not asserted.
+    v = run(git_ok, {"list": ("", 1)})
+    assert v["classification"] == "UNVERIFIED", v
+    assert any("gh unavailable" in f for f in v["facts"]), v
+    # 4. Unparseable gh output ≠ "no PR" → UNVERIFIED.
+    v = run(git_ok, {"list": ("gh: flaked mid-stream", 0)})
+    assert v["classification"] == "UNVERIFIED", v
+    assert any("unparseable" in f for f in v["facts"]), v
+    # 5. Open PR, `gh pr checks` dies (empty + rc!=0) → never "checks not failing".
+    v = run(git_ok, {"list": open_pr, "checks": ("", 1)})
+    assert v["classification"] == "RESUME_OPEN", v
+    assert any("NOT verified" in f for f in v["facts"]), v
+    assert "checks not failing" not in compose(v), compose(v)
+    # 6. Open PR with failing checks (rc!=0 WITH output = checks failing, not gh failing).
+    v = run(git_ok, {"list": open_pr, "checks": ("CI\tfail\t1m\turl", 1)})
+    assert v["classification"] == "RESUME_FAILING", v
+    # 7. Unmerged commits, no PR → UNSUBMITTED_WORK.
+    v = run({**git_ok, "cherry": ("+ abc123", 0)}, {"list": ("[]", 0)})
+    assert v["classification"] == "UNSUBMITTED_WORK", v
+    # 8. PR number in the SNAPSHOT (not reason — that's a closed enum) that is
+    #    MERGED → stale-premise fact; classification still independent (DONE).
+    v = run(git_ok, {"list": ("[]", 0),
+                     "view": ('{"state": "MERGED", "headRefName": "other"}', 0)},
+            snapshot="fix PR #14203 FAILING checks")
+    assert any("stale" in f for f in v["facts"]), v
+    assert v["classification"] == "DONE", v
+    print("selftest: 8/8 classification scenarios passed")
+
+
+def main():
+    if "--selftest" in sys.argv:
+        selftest()
+        return
+    act = "--act" in sys.argv
+    fetch = "--no-fetch" not in sys.argv
+    tid = None
+    if "--tid" in sys.argv:
+        i = sys.argv.index("--tid")
+        tid = sys.argv[i + 1] if i + 1 < len(sys.argv) else None
+    items = hibernated(tid)
+    # BEFORE the loop: --act appends to queue/acted.jsonl per terminal, and a
+    # missing queue/ would crash mid-dispatch — after real side effects fired
+    # but before they were logged. (tick.py/judge.py order it the same way.)
+    os.makedirs(QUEUE, exist_ok=True)
+    print(f"=== nightwatch wake @ {time.strftime('%H:%M:%S')} "
+          f"{'[ACT]' if act else '[dry-run]'} — {len(items)} hibernated ===")
+    plan = []
+    for it in items:
+        v = verify(it, fetch=fetch)
+        v["wake_text"] = compose(v)
+        plan.append(v)
+        print(f"  ▸ {it['name']} ({it['tid'][:8]}): {v['classification']} — "
+              + ("; ".join(v["facts"])[:110] or "-"))
+        if act:
+            # The wake text rides `tbd terminal wake --prompt` as an argv to
+            # `claude --resume` — atomic with the respawn. NEVER `terminal
+            # send`: send pastes into whatever the pane currently runs (a bare
+            # shell after hibernation, or a LIVE human session if someone woke
+            # this terminal between our DB snapshot and now). On the idempotent
+            # no-op paths (already awake / wake in flight) the daemon reports
+            # woken:false and the prompt is not delivered anywhere. An old tbd
+            # binary without --prompt exits non-zero → fail closed, no dispatch.
+            out, wake_rc = sh(["tbd", "terminal", "wake", "--terminal", it["tid"],
+                               "--prompt", v["wake_text"], "--json"], t=60)
+            woken = False
+            if wake_rc == 0:
+                try: woken = bool(json.loads(out).get("woken"))
+                except Exception: woken = False
+            v["dispatched"] = woken
+            if not woken:
+                print("    ✗ not dispatched — " +
+                      ("terminal no longer parked (raced a live wake) — prompt withheld"
+                       if wake_rc == 0 else "wake failed or tbd binary lacks --prompt"))
+            with open(f"{QUEUE}/acted.jsonl", "a") as f:
+                f.write(json.dumps({"kind": "wake-dispatch", "tid": it["tid"],
+                                    "name": it["name"], "classification": v["classification"],
+                                    "ok": v["dispatched"], "ts": int(time.time())}) + "\n")
+    json.dump({"ts": int(time.time()), "plan": plan},
+              open(f"{QUEUE}/wake-plan.json", "w"), indent=2)
+    done = sum(1 for v in plan if v["classification"] == "DONE")
+    print(f"\n→ {done}/{len(plan)} verified DONE (would have been stale 'resume' wakes without "
+          f"verification). Plan: queue/wake-plan.json")
+
+
+if __name__ == "__main__":
+    main()
 """#
 
     public static let tickPy: String = #"""
