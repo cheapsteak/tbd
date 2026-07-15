@@ -228,6 +228,11 @@ struct ContentView: View {
                             } label: {
                                 PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
                             } primaryAction: {
+                                // cmd+click opens the PR in the default browser instead of an in-app tab.
+                                if NSEvent.modifierFlags.contains(.command) {
+                                    NSWorkspace.shared.open(prURL)
+                                    return
+                                }
                                 let existingTabs = appState.tabs[worktreeID] ?? []
                                 if let existingIndex = existingTabs.firstIndex(where: {
                                     if case .webview(_, let url) = $0.content { return url == prURL }
