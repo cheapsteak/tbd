@@ -64,6 +64,16 @@ import Testing
     #expect(args.contains("main"))
 }
 
+@Test func testTerminalFeaturesHyperlinksCommand() {
+    // OSC 8 hyperlinks emitted by Claude Code are stripped by tmux for normal
+    // (non-control-mode) attach clients unless the client's TERM advertises the
+    // `hyperlinks` terminal-feature. TBD's grouped-sessions attach client runs
+    // with TERM=xterm-256color, so server setup must advertise the feature keyed
+    // to that TERM for the sequences to reach SwiftTerm.
+    let args = TmuxManager.terminalFeaturesHyperlinksCommand(server: "tbd-a1b2c3d4")
+    #expect(args == ["-L", "tbd-a1b2c3d4", "set", "-ga", "terminal-features", "xterm-256color:hyperlinks"])
+}
+
 @Test func testNewWindowCommand() {
     let args = TmuxManager.newWindowCommand(
         server: "tbd-a1b2c3d4",

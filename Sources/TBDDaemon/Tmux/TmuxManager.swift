@@ -154,6 +154,22 @@ public struct TmuxManager: Sendable {
             + ["-PF", "#{window_id}"]
     }
 
+    /// Advertise the `hyperlinks` terminal-feature for TERM=xterm-256color so
+    /// tmux forwards OSC 8 hyperlink escape sequences to normal (non-control-mode)
+    /// attach clients instead of stripping them. The grouped-sessions attach
+    /// client (see `TerminalPanelView.makeViewerEnvironment`) runs with
+    /// TERM=xterm-256color, so the feature is keyed to that TERM to match.
+    ///
+    /// Uses `set -ga` (append) rather than `set -g` (replace): `-g` would
+    /// overwrite the whole terminal-features array, dropping tmux's built-in
+    /// xterm defaults (clipboard, ccolour, cstyle, focus, title). `-ga` appends,
+    /// so those defaults are preserved while hyperlink forwarding is added. tmux
+    /// strips OSC 8 hyperlinks for a normal-attach client unless this feature is
+    /// advertised.
+    public static func terminalFeaturesHyperlinksCommand(server: String) -> [String] {
+        ["-L", server, "set", "-ga", "terminal-features", "xterm-256color:hyperlinks"]
+    }
+
     public static func hasSessionCommand(server: String, session: String) -> [String] {
         ["-L", server, "has-session", "-t", session]
     }
@@ -351,7 +367,12 @@ public struct TmuxManager: Sendable {
         let hasSessionArgs = Self.hasSessionCommand(server: server, session: session)
         do {
             try await runTmux(hasSessionArgs)
-            // Session already exists, nothing to do
+            // Session already exists. Ensure hyperlink forwarding is enabled even on
+            // servers created before this option existed (tmux servers persist across
+            // app restarts). Uses `set -ga` to append so tmux's default xterm
+            // features (clipboard, focus, title, etc.) are preserved; OSC 8
+            // hyperlinks are stripped for a normal-attach client unless advertised.
+            _ = try? await runTmux(Self.terminalFeaturesHyperlinksCommand(server: server))
             return nil
         } catch {
             // Session does not exist, create it — capture the initial window ID
@@ -363,6 +384,10 @@ public struct TmuxManager: Sendable {
             _ = try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
             _ = try? await runTmux(["-L", server, "set", "-g", "pane-border-indicators", "off"])
             _ = try? await runTmux(["-L", server, "set", "-g", "default-terminal", "xterm-256color"])
+            // Advertise the `hyperlinks` terminal-feature so tmux forwards OSC 8
+            // hyperlink escape sequences to normal (non-control-mode) attach
+            // clients instead of stripping them (see helper doc comment).
+            _ = try? await runTmux(Self.terminalFeaturesHyperlinksCommand(server: server))
             // Enable mouse so scroll wheel enters copy-mode and scrolls history
             _ = try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
             // Enable extended key sequences so Shift+Arrow etc. pass through to applications
