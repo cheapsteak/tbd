@@ -83,8 +83,29 @@ private struct UsageBarRow: View {
                 .monospacedDigit()
                 .foregroundStyle(fillColor)
                 .frame(width: 30, alignment: .trailing)
+            trailingResetHint
         }
         .help(helpText)
+    }
+
+    // MARK: Trailing reset countdown
+
+    /// Fourth column: weekly reset countdown (inline hint) on the wk row only,
+    /// empty but space-reserving on the 5h row to keep bars aligned.
+    private var trailingResetHint: some View {
+        let countdownText: String = {
+            guard usesRelativeReset, let resetsAt = bucket.resetsAt,
+                  let compact = ProfileUsagePresentation.relativeResetText(resetsAt, now: now) else {
+                return ""
+            }
+            return "· \(compact)"
+        }()
+
+        return Text(countdownText)
+            .font(.system(size: 9, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
+            .frame(width: 46, alignment: .leading)
     }
 
     // MARK: Bar geometry
@@ -225,7 +246,7 @@ private struct UsageBarRow: View {
             bucket("weekly_all", 30, severity: "normal"),
         ]), now: now)
     }
-    .frame(width: 220)
+    .frame(width: 260)
     .padding()
 }
 #endif
