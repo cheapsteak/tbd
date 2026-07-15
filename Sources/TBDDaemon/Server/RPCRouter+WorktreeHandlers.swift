@@ -25,6 +25,14 @@ extension RPCRouter {
             useExistingBranch: useExistingBranch
         )
 
+        // Phase 1.5: Fetch from origin (coalesced, with tight timeout)
+        // This runs OUTSIDE the serialized lane so back-to-back creates
+        // don't queue behind fetches.
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            throw WorktreeLifecycleError.repoNotFound(params.repoID)
+        }
+        await fetchCache.fetchIfNeeded(repoPath: repo.path)
+
         // Phase 2: Fire-and-forget — git operations + tmux setup in background.
         // Serialize per-repo so concurrent creates don't contend on .git/index.lock.
         let lifecycle = self.lifecycle

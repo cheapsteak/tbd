@@ -153,14 +153,14 @@ public struct GitManager: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Fetches from origin for the given branch.
-    public func fetch(repoPath: String, branch: String) async throws {
-        _ = try await run(arguments: ["fetch", "origin", branch], at: repoPath)
+    /// Fetches from origin for the given branch, with optional timeout override.
+    public func fetch(repoPath: String, branch: String, timeout: Duration? = nil) async throws {
+        _ = try await run(arguments: ["fetch", "origin", branch], at: repoPath, timeout: timeout)
     }
 
-    /// Fetches all refs from origin.
-    public func fetch(repoPath: String) async throws {
-        _ = try await run(arguments: ["fetch", "origin"], at: repoPath)
+    /// Fetches all refs from origin, with optional timeout override.
+    public func fetch(repoPath: String, timeout: Duration? = nil) async throws {
+        _ = try await run(arguments: ["fetch", "origin"], at: repoPath, timeout: timeout)
     }
 
     /// Returns the HEAD SHA for a branch or ref.
@@ -233,21 +233,24 @@ public struct GitManager: Sendable {
     }
 
     /// Creates a new worktree at `worktreePath` on a new branch based on `baseBranch`.
+    /// Enables parallel checkout for faster working-tree setup.
     public func worktreeAdd(repoPath: String, worktreePath: String, branch: String, baseBranch: String) async throws {
-        _ = try await run(arguments: ["worktree", "add", worktreePath, "-b", branch, baseBranch], at: repoPath)
+        _ = try await run(arguments: ["-c", "checkout.workers=0", "worktree", "add", worktreePath, "-b", branch, baseBranch], at: repoPath)
     }
 
     /// Adds a worktree at `worktreePath` using an existing branch (no -b flag).
+    /// Enables parallel checkout for faster working-tree setup.
     public func worktreeAddExisting(repoPath: String, worktreePath: String, branch: String) async throws {
-        _ = try await run(arguments: ["worktree", "add", worktreePath, branch], at: repoPath)
+        _ = try await run(arguments: ["-c", "checkout.workers=0", "worktree", "add", worktreePath, branch], at: repoPath)
     }
 
     /// Adds a worktree at `worktreePath` tracking an existing remote branch.
     /// Creates a local branch named `localBranch` from `remoteRef`
     /// (e.g. `origin/foo`) with upstream tracking configured.
+    /// Enables parallel checkout for faster working-tree setup.
     public func worktreeAddTrackingRemote(repoPath: String, worktreePath: String, localBranch: String, remoteRef: String) async throws {
         _ = try await run(
-            arguments: ["worktree", "add", "--track", "-b", localBranch, worktreePath, remoteRef],
+            arguments: ["-c", "checkout.workers=0", "worktree", "add", "--track", "-b", localBranch, worktreePath, remoteRef],
             at: repoPath
         )
     }
@@ -255,9 +258,10 @@ public struct GitManager: Sendable {
     /// Adds a worktree at `worktreePath`, creating a new branch pointing at the given SHA.
     /// Used as a fallback when the original branch was renamed/deleted but we have the
     /// archived HEAD SHA to recover the commit.
+    /// Enables parallel checkout for faster working-tree setup.
     public func worktreeAddNewBranch(repoPath: String, worktreePath: String, branch: String, sha: String) async throws {
         _ = try await run(
-            arguments: ["worktree", "add", "-b", branch, worktreePath, sha],
+            arguments: ["-c", "checkout.workers=0", "worktree", "add", "-b", branch, worktreePath, sha],
             at: repoPath
         )
     }
@@ -610,8 +614,9 @@ public struct GitManager: Sendable {
     /// cross-environment hang to exercise the kill path (a post-checkout hook did
     /// not fire on CI). Production callers never pass `executable`.
     private func run(arguments: [String], at directory: String,
+                     timeout: Duration? = nil,
                      executable: String = "/usr/bin/git") async throws -> String {
-        let timeout = subprocessTimeout
+        let resolvedTimeout = timeout ?? subprocessTimeout
         let commandDescription = "git " + arguments.joined(separator: " ")
         // All the mechanism (starvation-proof watchdog thread, authoritative
         // deadline, incremental pipe draining, no-EOF-wait, single-resume
@@ -623,11 +628,11 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
-            timeout: timeout
+            timeout: resolvedTimeout
         ) {
         case .timedOut:
-            logger.warning("git subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
-            throw GitTimeoutError(command: commandDescription, timeout: timeout)
+            logger.warning("git subprocess timed out after \(resolvedTimeout, privacy: .public): \(commandDescription, privacy: .public)")
+            throw GitTimeoutError(command: commandDescription, timeout: resolvedTimeout)
         case let .completed(status, stdoutData, stderrData):
             let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""

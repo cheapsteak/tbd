@@ -66,6 +66,8 @@ public final class RPCRouter: Sendable {
     /// TTL cache for per-worktree upstream branch lookups, so `pr.list` stops
     /// spawning a `git config` subprocess per worktree on every poll.
     let upstreamBranchCache = UpstreamBranchCache()
+    /// Coalesces fetch operations per repo using a TTL cache + singleflight.
+    let fetchCache = FetchCache()
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, terminal handlers open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.
