@@ -10,7 +10,6 @@ import TBDShared
 /// we are, and a trailing percent (and inline reset countdown on the weekly
 /// all-models row).
 ///
-///
 /// Pure presentation over a `ProfileUsageSnapshot` (no picker/tab state), so it
 /// is reusable anywhere a snapshot is in hand. `now`/`timeZone` are injectable
 /// for previews and deterministic layout. A row is skipped entirely when its
