@@ -320,7 +320,11 @@ extension RPCRouter {
             settingsOverlayPath: isClaudeType
                 ? ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString
+                    sessionKey: plannedTerminalID.uuidString,
+                    // Fragment applies to FRESH primary spawns only; a resume
+                    // must not reapply it. Hooks overlay still resolves for
+                    // resumes — only extraSettingsJSON goes nil.
+                    extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
                   )
                 : nil,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,

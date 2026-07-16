@@ -37,6 +37,9 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Read initial prompt from a file (use - for stdin)")
     var promptFile: String?
 
+    @Option(name: .long, help: "Extra Claude Code settings as a JSON object, deep-merged into TBD's per-session --settings overlay for the spawned agent (Claude only). Example: '{\"skillOverrides\":{\"some-skill\":\"off\"}}'")
+    var claudeSettings: String?
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
@@ -46,7 +49,7 @@ struct TerminalCreate: AsyncParsableCommand {
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile)),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings),
             resultType: Terminal.self
         )
 
