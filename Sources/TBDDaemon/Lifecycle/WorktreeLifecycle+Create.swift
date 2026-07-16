@@ -201,8 +201,8 @@ extension WorktreeLifecycle {
                 atPath: parentDir,
                 withIntermediateDirectories: true
             )
-            let createDirElapsedMs = Int(-clock.now.duration(to: createDirStart).components.attoseconds / 1_000_000_000_000_000)
-            timingLogger.debug("createdir \(worktreeID.uuidString, privacy: .public) \(createDirElapsedMs)ms")
+            let createDirElapsedMs = createDirStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("createdir \(worktreeID.uuidString, privacy: .public) \(Int(createDirElapsedMs))ms")
 
             // 2. git worktree add (fetch was run beforehand in the RPC handler)
             let worktreeAddStart = clock.now
@@ -251,8 +251,8 @@ extension WorktreeLifecycle {
                 }
                 resultPath = result.path
             }
-            let worktreeAddElapsedMs = Int(-clock.now.duration(to: worktreeAddStart).components.attoseconds / 1_000_000_000_000_000)
-            timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(worktreeAddElapsedMs)ms")
+            let worktreeAddElapsedMs = worktreeAddStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(Int(worktreeAddElapsedMs))ms")
 
             // 3. Setup tmux terminals.
             let terminalSpawnStart = clock.now
@@ -280,8 +280,8 @@ extension WorktreeLifecycle {
                     worktreeID: worktree.id,
                     label: TerminalLabel.preSession
                 )))
-                let terminalSpawnElapsedMs = Int(-clock.now.duration(to: terminalSpawnStart).components.attoseconds / 1_000_000_000_000_000)
-                timingLogger.debug("terminal-spawn-presession \(worktreeID.uuidString, privacy: .public) \(terminalSpawnElapsedMs)ms")
+                let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
+                timingLogger.debug("terminal-spawn-presession \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
                 let phase3 = Task.detached { [self] in
                     await runPreSessionPhase3(
                         preSession: preSession,
@@ -311,17 +311,17 @@ extension WorktreeLifecycle {
                 overrideProfileID: overrideProfileID,
                 claudeSettingsOverlay: claudeSettingsOverlay
             )
-            let terminalSpawnElapsedMs = Int(-clock.now.duration(to: terminalSpawnStart).components.attoseconds / 1_000_000_000_000_000)
-            timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(terminalSpawnElapsedMs)ms")
+            let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
             // 4. Update status to active
             let markActiveStart = clock.now
             try await db.worktrees.updateStatus(id: worktreeID, status: .active)
-            let markActiveElapsedMs = Int(-clock.now.duration(to: markActiveStart).components.attoseconds / 1_000_000_000_000_000)
-            timingLogger.debug("mark-active \(worktreeID.uuidString, privacy: .public) \(markActiveElapsedMs)ms")
+            let markActiveElapsedMs = markActiveStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("mark-active \(worktreeID.uuidString, privacy: .public) \(Int(markActiveElapsedMs))ms")
 
-            let totalElapsedMs = Int(-clock.now.duration(to: phaseStart).components.attoseconds / 1_000_000_000_000_000)
-            timingLogger.info("complete-worktree \(worktreeID.uuidString, privacy: .public) total \(totalElapsedMs)ms")
+            let totalElapsedMs = phaseStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.info("complete-worktree \(worktreeID.uuidString, privacy: .public) total \(Int(totalElapsedMs))ms")
             return .ready
 
         } catch {
