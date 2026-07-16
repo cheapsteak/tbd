@@ -55,6 +55,9 @@ extension RPCRouter {
         // Pass the raw branch ref (possibly `origin/...`) to phase 2 so it
         // can dispatch to the right git command.
         let existingBranchRef = useExistingBranch ? params.branch : nil
+        // Fork-PR rows opt into the refs/pull/<n>/head fetch; decorated
+        // same-repo rows leave this false and check out the existing branch.
+        let checkoutPRHead = params.checkoutPRHead ?? false
         // Explicit per-creation model-profile override (sidebar `+` picker).
         // nil preserves the repo/scratch/global precedence chain.
         let overrideProfileID = params.profileID
@@ -71,7 +74,7 @@ extension RPCRouter {
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
                 await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, overrideProfileID: overrideProfileID, claudeSettingsOverlay: claudeSettingsOverlay)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, claudeSettingsOverlay: claudeSettingsOverlay)
                 switch completion {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(

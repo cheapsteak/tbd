@@ -70,7 +70,7 @@ import Testing
 
         let wt = try await lifecycle.createWorktree(
             repoID: repo.id, branch: "feature-x", skipClaude: true,
-            useExistingBranch: true, prNumber: 7
+            useExistingBranch: true, prNumber: 7, checkoutPRHead: true
         )
 
         #expect(wt.status == .active)
@@ -103,7 +103,7 @@ import Testing
 
         let wt = try await lifecycle.createWorktree(
             repoID: repo.id, branch: "feature-x", skipClaude: true,
-            useExistingBranch: true, prNumber: 7
+            useExistingBranch: true, prNumber: 7, checkoutPRHead: true
         )
 
         // Landed on the uniquified branch at the pull-ref commit...
@@ -115,5 +115,40 @@ import Testing
         // ...and the original branch is untouched by the force refspec.
         let afterSHA = try await GitManager().headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/feature-x")
         #expect(afterSHA == originalSHA)
+    }
+
+    /// Decorated same-repo row: `prNumber` is set for status tracking, but
+    /// `checkoutPRHead` is false, so selecting it must behave exactly like
+    /// picking that existing branch — NO pull-ref fetch, NO `feature-x-2` clone.
+    @Test func createFromDecoratedBranchRowChecksOutExistingBranch() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await shell("git branch feature-x", at: repoDir)
+        let branchSHA = try await GitManager().headSHA(repoPath: repoDir.path, ref: "refs/heads/feature-x")
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        // prNumber stamped, checkoutPRHead omitted (defaults false).
+        let wt = try await lifecycle.createWorktree(
+            repoID: repo.id, branch: "feature-x", skipClaude: true,
+            useExistingBranch: true, prNumber: 9
+        )
+
+        #expect(wt.status == .active)
+        #expect(wt.branch == "feature-x")     // existing branch, not uniquified
+        #expect(wt.prNumber == 9)             // still stamped for status tracking
+        let head = try await GitManager().headSHA(worktreePath: wt.path)
+        #expect(head == branchSHA)
+        // No stray duplicate branch was created by a pull-ref fetch.
+        let dupExists = try await GitManager().localBranchExists(repoPath: repoDir.path, name: "feature-x-2")
+        #expect(dupExists == false)
+
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        #expect(listed.contains { $0.branch == "feature-x" && $0.path.hasSuffix("/feature-x") })
     }
 }
