@@ -861,7 +861,13 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil) {
+    /// GitHub PR number this worktree is being created from. Set (together with
+    /// `useExistingBranch == true`) when the picker checks out a PR: the daemon
+    /// fetches `refs/pull/<n>/head` into a local branch and stamps the number on
+    /// the row so `PRStatusManager` tracks it by number. Optional/defaulted for
+    /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
+    public let prNumber: Int?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -871,6 +877,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
         self.claudeSettingsOverlay = claudeSettingsOverlay
+        self.prNumber = prNumber
     }
 }
 

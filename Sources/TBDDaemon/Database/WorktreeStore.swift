@@ -174,7 +174,8 @@ public struct WorktreeStore: Sendable {
         path: String,
         tmuxServer: String,
         status: WorktreeStatus = .active,
-        parentWorktreeID: UUID? = nil
+        parentWorktreeID: UUID? = nil,
+        prNumber: Int? = nil
     ) async throws -> Worktree {
         try await writer.write { db in
             let maxOrder: Int
@@ -200,7 +201,8 @@ public struct WorktreeStore: Sendable {
                 status: status,
                 tmuxServer: tmuxServer,
                 sortOrder: maxOrder + 1,
-                parentWorktreeID: parentWorktreeID
+                parentWorktreeID: parentWorktreeID,
+                prNumber: prNumber
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)

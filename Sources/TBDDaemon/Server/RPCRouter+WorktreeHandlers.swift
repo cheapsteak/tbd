@@ -22,7 +22,8 @@ extension RPCRouter {
             siblingOfWorktreeID: params.siblingOfWorktreeID,
             callerWorktreeID: params.callerWorktreeID,
             suppressAutoParent: params.suppressAutoParent ?? false,
-            useExistingBranch: useExistingBranch
+            useExistingBranch: useExistingBranch,
+            prNumber: params.prNumber
         )
 
         // Phase 1.5: Fetch from origin (coalesced, with tight timeout)

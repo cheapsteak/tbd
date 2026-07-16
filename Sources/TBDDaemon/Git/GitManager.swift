@@ -163,6 +163,30 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["fetch", "origin"], at: repoPath, timeout: timeout)
     }
 
+    /// True if `refs/heads/<name>` exists locally. Used to pick a
+    /// non-clobbering local branch name before force-fetching a pull ref.
+    public func localBranchExists(repoPath: String, name: String) async throws -> Bool {
+        do {
+            _ = try await run(arguments: ["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], at: repoPath)
+            return true
+        } catch {
+            // show-ref --quiet exits 1 when the ref is missing — treat any
+            // failure as "absent" (same convention as `refExists`).
+            return false
+        }
+    }
+
+    /// Fetches a PR head (same-repo or fork — `refs/pull/<n>/head` exists for
+    /// both) into a local branch. The `+` force-updates, so callers MUST pass a
+    /// branch name verified free via `localBranchExists` / uniquification, or an
+    /// unrelated same-named branch is silently rewritten.
+    public func fetchPullRequestHead(repoPath: String, number: Int, localBranch: String) async throws {
+        _ = try await run(
+            arguments: ["fetch", "origin", "+refs/pull/\(number)/head:refs/heads/\(localBranch)"],
+            at: repoPath
+        )
+    }
+
     /// Returns the HEAD SHA for a branch or ref.
     public func headSHA(repoPath: String, ref: String = "HEAD") async throws -> String {
         let output = try await run(arguments: ["rev-parse", ref], at: repoPath)
