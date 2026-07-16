@@ -505,7 +505,12 @@ extension WorktreeLifecycle {
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
                 "CODEX_HOME": codexHome.path,
             ]
+            // omz-update suppression rides `-e` (process env before .zshrc)
+            // so the update prompt can't block the codex command; FORCED over
+            // user overrides (matching the claude path) — agent tabs must
+            // never block on the interactive prompt.
             primarySensitiveEnv = mergedEnvOverrides
+                .merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             primarySessionID = nil
             primaryProfileID = nil
             primaryLabel = TerminalLabel.codex

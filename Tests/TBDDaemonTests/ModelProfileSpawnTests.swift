@@ -227,7 +227,10 @@ struct ModelProfileSpawnTests {
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.codex)
-        try await db.config.setEnvOverrides(["FOO": "bar"])
+        // DISABLE_AUTO_UPDATE=false is deliberately included: the omz-update
+        // suppression is FORCED on agent tabs (a user "false" would silently
+        // reintroduce the spawn-blockage bug), so it must be overridden to true.
+        try await db.config.setEnvOverrides(["FOO": "bar", "DISABLE_AUTO_UPDATE": "false"])
         try await db.repos.setEnvOverrides(id: repo.id, overrides: ["REPO_VAR": "rv"])
         // Re-fetch so the repo passed to spawnPrimaryTerminals carries its
         // freshly-persisted envOverrides (the spawn reads repo.envOverrides
@@ -241,11 +244,16 @@ struct ModelProfileSpawnTests {
         // Both scopes reach the Codex pane as sensitive -e env.
         #expect(recorder.joinedAll.contains("FOO=bar"))
         #expect(recorder.joinedAll.contains("REPO_VAR=rv"))
+        // The forced omz suppression wins over the user's explicit "false";
+        // other override keys merged untouched above.
+        #expect(recorder.joinedAll.contains("DISABLE_AUTO_UPDATE=true"))
+        #expect(!recorder.joinedAll.contains("DISABLE_AUTO_UPDATE=false"))
     }
 
-    /// With no env overrides configured, the Codex primary spawn injects no
-    /// sensitive `-e` env at all (the empty-config off branch).
-    @Test("spawn: empty config → Codex primary gets no -e env overrides")
+    /// With no env overrides configured, the Codex primary spawn's only
+    /// sensitive `-e` env is the omz update-prompt suppression (the
+    /// empty-config off branch injects no user overrides).
+    @Test("spawn: empty config → Codex primary gets only omz suppression as -e env")
     func codexEmptyConfigInjectsNothing() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
@@ -265,11 +273,17 @@ struct ModelProfileSpawnTests {
             worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
         )
 
-        // The Codex `new-window` call exists and carries no `-e` env flag.
+        // The Codex `new-window` call exists; its only `-e` env is the
+        // omz update-prompt suppression — an agent tab runs a command and
+        // must never block on the interactive "Would you like to update?"
+        // prompt. No user overrides leak in.
         let codexCall = try #require(recorder.calls.first {
             $0.contains("new-window") && ($0.last?.contains("codex") ?? false)
         })
-        #expect(!codexCall.contains("-e"))
+        let eIndices = codexCall.indices.filter { codexCall[$0] == "-e" }
+        #expect(eIndices.count == 1)
+        #expect(codexCall.contains("DISABLE_AUTO_UPDATE=true"),
+                "codex window must suppress the oh-my-zsh update prompt via -e")
         #expect(!recorder.joinedAll.contains("FOO=bar"))
     }
 

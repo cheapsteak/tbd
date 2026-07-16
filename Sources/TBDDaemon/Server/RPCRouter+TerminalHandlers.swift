@@ -167,13 +167,18 @@ extension RPCRouter {
                 codexEnv["COLORFGBG"] = colorFgBg
             }
 
-            // Codex: the merged free-form overrides ARE the entire sensitive env.
-            // No profile is resolved for Codex, so the profile scope is nil.
+            // Codex: the merged free-form overrides plus omz-update suppression
+            // form the sensitive env. DISABLE_AUTO_UPDATE must go through `-e`
+            // (process env before .zshrc) — the `env:` dict is inlined AFTER rc
+            // files run, so oh-my-zsh's update prompt would still block the
+            // agent. FORCED over user overrides (matching the claude path): an
+            // agent tab runs a command and must never block on the interactive
+            // update prompt. No profile is resolved for Codex, so that scope is nil.
             let codexEnvOverrides = EnvOverrideResolver.merge(
                 global: createConfig?.envOverrides,
                 repo: repo?.envOverrides,
                 profile: nil
-            )
+            ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
                 session: "main",
@@ -562,8 +567,10 @@ extension RPCRouter {
             codexEnv["CODEX_HOME"] = codexHome.path
 
             // Codex: re-apply the merged free-form overrides (global < repo) so a
-            // recreated Codex pane keeps them. No profile is resolved here, so the
-            // profile scope is nil.
+            // recreated Codex pane keeps them, plus omz-update suppression via
+            // `-e` (must be in the process env before .zshrc; FORCED over user
+            // overrides — agent tabs must never block on the interactive update
+            // prompt). No profile is resolved here, so that scope is nil.
             let recreateConfig = try? await db.config.get()
             let recreateRepo: Repo?
             if let rid = worktree.repoID {
@@ -575,7 +582,7 @@ extension RPCRouter {
                 global: recreateConfig?.envOverrides,
                 repo: recreateRepo?.envOverrides,
                 profile: nil
-            )
+            ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
                 session: "main",

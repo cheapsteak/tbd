@@ -564,6 +564,17 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
     }, "created codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
+    // The codex window must carry `-e DISABLE_AUTO_UPDATE=true` (process env,
+    // set before .zshrc runs) so oh-my-zsh's interactive update prompt can't
+    // block the spawned codex command.
+    // Adjacency-checked like PreSessionHookTests.hasProcessEnvFlag (that
+    // helper is file-private): a bare substring match could false-positive
+    // on the shell command body.
+    let codexCall = try #require(recorded.snapshot().first { $0.contains("new-window") })
+    let hasFlag = codexCall.firstIndex(of: "DISABLE_AUTO_UPDATE=true")
+        .map { $0 > codexCall.startIndex && codexCall[codexCall.index(before: $0)] == "-e" } ?? false
+    #expect(hasFlag,
+            "codex window must suppress the oh-my-zsh update prompt via -e; got: \(codexCall)")
 }
 
 @Test("handleTerminalCreate passes initial prompt to fresh Codex sessions")
