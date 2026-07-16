@@ -25,6 +25,23 @@ extension RPCRouter {
             useExistingBranch: useExistingBranch
         )
 
+        // Phase 1.5: Fetch from origin (coalesced, with tight timeout)
+        // Fire off as a background task so it doesn't block the RPC response.
+        // Phase 2 will re-await before git worktree add; FetchCache's singleflight
+        // means the second await joins the in-flight fetch or is a no-op if cached.
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            // Mirror completeCreateWorktree's guard: clean up the .creating row
+            // inserted by beginCreateWorktree so it can't be orphaned forever.
+            try? await db.worktrees.delete(id: pending.id)
+            throw WorktreeLifecycleError.repoNotFound(params.repoID)
+        }
+        let repoPath = repo.path
+        let defaultBranch = repo.defaultBranch
+        let fetchCache = self.fetchCache
+        Task {
+            await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
+        }
+
         // Phase 2: Fire-and-forget — git operations + tmux setup in background.
         // Serialize per-repo so concurrent creates don't contend on .git/index.lock.
         let lifecycle = self.lifecycle
@@ -48,6 +65,11 @@ extension RPCRouter {
         // — pending.repoID mirrors it but is now UUID? on the shared model.
         await repoSerializer.submit(repoID: params.repoID) {
             do {
+                // Re-await the fetch to ensure it completes before git operations.
+                // FetchCache's singleflight means this either joins the in-flight
+                // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
+                await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
+
                 let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, overrideProfileID: overrideProfileID, claudeSettingsOverlay: claudeSettingsOverlay)
                 switch completion {
                 case .ready:

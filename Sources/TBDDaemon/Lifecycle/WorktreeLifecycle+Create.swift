@@ -3,6 +3,7 @@ import os
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
+private let timingLogger = Logger(subsystem: "com.tbd.daemon", category: "worktreeTiming")
 
 /// Result of `completeCreateWorktree`. The pre-session path defers the
 /// primary terminal spawn to a background task so the caller's serializer
@@ -190,21 +191,21 @@ extension WorktreeLifecycle {
         }
 
         do {
-            // 1. Best-effort fetch from origin
-            do {
-                try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
-            } catch {
-                // Continue with local state if fetch fails
-            }
+            let clock = ContinuousClock()
+            let phaseStart = clock.now
 
-            // 2. Create parent directory
+            // 1. Create parent directory
+            let createDirStart = clock.now
             let parentDir = (worktree.path as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(
                 atPath: parentDir,
                 withIntermediateDirectories: true
             )
+            let createDirElapsedMs = createDirStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("createdir \(worktreeID.uuidString, privacy: .public) \(Int(createDirElapsedMs))ms")
 
-            // 3. git worktree add
+            // 2. git worktree add (fetch was run beforehand in the RPC handler)
+            let worktreeAddStart = clock.now
             let resultPath: String
             if let ref = existingBranchRef {
                 // Existing-branch flow: check out the chosen ref. Local branches
@@ -250,9 +251,12 @@ extension WorktreeLifecycle {
                 }
                 resultPath = result.path
             }
+            let worktreeAddElapsedMs = worktreeAddStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(Int(worktreeAddElapsedMs))ms")
 
-            // 5. Setup tmux terminals.
-            // 5a. Blocking preSession hook: spawn its terminal FIRST and gate
+            // 3. Setup tmux terminals.
+            let terminalSpawnStart = clock.now
+            // 3a. Blocking preSession hook: spawn its terminal FIRST and gate
             // the primary terminals on its completion marker. The wait runs in
             // a background task so the caller's RepoSerializer lane is freed
             // immediately — never block it for the duration of the hook.
@@ -276,6 +280,8 @@ extension WorktreeLifecycle {
                     worktreeID: worktree.id,
                     label: TerminalLabel.preSession
                 )))
+                let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
+                timingLogger.debug("terminal-spawn-presession \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
                 let phase3 = Task.detached { [self] in
                     await runPreSessionPhase3(
                         preSession: preSession,
@@ -292,7 +298,7 @@ extension WorktreeLifecycle {
                 return .preSessionPending(phase3: phase3)
             }
 
-            // 5b. No preSession hook: spawn primary terminals inline
+            // 3b. No preSession hook: spawn primary terminals inline
             // (behavior identical to before the preSession hook existed).
             _ = try await spawnPrimaryTerminals(
                 worktree: worktree, repo: repo,
@@ -305,9 +311,17 @@ extension WorktreeLifecycle {
                 overrideProfileID: overrideProfileID,
                 claudeSettingsOverlay: claudeSettingsOverlay
             )
+            let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
-            // 6. Update status to active
+            // 4. Update status to active
+            let markActiveStart = clock.now
             try await db.worktrees.updateStatus(id: worktreeID, status: .active)
+            let markActiveElapsedMs = markActiveStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.debug("mark-active \(worktreeID.uuidString, privacy: .public) \(Int(markActiveElapsedMs))ms")
+
+            let totalElapsedMs = phaseStart.duration(to: clock.now) / .milliseconds(1)
+            timingLogger.info("complete-worktree \(worktreeID.uuidString, privacy: .public) total \(Int(totalElapsedMs))ms")
             return .ready
 
         } catch {
