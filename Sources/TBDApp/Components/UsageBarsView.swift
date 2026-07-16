@@ -1,12 +1,14 @@
 import SwiftUI
 import TBDShared
 
-/// A compact two-row usage meter for a Claude OAuth profile: the 5-hour session
-/// window and the weekly all-models window, each drawn as a thin bar with a
-/// pace-aware colored fill (green/yellow/orange/red — projection of end-of-window
-/// usage from the current burn rate, floored by the API severity so a
-/// warning/critical bucket never reads healthy), a neutral "time marker" tick
-/// showing how far through the window we are, and a trailing percent.
+/// A compact usage meter for a Claude OAuth profile: the 5-hour session
+/// window, the weekly all-models window, and per-model-family weekly windows,
+/// each drawn as a thin bar with a pace-aware colored fill (green/yellow/
+/// orange/red — projection of end-of-window usage from the current burn rate,
+/// floored by the API severity so a warning/critical bucket never reads
+/// healthy), a neutral "time marker" tick showing how far through the window
+/// we are, and a trailing percent (and inline reset countdown on the weekly
+/// all-models row).
 ///
 /// Pure presentation over a `ProfileUsageSnapshot` (no picker/tab state), so it
 /// is reusable anywhere a snapshot is in hand. `now`/`timeZone` are injectable
@@ -34,6 +36,7 @@ struct UsageBarsView: View {
                             windowLabel: "5-hour window",
                             windowDuration: ProfileUsagePresentation.sessionWindow,
                             usesRelativeReset: false,
+                            showsInlineReset: false,
                             now: now,
                             timeZone: timeZone)
             }
@@ -43,6 +46,17 @@ struct UsageBarsView: View {
                             windowLabel: "Weekly window",
                             windowDuration: ProfileUsagePresentation.weeklyWindow,
                             usesRelativeReset: true,
+                            showsInlineReset: true,
+                            now: now,
+                            timeZone: timeZone)
+            }
+            ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()), id: \.offset) { _, scoped in
+                UsageBarRow(bucket: scoped,
+                            label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
+                            windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
+                            windowDuration: ProfileUsagePresentation.weeklyWindow,
+                            usesRelativeReset: true,
+                            showsInlineReset: false,
                             now: now,
                             timeZone: timeZone)
             }
@@ -53,19 +67,23 @@ struct UsageBarsView: View {
 // MARK: - One bar row
 
 /// A single window's row: a fixed-width label, the flexible bar (fill + time
-/// marker), and a fixed-width trailing percent — the three fixed columns keep
-/// bars vertically aligned across rows.
+/// marker), a fixed-width trailing percent, and a fixed-width trailing hint
+/// column. The four fixed columns keep bars vertically aligned across rows.
 private struct UsageBarRow: View {
     let bucket: ClaudeUsageLimitBucket
-    /// Leading label ("5h:" / "wk:").
+    /// Leading label ("5h:" / "wk:" / "F:").
     let label: String
-    /// Spelled-out window name for the `.help` tooltip ("5-hour window").
+    /// Spelled-out window name for the `.help` tooltip ("5-hour window" / "Fable weekly").
     let windowLabel: String
     /// Window length feeding the time marker's elapsed fraction.
     let windowDuration: TimeInterval
     /// The 5h window shows an absolute reset clock; the weekly window shows a
     /// relative countdown ("resets in 2d 5h").
     let usesRelativeReset: Bool
+    /// Whether to show the inline trailing countdown ("· 2d 5h"). When true,
+    /// requires usesRelativeReset to be true to render the countdown. The trailing
+    /// column is still reserved on all rows for bar alignment.
+    let showsInlineReset: Bool
     let now: Date
     let timeZone: TimeZone
 
@@ -83,8 +101,30 @@ private struct UsageBarRow: View {
                 .monospacedDigit()
                 .foregroundStyle(fillColor)
                 .frame(width: 30, alignment: .trailing)
+            trailingResetHint
         }
         .help(helpText)
+    }
+
+    // MARK: Trailing reset countdown
+
+    /// Fourth column: weekly reset countdown (inline hint) on rows where
+    /// showsInlineReset is true, empty but space-reserving on other rows
+    /// to keep bars aligned.
+    private var trailingResetHint: some View {
+        let countdownText: String = {
+            guard showsInlineReset, usesRelativeReset, let resetsAt = bucket.resetsAt,
+                  let compact = ProfileUsagePresentation.relativeResetText(resetsAt, now: now) else {
+                return ""
+            }
+            return "· \(compact)"
+        }()
+
+        return Text(countdownText)
+            .font(.system(size: 9, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
+            .frame(width: 46, alignment: .leading)
     }
 
     // MARK: Bar geometry
@@ -192,6 +232,12 @@ private struct UsageBarRow: View {
         ClaudeUsageLimitBucket(kind: kind, percent: percent, severity: severity,
                                resetsAt: resetsIn.map { now.addingTimeInterval($0) })
     }
+    func scopedBucket(_ name: String, _ percent: Double, severity: String? = nil,
+                      resetsIn: TimeInterval? = nil) -> ClaudeUsageLimitBucket {
+        ClaudeUsageLimitBucket(kind: "weekly_scoped", percent: percent, severity: severity,
+                               resetsAt: resetsIn.map { now.addingTimeInterval($0) },
+                               modelDisplayName: name)
+    }
     func snap(_ buckets: [ClaudeUsageLimitBucket]) -> ProfileUsageSnapshot {
         ProfileUsageSnapshot(buckets: buckets, fetchedAt: now,
                              lastAttemptAt: now, status: "ok", statusKind: .ok)
@@ -211,6 +257,7 @@ private struct UsageBarRow: View {
         UsageBarsView(snapshot: snap([
             bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),
             bucket("weekly_all", 55, severity: "normal", resetsIn: 2.95 * 24 * 3600),
+            scopedBucket("Fable", 15, severity: "normal", resetsIn: 2.95 * 24 * 3600),
         ]), now: now)
 
         // Near limit.
@@ -225,7 +272,7 @@ private struct UsageBarRow: View {
             bucket("weekly_all", 30, severity: "normal"),
         ]), now: now)
     }
-    .frame(width: 220)
+    .frame(width: 260)
     .padding()
 }
 #endif
