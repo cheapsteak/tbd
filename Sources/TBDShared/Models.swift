@@ -152,6 +152,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Set only on promoted scratch rows: the repo created by `tbd scratch promote`.
     public var promotedToRepoID: UUID?
 
+    /// Number of the GitHub PR this worktree was created from, if any. `nil` for
+    /// worktrees created from a plain branch. Lets `PRStatusManager` resolve
+    /// status by direct number lookup — the only way fork PRs (no matching
+    /// local branch) get tracked.
+    public var prNumber: Int?
+
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
 
@@ -172,7 +178,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 autoArchiveOnMerge: Bool? = nil,
                 autoHibernateOnMerge: Bool? = nil,
                 promotedToRepoID: UUID? = nil,
-                prStatus: PRStatus? = nil) {
+                prStatus: PRStatus? = nil,
+                prNumber: Int? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -193,6 +200,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.autoHibernateOnMerge = autoHibernateOnMerge
         self.promotedToRepoID = promotedToRepoID
         self.prStatus = prStatus
+        self.prNumber = prNumber
     }
 
     enum CodingKeys: String, CodingKey {
@@ -201,7 +209,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
-        case promotedToRepoID, prStatus
+        case promotedToRepoID, prStatus, prNumber
     }
 
     public init(from decoder: Decoder) throws {
@@ -226,6 +234,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         autoHibernateOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateOnMerge)
         promotedToRepoID = try c.decodeIfPresent(UUID.self, forKey: .promotedToRepoID)
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
+        prNumber = try c.decodeIfPresent(Int.self, forKey: .prNumber)
     }
 }
 

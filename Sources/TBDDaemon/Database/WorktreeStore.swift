@@ -30,6 +30,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var autoHibernateOnMerge: Bool?
     var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
     var promotedToRepoID: String?  // set only on promoted scratch rows
+    var pr_number: Int?  // number of the PR this worktree was created from, nil otherwise
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -56,6 +57,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.autoHibernateOnMerge = wt.autoHibernateOnMerge
         self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
+        self.pr_number = wt.prNumber
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -111,7 +113,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             autoArchiveOnMerge: autoArchiveOnMerge,
             autoHibernateOnMerge: autoHibernateOnMerge,
             promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
-            prStatus: pr
+            prStatus: pr,
+            prNumber: pr_number
         )
     }
 }
