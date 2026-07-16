@@ -108,7 +108,15 @@ public enum ClaudeHookOverlay {
     /// keys (it does NOT merge across multiple `--settings` flags), so the
     /// fallback list MUST ride in the same file as the hooks — hence this
     /// merged body rather than a second overlay.
-    public static func generateBody(fallbackModels: [String]? = nil) throws -> Data {
+    ///
+    /// `extraSettings`, when present, is DEEP-MERGED into the body after
+    /// `fallbackModel`: object-valued keys present in both recurse; any other
+    /// clash lets the `extraSettings` value win. This preserves TBD's `hooks`
+    /// when the fragment only adds top-level keys (e.g. `skillOverrides`).
+    public static func generateBody(
+        fallbackModels: [String]? = nil,
+        extraSettings: [String: Any]? = nil
+    ) throws -> Data {
         var body: [String: Any] = [
             "hooks": [
                 "SessionStart": [
@@ -166,10 +174,44 @@ public enum ClaudeHookOverlay {
         if let fallbackModels, !fallbackModels.isEmpty {
             body["fallbackModel"] = fallbackModels
         }
+        if let extraSettings {
+            deepMerge(&body, extraSettings)
+        }
         return try JSONSerialization.data(
             withJSONObject: body,
             options: [.prettyPrinted, .sortedKeys]
         )
+    }
+
+    /// Recursive dict merge: for a key present in both, if BOTH values are
+    /// `[String: Any]` recurse; otherwise the `overlay` value wins.
+    private static func deepMerge(_ base: inout [String: Any], _ overlay: [String: Any]) {
+        for (key, overlayValue) in overlay {
+            if var baseChild = base[key] as? [String: Any],
+               let overlayChild = overlayValue as? [String: Any] {
+                deepMerge(&baseChild, overlayChild)
+                base[key] = baseChild
+            } else {
+                base[key] = overlayValue
+            }
+        }
+    }
+
+    /// Parse an `extraSettingsJSON` fragment into a settings dict. Returns nil
+    /// for nil/empty input; also returns nil (with a warning) when the string
+    /// isn't a valid JSON object, so a malformed fragment degrades to "no extra
+    /// settings" rather than aborting the spawn.
+    private static func parseExtraSettings(_ json: String?) -> [String: Any]? {
+        guard let json, !json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else {
+            logger.warning("Ignoring malformed claudeSettingsOverlay fragment (not a JSON object): \(json, privacy: .public)")
+            return nil
+        }
+        return dict
     }
 
     /// Resolve the `--settings` overlay path for a spawn.
@@ -191,16 +233,33 @@ public enum ClaudeHookOverlay {
     /// shared global `overlayPath` is returned instead. This guarantees a
     /// spawn always has a usable `--settings` path — it degrades to "no
     /// fallback models" rather than aborting the spawn.
+    ///
+    /// `extraSettingsJSON` (a JSON OBJECT string) also forces a per-session
+    /// overlay and is deep-merged into the body. If it's nil/empty it's
+    /// ignored; if it fails to parse as a JSON object it's logged and dropped
+    /// (the fragment degrades to nothing — a bad fragment must never abort the
+    /// spawn).
+    ///
+    /// ponytail: the fragment applies at FRESH spawn only. Wake/hibernation
+    /// resume does NOT reapply it — that would need persisting the fragment on
+    /// the terminal DB row via a migration (out of scope for v1).
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
-        sessionKey: String
+        sessionKey: String,
+        extraSettingsJSON: String? = nil
     ) -> String {
-        guard let fallbackModels, !fallbackModels.isEmpty else {
+        let hasFallback = !(fallbackModels?.isEmpty ?? true)
+        // A non-empty fragment string forces a per-session overlay even if it
+        // later fails to parse — a malformed fragment degrades to hooks-only,
+        // it must not silently fall back to (and mutate) the shared global file.
+        let hasExtra = !(extraSettingsJSON?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        guard hasFallback || hasExtra else {
             return overlayPath
         }
+        let extraSettings = parseExtraSettings(extraSettingsJSON)
         let path = perSessionOverlayPath(sessionKey: sessionKey)
         do {
-            let data = try generateBody(fallbackModels: fallbackModels)
+            let data = try generateBody(fallbackModels: fallbackModels, extraSettings: extraSettings)
             let parent = (path as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(
                 atPath: parent,

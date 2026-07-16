@@ -277,7 +277,8 @@ extension WorktreeLifecycle {
         initialPrompt: String? = nil,
         cols: Int? = nil, rows: Int? = nil,
         completionAction: PreSessionCompletionAction,
-        overrideProfileID: UUID? = nil
+        overrideProfileID: UUID? = nil,
+        claudeSettingsOverlay: String? = nil
     ) async {
         let outcome = await waitForPreSessionCompletion(
             preSession: preSession, tmuxServer: worktree.tmuxServer
@@ -344,7 +345,8 @@ extension WorktreeLifecycle {
                 // On success the hook tab is about to be deleted — never splice
                 // it into tab order. On failure it stays, at index 1 as before.
                 preSessionTerminalID: succeeded ? nil : preSession.terminalID,
-                overrideProfileID: overrideProfileID
+                overrideProfileID: overrideProfileID,
+                claudeSettingsOverlay: claudeSettingsOverlay
             )
             for terminal in created {
                 subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(

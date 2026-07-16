@@ -822,7 +822,12 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// existing precedence-based resolution. Not persisted — creation-time only.
     /// Optional/defaulted for backward compatibility with older clients.
     public let profileID: UUID?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil) {
+    /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
+    /// per-session `--settings` overlay for this spawn's Claude agent. General
+    /// passthrough — TBD does not interpret the contents. Optional/defaulted for
+    /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
+    public let claudeSettingsOverlay: String?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -831,6 +836,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.suppressAutoParent = suppressAutoParent
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
+        self.claudeSettingsOverlay = claudeSettingsOverlay
     }
 }
 
@@ -1039,10 +1045,16 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// COLORFGBG environment variable value computed from active terminal color scheme's
     /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
     public let colorFgBg: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) {
+    /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
+    /// per-session `--settings` overlay for this spawn's Claude agent. General
+    /// passthrough — TBD does not interpret the contents. Optional/defaulted for
+    /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
+    public let claudeSettingsOverlay: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
+        self.claudeSettingsOverlay = claudeSettingsOverlay
     }
 }
 

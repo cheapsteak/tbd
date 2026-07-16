@@ -256,6 +256,117 @@ extension TBDHomeSerialized {
         #expect(FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath))
     }
 
+    // MARK: - Extra settings passthrough (claudeSettingsOverlay)
+
+    @Test func generateBodyWithNilExtraSettingsIsHooksOnly() throws {
+        // OFF branch: byte-identical to the hooks-only default. No extra keys.
+        let baseline = try ClaudeHookOverlay.generateBody()
+        let data = try ClaudeHookOverlay.generateBody(extraSettings: nil)
+        #expect(data == baseline)
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        // Only `hooks` at top level (no fallbackModel, no fragment keys).
+        #expect(parsed?.keys.sorted() == ["hooks"])
+    }
+
+    @Test func generateBodyWithExtraSettingsMergesAndKeepsHooks() throws {
+        let extra: [String: Any] = ["skillOverrides": ["x": "off"]]
+        let data = try ClaudeHookOverlay.generateBody(extraSettings: extra)
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // Fragment landed…
+        let overrides = parsed?["skillOverrides"] as? [String: Any]
+        #expect(overrides?["x"] as? String == "off")
+        // …and the original hooks dict is intact.
+        #expect(parsed?["hooks"] != nil)
+        #expect((parsed?["hooks"] as? [String: Any])?["SessionStart"] != nil)
+    }
+
+    @Test func generateBodyDeepMergesNestedObjectRatherThanReplacing() throws {
+        // A fragment that shares a nested object key with hooks: the merge must
+        // recurse and PRESERVE the sibling keys, not replace the whole `hooks`.
+        let extra: [String: Any] = ["hooks": ["MyEvent": "value"]]
+        let data = try ClaudeHookOverlay.generateBody(extraSettings: extra)
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let hooks = parsed?["hooks"] as? [String: Any]
+        // The added key is present…
+        #expect(hooks?["MyEvent"] as? String == "value")
+        // …and the pre-existing hook events survive (deep merge, not replace).
+        #expect(hooks?["SessionStart"] != nil)
+        #expect(hooks?["Stop"] != nil)
+    }
+
+    @Test func resolveOverlayPathWithNilExtraSettingsReturnsGlobalPath() throws {
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            extraSettingsJSON: nil
+        )
+        #expect(path == ClaudeHookOverlay.overlayPath)
+    }
+
+    @Test func resolveOverlayPathWithEmptyExtraSettingsReturnsGlobalPath() throws {
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            extraSettingsJSON: "   "
+        )
+        #expect(path == ClaudeHookOverlay.overlayPath)
+    }
+
+    @Test func resolveOverlayPathWithExtraSettingsWritesPerSessionMergedFile() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let key = UUID().uuidString
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: key,
+            extraSettingsJSON: #"{"skillOverrides":{"longeye-code-review":"off"}}"#
+        )
+        // Per-session file (not the shared global overlay).
+        #expect(path != ClaudeHookOverlay.overlayPath)
+        #expect(path.contains(ClaudeHookOverlay.perSessionPrefix))
+        #expect(FileManager.default.fileExists(atPath: path))
+
+        // On-disk overlay merges the fragment AND keeps hooks.
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        let overrides = parsed?["skillOverrides"] as? [String: Any]
+        #expect(overrides?["longeye-code-review"] as? String == "off")
+    }
+
+    @Test func resolveOverlayPathWithMalformedExtraSettingsDoesNotThrowAndKeepsHooks() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        // Malformed fragment: still forces a per-session write (non-empty
+        // string), degrades to hooks-only, never throws/aborts.
+        let key = UUID().uuidString
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: key,
+            extraSettingsJSON: "{not json"
+        )
+        #expect(path.contains(ClaudeHookOverlay.perSessionPrefix))
+        #expect(FileManager.default.fileExists(atPath: path))
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // Fragment ignored; hooks preserved.
+        #expect(parsed?["hooks"] != nil)
+        #expect(parsed?["skillOverrides"] == nil)
+    }
+
     @Test func roundtripsAsValidJSON() throws {
         let data = try ClaudeHookOverlay.generateBody()
         // Must round-trip — a malformed overlay file would crash Claude

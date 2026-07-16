@@ -53,6 +53,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Read initial prompt from a file (use - for stdin)")
     var promptFile: String?
 
+    @Option(name: .long, help: "Extra Claude Code settings as a JSON object, deep-merged into TBD's per-session --settings overlay for the spawned agent (Claude only). Example: '{\"skillOverrides\":{\"some-skill\":\"off\"}}'")
+    var claudeSettings: String?
+
     @Option(
         name: .customLong("position"),
         help: ArgumentHelp(
@@ -125,7 +128,8 @@ struct WorktreeCreate: AsyncParsableCommand {
                 parentWorktreeID: nil,
                 siblingOfWorktreeID: parentingFields.siblingOfWorktreeID,
                 callerWorktreeID: parentingFields.callerWorktreeID,
-                suppressAutoParent: parentingFields.suppressAutoParent
+                suppressAutoParent: parentingFields.suppressAutoParent,
+                claudeSettingsOverlay: claudeSettings
             ),
             resultType: Worktree.self
         )

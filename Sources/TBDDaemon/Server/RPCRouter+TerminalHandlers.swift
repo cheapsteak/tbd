@@ -320,7 +320,8 @@ extension RPCRouter {
             settingsOverlayPath: isClaudeType
                 ? ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString
+                    sessionKey: plannedTerminalID.uuidString,
+                    extraSettingsJSON: params.claudeSettingsOverlay
                   )
                 : nil,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,

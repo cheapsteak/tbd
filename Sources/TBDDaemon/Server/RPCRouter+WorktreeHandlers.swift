@@ -40,12 +40,15 @@ extension RPCRouter {
         // Explicit per-creation model-profile override (sidebar `+` picker).
         // nil preserves the repo/scratch/global precedence chain.
         let overrideProfileID = params.profileID
+        // General Claude settings passthrough, deep-merged into the per-session
+        // --settings overlay on the fresh-primary spawn (see ClaudeHookOverlay).
+        let claudeSettingsOverlay = params.claudeSettingsOverlay
         // handleWorktreeCreate is always repo-scoped (scratch creation uses a
         // separate RPC), so params.repoID is the reliable non-optional source
         // — pending.repoID mirrors it but is now UUID? on the shared model.
         await repoSerializer.submit(repoID: params.repoID) {
             do {
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, overrideProfileID: overrideProfileID)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, overrideProfileID: overrideProfileID, claudeSettingsOverlay: claudeSettingsOverlay)
                 switch completion {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
