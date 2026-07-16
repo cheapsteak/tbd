@@ -36,11 +36,32 @@ struct BranchPickerMergeTests {
         let prs = [pr(454, head: "show-weekly-reset", owner: "zionts", fork: true)]
         let items = mergePickerItems(branches: branches, prs: prs)
         #expect(items.count == 3)
-        // Order: local main, PR-only fork row, remote dev.
-        #expect(items[0].branch?.name == "main")
+        // PR-carrying rows float to the top: fork row first, then plain branches
+        // in their original relative order (main, then remote dev).
+        #expect(items[0].branch == nil)
+        #expect(items[0].pr?.number == 454)
+        #expect(items[1].branch?.name == "main")
+        #expect(items[2].branch?.name == "origin/dev")
+    }
+
+    @Test("PR-carrying rows float to the top, preserving relative order within each group")
+    func prRowsFloatToTop() {
+        let branches = [local("a"), local("b"), remote("dev")]
+        let prs = [
+            pr(200, head: "b", title: "b decoration"),
+            pr(454, head: "fork-head", owner: "zionts", fork: true)
+        ]
+        let items = mergePickerItems(branches: branches, prs: prs)
+        #expect(items.count == 4)
+        // pr != nil group first (decorated b, then fork row — original relative
+        // order preserved), then plain rows (a, then remote dev).
+        #expect(items[0].branch?.name == "b")
+        #expect(items[0].pr?.number == 200)
         #expect(items[1].branch == nil)
         #expect(items[1].pr?.number == 454)
-        #expect(items[2].branch?.name == "origin/dev")
+        #expect(items[2].branch?.name == "a")
+        #expect(items[2].pr == nil)
+        #expect(items[3].branch?.name == "origin/dev")
     }
 
     @Test("non-fork PR with no matching branch still gets its own row (unfetched head)")
@@ -49,8 +70,9 @@ struct BranchPickerMergeTests {
         let prs = [pr(77, head: "not-fetched-yet", fork: false)]
         let items = mergePickerItems(branches: branches, prs: prs)
         #expect(items.count == 2)
-        #expect(items.last?.branch == nil)
-        #expect(items.last?.pr?.number == 77)
+        // PR-carrying row floats to the top.
+        #expect(items.first?.branch == nil)
+        #expect(items.first?.pr?.number == 77)
     }
 
     @Test("two same-repo PRs on one head branch: one decorates, the other gets its own row")
@@ -85,8 +107,9 @@ struct BranchPickerMergeTests {
         let items = mergePickerItems(branches: branches, prs: prs)
         #expect(items.count == 2)
         #expect(items.first { $0.branch?.name == "main" }?.pr == nil)
-        #expect(items.last?.branch == nil)
-        #expect(items.last?.pr?.number == 9)
+        // PR-carrying row floats to the top even though it doesn't decorate "main".
+        #expect(items.first?.branch == nil)
+        #expect(items.first?.pr?.number == 9)
     }
 
     @Test("PR-only rows go before remotes even with no local branches")

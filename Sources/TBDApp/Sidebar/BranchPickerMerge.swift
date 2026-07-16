@@ -16,8 +16,10 @@ struct PickerItem: Equatable, Identifiable {
 /// Merge open PRs into the branch list. A non-fork PR whose `headRefName` matches
 /// a branch row's `localName` decorates that (first-matching) row; every other PR
 /// — fork PRs, and non-fork PRs with no local branch — becomes its own row,
-/// inserted after local branches and before the first remote branch. Existing
-/// branch order is preserved.
+/// inserted after local branches and before the first remote branch. Finally, the
+/// list is stably partitioned so every PR-carrying row (decorated branch or
+/// PR-only) floats to the top, above plain branches — each group keeping its
+/// existing relative order.
 func mergePickerItems(branches: [BranchInfo], prs: [OpenPRInfo]) -> [PickerItem] {
     let branchLocalNames = Set(branches.map(\.localName))
 
@@ -50,7 +52,10 @@ func mergePickerItems(branches: [BranchInfo], prs: [OpenPRInfo]) -> [PickerItem]
         result.append(PickerItem(branch: branch, pr: pr))
     }
     if !insertedPROnly { result.append(contentsOf: prOnlyRows) }
-    return result
+
+    // Stable partition: PR-carrying rows float to the top, plain branches after —
+    // `filter` preserves relative order within each group.
+    return result.filter { $0.pr != nil } + result.filter { $0.pr == nil }
 }
 
 /// Case-insensitive typeahead: branch name/localName, PR number, PR title, owner
