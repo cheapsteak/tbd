@@ -24,11 +24,18 @@ func mergePickerItems(branches: [BranchInfo], prs: [OpenPRInfo]) -> [PickerItem]
     // A PR decorates a branch only when it is same-repo AND some branch carries
     // its head name. Fork PRs never decorate (a fork head like "main" can collide
     // with an unrelated local branch — see forkDoesNotDecorateCoincidentalLocal).
+    // Only ONE PR per head branch can claim the decoration slot; any same-repo PR
+    // that loses the race (two PRs sharing a head, e.g. same head → different
+    // base) must still surface as its own PR-only row rather than vanish.
     var decoration: [String: OpenPRInfo] = [:]
+    var claimed = Set<Int>()   // PR numbers that took a decoration slot
     for pr in prs where !pr.isCrossRepository && branchLocalNames.contains(pr.headRefName) {
-        if decoration[pr.headRefName] == nil { decoration[pr.headRefName] = pr }
+        if decoration[pr.headRefName] == nil {
+            decoration[pr.headRefName] = pr
+            claimed.insert(pr.number)
+        }
     }
-    let prOnly = prs.filter { $0.isCrossRepository || !branchLocalNames.contains($0.headRefName) }
+    let prOnly = prs.filter { !claimed.contains($0.number) }
     let prOnlyRows = prOnly.map { PickerItem(branch: nil, pr: $0) }
 
     var result: [PickerItem] = []

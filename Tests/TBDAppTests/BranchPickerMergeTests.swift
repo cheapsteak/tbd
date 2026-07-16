@@ -53,6 +53,31 @@ struct BranchPickerMergeTests {
         #expect(items.last?.pr?.number == 77)
     }
 
+    @Test("two same-repo PRs on one head branch: one decorates, the other gets its own row")
+    func twoSameRepoPRsSharingHeadBothSurface() {
+        // Same head branch, different base → two open PRs. The first decorates the
+        // branch row; the second must not vanish just because its head is a local
+        // branch name — it falls through to a PR-only row.
+        let branches = [local("feature-x"), local("main")]
+        let prs = [
+            pr(100, head: "feature-x", title: "feature-x → main"),
+            pr(101, head: "feature-x", title: "feature-x → release")
+        ]
+        let items = mergePickerItems(branches: branches, prs: prs)
+
+        // Two items involve "feature-x": the decorated branch row + the PR-only row.
+        let involving = items.filter { $0.branch?.localName == "feature-x" || $0.pr?.headRefName == "feature-x" }
+        #expect(involving.count == 2)
+
+        let decorated = items.first { $0.branch?.name == "feature-x" }
+        #expect(decorated?.pr?.number == 100)
+        let prOnly = items.first { $0.branch == nil && $0.pr != nil }
+        #expect(prOnly?.pr?.number == 101)
+
+        // PickerItem.id is branch name OR "pr-<number>", so no id collision.
+        #expect(Set(items.map(\.id)).count == items.count)
+    }
+
     @Test("fork PR whose head name coincides with a local branch does NOT decorate it")
     func forkDoesNotDecorateCoincidentalLocal() {
         let branches = [local("main")]
