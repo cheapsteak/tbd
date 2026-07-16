@@ -12,11 +12,13 @@ import TBDShared
 struct WakeOnFocusDecisionTests {
     private func terminal(_ id: UUID, parked: Bool) -> Terminal {
         Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                 claudeSessionID: UUID().uuidString,
                  hibernatedAt: parked ? Date() : nil)
     }
 
     private func parkedTerminal(_ id: UUID, reason: HibernateReason?) -> Terminal {
         Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                 claudeSessionID: UUID().uuidString,
                  hibernatedAt: Date(), hibernateReason: reason)
     }
 
@@ -245,6 +247,7 @@ struct WakeOnFocusDecisionTests {
         let ids = (0..<5).map { _ in UUID() }
         state.terminals[wt] = ids.map { id in
             Terminal(id: id, worktreeID: wt, tmuxWindowID: "@1", tmuxPaneID: "%1",
+                     claudeSessionID: UUID().uuidString,
                      hibernatedAt: Date())
         }
         // Focus the first parked terminal.

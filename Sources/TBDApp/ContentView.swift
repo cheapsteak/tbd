@@ -332,6 +332,14 @@ struct ContentView: View {
                 for worktreeID in newSelection {
                     await appState.refreshTerminals(worktreeID: worktreeID)
                 }
+                // Cold-start race fix: after terminals refresh on focus, re-invoke
+                // the wake decision. The synchronous focusTerminalAfterSelectionChange
+                // below runs before refreshTerminals completes, so the wake decision
+                // may race against an empty terminals[worktreeID] list. Re-invoking
+                // after the full load ensures parked terminals are visible.
+                if newSelection.count == 1, let id = newSelection.first {
+                    appState.wakeHibernatedTerminalsOnFocus(worktreeID: id)
+                }
             }
 
             // Keep-alive: track most-recently-visited worktree for view-tree preservation.
