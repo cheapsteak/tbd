@@ -22,7 +22,7 @@ struct FloatingMenuAnchor<Content: View>: NSViewRepresentable {
             if let panel = coordinator.panel {
                 panel.updateContent(content)          // refresh (e.g. default-row highlight); no reposition
             } else {
-                let panel = FloatingPanel(content: content)
+                let panel = FloatingPanel(content: content, canBecomeKey: true)
                 coordinator.panel = panel
                 panel.showAsMenu(relativeTo: nsView)
             }

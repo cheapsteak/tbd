@@ -1,12 +1,16 @@
 import AppKit
 import SwiftUI
 
-/// A borderless, non-activating floating panel for instant show/hide
-/// without stealing focus from the parent text field.
+/// A borderless, non-activating floating panel for instant show/hide.
+/// Non-key by default so hover overlays (e.g. the emoji picker) never steal
+/// focus from the parent rename field; pass `canBecomeKey: true` when the
+/// panel hosts its own text input (e.g. the branch filter field).
 class FloatingPanel: NSPanel {
     private var hostingView: NSHostingView<AnyView>?
+    private let keyCapable: Bool
 
-    init<Content: View>(content: Content) {
+    init<Content: View>(content: Content, canBecomeKey: Bool = false) {
+        keyCapable = canBecomeKey
         super.init(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -87,6 +91,6 @@ class FloatingPanel: NSPanel {
         orderOut(nil)
     }
 
-    override var canBecomeKey: Bool { false }
+    override var canBecomeKey: Bool { keyCapable }
     override var canBecomeMain: Bool { false }
 }
