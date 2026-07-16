@@ -19,11 +19,14 @@ Merged in order (later wins key collisions; object-valued keys recurse):
 
 ## When each applies
 
-- The **repo fragment** is read fresh from the repo row at every Claude
-  spawn, so it applies on ALL spawn paths: fresh create, resume,
-  hibernation wake, recreate-window*, and profile swap.
-  (*recreate-window respawns as shell/codex, never Claude, so no overlay
-  is involved there.)
+- The **repo fragment** is resolved from the repo row at spawn time, so it
+  applies on ALL spawn paths: fresh create, resume, hibernation wake,
+  recreate-window*, and profile swap. Hibernation wake and the RPC spawn
+  handlers read the row fresh; preSession-hook-gated creates and
+  archived-worktree revives use the row as of create/revive entry (the
+  snapshot threads through the detached spawn phase, which can run minutes
+  later). (*recreate-window respawns as shell/codex, never Claude, so no
+  overlay is involved there.)
 - The **per-spawn fragment** applies at fresh spawn only; resumes and wakes
   do not reapply it.
 

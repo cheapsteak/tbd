@@ -243,9 +243,11 @@ public enum ClaudeHookOverlay {
     /// dropped without discarding the other, and a bad fragment must never
     /// abort the spawn.
     ///
-    /// The repo fragment is read fresh from the repo row at every spawn, so it
-    /// applies on ALL spawn paths (fresh create, resume, wake, profile swap).
-    /// The per-spawn fragment applies at FRESH spawn only — callers gate it.
+    /// The repo fragment is resolved from the repo row at spawn time (on
+    /// preSession-gated creates and archived-worktree revives, from the row as
+    /// of create/revive entry), so it applies on ALL spawn paths (fresh create,
+    /// resume, wake, profile swap). The per-spawn fragment applies at FRESH
+    /// spawn only — callers gate it.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,

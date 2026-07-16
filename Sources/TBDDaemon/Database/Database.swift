@@ -892,8 +892,8 @@ public final class TBDDatabase: Sendable {
         }
 
         // Per-repo Claude settings overlay fragment (JSON object string,
-        // plain-text passthrough). NULL = unset. Read fresh at every Claude
-        // spawn and deep-merged into TBD's per-session `--settings` overlay
+        // plain-text passthrough). NULL = unset. Resolved at Claude spawn
+        // time and deep-merged into TBD's per-session `--settings` overlay
         // beneath the per-spawn `--claude-settings` fragment. See
         // docs/claude-settings-overlay.md.
         migrator.registerMigration("v53_repo_claude_settings_overlay") { db in

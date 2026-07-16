@@ -26,7 +26,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     /// Free-form env-var overrides applied to spawned sessions (repo scope).
     public var envOverrides: [String: String]
     /// Claude settings overlay fragment (JSON object string) deep-merged into
-    /// TBD's per-session `--settings` overlay at every Claude spawn. nil =
+    /// TBD's per-session `--settings` overlay at Claude spawn time. nil =
     /// unset. Passthrough — TBD does not interpret the contents.
     public var claudeSettingsOverlay: String?
 

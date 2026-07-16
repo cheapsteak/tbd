@@ -195,7 +195,7 @@ private struct ClaudeSettingsOverlayEditor: View {
             Text("Claude settings overlay")
                 .font(.callout)
                 .fontWeight(.medium)
-            Text("JSON object deep-merged into TBD's --settings overlay on every Claude spawn in this repo (fresh, resume, wake). Leave empty to disable.")
+            Text("JSON object deep-merged into TBD's --settings overlay when Claude spawns in this repo (fresh, resume, wake). Leave empty to disable.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
