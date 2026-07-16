@@ -511,6 +511,14 @@ public final class Daemon: Sendable {
         let appForeground = AppForegroundState()
         rpcRouter.appForegroundState = appForeground
 
+        // 8b. Migrate legacy per-repo claude_settings_overlay column values
+        // (v53, PR #452) to their file-backed home under
+        // `~/tbd/repos/<repoID>/claude-settings.json`. Idempotent; converges
+        // to a no-op once every row is NULL. MUST run before the servers
+        // start serving (steps 9/10): spawn RPCs read the overlay file, and a
+        // spawn landing before the sweep would miss a legacy column value.
+        await database.repos.sweepClaudeSettingsOverlayColumnToFiles()
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -600,12 +608,6 @@ public final class Daemon: Sendable {
             } catch {
                 daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
             }
-
-            // 11a-cso. Migrate legacy per-repo claude_settings_overlay column
-            // values (v53, PR #452) to their file-backed home under
-            // `~/tbd/repos/<repoID>/claude-settings.json`. Idempotent;
-            // converges to a no-op once every row is NULL.
-            await database.repos.sweepClaudeSettingsOverlayColumnToFiles()
 
             // Effective foreground for the git cadence gates: the app-reported
             // state AND at least one live client connection, so a crashed or

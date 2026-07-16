@@ -247,12 +247,15 @@ public struct RepoStore: Sendable {
             guard let repoID = UUID(uuidString: row.id) else { continue }
             let path = TBDConstants.claudeSettingsOverlayPath(repoID: repoID, environment: environment)
             do {
-                if !FileManager.default.fileExists(atPath: path) {
+                if FileManager.default.fileExists(atPath: path) {
+                    logger.info("claude_settings_overlay sweep: overlay file already exists at \(path, privacy: .public); discarding legacy column value for repo \(row.id, privacy: .public)")
+                } else {
                     try FileManager.default.createDirectory(
                         atPath: (path as NSString).deletingLastPathComponent,
                         withIntermediateDirectories: true
                     )
                     try row.fragment.write(toFile: path, atomically: true, encoding: .utf8)
+                    logger.info("Migrated claude_settings_overlay for repo \(row.id, privacy: .public) to \(path, privacy: .public)")
                 }
                 try await writer.write { db in
                     try db.execute(
@@ -260,7 +263,6 @@ public struct RepoStore: Sendable {
                         arguments: [row.id]
                     )
                 }
-                logger.info("Migrated claude_settings_overlay for repo \(row.id, privacy: .public) to \(path, privacy: .public)")
             } catch {
                 logger.error("claude_settings_overlay sweep failed for repo \(row.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }

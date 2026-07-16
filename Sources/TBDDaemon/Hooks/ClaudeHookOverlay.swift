@@ -214,6 +214,19 @@ public enum ClaudeHookOverlay {
         return dict
     }
 
+    /// Read the repo's Claude settings overlay fragment file
+    /// (`~/tbd/repos/<repoID>/claude-settings.json`), fresh at spawn time.
+    /// nil repoID (scratch spaces) or a missing/unreadable file → nil (inert).
+    /// Malformed content is handled downstream by `resolveOverlayPath`
+    /// (degrades to hooks-only, never aborts the spawn).
+    public static func repoSettingsFragment(repoID: UUID?) -> String? {
+        guard let repoID else { return nil }
+        return try? String(
+            contentsOfFile: TBDConstants.claudeSettingsOverlayPath(repoID: repoID),
+            encoding: .utf8
+        )
+    }
+
     /// Resolve the `--settings` overlay path for a spawn.
     ///
     /// - Both fallback models AND `extraSettingsJSON` absent → returns the
@@ -235,7 +248,8 @@ public enum ClaudeHookOverlay {
     /// spawn always has a usable `--settings` path — it degrades to "no
     /// fallback models" rather than aborting the spawn.
     ///
-    /// `repoSettingsJSON` (the repo row's persisted fragment) and
+    /// `repoSettingsJSON` (the repo's file-backed fragment, read by callers
+    /// via `repoSettingsFragment`) and
     /// `extraSettingsJSON` (the per-spawn param) are JSON OBJECT strings that
     /// also force a per-session overlay and are deep-merged into the body —
     /// repo fragment first, per-spawn fragment on top (per-spawn wins
@@ -248,19 +262,6 @@ public enum ClaudeHookOverlay {
     /// spawn paths (fresh create, resume, wake, profile swap) and edits made
     /// during a preSession hook wait are picked up. The per-spawn fragment
     /// applies at FRESH spawn only — callers gate it.
-    /// Read the repo's Claude settings overlay fragment file
-    /// (`~/tbd/repos/<repoID>/claude-settings.json`), fresh at spawn time.
-    /// nil repoID (scratch spaces) or a missing/unreadable file → nil (inert).
-    /// Malformed content is handled downstream by `resolveOverlayPath`
-    /// (degrades to hooks-only, never aborts the spawn).
-    public static func repoSettingsFragment(repoID: UUID?) -> String? {
-        guard let repoID else { return nil }
-        return try? String(
-            contentsOfFile: TBDConstants.claudeSettingsOverlayPath(repoID: repoID),
-            encoding: .utf8
-        )
-    }
-
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,
