@@ -601,6 +601,12 @@ public final class Daemon: Sendable {
                 daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
             }
 
+            // 11a-cso. Migrate legacy per-repo claude_settings_overlay column
+            // values (v53, PR #452) to their file-backed home under
+            // `~/tbd/repos/<repoID>/claude-settings.json`. Idempotent;
+            // converges to a no-op once every row is NULL.
+            await database.repos.sweepClaudeSettingsOverlayColumnToFiles()
+
             // Effective foreground for the git cadence gates: the app-reported
             // state AND at least one live client connection, so a crashed or
             // force-quit app (which never reports `false`) can't pin the fast

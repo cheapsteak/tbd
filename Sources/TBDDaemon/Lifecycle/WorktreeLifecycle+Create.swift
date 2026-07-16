@@ -564,9 +564,9 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID1.uuidString,
-                    // Repo fragment is persisted config — applies on every
-                    // spawn path, resume included.
-                    repoSettingsJSON: repo?.claudeSettingsOverlay,
+                    // Repo fragment is file-backed config, read fresh at
+                    // spawn time — applies on every spawn path, resume included.
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
                     // Per-spawn fragment applies to FRESH primary spawns only;
                     // an archived-session resume must not reapply it. Hooks
                     // overlay still resolves for resumes — only
@@ -706,7 +706,7 @@ extension WorktreeLifecycle {
                     settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                         fallbackModels: resolvedProfile?.fallbackModels,
                         sessionKey: plannedID.uuidString,
-                        repoSettingsJSON: repo?.claudeSettingsOverlay
+                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides

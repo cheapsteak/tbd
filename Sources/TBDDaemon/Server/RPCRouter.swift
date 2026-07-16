@@ -288,8 +288,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetEnvOverrides(request.paramsData)
             case RPCMethod.repoSetEnvOverrides:
                 return try await handleRepoSetEnvOverrides(request.paramsData)
-            case RPCMethod.repoSetClaudeSettingsOverlay:
-                return try await handleRepoSetClaudeSettingsOverlay(request.paramsData)
             case RPCMethod.modelProfileSetEnvOverrides:
                 return try await handleModelProfileSetEnvOverrides(request.paramsData)
             case RPCMethod.modelProfileFetchUsage:

@@ -24,7 +24,6 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hidden: Bool
     var expanded: Bool
     var env_overrides: String?
-    var claude_settings_overlay: String?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -42,7 +41,6 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.hidden = repo.hidden
         self.expanded = repo.expanded
         self.env_overrides = EnvOverridesCoding.encode(repo.envOverrides)
-        self.claude_settings_overlay = repo.claudeSettingsOverlay
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -68,8 +66,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             status: RepoStatus(rawValue: status) ?? .ok,
             hidden: hidden,
             expanded: expanded,
-            envOverrides: EnvOverridesCoding.decode(env_overrides),
-            claudeSettingsOverlay: claude_settings_overlay
+            envOverrides: EnvOverridesCoding.decode(env_overrides)
         )
     }
 }
@@ -220,14 +217,53 @@ public struct RepoStore: Sendable {
         }
     }
 
-    /// Set or clear the per-repo Claude settings overlay fragment.
-    /// nil (or the caller mapping empty text to nil) clears to NULL.
-    public func setClaudeSettingsOverlay(id: UUID, overlay: String?) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE repo SET claude_settings_overlay = ? WHERE id = ?",
-                arguments: [overlay, id.uuidString]
-            )
+    /// One-time idempotent startup sweep: migrate legacy per-repo Claude
+    /// settings overlay fragments out of the DB and into their file-backed
+    /// home (`~/tbd/repos/<repoID>/claude-settings.json`).
+    ///
+    /// PR #452 briefly stored the fragment in the `claude_settings_overlay`
+    /// column (v53); the column stays in the schema as a vestige — existing
+    /// migrations are never modified. For every row with a non-NULL value:
+    /// write it to the overlay file (unless the file already exists — the
+    /// file wins), then NULL the column. Converges to a no-op. Non-fatal:
+    /// a failed row is logged and left for the next startup.
+    public func sweepClaudeSettingsOverlayColumnToFiles(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) async {
+        let logger = Logger(subsystem: "com.tbd.daemon", category: "startup")
+        let rows: [(id: String, fragment: String)]
+        do {
+            rows = try await writer.read { db in
+                try Row.fetchAll(
+                    db,
+                    sql: "SELECT id, claude_settings_overlay FROM repo WHERE claude_settings_overlay IS NOT NULL"
+                ).map { (id: $0["id"], fragment: $0["claude_settings_overlay"]) }
+            }
+        } catch {
+            logger.error("claude_settings_overlay sweep: read failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        for row in rows {
+            guard let repoID = UUID(uuidString: row.id) else { continue }
+            let path = TBDConstants.claudeSettingsOverlayPath(repoID: repoID, environment: environment)
+            do {
+                if !FileManager.default.fileExists(atPath: path) {
+                    try FileManager.default.createDirectory(
+                        atPath: (path as NSString).deletingLastPathComponent,
+                        withIntermediateDirectories: true
+                    )
+                    try row.fragment.write(toFile: path, atomically: true, encoding: .utf8)
+                }
+                try await writer.write { db in
+                    try db.execute(
+                        sql: "UPDATE repo SET claude_settings_overlay = NULL WHERE id = ?",
+                        arguments: [row.id]
+                    )
+                }
+                logger.info("Migrated claude_settings_overlay for repo \(row.id, privacy: .public) to \(path, privacy: .public)")
+            } catch {
+                logger.error("claude_settings_overlay sweep failed for repo \(row.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

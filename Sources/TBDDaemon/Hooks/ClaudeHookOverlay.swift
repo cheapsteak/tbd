@@ -243,11 +243,24 @@ public enum ClaudeHookOverlay {
     /// dropped without discarding the other, and a bad fragment must never
     /// abort the spawn.
     ///
-    /// The repo fragment is resolved from the repo row at spawn time (on
-    /// preSession-gated creates and archived-worktree revives, from the row as
-    /// of create/revive entry), so it applies on ALL spawn paths (fresh create,
-    /// resume, wake, profile swap). The per-spawn fragment applies at FRESH
-    /// spawn only — callers gate it.
+    /// The repo fragment is read fresh from the repo's overlay file (see
+    /// `repoSettingsFragment`) at actual spawn time, so it applies on ALL
+    /// spawn paths (fresh create, resume, wake, profile swap) and edits made
+    /// during a preSession hook wait are picked up. The per-spawn fragment
+    /// applies at FRESH spawn only — callers gate it.
+    /// Read the repo's Claude settings overlay fragment file
+    /// (`~/tbd/repos/<repoID>/claude-settings.json`), fresh at spawn time.
+    /// nil repoID (scratch spaces) or a missing/unreadable file → nil (inert).
+    /// Malformed content is handled downstream by `resolveOverlayPath`
+    /// (degrades to hooks-only, never aborts the spawn).
+    public static func repoSettingsFragment(repoID: UUID?) -> String? {
+        guard let repoID else { return nil }
+        return try? String(
+            contentsOfFile: TBDConstants.claudeSettingsOverlayPath(repoID: repoID),
+            encoding: .utf8
+        )
+    }
+
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,

@@ -512,8 +512,8 @@ public actor HibernationCoordinator {
         let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,
-            // Repo fragment is persisted config — reapplied on wake.
-            repoSettingsJSON: repo?.claudeSettingsOverlay
+            // Repo fragment is file-backed config, read fresh — reapplied on wake.
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
         )
         let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
         // Pre-accept Claude's folder-trust dialog for scratch spaces so a wake

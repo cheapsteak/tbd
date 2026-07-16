@@ -869,14 +869,6 @@ actor DaemonClient {
         )
     }
 
-    /// Set or clear a repo's Claude settings overlay fragment (nil clears).
-    func setRepoClaudeSettingsOverlay(repoID: UUID, overlay: String?) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.repoSetClaudeSettingsOverlay,
-            params: SetRepoClaudeSettingsOverlayParams(repoID: repoID, overlay: overlay)
-        )
-    }
-
     /// Set or clear a model profile's free-form env overrides.
     func setProfileEnvOverrides(profileID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(

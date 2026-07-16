@@ -119,6 +119,20 @@ public enum TBDConstants {
         notesPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Path to a repo's Claude settings overlay fragment file:
+    /// `~/tbd/repos/<repoID>/claude-settings.json`. A user-authored JSON
+    /// object deep-merged into TBD's `--settings` overlay at Claude spawn
+    /// time. Honors TBD_HOME.
+    public static func claudeSettingsOverlayPath(repoID: UUID, environment: [String: String]) -> String {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent("claude-settings.json")
+            .path
+    }
+    public static func claudeSettingsOverlayPath(repoID: UUID) -> String {
+        claudeSettingsOverlayPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Path to a scratch worktree's notepad file:
     /// `~/tbd/worktrees/<worktreeID>/notes.md`. Honors TBD_HOME.
     public static func notesPath(worktreeID: UUID, environment: [String: String]) -> String {

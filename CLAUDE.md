@@ -62,6 +62,13 @@ When adding a DB column in `Sources/TBDDaemon/Database/Database.swift`:
 
 Migrations use GRDB's `DatabaseMigrator`, numbered sequentially (`v1`, `v2`, `v3`...). Never modify an existing migration — always add a new one.
 
+### Per-repo config: two storage patterns
+
+- **DB columns** (`config` / `repo` tables) for small structured settings the daemon resolves at spawn time: `envOverrides`, profile override, feature flags.
+- **Files under `~/tbd/repos/<repoID>/`** for user-authored editable blobs: hooks, `notes.md`, `claude-settings.json`. Path helpers live in `TBDConstants` (`hookPath`, `notesPath`, `claudeSettingsOverlayPath`) and honor `TBD_HOME`.
+
+File-backed settings editors in the app write the file directly (no RPC) and must show the tilde-abbreviated backing path with a copy-path button — see `RepoHooksSettingsView`. Don't add a DB column for a user-authored blob (PR #452's `claude_settings_overlay` column had to be swept back out to a file).
+
 ### Unbundled executable constraints
 TBDApp runs as a bare SPM executable, not a `.app` bundle. APIs that require a bundle identifier will crash at runtime. Before using any Apple framework API, check whether it requires a bundle:
 - `UNUserNotificationCenter.current()` — crashes without `CFBundleIdentifier`
