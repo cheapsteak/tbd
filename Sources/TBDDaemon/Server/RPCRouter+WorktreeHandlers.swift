@@ -33,9 +33,10 @@ extension RPCRouter {
             throw WorktreeLifecycleError.repoNotFound(params.repoID)
         }
         let repoPath = repo.path
+        let defaultBranch = repo.defaultBranch
         let fetchCache = self.fetchCache
         Task {
-            await fetchCache.fetchIfNeeded(repoPath: repoPath)
+            await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
         }
 
         // Phase 2: Fire-and-forget — git operations + tmux setup in background.
@@ -64,7 +65,7 @@ extension RPCRouter {
                 // Re-await the fetch to ensure it completes before git operations.
                 // FetchCache's singleflight means this either joins the in-flight
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
-                await fetchCache.fetchIfNeeded(repoPath: repoPath)
+                await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
                 let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, overrideProfileID: overrideProfileID, claudeSettingsOverlay: claudeSettingsOverlay)
                 switch completion {

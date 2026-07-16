@@ -19,21 +19,24 @@ public actor FetchCache {
 
     private let ttl: TimeInterval
     private let now: @Sendable () -> Date
-    private let performFetch: @Sendable (String, Duration) async throws -> Void
+    private let performFetch: @Sendable (String, String, Duration) async throws -> Void
 
+    // Cache and singleflight keyed by repoPath. Since callers always pass the repo's
+    // default branch (which is stable per repo), repoPath uniquely determines the branch.
     private var lastFetchTime: [String: CacheEntry] = [:]
     private var inFlightFetches: [String: Task<Void, Never>] = [:]
 
     /// - Parameters:
     ///   - ttl: How long a cached fetch stays fresh, in seconds.
     ///   - now: Clock seam for tests; defaults to wall-clock `Date()`.
-    ///   - performFetch: The actual fetch operation; defaults to `gitManager.fetch`.
+    ///   - performFetch: The actual fetch operation; defaults to `gitManager.fetch(branch:)`.
+    ///     Closure receives (repoPath, branch, timeout).
     public init(
         ttl: TimeInterval = fetchCacheTTL,
         now: @Sendable @escaping () -> Date = { Date() },
-        performFetch: @Sendable @escaping (String, Duration) async throws -> Void = { repoPath, timeout in
+        performFetch: @Sendable @escaping (String, String, Duration) async throws -> Void = { repoPath, branch, timeout in
             let manager = GitManager()
-            try await manager.fetch(repoPath: repoPath, timeout: timeout)
+            try await manager.fetch(repoPath: repoPath, branch: branch, timeout: timeout)
         }
     ) {
         self.ttl = ttl
@@ -41,11 +44,16 @@ public actor FetchCache {
         self.performFetch = performFetch
     }
 
-    /// Fetch the repo if no successful fetch exists within the TTL window.
+    /// Fetch the repo's default branch if no successful fetch exists within the TTL window.
     /// Uses singleflight so concurrent calls for the same repo share one in-flight fetch.
     /// Fetch failures do NOT update the cache, so retries can happen on next call.
+    /// - Parameters:
+    ///   - repoPath: The path to the repo being fetched.
+    ///   - branch: The repo's default branch (e.g., "main" or "master"). Fetch is scoped to this branch only.
+    ///   - timeout: How long the fetch is allowed to run; defaults to `fetchTimeout` (20s).
     public func fetchIfNeeded(
         repoPath: String,
+        branch: String,
         timeout: Duration = fetchTimeout
     ) async {
         // Check if we have a recent successful fetch within TTL
@@ -67,7 +75,7 @@ public actor FetchCache {
         // Launch the fetch and record it
         let fetchTask = Task {
             do {
-                try await performFetch(repoPath, timeout)
+                try await performFetch(repoPath, branch, timeout)
                 logger.debug("fetch succeeded for \(repoPath, privacy: .public)")
                 // Record success only on completion
                 await self.recordSuccessAsync(repoPath: repoPath)
