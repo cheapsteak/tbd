@@ -18,7 +18,10 @@ import TBDShared
 /// - Otherwise → `cmd` if set, else `shellFallback`.
 ///
 /// If we built a claude command (resume or fresh), `sensitiveEnv` carries the
-/// auth + routing env vars for the spawned session:
+/// auth + routing env vars for the spawned session (plus
+/// `DISABLE_AUTO_UPDATE=true`, an rc-affecting toggle that must reach the
+/// process env before .zshrc runs so oh-my-zsh's update prompt can't block
+/// the agent spawn):
 /// - oauth: `CLAUDE_CONFIG_DIR=<profileDir>` (no auth token; user `/login`s into this dir)
 /// - api key (direct or proxy): `ANTHROPIC_API_KEY=<secret>` + `CLAUDE_CONFIG_DIR=<profileDir>`
 ///   (+ `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` for proxy)
@@ -35,8 +38,10 @@ import TBDShared
 enum ClaudeSpawnCommandBuilder {
     struct Result: Equatable {
         let command: String
-        /// Env vars containing secrets OR routing config. Keep using tmux's
-        /// `-e KEY=VALUE` flag for all of these to avoid leaking via `ps`.
+        /// Env vars containing secrets, routing config, or rc-affecting
+        /// toggles (DISABLE_AUTO_UPDATE). Keep using tmux's `-e KEY=VALUE`
+        /// flag for all of these: secrets must not leak via `ps`, and rc
+        /// toggles must be set before .zshrc runs.
         let sensitiveEnv: [String: String]
     }
 
@@ -137,6 +142,15 @@ enum ClaudeSpawnCommandBuilder {
             }
             routingKeys.formUnion(["ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "CLAUDE_CONFIG_DIR"])
         }
+        // Suppress oh-my-zsh's interactive "Would you like to update?" prompt.
+        // It fires from .zshrc and would block the claude command until the
+        // user answers — but an agent tab runs a command, not an interactive
+        // shell for a human, so nothing should gate it. Plain shell tabs
+        // (`cmd` / `shellFallback`, early-returned above) keep update checks.
+        // Deliberately NOT a routing key: it must be in the process env
+        // BEFORE .zshrc runs, which only tmux's `-e` flag achieves — an
+        // inline export executes after rc files and would be useless.
+        env["DISABLE_AUTO_UPDATE"] = "true"
         // Registry-driven Claude spawn-env settings. This block only runs in
         // the Claude branches — the `cmd` / `shellFallback` branches return
         // earlier, before `env` exists — so non-Claude spawns are unaffected.

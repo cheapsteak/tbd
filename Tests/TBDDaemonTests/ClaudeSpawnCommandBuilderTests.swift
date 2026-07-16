@@ -22,8 +22,10 @@ struct ClaudeSpawnCommandBuilderTests {
             shellFallback: "/bin/zsh"
         )
         #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions")
-        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude spawns.
-        #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1"])
+        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude
+        // spawns; DISABLE_AUTO_UPDATE=true suppresses the omz update prompt
+        // that would otherwise block the agent command.
+        #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1", "DISABLE_AUTO_UPDATE": "true"])
     }
 
     @Test("fresh session id only")
@@ -38,8 +40,10 @@ struct ClaudeSpawnCommandBuilderTests {
             shellFallback: "/bin/zsh"
         )
         #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions")
-        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude spawns.
-        #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1"])
+        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude
+        // spawns; DISABLE_AUTO_UPDATE=true suppresses the omz update prompt
+        // that would otherwise block the agent command.
+        #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1", "DISABLE_AUTO_UPDATE": "true"])
     }
 
     @Test("fresh + appendSystemPrompt")
@@ -117,6 +121,31 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv.isEmpty)
     }
 
+    // MARK: - omz update-prompt suppression (agent tabs only)
+
+    @Test("claude branches suppress the omz update prompt; shell branches keep it")
+    func omzUpdateSuppressionScopedToAgentBranches() {
+        func build(resumeID: String?, freshSessionID: String?, cmd: String?) -> ClaudeSpawnCommandBuilder.Result {
+            ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID, freshSessionID: freshSessionID,
+                appendSystemPrompt: nil, initialPrompt: nil, profileSecret: nil,
+                cmd: cmd, shellFallback: "/bin/zsh"
+            )
+        }
+        // Agent (claude) branches: the spawned command must never block on
+        // oh-my-zsh's interactive update prompt, so it rides sensitiveEnv
+        // (tmux -e → process env before .zshrc). Never inlined in the command:
+        // an inline export runs after rc files and would be useless.
+        for r in [build(resumeID: "abc", freshSessionID: nil, cmd: nil),
+                  build(resumeID: nil, freshSessionID: "sid", cmd: nil)] {
+            #expect(r.sensitiveEnv["DISABLE_AUTO_UPDATE"] == "true")
+            #expect(!r.command.contains("DISABLE_AUTO_UPDATE"))
+        }
+        // Plain shell branches: a human is present, keep omz update checks.
+        #expect(build(resumeID: nil, freshSessionID: nil, cmd: "ls -la").sensitiveEnv["DISABLE_AUTO_UPDATE"] == nil)
+        #expect(build(resumeID: nil, freshSessionID: nil, cmd: nil).sensitiveEnv["DISABLE_AUTO_UPDATE"] == nil)
+    }
+
     // MARK: - Token branches: secret returned via sensitiveEnv, NOT in command
 
     @Test("resume + oauth secret: token NOT injected (oauth profiles get config dir instead)")
@@ -169,7 +198,11 @@ struct ClaudeSpawnCommandBuilderTests {
         )
         #expect(!r.command.contains(fakeOauth))
         // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude spawns.
-        #expect(r.sensitiveEnv == ["ANTHROPIC_API_KEY": fakeOauth, "CLAUDE_CODE_NO_FLICKER": "1"])
+        #expect(r.sensitiveEnv == [
+            "ANTHROPIC_API_KEY": fakeOauth,
+            "CLAUDE_CODE_NO_FLICKER": "1",
+            "DISABLE_AUTO_UPDATE": "true",
+        ])
     }
 
     @Test("cmd path ignores token (non-claude shell)")
@@ -598,7 +631,7 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
         // Exactly these 5 keys (registry adds CLAUDE_CODE_NO_FLICKER=1 for all Claude spawns)
-        #expect(r.sensitiveEnv.keys.sorted() == ["ANTHROPIC_MODEL", "AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_NO_FLICKER", "CLAUDE_CODE_USE_BEDROCK"])
+        #expect(r.sensitiveEnv.keys.sorted() == ["ANTHROPIC_MODEL", "AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_NO_FLICKER", "CLAUDE_CODE_USE_BEDROCK", "DISABLE_AUTO_UPDATE"])
     }
 
     @Test("bedrock: AWS_PROFILE omitted when nil")

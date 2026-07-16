@@ -151,11 +151,12 @@ struct PreSessionHookTests {
                 "first window must be the primary agent")
         #expect(windowCalls[1].last?.contains("claude --session-id") == false,
                 "second window must be the setup hook/shell")
-        // omz-update suppression is scoped to windows that actually run a
-        // hook: with no setup hook configured, the "Setup" tab is a plain
-        // shell and must keep update checks, same as the primary agent.
-        #expect(!windowCalls[0].contains("DISABLE_AUTO_UPDATE=true"),
-                "primary terminal must keep oh-my-zsh update checks")
+        // omz-update suppression covers agent tabs (a spawned agent command
+        // must never block on the interactive update prompt) and hook panes;
+        // with no setup hook configured, the "Setup" tab is a plain shell
+        // for a human and must keep update checks.
+        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
+                "primary agent window must suppress the oh-my-zsh update prompt via -e")
         #expect(!windowCalls[1].contains("DISABLE_AUTO_UPDATE=true"),
                 "hook-less setup tab is a regular shell and must keep omz update checks")
         // Setup window carries the full documented hook env even with no
@@ -191,11 +192,12 @@ struct PreSessionHookTests {
         // Windows: [claude, setup]. With a setup hook resolved, the setup
         // window must carry `-e DISABLE_AUTO_UPDATE=true` (process env, set
         // before .zshrc runs) so the omz updater prompt can't delay the hook;
-        // the primary agent window must not.
+        // the primary agent window carries it too — a spawned agent command
+        // must never block on the interactive update prompt.
         let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
         #expect(windowCalls.count == 2)
-        #expect(!windowCalls[0].contains("DISABLE_AUTO_UPDATE=true"),
-                "primary terminal must keep oh-my-zsh update checks")
+        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
+                "primary agent window must suppress the oh-my-zsh update prompt via -e")
         #expect(hasProcessEnvFlag(windowCalls[1], "DISABLE_AUTO_UPDATE=true"),
                 "setup hook window must suppress the oh-my-zsh update prompt via -e")
         #expect(windowCalls[1].last?.contains(".worktree-hooks/setup") == true,
@@ -314,11 +316,11 @@ struct PreSessionHookTests {
         // (TBD_EVENT=setup) — windows are [pre-session, claude, setup].
         let allWindowCalls = recorder.snapshot().filter { $0.contains("new-window") }
         #expect(allWindowCalls.count == 3)
-        // Only windows that actually run a hook suppress the omz updater:
-        // this fixture has no setup hook, so the "Setup" tab is a plain shell
-        // and keeps update checks, same as the primary agent.
-        #expect(!allWindowCalls[1].contains("DISABLE_AUTO_UPDATE=true"),
-                "primary terminal must keep oh-my-zsh update checks")
+        // Hook panes and agent tabs suppress the omz updater; this fixture
+        // has no setup hook, so the "Setup" tab is a plain shell for a human
+        // and keeps update checks.
+        #expect(hasProcessEnvFlag(allWindowCalls[1], "DISABLE_AUTO_UPDATE=true"),
+                "primary agent window must suppress the oh-my-zsh update prompt via -e")
         #expect(!allWindowCalls[2].contains("DISABLE_AUTO_UPDATE=true"),
                 "hook-less setup tab is a regular shell and must keep omz update checks")
         let setupBody = allWindowCalls[2].last ?? ""

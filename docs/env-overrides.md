@@ -43,7 +43,9 @@ merged = global ∪ repo ∪ profile-freeform
 final  = merged ∪ builderAuthRouting        // auth/routing is final
 ```
 
-A free-form var can set anything the builder does **not** already set, but it cannot clobber a key the builder owns. This keeps a stray free-form override from silently breaking model connectivity. (Codex does not get structured Claude routing env — its auth stays via `CODEX_HOME` — so for Codex the merged free-form map is the entirety of the injected env.)
+A free-form var can set anything the builder does **not** already set, but it cannot clobber a key the builder owns. This keeps a stray free-form override from silently breaking model connectivity. (Codex does not get structured Claude routing env — its auth stays via `CODEX_HOME` — so for Codex the injected env is the merged free-form map plus one forced key, below.)
+
+One key is forced on **both** claude and codex agent tabs and cannot be overridden: `DISABLE_AUTO_UPDATE=true`. An agent tab runs a command, not an interactive shell for a human, so oh-my-zsh's interactive update prompt (fired from `.zshrc`) must never block the spawn — a free-form override of `false` would silently reintroduce that blockage. Plain shell tabs keep omz update checks.
 
 ## Values are free-form
 

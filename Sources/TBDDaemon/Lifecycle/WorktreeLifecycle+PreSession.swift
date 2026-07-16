@@ -67,10 +67,13 @@ extension WorktreeLifecycle {
     /// `zstyle ':omz:update' mode disabled`), so this skips its interactive
     /// "Would you like to update?" prompt that would otherwise block the hook
     /// command until the user answers or the preSession wait times out.
-    /// Deliberately per-window (never `setenv -g`): regular shell/claude/codex
-    /// tabs must keep omz update checks. Callers apply it only when the hook
-    /// actually resolves — a hook-less "Setup" tab is a plain shell and keeps
-    /// update checks.
+    /// Deliberately per-window (never `setenv -g`): plain shell tabs must
+    /// keep omz update checks — a human is present there. Agent (claude/codex)
+    /// tabs also suppress the prompt, but at their own spawn sites
+    /// (`ClaudeSpawnCommandBuilder` and the codex spawn env), since a spawned
+    /// agent command must never block on an interactive prompt. Callers apply
+    /// this env only when the hook actually resolves — a hook-less "Setup"
+    /// tab is a plain shell and keeps update checks.
     static let hookPaneEnv: [String: String] = ["DISABLE_AUTO_UPDATE": "true"]
 
     /// Wraps the hook so its exit code lands in the marker file and the pane
