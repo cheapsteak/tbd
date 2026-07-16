@@ -178,6 +178,7 @@ public enum RPCMethod {
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
     public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
     public static let repoListBranches = "repo.listBranches"
+    public static let repoListOpenPRs = "repo.listOpenPRs"
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
@@ -236,6 +237,39 @@ public struct RepoListBranchesParams: Codable, Sendable {
 public struct RepoListBranchesResult: Codable, Sendable {
     public let branches: [BranchInfo]
     public init(branches: [BranchInfo]) { self.branches = branches }
+}
+
+// MARK: - Open PR Listing
+
+/// One open PR on a repo, for the `repo.listOpenPRs` RPC (branch picker).
+public struct OpenPRInfo: Codable, Sendable, Equatable, Identifiable {
+    public let number: Int
+    public let title: String
+    public let headRefName: String
+    public let headOwner: String        // headRepositoryOwner.login; "" if absent
+    public let isCrossRepository: Bool
+    public let isDraft: Bool
+    public var id: Int { number }
+
+    public init(number: Int, title: String, headRefName: String, headOwner: String,
+                isCrossRepository: Bool, isDraft: Bool) {
+        self.number = number
+        self.title = title
+        self.headRefName = headRefName
+        self.headOwner = headOwner
+        self.isCrossRepository = isCrossRepository
+        self.isDraft = isDraft
+    }
+}
+
+public struct RepoListOpenPRsParams: Codable, Sendable {
+    public let repoID: UUID
+    public init(repoID: UUID) { self.repoID = repoID }
+}
+
+public struct RepoListOpenPRsResult: Codable, Sendable {
+    public let prs: [OpenPRInfo]
+    public init(prs: [OpenPRInfo]) { self.prs = prs }
 }
 
 // MARK: - Legacy Hook Detection / Removal

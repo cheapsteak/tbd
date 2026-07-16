@@ -633,6 +633,79 @@ public actor PRStatusManager {
         }
     }
 
+    /// Pure parse of the `repo.listOpenPRs` GraphQL response
+    /// (`openPRsQuery`). Never throws — any malformed/unexpected shape
+    /// (network hiccup, schema drift, truncated output) degrades to an
+    /// empty list with a `.debug` log line, matching the RPC's own
+    /// never-error-just-degrade contract (spec §1).
+    public static func parseOpenPRNodes(from data: Data) -> [OpenPRInfo] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataObj = root["data"] as? [String: Any],
+              let repository = dataObj["repository"] as? [String: Any],
+              let prs = repository["pullRequests"] as? [String: Any],
+              let nodes = prs["nodes"] as? [Any] else {
+            logger.debug("listOpenPRs: malformed GraphQL response, returning empty list")
+            return []
+        }
+
+        if nodes.count >= 100 {
+            logger.debug("listOpenPRs: hit the 100-PR page cap; list may be truncated")
+        }
+
+        return nodes.compactMap { $0 as? [String: Any] }.compactMap { node -> OpenPRInfo? in
+            guard let number = node["number"] as? Int,
+                  let title = node["title"] as? String,
+                  let headRefName = node["headRefName"] as? String else { return nil }
+            let isDraft = node["isDraft"] as? Bool ?? false
+            let isCrossRepository = node["isCrossRepository"] as? Bool ?? false
+            let headOwner = (node["headRepositoryOwner"] as? [String: Any])?["login"] as? String ?? ""
+            return OpenPRInfo(number: number, title: title, headRefName: headRefName,
+                              headOwner: headOwner, isCrossRepository: isCrossRepository, isDraft: isDraft)
+        }
+    }
+
+    /// Repo-scoped query for `repo.listOpenPRs`: every OPEN PR (own, teammates',
+    /// fork), newest-updated first, capped at one page of 100 (spec §1 non-goal:
+    /// no pagination in v1).
+    static func openPRsQuery() -> String {
+        """
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            pullRequests(states: [OPEN], first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              nodes { number title headRefName isDraft isCrossRepository headRepositoryOwner { login } }
+            }
+          }
+        }
+        """
+    }
+
+    /// Fetch all open PRs for the repo at `repoPath` (`repo.listOpenPRs` RPC).
+    /// Every failure path (gh missing, unauthenticated/offline, non-zero exit,
+    /// unparseable response) degrades to `[]` with a `.debug` log — never
+    /// throws, matching the picker's "PR data is best-effort" contract.
+    public nonisolated func fetchOpenPRs(repoPath: String) async -> [OpenPRInfo] {
+        guard let ownerRepo = await resolveNameWithOwner(repoPath: repoPath) else {
+            logger.debug("listOpenPRs: could not resolve owner/name for \(repoPath, privacy: .public)")
+            return []
+        }
+        let args = [
+            "api", "graphql",
+            "-f", "query=\(Self.openPRsQuery())",
+            "-f", "owner=\(ownerRepo.owner)",
+            "-f", "name=\(ownerRepo.name)"
+        ]
+        guard let result = await runGHResult(args: args, repoPath: repoPath) else {
+            logger.debug("listOpenPRs: gh did not launch for \(repoPath, privacy: .public)")
+            return []
+        }
+        guard result.exitStatus == 0, let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("listOpenPRs: gh graphql exited \(result.exitStatus, privacy: .public): \(errSuffix, privacy: .public)")
+            return []
+        }
+        return Self.parseOpenPRNodes(from: data)
+    }
+
     /// Parse the single-PR refresh response (`prByBranchQuery`).
     ///
     /// Walks `data.repository.pullRequests.nodes` and returns the best node —

@@ -1152,4 +1152,111 @@ struct PRStatusManagerTests {
         let all = await manager.allStatuses()
         #expect(all[id] == merged)
     }
+
+    // MARK: - parseOpenPRNodes (repo.listOpenPRs)
+
+    @Test("parseOpenPRNodes parses a fork PR and a draft PR")
+    func parseOpenPRNodesHappyPath() {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 454,
+                    "title": "Weekly reset job",
+                    "headRefName": "show-weekly-reset",
+                    "isDraft": false,
+                    "isCrossRepository": true,
+                    "headRepositoryOwner": { "login": "zionts" }
+                  },
+                  {
+                    "number": 12,
+                    "title": "WIP: refactor",
+                    "headRefName": "tbd/refactor",
+                    "isDraft": true,
+                    "isCrossRepository": false,
+                    "headRepositoryOwner": { "login": "acme" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.count == 2)
+        #expect(prs[0].number == 454)
+        #expect(prs[0].title == "Weekly reset job")
+        #expect(prs[0].headRefName == "show-weekly-reset")
+        #expect(prs[0].headOwner == "zionts")
+        #expect(prs[0].isCrossRepository == true)
+        #expect(prs[0].isDraft == false)
+        #expect(prs[1].number == 12)
+        #expect(prs[1].isDraft == true)
+        #expect(prs[1].isCrossRepository == false)
+    }
+
+    @Test("parseOpenPRNodes returns empty for empty nodes")
+    func parseOpenPRNodesEmptyNodes() {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": []
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.isEmpty)
+    }
+
+    @Test("parseOpenPRNodes returns empty for malformed JSON")
+    func parseOpenPRNodesMalformed() {
+        let json = "{ not valid json".data(using: .utf8)!
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.isEmpty)
+    }
+
+    @Test("parseOpenPRNodes returns empty when the outer shape is missing repository")
+    func parseOpenPRNodesMissingRepository() {
+        let json = """
+        { "data": { "somethingElse": true } }
+        """.data(using: .utf8)!
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.isEmpty)
+    }
+
+    @Test("parseOpenPRNodes defaults headOwner to empty string when headRepositoryOwner is absent")
+    func parseOpenPRNodesMissingHeadRepositoryOwner() {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 7,
+                    "title": "Same-repo PR",
+                    "headRefName": "tbd/same-repo",
+                    "isDraft": false,
+                    "isCrossRepository": false
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.count == 1)
+        #expect(prs[0].headOwner == "")
+    }
 }

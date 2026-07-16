@@ -178,6 +178,24 @@ extension RPCRouter {
         return try RPCResponse(result: RepoListBranchesResult(branches: branches))
     }
 
+    /// Repo-scoped open-PR list for the branch picker (spec §1). Degrades to an
+    /// empty list rather than an RPC error on any `gh`/GraphQL failure — see
+    /// `PRStatusManager.fetchOpenPRs`. Drops PRs already checked out in a
+    /// worktree, mirroring `listBranches`' in-use filter.
+    func handleRepoListOpenPRs(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoListOpenPRsParams.self, from: paramsData)
+
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        let prs = await prManager.fetchOpenPRs(repoPath: repo.path)
+        let inUse = Set((try? await git.worktreeList(repoPath: repo.path))?.map(\.branch).filter { !$0.isEmpty } ?? [])
+        let filtered = prs.filter { !inUse.contains($0.headRefName) }
+
+        return try RPCResponse(result: RepoListOpenPRsResult(prs: filtered))
+    }
+
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRenameParams.self, from: paramsData)
 

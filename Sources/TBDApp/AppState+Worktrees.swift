@@ -264,6 +264,18 @@ extension AppState {
         }
     }
 
+    /// List open PRs for a repo, for the branch picker's second load phase.
+    /// Rethrows so callers can distinguish a fetch failure (keep showing
+    /// branches, no PR pills) from a genuinely empty list.
+    func listOpenPRs(repoID: UUID) async throws -> [OpenPRInfo] {
+        do {
+            return try await daemonClient.listOpenPRs(repoID: repoID)
+        } catch {
+            logger.error("Failed to list open PRs: \(error)")
+            throw error
+        }
+    }
+
     /// Archive a worktree. Scratch-aware by construction: repo-less scratch
     /// spaces are delegated to `archiveScratch(id:)` — the repo-worktree
     /// `worktree.archive` RPC rejects them with `repoNotFound` — so callers

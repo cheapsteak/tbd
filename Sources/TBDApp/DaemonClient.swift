@@ -507,6 +507,17 @@ actor DaemonClient {
         return result.branches
     }
 
+    /// List open PRs for a repo (branch picker, two-phase load). Degrades to
+    /// `[]` daemon-side on any `gh`/GraphQL failure — never an RPC error.
+    func listOpenPRs(repoID: UUID) async throws -> [OpenPRInfo] {
+        let result = try await callAsync(
+            method: RPCMethod.repoListOpenPRs,
+            params: RepoListOpenPRsParams(repoID: repoID),
+            resultType: RepoListOpenPRsResult.self
+        )
+        return result.prs
+    }
+
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
     /// Pass `excludeArchived: true` to skip archived rows (used by the 2 s poll so
     /// the 87 % of payload that is immediately dropped client-side never crosses the wire).
