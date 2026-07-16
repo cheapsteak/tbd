@@ -175,8 +175,9 @@ extension WorktreeLifecycle {
     /// local `refs/heads/<name>` exists. Mirrors `uniqueFolderName`'s loop but
     /// probes git refs instead of paths: the PR-head fetch uses a `+` force
     /// refspec, so a colliding name would silently rewrite an unrelated branch;
-    /// this picks a free name first. Caps at -1000, then falls through (the
-    /// fetch/worktree-add fails loudly if every candidate is taken).
+    /// this picks a free name first. Caps at -1000; if every candidate through
+    /// `base-1000` is taken it THROWS rather than returning the taken `base` —
+    /// returning it would let the force refspec clobber that existing branch.
     private func uniqueLocalBranchName(repoPath: String, base: String) async throws -> String {
         if try await git.localBranchExists(repoPath: repoPath, name: base) == false {
             return base
@@ -187,7 +188,8 @@ extension WorktreeLifecycle {
                 return candidate
             }
         }
-        return base
+        throw WorktreeLifecycleError.createFailed(
+            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the force-fetch refspec would clobber the existing branch)")
     }
 
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,

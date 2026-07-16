@@ -283,4 +283,38 @@ extension RPCRouterTests {
         #expect(!response.success)
         #expect(response.error?.contains("Unknown method") == true)
     }
+
+    // MARK: - repo.listOpenPRs in-use filter
+
+    private func openPR(_ number: Int, head: String) -> OpenPRInfo {
+        OpenPRInfo(number: number, title: "PR \(number)", headRefName: head,
+                   headOwner: "acme", isCrossRepository: false, isDraft: false)
+    }
+
+    @Test("filterOpenPRsNotInUse drops a PR whose number is stamped on a worktree even when branch names differ")
+    func filterOpenPRsDropsByStoredNumber() {
+        // The PR head was fetched under a uniquified local branch ("feature-2"),
+        // so its head name ("feature") is NOT in the in-use branch set, but the
+        // worktree row carries PR #42 — the number filter must still drop it.
+        let prs = [openPR(42, head: "feature"), openPR(43, head: "other")]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["feature-2"], inUsePRNumbers: [42])
+        #expect(filtered.map(\.number) == [43])
+    }
+
+    @Test("filterOpenPRsNotInUse still drops a PR by matching head branch name")
+    func filterOpenPRsDropsByBranchName() {
+        let prs = [openPR(42, head: "feature"), openPR(43, head: "other")]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["feature"], inUsePRNumbers: [])
+        #expect(filtered.map(\.number) == [43])
+    }
+
+    @Test("filterOpenPRsNotInUse keeps PRs that are neither checked out nor stamped")
+    func filterOpenPRsKeepsFree() {
+        let prs = [openPR(42, head: "feature"), openPR(43, head: "other")]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["unrelated"], inUsePRNumbers: [99])
+        #expect(filtered.map(\.number) == [42, 43])
+    }
 }
