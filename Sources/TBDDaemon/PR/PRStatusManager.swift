@@ -105,7 +105,7 @@ public actor PRStatusManager {
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
     /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
-    public func fetchAll(worktrees: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)]) async {
+    public func fetchAll(worktrees: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)]) async {
         guard !worktrees.isEmpty else { return }
         guard !fetchAllInProgress else { return }   // a previous poll is still running; skip to avoid interleaved generations
         fetchAllInProgress = true
@@ -114,40 +114,38 @@ public actor PRStatusManager {
         // All worktrees share one repo; any path works as gh's working directory for auth.
         let repoPath = worktrees[0].worktreePath
 
-        guard let jsonData = await runGHGraphQL(repoPath: repoPath) else { return }
+        // Worktrees created from a PR row carry its number; resolve those
+        // directly (a fork PR's head never appears in the viewer-authored batch).
+        // Everything else uses the legacy viewer-batch branch-name matching,
+        // byte-identical to before.
+        let (numbered, unnumbered) = Self.partitionByPRNumber(worktrees) { $0.prNumber }
 
-        guard let nodes = try? Self.parsePRNodes(from: jsonData) else {
-            logger.warning("Failed to parse GraphQL response")
-            return
-        }
-
-        // Build branch → PRNode lookup. When multiple PRs share a branch,
-        // pick the best one: sort by state priority (OPEN > MERGED > CLOSED),
-        // then by createdAt descending (newest first within the same state).
-        var byBranch: [String: PRNode] = [:]
-        for node in nodes {
-            if let existing = byBranch[node.headRefName] {
-                let nodePriority = Self.prPriority(node.state)
-                let existingPriority = Self.prPriority(existing.state)
-                if nodePriority > existingPriority {
-                    byBranch[node.headRefName] = node
-                } else if nodePriority == existingPriority && node.createdAt > existing.createdAt {
-                    byBranch[node.headRefName] = node
-                }
-            } else {
-                byBranch[node.headRefName] = node
-            }
-        }
-
-        // Collect matches first.
         // Do NOT clear entries for missing worktrees — the batch query is
         // limited to 100 PRs across all repos, so older PRs may not appear.
         // Those entries may have been populated by a targeted `refresh` call.
         var matches: [(worktreeID: UUID, node: PRNode)] = []
-        for wt in worktrees {
-            let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
-            if let node = candidates.compactMap({ byBranch[$0] }).first {
-                matches.append((wt.id, node))
+
+        // Numbered path: one aliased by-number query (skipped when none stored).
+        if !numbered.isEmpty {
+            matches += await fetchNumberedMatches(numbered, repoPath: repoPath)
+        }
+
+        // Legacy path: viewer-authored batch + branch-name matching. On a fetch
+        // or parse failure it contributes no matches, but the numbered path above
+        // has already resolved independently.
+        if !unnumbered.isEmpty {
+            if let jsonData = await runGHGraphQL(repoPath: repoPath) {
+                if let nodes = try? Self.parsePRNodes(from: jsonData) {
+                    let byBranch = Self.bestNodeByBranch(nodes)
+                    for wt in unnumbered {
+                        let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
+                        if let node = candidates.compactMap({ byBranch[$0] }).first {
+                            matches.append((wt.id, node))
+                        }
+                    }
+                } else {
+                    logger.warning("Failed to parse GraphQL response")
+                }
             }
         }
 
@@ -598,6 +596,80 @@ public actor PRStatusManager {
         public let mergeQueuePosition: Int?
     }
 
+    /// Split poll inputs by whether the worktree carries a stored PR number.
+    /// Numbered entries resolve via a direct `pullRequest(number:)` lookup (the
+    /// only way to reach a fork PR, whose head never appears in the viewer batch);
+    /// the rest fall through to the legacy viewer-authored branch-name matching.
+    static func partitionByPRNumber<T>(_ items: [T], prNumber: (T) -> Int?) -> (numbered: [T], unnumbered: [T]) {
+        var numbered: [T] = []
+        var unnumbered: [T] = []
+        for item in items {
+            if prNumber(item) != nil { numbered.append(item) } else { unnumbered.append(item) }
+        }
+        return (numbered, unnumbered)
+    }
+
+    /// Build the branch → best-PR lookup used by the legacy (unnumbered) path.
+    /// When multiple PRs share a branch, pick the best: highest state priority
+    /// (OPEN > MERGED > CLOSED), then newest `createdAt` within the same state.
+    static func bestNodeByBranch(_ nodes: [PRNode]) -> [String: PRNode] {
+        var byBranch: [String: PRNode] = [:]
+        for node in nodes {
+            if let existing = byBranch[node.headRefName] {
+                let nodePriority = prPriority(node.state)
+                let existingPriority = prPriority(existing.state)
+                if nodePriority > existingPriority {
+                    byBranch[node.headRefName] = node
+                } else if nodePriority == existingPriority && node.createdAt > existing.createdAt {
+                    byBranch[node.headRefName] = node
+                }
+            } else {
+                byBranch[node.headRefName] = node
+            }
+        }
+        return byBranch
+    }
+
+    /// The per-PR field selection shared by the viewer batch and the by-number
+    /// aliased query, so the two can't drift and both parse into `PRNode`.
+    static let prNodeFieldSelection =
+        "number url state mergeStateStatus reviewDecision headRefName createdAt isDraft "
+        + "statusCheckRollup { state } mergeQueueEntry { position }"
+
+    /// One aliased query resolving several worktrees' stored PR numbers in a
+    /// single round trip: `pr0: pullRequest(number: 454) { … }` etc. under the
+    /// repo object. Numbers are Int literals (injection-safe); `owner`/`name`
+    /// are GraphQL variables bound at the call site.
+    static func numberedPRQuery(aliases: [(alias: String, number: Int)]) -> String {
+        let selections = aliases
+            .map { "\($0.alias): pullRequest(number: \($0.number)) { \(prNodeFieldSelection) }" }
+            .joined(separator: "\n    ")
+        return """
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            \(selections)
+          }
+        }
+        """
+    }
+
+    /// Pure parse of the by-number aliased response. Each alias maps to a
+    /// worktree; a null/absent `pullRequest` (deleted or inaccessible PR) or a
+    /// malformed shape yields no match for that worktree — never a crash.
+    static func parseNumberedPRNodes(from data: Data, aliases: [(alias: String, worktreeID: UUID)]) -> [(worktreeID: UUID, node: PRNode)] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataObj = root["data"] as? [String: Any],
+              let repository = dataObj["repository"] as? [String: Any] else {
+            logger.debug("fetchAll: malformed by-number GraphQL response, resolving no numbered worktrees")
+            return []
+        }
+        return aliases.compactMap { alias, worktreeID in
+            guard let prObj = repository[alias] as? [String: Any],
+                  let node = prNode(from: prObj) else { return nil }
+            return (worktreeID, node)
+        }
+    }
+
     public static func parsePRNodes(from data: Data) throws -> [PRNode] {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataObj = root["data"] as? [String: Any],
@@ -607,30 +679,34 @@ public actor PRStatusManager {
             throw PRStatusError.invalidJSON
         }
 
-        return nodes.compactMap { $0 as? [String: Any] }.compactMap { node -> PRNode? in
-            guard let number = node["number"] as? Int,
-                  let url = node["url"] as? String,
-                  let state = node["state"] as? String,
-                  let mergeStateStatus = node["mergeStateStatus"] as? String,
-                  let headRefName = node["headRefName"] as? String,
-                  let createdAt = node["createdAt"] as? String else { return nil }
-            let reviewDecision = node["reviewDecision"] as? String ?? ""
-            let isDraft = node["isDraft"] as? Bool ?? false
-            let statusCheckRollup = node["statusCheckRollup"] as? [String: Any]
-            let statusCheckRollupState = statusCheckRollup?["state"] as? String
-            // A null/absent mergeQueueEntry (not queued) yields nil; only a real
-            // entry carrying an Int position gates the bus icon.
-            let mergeQueueEntry = node["mergeQueueEntry"] as? [String: Any]
-            let mergeQueuePosition = mergeQueueEntry?["position"] as? Int
-            return PRNode(number: number, url: url, state: state,
-                          mergeStateStatus: mergeStateStatus,
-                          reviewDecision: reviewDecision,
-                          headRefName: headRefName,
-                          createdAt: createdAt,
-                          isDraft: isDraft,
-                          statusCheckRollupState: statusCheckRollupState,
-                          mergeQueuePosition: mergeQueuePosition)
-        }
+        return nodes.compactMap { $0 as? [String: Any] }.compactMap(prNode(from:))
+    }
+
+    /// Extract one `PRNode` from a GraphQL PR object, shared by the viewer-batch
+    /// parse and the by-number parse (same `prNodeFieldSelection`).
+    static func prNode(from node: [String: Any]) -> PRNode? {
+        guard let number = node["number"] as? Int,
+              let url = node["url"] as? String,
+              let state = node["state"] as? String,
+              let mergeStateStatus = node["mergeStateStatus"] as? String,
+              let headRefName = node["headRefName"] as? String,
+              let createdAt = node["createdAt"] as? String else { return nil }
+        let reviewDecision = node["reviewDecision"] as? String ?? ""
+        let isDraft = node["isDraft"] as? Bool ?? false
+        let statusCheckRollup = node["statusCheckRollup"] as? [String: Any]
+        let statusCheckRollupState = statusCheckRollup?["state"] as? String
+        // A null/absent mergeQueueEntry (not queued) yields nil; only a real
+        // entry carrying an Int position gates the bus icon.
+        let mergeQueueEntry = node["mergeQueueEntry"] as? [String: Any]
+        let mergeQueuePosition = mergeQueueEntry?["position"] as? Int
+        return PRNode(number: number, url: url, state: state,
+                      mergeStateStatus: mergeStateStatus,
+                      reviewDecision: reviewDecision,
+                      headRefName: headRefName,
+                      createdAt: createdAt,
+                      isDraft: isDraft,
+                      statusCheckRollupState: statusCheckRollupState,
+                      mergeQueuePosition: mergeQueuePosition)
     }
 
     /// Pure parse of the `repo.listOpenPRs` GraphQL response
@@ -761,17 +837,47 @@ public actor PRStatusManager {
         return (owner: String(parts[0]), name: String(parts[1]))
     }
 
+    /// Resolve stored PR numbers directly via one aliased `pullRequest(number:)`
+    /// query — the only way to reach a fork PR, whose head branch never appears
+    /// in the viewer-authored batch. Degrades to no matches on any failure
+    /// (owner/name unresolved, gh missing, non-zero exit, unparseable); the
+    /// caller keeps prior cached status for those worktrees.
+    private nonisolated func fetchNumberedMatches(
+        _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        repoPath: String
+    ) async -> [(worktreeID: UUID, node: PRNode)] {
+        guard let ownerRepo = await resolveNameWithOwner(repoPath: repoPath) else {
+            logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(repoPath, privacy: .public)")
+            return []
+        }
+        let entries: [(alias: String, number: Int, worktreeID: UUID)] = numbered.enumerated().compactMap { index, wt in
+            guard let number = wt.prNumber else { return nil }
+            return (alias: "pr\(index)", number: number, worktreeID: wt.id)
+        }
+        guard !entries.isEmpty else { return [] }
+        let query = Self.numberedPRQuery(aliases: entries.map { ($0.alias, $0.number) })
+        let args = [
+            "api", "graphql",
+            "-f", "query=\(query)",
+            "-f", "owner=\(ownerRepo.owner)",
+            "-f", "name=\(ownerRepo.name)"
+        ]
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              result.exitStatus == 0,
+              let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            logger.debug("fetchAll: by-number query failed for numbered PRs at \(repoPath, privacy: .public)")
+            return []
+        }
+        return Self.parseNumberedPRNodes(from: data, aliases: entries.map { ($0.alias, $0.worktreeID) })
+    }
+
     private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
         let query = """
         {
           viewer {
             pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                          orderBy: {field: CREATED_AT, direction: DESC}) {
-              nodes {
-                number url state mergeStateStatus reviewDecision headRefName createdAt isDraft
-                statusCheckRollup { state }
-                mergeQueueEntry { position }
-              }
+              nodes { \(Self.prNodeFieldSelection) }
             }
           }
         }
