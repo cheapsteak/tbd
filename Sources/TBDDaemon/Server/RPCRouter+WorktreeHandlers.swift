@@ -30,6 +30,9 @@ extension RPCRouter {
         // Phase 2 will re-await before git worktree add; FetchCache's singleflight
         // means the second await joins the in-flight fetch or is a no-op if cached.
         guard let repo = try await db.repos.get(id: params.repoID) else {
+            // Mirror completeCreateWorktree's guard: clean up the .creating row
+            // inserted by beginCreateWorktree so it can't be orphaned forever.
+            try? await db.worktrees.delete(id: pending.id)
             throw WorktreeLifecycleError.repoNotFound(params.repoID)
         }
         let repoPath = repo.path

@@ -78,7 +78,7 @@ public actor FetchCache {
                 try await performFetch(repoPath, branch, timeout)
                 logger.debug("fetch succeeded for \(repoPath, privacy: .public)")
                 // Record success only on completion
-                await self.recordSuccessAsync(repoPath: repoPath)
+                await self.recordSuccess(repoPath: repoPath)
             } catch {
                 logger.debug("fetch timeout or error for \(repoPath, privacy: .public): \(error, privacy: .public)")
                 // Best-effort: don't record failure, so retries can happen
@@ -92,9 +92,5 @@ public actor FetchCache {
 
     private func recordSuccess(repoPath: String) {
         lastFetchTime[repoPath] = CacheEntry(fetchedAt: now())
-    }
-
-    private func recordSuccessAsync(repoPath: String) async {
-        recordSuccess(repoPath: repoPath)
     }
 }
