@@ -18,12 +18,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    func handleRepoSetClaudeSettingsOverlay(_ data: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(SetRepoClaudeSettingsOverlayParams.self, from: data)
-        try await db.repos.setClaudeSettingsOverlay(id: params.repoID, overlay: params.overlay)
-        return .ok()
-    }
-
     func handleModelProfileSetEnvOverrides(_ data: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SetProfileEnvOverridesParams.self, from: data)
         try await db.modelProfiles.setEnvOverrides(id: params.profileID, overrides: params.overrides)

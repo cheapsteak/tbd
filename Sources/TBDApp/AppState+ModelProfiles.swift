@@ -346,21 +346,6 @@ extension AppState {
         }
     }
 
-    /// Set or clear a repo's Claude settings overlay fragment (nil clears).
-    func setRepoClaudeSettingsOverlay(repoID: UUID, overlay: String?) async {
-        do {
-            try await daemonClient.setRepoClaudeSettingsOverlay(repoID: repoID, overlay: overlay)
-            if let idx = repos.firstIndex(where: { $0.id == repoID }) {
-                var repo = repos[idx]
-                repo.claudeSettingsOverlay = overlay
-                repos[idx] = repo
-            }
-        } catch {
-            logger.error("Failed to set repo Claude settings overlay: \(error, privacy: .public)")
-            showAlert("Failed to set Claude settings overlay: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Set or clear a model profile's free-form env overrides.
     func setProfileEnvOverrides(profileID: UUID, overrides: [String: String]) async {
         do {

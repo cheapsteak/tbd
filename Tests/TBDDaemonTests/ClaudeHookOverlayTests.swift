@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDDaemonLib
+import TBDShared
 
 // Nested under TBDHomeSerialized: the per-session overlay tests mutate the
 // process-global `TBD_HOME` env var to isolate the runtime dir. Nesting (rather
@@ -367,7 +368,37 @@ extension TBDHomeSerialized {
         #expect(parsed?["skillOverrides"] == nil)
     }
 
-    // MARK: - Repo settings fragment (per-repo claude_settings_overlay)
+    // MARK: - Repo settings fragment (~/tbd/repos/<repoID>/claude-settings.json)
+
+    @Test func repoSettingsFragmentReadsFileAndIsNilWhenMissing() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        // nil repoID (scratch spaces) and a missing file are both inert.
+        #expect(ClaudeHookOverlay.repoSettingsFragment(repoID: nil) == nil)
+        let repoID = UUID()
+        #expect(ClaudeHookOverlay.repoSettingsFragment(repoID: repoID) == nil)
+
+        // Once the file exists, the fragment is read fresh from disk.
+        let path = TBDConstants.claudeSettingsOverlayPath(repoID: repoID)
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        let fragment = #"{"skillOverrides":{"x":"off"}}"#
+        try fragment.write(toFile: path, atomically: true, encoding: .utf8)
+        #expect(ClaudeHookOverlay.repoSettingsFragment(repoID: repoID) == fragment)
+
+        // Fresh at every call: an edit is picked up by the next read.
+        let updated = #"{"skillOverrides":{"x":"on"}}"#
+        try updated.write(toFile: path, atomically: true, encoding: .utf8)
+        #expect(ClaudeHookOverlay.repoSettingsFragment(repoID: repoID) == updated)
+    }
 
     @Test func resolveOverlayPathWithNilRepoFragmentReturnsGlobalPath() throws {
         // OFF branch of the new gate: nil repo fragment + nil per-spawn

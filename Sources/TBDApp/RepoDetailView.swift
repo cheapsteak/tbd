@@ -112,9 +112,7 @@ struct RepoSettingsView: View {
                         Divider()
                             .padding(.vertical, 4)
 
-                        ClaudeSettingsOverlayEditor(
-                            initial: repo.claudeSettingsOverlay
-                        ) { await appState.setRepoClaudeSettingsOverlay(repoID: repo.id, overlay: $0) }
+                        ClaudeSettingsOverlayEditor(repoID: repo.id)
 
                         Divider()
                             .padding(.vertical, 4)
@@ -172,23 +170,19 @@ struct RepoSettingsView: View {
     }
 }
 
-/// Minimal per-repo editor for the Claude settings overlay fragment: a
-/// monospaced multi-line JSON field with the same save flow as
-/// `EnvOverridesEditor`. Empty/whitespace text clears the fragment (NULL).
-/// Passthrough by design — no JSON validation beyond what the daemon logs
-/// at spawn time. See docs/claude-settings-overlay.md.
+/// Per-repo editor for the Claude settings overlay fragment, file-backed like
+/// the hook editors in `RepoHooksSettingsView`: the fragment lives at
+/// `~/tbd/repos/<repoID>/claude-settings.json` and is read fresh at every
+/// Claude spawn, so it can also be edited externally. Empty/whitespace save
+/// deletes the file. Passthrough by design — no JSON validation beyond what
+/// the daemon logs at spawn time. See docs/claude-settings-overlay.md.
 private struct ClaudeSettingsOverlayEditor: View {
-    /// Hands the committed fragment (nil = cleared) to the caller for persistence.
-    let onSave: (String?) async -> Void
+    let repoID: UUID
 
-    @State private var text: String
-    @State private var isSaving = false
+    @State private var text = ""
     @State private var showSaved = false
 
-    init(initial: String?, onSave: @escaping (String?) async -> Void) {
-        self.onSave = onSave
-        _text = State(initialValue: initial ?? "")
-    }
+    private var filePath: String { TBDConstants.claudeSettingsOverlayPath(repoID: repoID) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -209,28 +203,54 @@ private struct ClaudeSettingsOverlayEditor: View {
                 )
 
             HStack {
+                HStack(spacing: 4) {
+                    Text(filePath.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(filePath, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Copy full path")
+                }
+
                 Spacer()
+
                 if showSaved {
                     Text("Saved")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .transition(.opacity)
                 }
+
                 Button("Save") { save() }
                     .controlSize(.small)
-                    .disabled(isSaving)
             }
+        }
+        .onAppear {
+            text = (try? String(contentsOfFile: filePath, encoding: .utf8)) ?? ""
         }
     }
 
     private func save() {
-        isSaving = true
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let overlay = trimmed.isEmpty ? nil : text
+        if trimmed.isEmpty {
+            try? FileManager.default.removeItem(atPath: filePath)
+        } else {
+            let dir = (filePath as NSString).deletingLastPathComponent
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? trimmed.write(toFile: filePath, atomically: true, encoding: .utf8)
+        }
+        withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
         Task {
-            await onSave(overlay)
-            isSaving = false
-            withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
             try? await Task.sleep(for: .seconds(2))
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = false }
         }

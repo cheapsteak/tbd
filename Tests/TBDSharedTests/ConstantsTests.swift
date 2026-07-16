@@ -147,6 +147,12 @@ import Foundation
     #expect(path == "/tmp/tbd-notes/repos/12345678-1234-1234-1234-123456789ABC/notes.md")
 }
 
+@Test func claudeSettingsOverlayPathRepoScope() {
+    let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
+    let path = TBDConstants.claudeSettingsOverlayPath(repoID: repoID, environment: ["TBD_HOME": "/tmp/tbd-cso"])
+    #expect(path == "/tmp/tbd-cso/repos/12345678-1234-1234-1234-123456789ABC/claude-settings.json")
+}
+
 @Test func notesPathWorktreeScope() {
     let wtID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
     let path = TBDConstants.notesPath(worktreeID: wtID, environment: ["TBD_HOME": "/tmp/tbd-notes"])
