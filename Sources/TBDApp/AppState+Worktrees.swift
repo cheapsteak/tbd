@@ -20,7 +20,7 @@ extension AppState {
     /// `profileID` is an optional explicit model-profile override chosen at
     /// creation time (sidebar `+` profile picker). nil resolves the profile via
     /// the daemon's normal repo/scratch/global precedence chain (today's behavior).
-    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil) {
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, displayName: String? = nil) {
         // Optimistic placeholder so the row appears instantly. When picking an
         // existing branch we use its local name so the placeholder name
         // doesn't briefly show a fake `tbd/*` value.
@@ -36,7 +36,7 @@ extension AppState {
         let placeholder = Worktree(
             repoID: repoID,
             name: placeholderName,
-            displayName: placeholderName,
+            displayName: displayName ?? placeholderName,
             branch: placeholderBranch,
             path: "",
             status: .creating,
@@ -64,10 +64,13 @@ extension AppState {
                 let wt = try await daemonClient.createWorktree(
                     repoID: repoID,
                     branch: existingBranch?.name,
+                    displayName: displayName,
                     cols: size.cols, rows: size.rows,
                     parentWorktreeID: parentWorktreeID,
                     useExistingBranch: existingBranch != nil,
-                    profileID: profileID
+                    profileID: profileID,
+                    prNumber: prNumber,
+                    checkoutPRHead: checkoutPRHead
                 )
                 // Replace the placeholder with the real worktree, carrying
                 // over any rename the user typed while creation was in
