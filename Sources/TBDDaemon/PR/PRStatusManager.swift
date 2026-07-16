@@ -16,6 +16,12 @@ public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
 
+    /// TTL cache for `resolveNameWithOwner` so the periodic poll's by-number and
+    /// open-PR queries don't spawn a `gh repo view` subprocess per call. Keyed by
+    /// repoPath; ~15-min TTL (a checkout's owner/name effectively never changes).
+    /// Actor-isolated, so no locking — mirrors `RPCRouter.upstreamBranchCache`.
+    private var ownerRepoCache: [String: (value: (owner: String, name: String), expiry: Date)] = [:]
+
     /// Reentrancy guard: a previous poll still running means a new `fetchAll` is skipped
     /// so two generations of batch data can't interleave their cache writes.
     private var fetchAllInProgress = false
@@ -212,8 +218,15 @@ public actor PRStatusManager {
     /// merge-queue field set the batch query does. `gh repo view` resolves the
     /// checkout's `owner/name` so the query can scope to this repo+branch —
     /// which, unlike the 100-PR viewer batch, always finds an old PR.
-    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String) async -> PRStatus? {
-        guard let ownerRepo = await resolveNameWithOwner(repoPath: repoPath) else {
+    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
+        // A stored PR number (fork PRs, or a PR whose head we renamed locally)
+        // can't be found by head branch — resolve it directly, mirroring
+        // fetchAll's number-first path. Only fall back to the branch path when no
+        // number is stored.
+        if let prNumber {
+            return await refreshByNumber(worktreeID: worktreeID, number: prNumber, repoPath: repoPath)
+        }
+        guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
             return cache[worktreeID]   // can't resolve owner/name → leave cache unchanged
         }
         let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch)
@@ -230,36 +243,88 @@ public actor PRStatusManager {
                 continue
             }
 
-            let signals: (failing: Bool, pending: Bool)
-            if obj.state != "OPEN" {
-                signals = (false, false)   // mapState ignores signals for MERGED/CLOSED
-            } else if let fetched = await fetchCheckSignals(url: obj.url, number: obj.number, repoPath: repoPath) {
-                signals = fetched
-            } else if let cached = cache[worktreeID] {
-                return cached   // transient failure: keep the previous status rather than guessing
-            } else {
-                signals = (false, false)   // bootstrap with no data; the next poll corrects it
-            }
-
-            let (state, reason) = Self.mapStateAndReason(
-                ghState: obj.state,
-                mergeStateStatus: obj.mergeStateStatus,
-                reviewDecision: obj.reviewDecision ?? "",
-                isDraft: obj.isDraft,
-                requiredChecksFailing: signals.failing,
-                requiredChecksPending: signals.pending
-            )
-            let status = PRStatus(number: obj.number, url: obj.url, state: state, reason: reason,
-                                  mergeQueuePosition: obj.mergeQueuePosition)
-            await apply(status, for: worktreeID)
-            lastDirectUpdate[worktreeID] = Date()
-            await onPRStatusComputed?(worktreeID, status, repoPath)
-            return status
+            return await applyRefreshedNode(
+                worktreeID: worktreeID, number: obj.number, url: obj.url, state: obj.state,
+                mergeStateStatus: obj.mergeStateStatus, reviewDecision: obj.reviewDecision ?? "",
+                isDraft: obj.isDraft, mergeQueuePosition: obj.mergeQueuePosition, repoPath: repoPath)
         }
 
         // gh exited non-zero or parse failed for every candidate — leave cache unchanged.
         logger.debug("refresh: no candidate branch yielded a PR for worktree \(worktreeID, privacy: .public); keeping cached status")
         return cache[worktreeID]
+    }
+
+    /// Refresh a single worktree by its stored PR number — one aliased
+    /// `pullRequest(number:)` lookup (the only way to reach a fork PR, whose head
+    /// never appears in a branch query). Tolerant of a non-zero `gh` exit that
+    /// still carries usable `data` (a sibling batch error). Leaves the cache
+    /// untouched on any failure to resolve the number.
+    private func refreshByNumber(worktreeID: UUID, number: Int, repoPath: String) async -> PRStatus? {
+        guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
+            return cache[worktreeID]
+        }
+        let query = Self.numberedPRQuery(aliases: [(alias: "pr0", number: number)])
+        let args = [
+            "api", "graphql",
+            "-f", "query=\(query)",
+            "-f", "owner=\(ownerRepo.owner)",
+            "-f", "name=\(ownerRepo.name)"
+        ]
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            logger.debug("refresh: by-number query produced no data for PR #\(number, privacy: .public); keeping cached status")
+            return cache[worktreeID]
+        }
+        if result.exitStatus != 0 {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("refresh: by-number query exited \(result.exitStatus, privacy: .public) with partial data for PR #\(number, privacy: .public): \(errSuffix, privacy: .public)")
+        }
+        let matches = Self.parseNumberedPRNodes(from: data, aliases: [(alias: "pr0", worktreeID: worktreeID)])
+        guard let node = matches.first?.node else {
+            logger.debug("refresh: PR #\(number, privacy: .public) did not resolve by number; keeping cached status")
+            return cache[worktreeID]
+        }
+        return await applyRefreshedNode(
+            worktreeID: worktreeID, number: node.number, url: node.url, state: node.state,
+            mergeStateStatus: node.mergeStateStatus, reviewDecision: node.reviewDecision,
+            isDraft: node.isDraft, mergeQueuePosition: node.mergeQueuePosition, repoPath: repoPath)
+    }
+
+    /// Compute check signals for a resolved PR node, map to a `PRStatus`, write it
+    /// to the cache via `apply`, mark the direct-update timestamp, and fire the
+    /// nightwatch callback. Shared by both refresh paths (by-number, by-branch) so
+    /// their signal/apply logic can't drift. When per-check signals are
+    /// unavailable it keeps the prior cached status (transient failure) or, with
+    /// no cache to keep, bootstraps with no-signal state (the next poll corrects).
+    private func applyRefreshedNode(
+        worktreeID: UUID, number: Int, url: String, state: String,
+        mergeStateStatus: String, reviewDecision: String, isDraft: Bool,
+        mergeQueuePosition: Int?, repoPath: String
+    ) async -> PRStatus {
+        let signals: (failing: Bool, pending: Bool)
+        if state != "OPEN" {
+            signals = (false, false)   // mapState ignores signals for MERGED/CLOSED
+        } else if let fetched = await fetchCheckSignals(url: url, number: number, repoPath: repoPath) {
+            signals = fetched
+        } else if let cached = cache[worktreeID] {
+            return cached   // transient failure: keep the previous status rather than guessing
+        } else {
+            signals = (false, false)   // bootstrap with no data; the next poll corrects it
+        }
+        let (mappedState, reason) = Self.mapStateAndReason(
+            ghState: state,
+            mergeStateStatus: mergeStateStatus,
+            reviewDecision: reviewDecision,
+            isDraft: isDraft,
+            requiredChecksFailing: signals.failing,
+            requiredChecksPending: signals.pending
+        )
+        let status = PRStatus(number: number, url: url, state: mappedState, reason: reason,
+                              mergeQueuePosition: mergeQueuePosition)
+        await apply(status, for: worktreeID)
+        lastDirectUpdate[worktreeID] = Date()
+        await onPRStatusComputed?(worktreeID, status, repoPath)
+        return status
     }
 
     /// For tests only: seed a cache entry. Routes through `apply` so the
@@ -760,7 +825,7 @@ public actor PRStatusManager {
     /// unparseable response) degrades to `[]` with a `.debug` log — never
     /// throws, matching the picker's "PR data is best-effort" contract.
     public nonisolated func fetchOpenPRs(repoPath: String) async -> [OpenPRInfo] {
-        guard let ownerRepo = await resolveNameWithOwner(repoPath: repoPath) else {
+        guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
             logger.debug("listOpenPRs: could not resolve owner/name for \(repoPath, privacy: .public)")
             return []
         }
@@ -774,10 +839,18 @@ public actor PRStatusManager {
             logger.debug("listOpenPRs: gh did not launch for \(repoPath, privacy: .public)")
             return []
         }
-        guard result.exitStatus == 0, let data = Self.graphQLOutputData(stdout: result.stdout) else {
+        guard let data = Self.graphQLOutputData(stdout: result.stdout) else {
             let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.debug("listOpenPRs: gh graphql exited \(result.exitStatus, privacy: .public): \(errSuffix, privacy: .public)")
+            logger.debug("listOpenPRs: gh graphql produced no data (exit \(result.exitStatus, privacy: .public)): \(errSuffix, privacy: .public)")
             return []
+        }
+        // `gh api graphql` exits non-zero when ANY node errors (a stale/deleted/
+        // inaccessible fork PR) yet still emits usable `data` for the rest. Parse
+        // whatever came back rather than discarding the whole batch — mirrors
+        // `runGHGraphQL`'s partial-results tolerance (regression guard, PR #208).
+        if result.exitStatus != 0 {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("listOpenPRs: gh graphql exited \(result.exitStatus, privacy: .public) with partial data: \(errSuffix, privacy: .public)")
         }
         return Self.parseOpenPRNodes(from: data)
     }
@@ -837,6 +910,19 @@ public actor PRStatusManager {
         return (owner: String(parts[0]), name: String(parts[1]))
     }
 
+    /// `resolveNameWithOwner` behind a ~15-min TTL cache so the periodic poll
+    /// (by-number query) and picker (open-PR query) stop spawning a `gh repo
+    /// view` subprocess on every call. A checkout's owner/name is effectively
+    /// immutable, so a stale entry is harmless within the TTL.
+    private func cachedNameWithOwner(repoPath: String) async -> (owner: String, name: String)? {
+        if let entry = ownerRepoCache[repoPath], entry.expiry > Date() {
+            return entry.value
+        }
+        guard let resolved = await resolveNameWithOwner(repoPath: repoPath) else { return nil }
+        ownerRepoCache[repoPath] = (value: resolved, expiry: Date().addingTimeInterval(15 * 60))
+        return resolved
+    }
+
     /// Resolve stored PR numbers directly via one aliased `pullRequest(number:)`
     /// query — the only way to reach a fork PR, whose head branch never appears
     /// in the viewer-authored batch. Degrades to no matches on any failure
@@ -846,7 +932,7 @@ public actor PRStatusManager {
         _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
         repoPath: String
     ) async -> [(worktreeID: UUID, node: PRNode)] {
-        guard let ownerRepo = await resolveNameWithOwner(repoPath: repoPath) else {
+        guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
             logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(repoPath, privacy: .public)")
             return []
         }
@@ -863,10 +949,17 @@ public actor PRStatusManager {
             "-f", "name=\(ownerRepo.name)"
         ]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
-              result.exitStatus == 0,
               let data = Self.graphQLOutputData(stdout: result.stdout) else {
-            logger.debug("fetchAll: by-number query failed for numbered PRs at \(repoPath, privacy: .public)")
+            logger.debug("fetchAll: by-number query produced no data for numbered PRs at \(repoPath, privacy: .public)")
             return []
+        }
+        // `gh api graphql` exits non-zero when ONE aliased PR errors (stale,
+        // deleted, or inaccessible — likeliest for a fork PR) while still emitting
+        // usable `data` for the others. Parse whatever came back regardless of
+        // exit status; log the partial failure (regression guard, PR #208).
+        if result.exitStatus != 0 {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("fetchAll: by-number query exited \(result.exitStatus, privacy: .public) with partial data at \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
         }
         return Self.parseNumberedPRNodes(from: data, aliases: entries.map { ($0.alias, $0.worktreeID) })
     }

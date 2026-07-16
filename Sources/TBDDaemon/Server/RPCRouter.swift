@@ -473,7 +473,8 @@ public final class RPCRouter: Sendable {
             worktreeID: wt.id,
             branch: wt.branch,
             upstreamBranch: upstreamBranch,
-            repoPath: wt.path
+            repoPath: wt.path,
+            prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))
     }
