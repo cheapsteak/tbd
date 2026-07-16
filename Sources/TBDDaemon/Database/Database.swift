@@ -891,6 +891,15 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "gc_snapshot_retention_days", type: .integer, defaults: 30)
         }
 
+        // Per-repo Claude settings overlay fragment (JSON object string,
+        // plain-text passthrough). NULL = unset. Resolved at Claude spawn
+        // time and deep-merged into TBD's per-session `--settings` overlay
+        // beneath the per-spawn `--claude-settings` fragment. See
+        // docs/claude-settings-overlay.md.
+        migrator.registerMigration("v53_repo_claude_settings_overlay") { db in
+            try db.addColumnIfMissing(table: "repo", column: "claude_settings_overlay", type: .text)
+        }
+
         return migrator
     }
 }

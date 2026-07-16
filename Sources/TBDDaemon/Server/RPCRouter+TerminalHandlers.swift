@@ -321,9 +321,12 @@ extension RPCRouter {
                 ? ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    // Fragment applies to FRESH primary spawns only; a resume
-                    // must not reapply it. Hooks overlay still resolves for
-                    // resumes — only extraSettingsJSON goes nil.
+                    // Repo fragment is persisted config — applies on every
+                    // spawn path, resume included.
+                    repoSettingsJSON: repo?.claudeSettingsOverlay,
+                    // Per-spawn fragment applies to FRESH spawns only; a
+                    // resume must not reapply it. Hooks overlay still resolves
+                    // for resumes — only extraSettingsJSON goes nil.
                     extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
                   )
                 : nil,
@@ -1078,7 +1081,8 @@ extension RPCRouter {
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolved?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString
+                    sessionKey: plannedTerminalID.uuidString,
+                    repoSettingsJSON: repo?.claudeSettingsOverlay
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
@@ -1107,7 +1111,8 @@ extension RPCRouter {
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolved?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString
+                    sessionKey: plannedTerminalID.uuidString,
+                    repoSettingsJSON: repo?.claudeSettingsOverlay
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides

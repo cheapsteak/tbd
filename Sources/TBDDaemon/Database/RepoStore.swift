@@ -24,6 +24,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hidden: Bool
     var expanded: Bool
     var env_overrides: String?
+    var claude_settings_overlay: String?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -41,6 +42,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.hidden = repo.hidden
         self.expanded = repo.expanded
         self.env_overrides = EnvOverridesCoding.encode(repo.envOverrides)
+        self.claude_settings_overlay = repo.claudeSettingsOverlay
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -66,7 +68,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             status: RepoStatus(rawValue: status) ?? .ok,
             hidden: hidden,
             expanded: expanded,
-            envOverrides: EnvOverridesCoding.decode(env_overrides)
+            envOverrides: EnvOverridesCoding.decode(env_overrides),
+            claudeSettingsOverlay: claude_settings_overlay
         )
     }
 }
@@ -213,6 +216,17 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET env_overrides = ? WHERE id = ?",
                 arguments: [json, id.uuidString]
+            )
+        }
+    }
+
+    /// Set or clear the per-repo Claude settings overlay fragment.
+    /// nil (or the caller mapping empty text to nil) clears to NULL.
+    public func setClaudeSettingsOverlay(id: UUID, overlay: String?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET claude_settings_overlay = ? WHERE id = ?",
+                arguments: [overlay, id.uuidString]
             )
         }
     }

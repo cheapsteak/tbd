@@ -25,6 +25,10 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var expanded: Bool
     /// Free-form env-var overrides applied to spawned sessions (repo scope).
     public var envOverrides: [String: String]
+    /// Claude settings overlay fragment (JSON object string) deep-merged into
+    /// TBD's per-session `--settings` overlay at Claude spawn time. nil =
+    /// unset. Passthrough — TBD does not interpret the contents.
+    public var claudeSettingsOverlay: String?
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
@@ -33,7 +37,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
                 worktreeSlot: String? = nil, worktreeRoot: String? = nil,
                 status: RepoStatus = .ok, hidden: Bool = false,
                 expanded: Bool = true,
-                envOverrides: [String: String] = [:]) {
+                envOverrides: [String: String] = [:],
+                claudeSettingsOverlay: String? = nil) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -49,13 +54,14 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.hidden = hidden
         self.expanded = expanded
         self.envOverrides = envOverrides
+        self.claudeSettingsOverlay = claudeSettingsOverlay
     }
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
         case renamePrompt, customInstructions, profileOverrideID
         case worktreeSlot, worktreeRoot, status, hidden, expanded
-        case envOverrides
+        case envOverrides, claudeSettingsOverlay
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +82,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
         envOverrides = try c.decodeIfPresent(
             [String: String].self, forKey: .envOverrides) ?? [:]
+        claudeSettingsOverlay = try c.decodeIfPresent(
+            String.self, forKey: .claudeSettingsOverlay)
     }
 }
 

@@ -367,6 +367,159 @@ extension TBDHomeSerialized {
         #expect(parsed?["skillOverrides"] == nil)
     }
 
+    // MARK: - Repo settings fragment (per-repo claude_settings_overlay)
+
+    @Test func resolveOverlayPathWithNilRepoFragmentReturnsGlobalPath() throws {
+        // OFF branch of the new gate: nil repo fragment + nil per-spawn
+        // fragment behaves exactly as before (shared global overlay).
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: nil,
+            extraSettingsJSON: nil
+        )
+        #expect(path == ClaudeHookOverlay.overlayPath)
+    }
+
+    @Test func resolveOverlayPathWithNilRepoFragmentAndPerSpawnMatchesPerSpawnOnly() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        // OFF branch with a per-spawn fragment: nil repo fragment must not
+        // change the pre-existing per-spawn behavior.
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: nil,
+            extraSettingsJSON: #"{"skillOverrides":{"x":"off"}}"#
+        )
+        #expect(path.contains(ClaudeHookOverlay.perSessionPrefix))
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect(((parsed?["skillOverrides"] as? [String: Any])?["x"] as? String) == "off")
+    }
+
+    @Test func resolveOverlayPathWithRepoFragmentAloneWritesPerSessionMergedFile() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: #"{"skillOverrides":{"heavy-skill":"off"}}"#
+        )
+        #expect(path != ClaudeHookOverlay.overlayPath)
+        #expect(path.contains(ClaudeHookOverlay.perSessionPrefix))
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        let overrides = parsed?["skillOverrides"] as? [String: Any]
+        #expect(overrides?["heavy-skill"] as? String == "off")
+    }
+
+    @Test func repoAndPerSpawnFragmentsMergeWithPerSpawnWinningCollisions() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: #"{"skillOverrides":{"shared":"repo","repoOnly":"on"},"repoKey":1}"#,
+            extraSettingsJSON: #"{"skillOverrides":{"shared":"spawn"},"spawnKey":2}"#
+        )
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // Non-colliding keys from BOTH fragments are unioned…
+        #expect(parsed?["repoKey"] as? Int == 1)
+        #expect(parsed?["spawnKey"] as? Int == 2)
+        let overrides = parsed?["skillOverrides"] as? [String: Any]
+        #expect(overrides?["repoOnly"] as? String == "on")
+        // …the collision goes to the per-spawn fragment…
+        #expect(overrides?["shared"] as? String == "spawn")
+        // …and hooks survive.
+        #expect(parsed?["hooks"] != nil)
+    }
+
+    @Test func malformedRepoFragmentDegradesButValidPerSpawnStillApplies() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: "{not json",
+            extraSettingsJSON: #"{"spawnKey":"still-applies"}"#
+        )
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect(parsed?["spawnKey"] as? String == "still-applies")
+    }
+
+    @Test func malformedPerSpawnFragmentDegradesButValidRepoStillApplies() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: #"{"repoKey":"still-applies"}"#,
+            extraSettingsJSON: "{not json"
+        )
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect(parsed?["repoKey"] as? String == "still-applies")
+    }
+
+    @Test func bothFragmentsMalformedDegradesToHooksOnlyPerSessionFile() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: "{nope",
+            extraSettingsJSON: "[1,2]"
+        )
+        // Still per-session (non-empty fragments force it), hooks-only body.
+        #expect(path.contains(ClaudeHookOverlay.perSessionPrefix))
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?.keys.sorted() == ["hooks"])
+    }
+
     @Test func roundtripsAsValidJSON() throws {
         let data = try ClaudeHookOverlay.generateBody()
         // Must round-trip — a malformed overlay file would crash Claude
