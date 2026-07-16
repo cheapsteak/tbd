@@ -180,6 +180,7 @@ public enum RPCMethod {
     public static let repoListBranches = "repo.listBranches"
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
+    public static let repoSetClaudeSettingsOverlay = "repo.setClaudeSettingsOverlay"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let worktreeSetAutoHibernate = "worktree.setAutoHibernate"
@@ -1299,6 +1300,17 @@ public struct SetRepoEnvOverridesParams: Codable, Sendable, Equatable {
     public init(repoID: UUID, overrides: [String: String]) {
         self.repoID = repoID
         self.overrides = overrides
+    }
+}
+
+/// Params for `repo.setClaudeSettingsOverlay` — per-repo Claude settings
+/// overlay fragment (JSON object string). nil clears to unset.
+public struct SetRepoClaudeSettingsOverlayParams: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let overlay: String?
+    public init(repoID: UUID, overlay: String?) {
+        self.repoID = repoID
+        self.overlay = overlay
     }
 }
 

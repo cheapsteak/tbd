@@ -56,6 +56,30 @@ extension RPCRouterTests {
         #expect(stored?.envOverrides == ["FOO": "bar"])
     }
 
+    @Test("repo.setClaudeSettingsOverlay persists and clears the fragment")
+    func repoSetClaudeSettingsOverlay() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+
+        let fragment = #"{"skillOverrides":{"x":"off"}}"#
+        let set = try RPCRequest(
+            method: RPCMethod.repoSetClaudeSettingsOverlay,
+            params: SetRepoClaudeSettingsOverlayParams(repoID: repo.id, overlay: fragment)
+        )
+        #expect(await router.handle(set).success)
+        #expect(try await db.repos.get(id: repo.id)?.claudeSettingsOverlay == fragment)
+
+        let clear = try RPCRequest(
+            method: RPCMethod.repoSetClaudeSettingsOverlay,
+            params: SetRepoClaudeSettingsOverlayParams(repoID: repo.id, overlay: nil)
+        )
+        #expect(await router.handle(clear).success)
+        #expect(try await db.repos.get(id: repo.id)?.claudeSettingsOverlay == nil)
+    }
+
     @Test("modelProfile.setEnvOverrides persists per-profile overrides")
     func modelProfileSetEnvOverrides() async throws {
         let profile = try await db.modelProfiles.create(name: "P", kind: .oauth)

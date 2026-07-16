@@ -235,18 +235,21 @@ public enum ClaudeHookOverlay {
     /// spawn always has a usable `--settings` path — it degrades to "no
     /// fallback models" rather than aborting the spawn.
     ///
-    /// `extraSettingsJSON` (a JSON OBJECT string) also forces a per-session
-    /// overlay and is deep-merged into the body. If it's nil/empty it's
-    /// ignored; if it fails to parse as a JSON object it's logged and dropped
-    /// (the fragment degrades to nothing — a bad fragment must never abort the
-    /// spawn).
+    /// `repoSettingsJSON` (the repo row's persisted fragment) and
+    /// `extraSettingsJSON` (the per-spawn param) are JSON OBJECT strings that
+    /// also force a per-session overlay and are deep-merged into the body —
+    /// repo fragment first, per-spawn fragment on top (per-spawn wins
+    /// collisions). Each parses independently: a malformed one is logged and
+    /// dropped without discarding the other, and a bad fragment must never
+    /// abort the spawn.
     ///
-    /// ponytail: the fragment applies at FRESH spawn only. Wake/hibernation
-    /// resume does NOT reapply it — that would need persisting the fragment on
-    /// the terminal DB row via a migration (out of scope for v1).
+    /// The repo fragment is read fresh from the repo row at every spawn, so it
+    /// applies on ALL spawn paths (fresh create, resume, wake, profile swap).
+    /// The per-spawn fragment applies at FRESH spawn only — callers gate it.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,
+        repoSettingsJSON: String? = nil,
         extraSettingsJSON: String? = nil
     ) -> String {
         let hasFallback = !(fallbackModels?.isEmpty ?? true)
@@ -254,10 +257,17 @@ public enum ClaudeHookOverlay {
         // later fails to parse — a malformed fragment degrades to hooks-only,
         // it must not silently fall back to (and mutate) the shared global file.
         let hasExtra = !(extraSettingsJSON?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || !(repoSettingsJSON?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         guard hasFallback || hasExtra else {
             return overlayPath
         }
-        let extraSettings = parseExtraSettings(extraSettingsJSON)
+        // Repo fragment first, per-spawn fragment deep-merged on top.
+        var extraSettings = parseExtraSettings(repoSettingsJSON)
+        if let perSpawn = parseExtraSettings(extraSettingsJSON) {
+            var base = extraSettings ?? [:]
+            deepMerge(&base, perSpawn)
+            extraSettings = base
+        }
         let path = perSessionOverlayPath(sessionKey: sessionKey)
         do {
             let data = try generateBody(fallbackModels: fallbackModels, extraSettings: extraSettings)

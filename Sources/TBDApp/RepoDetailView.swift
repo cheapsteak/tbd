@@ -112,6 +112,13 @@ struct RepoSettingsView: View {
                         Divider()
                             .padding(.vertical, 4)
 
+                        ClaudeSettingsOverlayEditor(
+                            initial: repo.claudeSettingsOverlay
+                        ) { await appState.setRepoClaudeSettingsOverlay(repoID: repo.id, overlay: $0) }
+
+                        Divider()
+                            .padding(.vertical, 4)
+
                         RepoHooksSettingsView(repoID: repoID, focusedHook: $focusedHook)
                     }
                     .padding()
@@ -162,5 +169,70 @@ struct RepoSettingsView: View {
             return "Inheriting: \(name)"
         }
         return "Inheriting: Default (claude keychain login)"
+    }
+}
+
+/// Minimal per-repo editor for the Claude settings overlay fragment: a
+/// monospaced multi-line JSON field with the same save flow as
+/// `EnvOverridesEditor`. Empty/whitespace text clears the fragment (NULL).
+/// Passthrough by design — no JSON validation beyond what the daemon logs
+/// at spawn time. See docs/claude-settings-overlay.md.
+private struct ClaudeSettingsOverlayEditor: View {
+    /// Hands the committed fragment (nil = cleared) to the caller for persistence.
+    let onSave: (String?) async -> Void
+
+    @State private var text: String
+    @State private var isSaving = false
+    @State private var showSaved = false
+
+    init(initial: String?, onSave: @escaping (String?) async -> Void) {
+        self.onSave = onSave
+        _text = State(initialValue: initial ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Claude settings overlay")
+                .font(.callout)
+                .fontWeight(.medium)
+            Text("JSON object deep-merged into TBD's --settings overlay on every Claude spawn in this repo (fresh, resume, wake). Leave empty to disable.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextEditor(text: $text)
+                .font(.body.monospaced())
+                .frame(minHeight: 60, maxHeight: 120)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.secondary.opacity(0.3))
+                )
+
+            HStack {
+                Spacer()
+                if showSaved {
+                    Text("Saved")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                }
+                Button("Save") { save() }
+                    .controlSize(.small)
+                    .disabled(isSaving)
+            }
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let overlay = trimmed.isEmpty ? nil : text
+        Task {
+            await onSave(overlay)
+            isSaving = false
+            withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation(.easeInOut(duration: 0.3)) { showSaved = false }
+        }
     }
 }
