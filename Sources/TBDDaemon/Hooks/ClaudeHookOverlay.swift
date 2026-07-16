@@ -216,12 +216,13 @@ public enum ClaudeHookOverlay {
 
     /// Resolve the `--settings` overlay path for a spawn.
     ///
-    /// - No fallback models (nil/empty) → returns the shared global
-    ///   `overlayPath` unchanged (hooks-only, the pre-existing behavior).
-    /// - Fallback models present → writes a PER-SESSION overlay file that
-    ///   merges hooks + the `fallbackModel` array (because `fallbackModel` is
-    ///   per-profile and the global overlay is shared across all sessions),
-    ///   then returns that file's path.
+    /// - Both fallback models AND `extraSettingsJSON` absent → returns the
+    ///   shared global `overlayPath` unchanged (hooks-only, pre-existing behavior).
+    /// - Fallback models present OR a non-empty `extraSettingsJSON` fragment
+    ///   supplied → writes a PER-SESSION overlay file that merges hooks + the
+    ///   `fallbackModel` array (per-profile) + the fragment (both are session-
+    ///   specific, and the global overlay is shared across all sessions), then
+    ///   returns that file's path.
     ///
     /// The per-session path is keyed by `sessionKey` (a session/terminal/
     /// worktree-unique string) so concurrent sessions with different profiles
