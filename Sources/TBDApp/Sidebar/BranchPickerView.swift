@@ -50,17 +50,11 @@ struct BranchListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                TextField("Filter branches & PRs", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($searchFocused)
-                    .onSubmit { selectFirstMatch() }
-                if prsLoading {
-                    ProgressView()
-                        .controlSize(.mini)
-                }
-            }
-            .padding(8)
+            TextField("Filter branches & PRs", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .focused($searchFocused)
+                .onSubmit { selectFirstMatch() }
+                .padding(8)
 
             Divider()
 
@@ -72,7 +66,7 @@ struct BranchListView: View {
                     Spacer()
                 }
                 .padding(16)
-            } else if filteredItems.isEmpty {
+            } else if filteredItems.isEmpty && !prsLoading {
                 Text(emptyStateMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -80,6 +74,9 @@ struct BranchListView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        if prsLoading {
+                            PRLoadingPlaceholderRow()
+                        }
                         ForEach(filteredItems) { item in
                             BranchPickerRow(item: item) {
                                 pick(item)
@@ -143,6 +140,24 @@ struct BranchListView: View {
         if let first = filteredItems.first {
             pick(first)
         }
+    }
+}
+
+/// Non-interactive row shown at the top of the list while the open-PR fetch
+/// (`prsLoading`) is in flight. PR rows float to the top once loaded (see
+/// 20c8fbfb), so the placeholder occupies that same slot.
+private struct PRLoadingPlaceholderRow: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading pull requests…")
+                .font(.system(size: 12))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
