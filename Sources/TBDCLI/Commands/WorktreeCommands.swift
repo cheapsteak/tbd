@@ -75,6 +75,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    @Flag(name: .long, help: "Auto-archive this worktree when its PR merges (arms the per-worktree override; overrides the global default off).")
+    var archiveOnMerge = false
+
     mutating func validate() throws {
         if let folder = folder {
             if folder.isEmpty {
@@ -129,7 +132,8 @@ struct WorktreeCreate: AsyncParsableCommand {
                 siblingOfWorktreeID: parentingFields.siblingOfWorktreeID,
                 callerWorktreeID: parentingFields.callerWorktreeID,
                 suppressAutoParent: parentingFields.suppressAutoParent,
-                claudeSettingsOverlay: claudeSettings
+                claudeSettingsOverlay: claudeSettings,
+                autoArchiveOnMerge: archiveOnMerge ? true : nil
             ),
             resultType: Worktree.self
         )

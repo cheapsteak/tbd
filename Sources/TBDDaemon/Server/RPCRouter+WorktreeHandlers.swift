@@ -36,6 +36,17 @@ extension RPCRouter {
             try? await db.worktrees.delete(id: pending.id)
             throw WorktreeLifecycleError.repoNotFound(params.repoID)
         }
+
+        // Arm the per-worktree auto-archive-on-merge override when the spawn
+        // requested it. nil leaves the row following the global default.
+        if let autoArchive = params.autoArchiveOnMerge {
+            do {
+                try await db.worktrees.setAutoArchiveOnMerge(id: pending.id, value: autoArchive)
+            } catch {
+                logger.warning("failed to arm auto-archive for \(pending.id, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
         let fetchCache = self.fetchCache

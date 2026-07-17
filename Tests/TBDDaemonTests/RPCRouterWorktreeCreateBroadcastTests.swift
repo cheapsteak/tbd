@@ -165,6 +165,55 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         #expect(created.count == 1,
                 ".preSessionPending must produce exactly one .worktreeCreated total (no handler duplicate)")
     }
+
+    // Branching-conditional coverage (CLAUDE.md): the handler arms the
+    // per-worktree auto-archive-on-merge override only when the param is
+    // non-nil. Both branches are asserted below.
+
+    @Test func createWithAutoArchiveTrueArmsOverride() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let request = try RPCRequest(
+            method: RPCMethod.worktreeCreate,
+            params: WorktreeCreateParams(repoID: repo.id, autoArchiveOnMerge: true)
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+        let pending = try response.decodeResult(Worktree.self)
+
+        let row = try #require(try await db.worktrees.get(id: pending.id))
+        #expect(row.autoArchiveOnMerge == true)
+    }
+
+    @Test func createWithoutAutoArchiveLeavesOverrideNil() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        // Omitted (nil) → the row follows the global default (override unset).
+        let request = try RPCRequest(
+            method: RPCMethod.worktreeCreate,
+            params: WorktreeCreateParams(repoID: repo.id)
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+        let pending = try response.decodeResult(Worktree.self)
+
+        let row = try #require(try await db.worktrees.get(id: pending.id))
+        #expect(row.autoArchiveOnMerge == nil)
+    }
 }
 }
 
