@@ -209,11 +209,18 @@ extension RPCRouter {
     /// Drop PRs already checked out in a worktree — by head branch name OR by a
     /// number stamped on an active worktree row (covers a PR whose head was
     /// fetched under a uniquified local branch, whose name no longer matches).
-    /// Pure so it's unit-testable without git/gh/db.
+    /// The branch-name check applies only to same-repo PRs: a fork PR's head
+    /// branch lives in the contributor's namespace, so a name matching a
+    /// checked-out origin branch (e.g. a fork PR opened off "main") is
+    /// coincidental, not the same ref — only the stored-PR-number check
+    /// applies to fork PRs. Pure so it's unit-testable without git/gh/db.
     static func filterOpenPRsNotInUse(
         _ prs: [OpenPRInfo], inUseBranches: Set<String>, inUsePRNumbers: Set<Int>
     ) -> [OpenPRInfo] {
-        prs.filter { !inUseBranches.contains($0.headRefName) && !inUsePRNumbers.contains($0.number) }
+        prs.filter { pr in
+            let branchInUse = !pr.isCrossRepository && inUseBranches.contains(pr.headRefName)
+            return !branchInUse && !inUsePRNumbers.contains(pr.number)
+        }
     }
 
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
