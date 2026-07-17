@@ -165,13 +165,18 @@ public struct GitManager: Sendable {
 
     /// True if `refs/heads/<name>` exists locally. Used to pick a
     /// non-clobbering local branch name before force-fetching a pull ref.
+    ///
+    /// Fails closed, unlike the read-only `refExists`: this result gates
+    /// whether `fetchPullRequestHead`'s `+refs/pull/<n>/head:refs/heads/<name>`
+    /// force-refspec is safe to run against `name`. Only the benign "ref
+    /// missing" case (`show-ref --quiet` exits 1) is treated as absent — any
+    /// other failure (timeout, spawn failure, other exit codes) is rethrown so
+    /// a bad answer here can't let the force-fetch silently clobber a branch.
     public func localBranchExists(repoPath: String, name: String) async throws -> Bool {
         do {
             _ = try await run(arguments: ["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], at: repoPath)
             return true
-        } catch {
-            // show-ref --quiet exits 1 when the ref is missing — treat any
-            // failure as "absent" (same convention as `refExists`).
+        } catch let error as GitError where error.exitCode == 1 {
             return false
         }
     }

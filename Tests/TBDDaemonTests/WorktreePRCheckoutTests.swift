@@ -42,6 +42,24 @@ import Testing
         return (cloneTempDir, cloneRepoDir, prSHA)
     }
 
+    /// `localBranchExists` gates the force-refspec in `fetchPullRequestHead`,
+    /// so it must fail CLOSED: only the benign "ref missing" exit-1 case may
+    /// return `false`. A non-exit-1 failure (here: `show-ref` run inside a
+    /// plain, non-git directory exits 128 with "fatal: not a git repository")
+    /// must propagate as a thrown `GitError` instead of being reported as
+    /// "branch absent".
+    @Test func localBranchExistsThrowsOnNonRefMissingFailure() async throws {
+        let notARepo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-not-a-repo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: notARepo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: notARepo) }
+
+        let git = GitManager()
+        await #expect(throws: GitError.self) {
+            _ = try await git.localBranchExists(repoPath: notARepo.path, name: "whatever")
+        }
+    }
+
     @Test func fetchPullRequestHeadCreatesLocalBranchAtPullCommit() async throws {
         let (tempDir, cloneRepoDir, prSHA) = try await makePRFixture(number: 7)
         defer { try? FileManager.default.removeItem(at: tempDir) }
