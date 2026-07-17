@@ -31,29 +31,23 @@ struct UsageBarsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                UsageBarRow(bucket: session,
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(session, now: now, timeZone: timeZone),
                             label: "5h:",
                             windowLabel: "5-hour window",
-                            windowDuration: ProfileUsagePresentation.sessionWindow,
-                            resetDisplay: .clock,
                             now: now,
                             timeZone: timeZone)
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                UsageBarRow(bucket: weekly,
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: timeZone),
                             label: "wk:",
                             windowLabel: "Weekly window",
-                            windowDuration: ProfileUsagePresentation.weeklyWindow,
-                            resetDisplay: .countdown,
                             now: now,
                             timeZone: timeZone)
             }
             ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()), id: \.offset) { _, scoped in
-                UsageBarRow(bucket: scoped,
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, now: now, timeZone: timeZone),
                             label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
                             windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
-                            windowDuration: ProfileUsagePresentation.weeklyWindow,
-                            resetDisplay: .tooltipOnly,
                             now: now,
                             timeZone: timeZone)
             }
@@ -63,29 +57,15 @@ struct UsageBarsView: View {
 
 // MARK: - One bar row
 
-/// How a row expresses its window's reset, inline and in the tooltip.
-private enum ResetDisplay {
-    /// "· 23:10" inline; tooltip "resets 23:10" (absolute clock, for 5h window).
-    case clock
-    /// "· 2d 5h" inline; tooltip "resets in 2d 5h" (relative countdown, for wk window).
-    case countdown
-    /// nothing inline; tooltip "resets in 2d 5h" (relative countdown, for scoped/F: rows).
-    case tooltipOnly
-}
-
 /// A single window's row: a fixed-width label, the flexible bar (fill + time
 /// marker), a fixed-width trailing percent, and a fixed-width trailing hint
 /// column. The four fixed columns keep bars vertically aligned across rows.
 private struct UsageBarRow: View {
-    let bucket: ClaudeUsageLimitBucket
+    let presentation: ProfileUsagePresentation.BucketPresentation
     /// Leading label ("5h:" / "wk:" / "F:").
     let label: String
     /// Spelled-out window name for the `.help` tooltip ("5-hour window" / "Fable weekly").
     let windowLabel: String
-    /// Window length feeding the time marker's elapsed fraction.
-    let windowDuration: TimeInterval
-    /// How this row displays its reset time (clock, countdown, or tooltip-only).
-    let resetDisplay: ResetDisplay
     let now: Date
     let timeZone: TimeZone
 
@@ -98,7 +78,7 @@ private struct UsageBarRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 22, alignment: .leading)
             bar
-            Text(ProfileUsagePresentation.percentText(bucket.percent))
+            Text(presentation.percentText)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(fillColor)
@@ -115,20 +95,7 @@ private struct UsageBarRow: View {
     /// to keep bars aligned. The 46pt width reserves space for both "· 23:10" and
     /// "· 2d 5h" at 9pt monospacedDigit.
     private var trailingResetHint: some View {
-        let hintText: String = {
-            guard let resetsAt = bucket.resetsAt else { return "" }
-            switch resetDisplay {
-            case .clock:
-                return "· \(ProfileUsagePresentation.resetTimeText(resetsAt, timeZone: timeZone))"
-            case .countdown:
-                guard let compact = ProfileUsagePresentation.compactResetCountdown(resetsAt, now: now) else {
-                    return ""
-                }
-                return "· \(compact)"
-            case .tooltipOnly:
-                return ""
-            }
-        }()
+        let hintText = presentation.resetInline.map { "· \($0)" } ?? ""
 
         return Text(hintText)
             .font(.system(size: 9, design: .rounded))
@@ -148,7 +115,7 @@ private struct UsageBarRow: View {
                 // Usage fill.
                 RoundedRectangle(cornerRadius: 2.5)
                     .fill(fillColor)
-                    .frame(width: geo.size.width * min(bucket.percent / 100, 1))
+                    .frame(width: geo.size.width * min(presentation.percent / 100, 1))
             }
             .frame(height: 5)
             // Time marker: a 9pt tick centered on the 5pt bar (overhangs 2pt
@@ -177,38 +144,11 @@ private struct UsageBarRow: View {
     /// pace data (no reset date, <15% elapsed) this is exactly the old
     /// severity coloring.
     private var fillColor: Color {
-        switch ProfileUsagePresentation.fillLevel(severity: bucket.severity,
-                                                  percent: bucket.percent,
-                                                  elapsedFraction: elapsedFraction) {
-        case .normal: return Self.adaptiveGreen(colorScheme)
-        case .caution: return Self.adaptiveYellow(colorScheme)
-        case .warning: return .orange
-        case .critical: return .red
-        }
+        presentation.fill.barColor(colorScheme)
     }
 
     private var elapsedFraction: Double? {
-        ProfileUsagePresentation.elapsedFraction(resetsAt: bucket.resetsAt,
-                                                 windowDuration: windowDuration,
-                                                 now: now)
-    }
-
-    /// Green that reads on both appearances: a brighter mint in dark mode, a
-    /// deeper forest in light mode (the light default green washes out on a
-    /// pale bar track).
-    private static func adaptiveGreen(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark
-            ? Color(red: 60 / 255, green: 199 / 255, blue: 95 / 255)
-            : Color(red: 27 / 255, green: 107 / 255, blue: 52 / 255)
-    }
-
-    /// Yellow that reads on both appearances: a bright warm yellow in dark
-    /// mode, a deeper amber in light mode (pure yellow washes out against the
-    /// pale bar track).
-    private static func adaptiveYellow(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark
-            ? Color(red: 235 / 255, green: 194 / 255, blue: 52 / 255)
-            : Color(red: 158 / 255, green: 110 / 255, blue: 6 / 255)
+        presentation.elapsedFraction
     }
 
     // MARK: Tooltip
@@ -216,16 +156,9 @@ private struct UsageBarRow: View {
     /// The spelled-out reset info the compact form omits, kept as a `.help`
     /// tooltip so nothing is lost: "5-hour window: 12% used · resets 23:10".
     private var helpText: String {
-        var text = "\(windowLabel): \(ProfileUsagePresentation.percentText(bucket.percent)) used"
-        if let resets = bucket.resetsAt {
-            switch resetDisplay {
-            case .clock:
-                text += " · resets \(ProfileUsagePresentation.resetTimeText(resets, timeZone: timeZone))"
-            case .countdown, .tooltipOnly:
-                if let relative = ProfileUsagePresentation.compactResetCountdown(resets, now: now) {
-                    text += " · resets in \(relative)"
-                }
-            }
+        var text = "\(windowLabel): \(presentation.percentText) used"
+        if let resetPhrase = presentation.resetPhrase {
+            text += " · \(resetPhrase)"
         }
         return text
     }

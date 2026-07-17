@@ -11,9 +11,12 @@ enum HoverCardTextStyle: Equatable {
 }
 
 /// Color treatment for a row value. Calm by default: color appears ONLY for
-/// warning/critical states, never as decoration.
+/// caution/warning/critical states, never as decoration. The four-tier hierarchy
+/// aligns with `ProfileUsagePresentation.FillLevel`.
 enum HoverCardTint: Equatable {
     case normal
+    /// Yellow: pace-aware caution tier (on track to warm but not yet alarmingly so).
+    case caution
     case warning
     case critical
 }
@@ -303,6 +306,7 @@ struct HoverCardView: View {
 
     private func valueColor(_ row: HoverCardRow) -> Color {
         switch row.tint {
+        case .caution: return .yellow
         case .warning: return .orange
         case .critical: return .red
         case .normal: return row.valueStyle == .mutedItalic ? Color.secondary : Color.primary

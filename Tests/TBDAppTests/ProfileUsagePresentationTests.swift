@@ -313,6 +313,132 @@ struct FillLevelTests {
     }
 }
 
+// MARK: - Reset display policy
+
+@Suite("ProfileUsagePresentation — resetDisplay policy")
+struct ResetDisplayPolicyTests {
+    @Test func sessionKindUsesClockDisplay() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "session") == .clock)
+    }
+
+    @Test func weeklyAllKindUsesCountdownDisplay() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_all") == .countdown)
+    }
+
+    @Test func scopedKindUsesTooltipOnlyDisplay() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_scoped") == .tooltipOnly)
+    }
+
+    @Test func unknownKindDefaultsToTooltipOnly() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "future_kind") == .tooltipOnly)
+    }
+}
+
+@Suite("ProfileUsagePresentation — windowDuration")
+struct WindowDurationTests {
+    @Test func sessionKindUsesSessionWindow() {
+        #expect(ProfileUsagePresentation.windowDuration(forKind: "session") == ProfileUsagePresentation.sessionWindow)
+    }
+
+    @Test func weeklyAllKindUsesWeeklyWindow() {
+        #expect(ProfileUsagePresentation.windowDuration(forKind: "weekly_all") == ProfileUsagePresentation.weeklyWindow)
+    }
+
+    @Test func scopedKindUsesWeeklyWindow() {
+        #expect(ProfileUsagePresentation.windowDuration(forKind: "weekly_scoped") == ProfileUsagePresentation.weeklyWindow)
+    }
+
+    @Test func unknownKindDefaultsToSessionWindow() {
+        #expect(ProfileUsagePresentation.windowDuration(forKind: "future_kind") == ProfileUsagePresentation.sessionWindow)
+    }
+}
+
+// MARK: - Unified bucket presentation
+
+@Suite("ProfileUsagePresentation — BucketPresentation")
+struct BucketPresentationTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func sessionBucketBuildsClockDisplay() {
+        // Use a reset date in the future relative to the test's 'now'.
+        // 45% early in the window (10% elapsed) → pace projection off (< 15% threshold), fill = normal floor
+        let futureReset = now.addingTimeInterval(0.9 * ProfileUsagePresentation.sessionWindow)  // 90% remaining
+        let sessionBucket = bucket(kind: "session", percent: 45, severity: "normal", resetsAt: futureReset)
+        let presentation = ProfileUsagePresentation.bucketPresentation(sessionBucket, now: now, timeZone: utc)
+        #expect(presentation.kind == "session")
+        #expect(presentation.percent == 45)
+        #expect(presentation.percentText == "45%")
+        #expect(presentation.resetDisplay == .clock)
+        #expect(presentation.resetInline != nil)  // Clock display should have reset inline
+        #expect(presentation.resetPhrase != nil)  // Should have reset phrase
+        #expect(presentation.fill == .normal)  // 10% elapsed, below gate
+        #expect(presentation.elapsedFraction != nil)
+    }
+
+    @Test func weeklyBucketBuildsCountdownDisplay() {
+        let weeklyBucket = bucket(kind: "weekly_all", percent: 76, severity: "warning")
+        let presentation = ProfileUsagePresentation.bucketPresentation(weeklyBucket, now: now, timeZone: utc)
+        #expect(presentation.kind == "weekly_all")
+        #expect(presentation.percent == 76)
+        #expect(presentation.percentText == "76%")
+        #expect(presentation.resetDisplay == .countdown)
+        #expect(presentation.resetInline == nil)  // No reset date on weekly bucket
+        #expect(presentation.resetPhrase == nil)
+        #expect(presentation.fill == .warning)
+        #expect(presentation.elapsedFraction == nil)
+    }
+
+    @Test func scopedBucketBuildsTooltipDisplay() {
+        let scopedBucket = bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable")
+        let presentation = ProfileUsagePresentation.bucketPresentation(scopedBucket, now: now, timeZone: utc)
+        #expect(presentation.kind == "weekly_scoped")
+        #expect(presentation.percent == 100)
+        #expect(presentation.percentText == "100%")
+        #expect(presentation.resetDisplay == .tooltipOnly)
+        #expect(presentation.resetInline == nil)
+        #expect(presentation.resetPhrase == nil)
+        #expect(presentation.fill == .critical)
+        #expect(presentation.elapsedFraction == nil)
+    }
+
+    @Test func paceAwareYellowTierInPresentation() {
+        // 55% at 0.65 elapsed on a session bucket → caution (yellow).
+        // elapsed = 0.65 * window means remaining = 0.35 * window
+        let sessionBucket = bucket(kind: "session", percent: 55, severity: "normal",
+                                   resetsAt: now.addingTimeInterval(0.35 * ProfileUsagePresentation.sessionWindow))
+        let presentation = ProfileUsagePresentation.bucketPresentation(sessionBucket, now: now, timeZone: utc)
+        #expect(presentation.fill == .caution)
+    }
+
+    @Test func countdownInResetPhraseWhenValid() {
+        // Weekly bucket with a reset date (hypothetically added by API in future).
+        let weekly = bucket(kind: "weekly_all", percent: 50, resetsAt: now.addingTimeInterval(2 * 24 * 3600))
+        let presentation = ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: utc)
+        #expect(presentation.resetDisplay == .countdown)
+        #expect(presentation.resetInline != nil)  // Now has countdown since we added a reset date
+        #expect(presentation.resetPhrase?.hasPrefix("resets in") ?? false)
+    }
+}
+
+@Suite("ProfileUsagePresentation — hoverCardTint mapping")
+struct HoverCardTintMappingTests {
+    @Test func normalFillMapsToNormalTint() {
+        #expect(ProfileUsagePresentation.hoverCardTint(for: .normal) == .normal)
+    }
+
+    @Test func cautionFillMapsToCautionTint() {
+        #expect(ProfileUsagePresentation.hoverCardTint(for: .caution) == .caution)
+    }
+
+    @Test func warningFillMapsToWarningTint() {
+        #expect(ProfileUsagePresentation.hoverCardTint(for: .warning) == .warning)
+    }
+
+    @Test func criticalFillMapsToCriticalTint() {
+        #expect(ProfileUsagePresentation.hoverCardTint(for: .critical) == .critical)
+    }
+}
+
 // MARK: - Pace projection: elapsed-time fraction
 
 @Suite("ProfileUsagePresentation — elapsedFraction")

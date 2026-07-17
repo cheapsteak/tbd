@@ -74,7 +74,7 @@ struct ClaudeTabCardTests {
         let terminal = claudeTerminal(profileID: gmail.profile.id,
                                       createdAt: resetDate)
         let card = AccountHoverCards.claudeTabCard(terminal: terminal,
-                                                   profiles: [gmail], timeZone: utc)
+                                                   profiles: [gmail], timeZone: utc, now: resetDate)
         #expect(card?.title == "g@gmail.com")
         #expect(card?.titleStyle == .plain)
         let rows = card?.rows ?? []
@@ -184,21 +184,34 @@ struct UsageRowsTests {
     }
 
     @Test func tintIsCalmForNormalAndColoredOnlyForWarningCritical() {
-        #expect(AccountHoverCards.tint(for: bucket(kind: "session", percent: 10,
-                                                   severity: "normal")) == .normal)
-        #expect(AccountHoverCards.tint(for: bucket(kind: "session", percent: 80,
-                                                   severity: "warning")) == .warning)
-        #expect(AccountHoverCards.tint(for: bucket(kind: "session", percent: 99,
-                                                   severity: "critical")) == .critical)
-        // API omitted severity: falls back to percent thresholds.
-        #expect(AccountHoverCards.tint(for: bucket(kind: "session", percent: 10)) == .normal)
-        #expect(AccountHoverCards.tint(for: bucket(kind: "session", percent: 92)) == .critical)
+        // Tint now uses pace-aware fill level (from BucketPresentation) instead of just severity.
+        // Without elapsed fraction, the fill = severity floor, so behavior is the same.
+        let normal = ProfileUsagePresentation.bucketPresentation(
+            bucket(kind: "session", percent: 10, severity: "normal"), timeZone: utc)
+        #expect(AccountHoverCards.tint(for: normal) == .normal)
+
+        let warning = ProfileUsagePresentation.bucketPresentation(
+            bucket(kind: "session", percent: 80, severity: "warning"), timeZone: utc)
+        #expect(AccountHoverCards.tint(for: warning) == .warning)
+
+        let critical = ProfileUsagePresentation.bucketPresentation(
+            bucket(kind: "session", percent: 99, severity: "critical"), timeZone: utc)
+        #expect(AccountHoverCards.tint(for: critical) == .critical)
+
+        // API omitted severity: falls back to percent thresholds (no elapsed fraction).
+        let normalNoSeverity = ProfileUsagePresentation.bucketPresentation(
+            bucket(kind: "session", percent: 10), timeZone: utc)
+        #expect(AccountHoverCards.tint(for: normalNoSeverity) == .normal)
+
+        let criticalNoSeverity = ProfileUsagePresentation.bucketPresentation(
+            bucket(kind: "session", percent: 92), timeZone: utc)
+        #expect(AccountHoverCards.tint(for: criticalNoSeverity) == .critical)
     }
 
     @Test func scopedBucketWithoutFamilyNameFallsBackToModelLabel() {
         let rows = AccountHoverCards.usageRows(
             for: snapshot(buckets: [bucket(kind: "weekly_scoped", percent: 50)]),
-            timeZone: utc
+            timeZone: utc, now: Date()
         )
         #expect(rows.first?.label == "Model")
     }
