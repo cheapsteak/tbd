@@ -35,8 +35,7 @@ struct UsageBarsView: View {
                             label: "5h:",
                             windowLabel: "5-hour window",
                             windowDuration: ProfileUsagePresentation.sessionWindow,
-                            usesRelativeReset: false,
-                            showsInlineReset: false,
+                            resetDisplay: .clock,
                             now: now,
                             timeZone: timeZone)
             }
@@ -45,8 +44,7 @@ struct UsageBarsView: View {
                             label: "wk:",
                             windowLabel: "Weekly window",
                             windowDuration: ProfileUsagePresentation.weeklyWindow,
-                            usesRelativeReset: true,
-                            showsInlineReset: true,
+                            resetDisplay: .countdown,
                             now: now,
                             timeZone: timeZone)
             }
@@ -55,8 +53,7 @@ struct UsageBarsView: View {
                             label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
                             windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
                             windowDuration: ProfileUsagePresentation.weeklyWindow,
-                            usesRelativeReset: true,
-                            showsInlineReset: false,
+                            resetDisplay: .tooltipOnly,
                             now: now,
                             timeZone: timeZone)
             }
@@ -65,6 +62,16 @@ struct UsageBarsView: View {
 }
 
 // MARK: - One bar row
+
+/// How a row expresses its window's reset, inline and in the tooltip.
+private enum ResetDisplay {
+    /// "· 23:10" inline; tooltip "resets 23:10" (absolute clock, for 5h window).
+    case clock
+    /// "· 2d 5h" inline; tooltip "resets in 2d 5h" (relative countdown, for wk window).
+    case countdown
+    /// nothing inline; tooltip "resets in 2d 5h" (relative countdown, for scoped/F: rows).
+    case tooltipOnly
+}
 
 /// A single window's row: a fixed-width label, the flexible bar (fill + time
 /// marker), a fixed-width trailing percent, and a fixed-width trailing hint
@@ -77,13 +84,8 @@ private struct UsageBarRow: View {
     let windowLabel: String
     /// Window length feeding the time marker's elapsed fraction.
     let windowDuration: TimeInterval
-    /// The 5h window shows an absolute reset clock; the weekly window shows a
-    /// relative countdown ("resets in 2d 5h").
-    let usesRelativeReset: Bool
-    /// Whether to show the inline trailing countdown ("· 2d 5h"). When true,
-    /// requires usesRelativeReset to be true to render the countdown. The trailing
-    /// column is still reserved on all rows for bar alignment.
-    let showsInlineReset: Bool
+    /// How this row displays its reset time (clock, countdown, or tooltip-only).
+    let resetDisplay: ResetDisplay
     let now: Date
     let timeZone: TimeZone
 
@@ -106,21 +108,29 @@ private struct UsageBarRow: View {
         .help(helpText)
     }
 
-    // MARK: Trailing reset countdown
+    // MARK: Trailing reset hint
 
-    /// Fourth column: weekly reset countdown (inline hint) on rows where
-    /// showsInlineReset is true, empty but space-reserving on other rows
-    /// to keep bars aligned.
+    /// Fourth column: reset display inline (clock for 5h, countdown for wk) on rows
+    /// where resetDisplay shows inline; empty but space-reserving on other rows
+    /// to keep bars aligned. The 46pt width reserves space for both "· 23:10" and
+    /// "· 2d 5h" at 9pt monospacedDigit.
     private var trailingResetHint: some View {
-        let countdownText: String = {
-            guard showsInlineReset, usesRelativeReset, let resetsAt = bucket.resetsAt,
-                  let compact = ProfileUsagePresentation.compactResetCountdown(resetsAt, now: now) else {
+        let hintText: String = {
+            guard let resetsAt = bucket.resetsAt else { return "" }
+            switch resetDisplay {
+            case .clock:
+                return "· \(ProfileUsagePresentation.resetTimeText(resetsAt, timeZone: timeZone))"
+            case .countdown:
+                guard let compact = ProfileUsagePresentation.compactResetCountdown(resetsAt, now: now) else {
+                    return ""
+                }
+                return "· \(compact)"
+            case .tooltipOnly:
                 return ""
             }
-            return "· \(compact)"
         }()
 
-        return Text(countdownText)
+        return Text(hintText)
             .font(.system(size: 9, design: .rounded))
             .monospacedDigit()
             .foregroundStyle(.tertiary)
@@ -208,12 +218,13 @@ private struct UsageBarRow: View {
     private var helpText: String {
         var text = "\(windowLabel): \(ProfileUsagePresentation.percentText(bucket.percent)) used"
         if let resets = bucket.resetsAt {
-            if usesRelativeReset {
+            switch resetDisplay {
+            case .clock:
+                text += " · resets \(ProfileUsagePresentation.resetTimeText(resets, timeZone: timeZone))"
+            case .countdown, .tooltipOnly:
                 if let relative = ProfileUsagePresentation.compactResetCountdown(resets, now: now) {
                     text += " · resets in \(relative)"
                 }
-            } else {
-                text += " · resets \(ProfileUsagePresentation.resetTimeText(resets, timeZone: timeZone))"
             }
         }
         return text
