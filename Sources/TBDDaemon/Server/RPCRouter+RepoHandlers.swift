@@ -193,8 +193,14 @@ extension RPCRouter {
         let inUseBranches = Set((try? await git.worktreeList(repoPath: repo.path))?.map(\.branch).filter { !$0.isEmpty } ?? [])
         // A PR head fetched into a uniquified/renamed local branch (e.g. head
         // "foo" checked out as "foo-2") no longer matches by head name, but the
-        // worktree row carries the PR number — filter on that too.
-        let inUsePRNumbers = Set((try? await db.worktrees.list(repoID: repo.id, status: .active))?.compactMap(\.prNumber) ?? [])
+        // worktree row carries the PR number — filter on that too. Use
+        // excludeArchived (not status: .active) so a worktree still
+        // `.creating` — several seconds of tmux/terminal spawn — still counts
+        // as in-use; otherwise its PR is selectable again during that window,
+        // letting a second worktree land on the same PR (matches the
+        // "globalLiveRows" excludeArchived convention in
+        // WorktreeLifecycle+Reconcile.swift).
+        let inUsePRNumbers = Set((try? await db.worktrees.list(repoID: repo.id, excludeArchived: true))?.compactMap(\.prNumber) ?? [])
         let filtered = Self.filterOpenPRsNotInUse(prs, inUseBranches: inUseBranches, inUsePRNumbers: inUsePRNumbers)
 
         return try RPCResponse(result: RepoListOpenPRsResult(prs: filtered))
