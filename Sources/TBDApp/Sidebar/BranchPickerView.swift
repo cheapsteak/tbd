@@ -34,27 +34,27 @@ struct BranchListView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var branches: [BranchInfo] = []
+    @State private var openPRs: [OpenPRInfo] = []
     @State private var query: String = ""
     @State private var isLoading: Bool = true
     @State private var loadError: Bool = false
+    /// True while the open-PR query is in flight (two-phase load). Branches
+    /// render immediately; PR rows pop in when this clears.
+    @State private var prsLoading: Bool = false
     @FocusState private var searchFocused: Bool
 
-    private var filteredBranches: [BranchInfo] {
-        let trimmed = query.trimmingCharacters(in: .whitespaces).lowercased()
-        if trimmed.isEmpty { return branches }
-        return branches.filter { branch in
-            branch.name.lowercased().contains(trimmed) ||
-                branch.localName.lowercased().contains(trimmed)
-        }
+    private var filteredItems: [PickerItem] {
+        mergePickerItems(branches: branches, prs: openPRs)
+            .filter { matchesFilter($0, query: query) }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            TextField("Filter branches", text: $query)
+            TextField("Filter branches & PRs", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .focused($searchFocused)
-                .padding(8)
                 .onSubmit { selectFirstMatch() }
+                .padding(8)
 
             Divider()
 
@@ -66,7 +66,7 @@ struct BranchListView: View {
                     Spacer()
                 }
                 .padding(16)
-            } else if filteredBranches.isEmpty {
+            } else if filteredItems.isEmpty && !prsLoading {
                 Text(emptyStateMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -74,9 +74,12 @@ struct BranchListView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(filteredBranches) { branch in
-                            BranchPickerRow(branch: branch) {
-                                pick(branch)
+                        if prsLoading {
+                            PRLoadingPlaceholderRow()
+                        }
+                        ForEach(filteredItems) { item in
+                            BranchPickerRow(item: item) {
+                                pick(item)
                             }
                         }
                     }
@@ -94,6 +97,11 @@ struct BranchListView: View {
             }
             isLoading = false
             searchFocused = true
+            // Phase two: PR rows pop in after branches render. A PR-list
+            // failure never blocks or errors the branch list (branches-only).
+            prsLoading = true
+            openPRs = (try? await appState.listOpenPRs(repoID: repoID)) ?? []
+            prsLoading = false
         }
     }
 
@@ -101,53 +109,101 @@ struct BranchListView: View {
     /// state or a genuinely empty repo, so the user can tell a load failure
     /// apart from "no matching branches".
     private var emptyStateMessage: String {
-        if !branches.isEmpty { return "No matches" }
+        if !branches.isEmpty || !openPRs.isEmpty { return "No matches" }
         if loadError { return "Failed to load branches" }
         return "No branches found"
     }
 
-    private func pick(_ branch: BranchInfo) {
+    private func pick(_ item: PickerItem) {
         dismiss()
         onClose()
         // Branch selection always uses the default model (no profile override).
-        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, existingBranch: branch)
+        if let branch = item.branch {
+            // Plain branch row, or a same-repo PR decorating an existing branch:
+            // check out the branch exactly as today; stamp the PR number (if any)
+            // for status tracking only — no pull-ref fetch (checkoutPRHead false).
+            appState.createWorktree(
+                repoID: repoID, parentWorktreeID: parentWorktreeID,
+                existingBranch: branch, prNumber: item.pr?.number)
+        } else if let pr = item.pr {
+            // PR-only row (fork PR, or a same-repo PR whose head is unfetched):
+            // fetch refs/pull/<n>/head into a fresh local branch.
+            let branch = BranchInfo(name: pr.headRefName, localName: pr.headRefName, isRemote: false)
+            appState.createWorktree(
+                repoID: repoID, parentWorktreeID: parentWorktreeID,
+                existingBranch: branch, prNumber: pr.number, checkoutPRHead: true,
+                displayName: "#\(pr.number) \(pr.title)")
+        }
     }
 
     private func selectFirstMatch() {
-        if let first = filteredBranches.first {
+        if let first = filteredItems.first {
             pick(first)
         }
     }
 }
 
+/// Non-interactive row shown at the top of the list while the open-PR fetch
+/// (`prsLoading`) is in flight. PR rows float to the top once loaded (see
+/// 20c8fbfb), so the placeholder occupies that same slot.
+private struct PRLoadingPlaceholderRow: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading pull requests…")
+                .font(.system(size: 12))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct BranchPickerRow: View {
-    let branch: BranchInfo
+    let item: PickerItem
     let onSelect: () -> Void
 
     @State private var isHovered = false
 
+    /// Row title: the branch name, or (PR-only rows) the PR head branch name.
+    private var title: String {
+        item.branch?.name ?? item.pr?.headRefName ?? ""
+    }
+    private var isRemote: Bool { item.branch?.isRemote ?? false }
+    /// Remote rows use a cloud; everything else (local branch or PR-only) uses
+    /// the branch glyph. PR-ness is conveyed by the pill, not the icon.
+    private var iconName: String {
+        isRemote ? "cloud" : "arrow.triangle.branch"
+    }
+
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 6) {
-                Image(systemName: branch.isRemote ? "cloud" : "arrow.triangle.branch")
+                Image(systemName: iconName)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(width: 14)
-                Text(branch.name)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    // Fork PR-only rows show the PR title as a secondary subtitle.
+                    if item.branch == nil, let pr = item.pr {
+                        Text(pr.title)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
                 Spacer(minLength: 4)
-                if branch.isRemote {
-                    Text("remote")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.secondary.opacity(0.10))
-                        )
+                if let pr = item.pr {
+                    prPill(pr)
+                } else if isRemote {
+                    pill("remote")
                 }
             }
             .padding(.horizontal, 10)
@@ -161,5 +217,25 @@ struct BranchPickerRow: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+
+    /// `PR #454` for same-repo, `zionts · PR #454` for fork PRs; dimmed for drafts.
+    private func prPill(_ pr: OpenPRInfo) -> some View {
+        let label = pr.isCrossRepository && !pr.headOwner.isEmpty
+            ? "\(pr.headOwner) · PR #\(pr.number)"
+            : "PR #\(pr.number)"
+        return pill(label).opacity(pr.isDraft ? 0.5 : 1.0)
+    }
+
+    private func pill(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.secondary.opacity(0.10))
+            )
     }
 }

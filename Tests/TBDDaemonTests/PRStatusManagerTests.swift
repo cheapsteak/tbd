@@ -1152,4 +1152,298 @@ struct PRStatusManagerTests {
         let all = await manager.allStatuses()
         #expect(all[id] == merged)
     }
+
+    // MARK: - parseOpenPRNodes (repo.listOpenPRs)
+
+    @Test("parseOpenPRNodes parses a fork PR and a draft PR")
+    func parseOpenPRNodesHappyPath() {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 454,
+                    "title": "Weekly reset job",
+                    "headRefName": "show-weekly-reset",
+                    "isDraft": false,
+                    "isCrossRepository": true,
+                    "headRepositoryOwner": { "login": "zionts" }
+                  },
+                  {
+                    "number": 12,
+                    "title": "WIP: refactor",
+                    "headRefName": "tbd/refactor",
+                    "isDraft": true,
+                    "isCrossRepository": false,
+                    "headRepositoryOwner": { "login": "acme" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.count == 2)
+        #expect(prs[0].number == 454)
+        #expect(prs[0].title == "Weekly reset job")
+        #expect(prs[0].headRefName == "show-weekly-reset")
+        #expect(prs[0].headOwner == "zionts")
+        #expect(prs[0].isCrossRepository == true)
+        #expect(prs[0].isDraft == false)
+        #expect(prs[1].number == 12)
+        #expect(prs[1].isDraft == true)
+        #expect(prs[1].isCrossRepository == false)
+    }
+
+    @Test("parseOpenPRNodes returns empty for empty nodes")
+    func parseOpenPRNodesEmptyNodes() {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": []
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.isEmpty)
+    }
+
+    @Test("parseOpenPRNodes returns empty for malformed JSON")
+    func parseOpenPRNodesMalformed() {
+        let json = "{ not valid json".data(using: .utf8)!
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.isEmpty)
+    }
+
+    @Test("parseOpenPRNodes returns empty when the outer shape is missing repository")
+    func parseOpenPRNodesMissingRepository() {
+        let json = """
+        { "data": { "somethingElse": true } }
+        """.data(using: .utf8)!
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.isEmpty)
+    }
+
+    @Test("parseOpenPRNodes defaults headOwner to empty string when headRepositoryOwner is absent")
+    func parseOpenPRNodesMissingHeadRepositoryOwner() {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 7,
+                    "title": "Same-repo PR",
+                    "headRefName": "tbd/same-repo",
+                    "isDraft": false,
+                    "isCrossRepository": false
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.count == 1)
+        #expect(prs[0].headOwner == "")
+    }
+
+    // MARK: - Number-first path (fetchAll partition + by-number resolution)
+
+    @Test("partitionByPRNumber splits stored-number worktrees from the rest (both branches of the conditional)")
+    func partitionByPRNumberSplits() {
+        let a = UUID(); let b = UUID(); let c = UUID()
+        let items: [(id: UUID, prNumber: Int?)] = [
+            (a, 454),   // numbered → by-number path
+            (b, nil),   // unnumbered → legacy branch-name path
+            (c, 12)     // numbered → by-number path
+        ]
+        let (numbered, unnumbered) = PRStatusManager.partitionByPRNumber(items) { $0.prNumber }
+        #expect(numbered.map { $0.id } == [a, c])
+        #expect(unnumbered.map { $0.id } == [b])
+    }
+
+    @Test("parseNumberedPRNodes resolves a numbered (fork) worktree from the by-number response")
+    func parseNumberedPRNodesResolvesForkPR() {
+        // The fork PR's head branch never appears in the viewer-authored batch;
+        // the stored number resolves it directly under its alias.
+        let wt = UUID()
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pr0": {
+                "number": 454,
+                "url": "https://github.com/acme/acme/pull/454",
+                "state": "OPEN",
+                "mergeStateStatus": "CLEAN",
+                "reviewDecision": "APPROVED",
+                "headRefName": "show-weekly-reset",
+                "createdAt": "2026-07-10T00:00:00Z",
+                "isDraft": false,
+                "statusCheckRollup": { "state": "SUCCESS" },
+                "mergeQueueEntry": { "position": 3 }
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let matches = PRStatusManager.parseNumberedPRNodes(from: json, aliases: [(alias: "pr0", worktreeID: wt)])
+        #expect(matches.count == 1)
+        #expect(matches.first?.worktreeID == wt)
+        #expect(matches.first?.node.number == 454)
+        #expect(matches.first?.node.headRefName == "show-weekly-reset")
+        #expect(matches.first?.node.mergeQueuePosition == 3)
+    }
+
+    @Test("parseNumberedPRNodes skips a null pullRequest (deleted/inaccessible PR) without crashing")
+    func parseNumberedPRNodesSkipsNullPullRequest() {
+        let wt = UUID()
+        let json = """
+        { "data": { "repository": { "pr0": null } } }
+        """.data(using: .utf8)!
+        let matches = PRStatusManager.parseNumberedPRNodes(from: json, aliases: [(alias: "pr0", worktreeID: wt)])
+        #expect(matches.isEmpty)
+    }
+
+    @Test("parseNumberedPRNodes returns empty for a malformed outer shape")
+    func parseNumberedPRNodesMalformed() {
+        let matches = PRStatusManager.parseNumberedPRNodes(
+            from: "{ not json".data(using: .utf8)!,
+            aliases: [(alias: "pr0", worktreeID: UUID())])
+        #expect(matches.isEmpty)
+    }
+
+    @Test("unnumbered worktree still resolves via the legacy viewer-authored branch match (regression)")
+    func unnumberedResolvesViaLegacyBranchMatch() throws {
+        // The viewer batch carries a node for the worktree's branch; a worktree
+        // with no stored number must still match it exactly as before.
+        let json = """
+        {
+          "data": {
+            "viewer": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 7,
+                    "url": "https://github.com/acme/acme/pull/7",
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": "APPROVED",
+                    "headRefName": "feature-x",
+                    "createdAt": "2026-07-01T00:00:00Z",
+                    "isDraft": false,
+                    "statusCheckRollup": { "state": "SUCCESS" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let nodes = try PRStatusManager.parsePRNodes(from: json)
+        let byBranch = PRStatusManager.bestNodeByBranch(nodes)
+        let candidates = PRStatusManager.branchCandidates(localBranch: "feature-x", upstreamBranch: nil)
+        let node = candidates.compactMap { byBranch[$0] }.first
+        #expect(node?.number == 7)
+    }
+
+    // MARK: - Partial-results tolerance (regression guard, PR #208)
+
+    @Test("parseOpenPRNodes yields nodes from a body carrying BOTH an errors array and valid data.repository")
+    func parseOpenPRNodesToleratesPartialErrors() {
+        // `gh api graphql` exits non-zero and includes `errors` when one node
+        // fails, yet still returns usable `data`. The parse must read the data
+        // regardless — the caller no longer bails on the non-zero exit.
+        let json = """
+        {
+          "errors": [
+            { "type": "NOT_FOUND", "message": "Could not resolve to a PullRequest." }
+          ],
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 454,
+                    "title": "Weekly reset job",
+                    "headRefName": "show-weekly-reset",
+                    "isDraft": false,
+                    "isCrossRepository": true,
+                    "headRepositoryOwner": { "login": "zionts" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let prs = PRStatusManager.parseOpenPRNodes(from: json)
+        #expect(prs.count == 1)
+        #expect(prs[0].number == 454)
+    }
+
+    @Test("parseNumberedPRNodes yields matches from a body carrying BOTH an errors array and valid data.repository")
+    func parseNumberedPRNodesToleratesPartialErrors() {
+        // One aliased PR errored (stale/deleted fork PR) → non-zero exit + errors,
+        // but the sibling aliases still carry usable nodes.
+        let wt = UUID()
+        let json = """
+        {
+          "errors": [
+            { "path": ["repository", "pr1"], "message": "Could not resolve to a PullRequest." }
+          ],
+          "data": {
+            "repository": {
+              "pr0": {
+                "number": 454,
+                "url": "https://github.com/acme/acme/pull/454",
+                "state": "OPEN",
+                "mergeStateStatus": "CLEAN",
+                "reviewDecision": "APPROVED",
+                "headRefName": "show-weekly-reset",
+                "createdAt": "2026-07-10T00:00:00Z",
+                "isDraft": false,
+                "statusCheckRollup": { "state": "SUCCESS" },
+                "mergeQueueEntry": { "position": 3 }
+              },
+              "pr1": null
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let matches = PRStatusManager.parseNumberedPRNodes(
+            from: json,
+            aliases: [(alias: "pr0", worktreeID: wt), (alias: "pr1", worktreeID: UUID())])
+        #expect(matches.count == 1)
+        #expect(matches.first?.worktreeID == wt)
+        #expect(matches.first?.node.number == 454)
+    }
+
+    @Test("numberedPRQuery is brace-balanced and aliases each PR number")
+    func numberedPRQueryBraceBalancedAndAliased() {
+        let query = PRStatusManager.numberedPRQuery(aliases: [(alias: "pr0", number: 454), (alias: "pr1", number: 12)])
+        let opens = query.filter { $0 == "{" }.count
+        let closes = query.filter { $0 == "}" }.count
+        #expect(opens == closes, "unbalanced braces (\(opens) open vs \(closes) close) in: \(query)")
+        #expect(query.contains("pr0: pullRequest(number: 454)"))
+        #expect(query.contains("pr1: pullRequest(number: 12)"))
+        #expect(query.contains("repository(owner: $owner, name: $name)"))
+    }
 }

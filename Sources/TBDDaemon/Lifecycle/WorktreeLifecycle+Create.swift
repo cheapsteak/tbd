@@ -26,12 +26,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
-        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch)
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
+        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, claudeSettingsOverlay: claudeSettingsOverlay)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -48,7 +48,7 @@ extension WorktreeLifecycle {
     /// Phase 1: Synchronous-fast. Generates a name, inserts a DB row with
     /// `status = .creating`, and returns the worktree immediately.
     /// NO git operations happen here.
-    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false) async throws -> Worktree {
+    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
@@ -138,7 +138,8 @@ extension WorktreeLifecycle {
             path: worktreePath,
             tmuxServer: tmuxServer,
             status: .creating,
-            parentWorktreeID: resolvedParent
+            parentWorktreeID: resolvedParent,
+            prNumber: prNumber
         )
 
         return worktree
@@ -170,6 +171,27 @@ extension WorktreeLifecycle {
         return base
     }
 
+    /// Returns `base`, or `base-2`, `base-3`, … — the first name for which no
+    /// local `refs/heads/<name>` exists. Mirrors `uniqueFolderName`'s loop but
+    /// probes git refs instead of paths: the PR-head fetch uses a `+` force
+    /// refspec, so a colliding name would silently rewrite an unrelated branch;
+    /// this picks a free name first. Caps at -1000; if every candidate through
+    /// `base-1000` is taken it THROWS rather than returning the taken `base` —
+    /// returning it would let the force refspec clobber that existing branch.
+    private func uniqueLocalBranchName(repoPath: String, base: String) async throws -> String {
+        if try await git.localBranchExists(repoPath: repoPath, name: base) == false {
+            return base
+        }
+        for suffix in 2...1000 {
+            let candidate = "\(base)-\(suffix)"
+            if try await git.localBranchExists(repoPath: repoPath, name: candidate) == false {
+                return candidate
+            }
+        }
+        throw WorktreeLifecycleError.createFailed(
+            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the force-fetch refspec would clobber the existing branch)")
+    }
+
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
     ///
@@ -181,7 +203,7 @@ extension WorktreeLifecycle {
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, overrideProfileID: UUID? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -213,7 +235,33 @@ extension WorktreeLifecycle {
                 // `--track -b <localName> <path> origin/<name>` to create a
                 // local tracking branch.
                 do {
-                    if ref.hasPrefix("origin/") {
+                    if checkoutPRHead, let prNumber = worktree.prNumber {
+                        // Fork-PR checkout: the PR head has no local ref, so
+                        // fetch refs/pull/<n>/head into a collision-free local
+                        // branch (the `+` refspec force-updates, so reusing an
+                        // existing ref name would silently rewrite an unrelated
+                        // branch), then check it out via the plain
+                        // existing-branch path. No fork remote is ever added.
+                        //
+                        // Decorated same-repo rows (prNumber set, checkoutPRHead
+                        // false) fall through to the else-branches below and
+                        // check out the existing branch unchanged — prNumber is
+                        // already stamped on the row for status tracking.
+                        let localBranch = try await uniqueLocalBranchName(
+                            repoPath: repo.path, base: worktree.branch
+                        )
+                        try await git.fetchPullRequestHead(
+                            repoPath: repo.path, number: prNumber, localBranch: localBranch
+                        )
+                        try await git.worktreeAddExisting(
+                            repoPath: repo.path,
+                            worktreePath: worktree.path,
+                            branch: localBranch
+                        )
+                        if localBranch != worktree.branch {
+                            try await db.worktrees.updateBranch(id: worktreeID, branch: localBranch)
+                        }
+                    } else if ref.hasPrefix("origin/") {
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,
                             worktreePath: worktree.path,

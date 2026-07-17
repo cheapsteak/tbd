@@ -164,6 +164,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoSetExpanded(request.paramsData)
             case RPCMethod.repoListBranches:
                 return try await handleRepoListBranches(request.paramsData)
+            case RPCMethod.repoListOpenPRs:
+                return try await handleRepoListOpenPRs(request.paramsData)
             case RPCMethod.worktreeCreate:
                 return try await handleWorktreeCreate(request.paramsData)
             case RPCMethod.worktreeList:
@@ -422,7 +424,7 @@ public final class RPCRouter: Sendable {
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)] = []
+        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
             // Route the per-worktree `git config` lookup through the TTL cache
@@ -437,7 +439,8 @@ public final class RPCRouter: Sendable {
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
-                worktreePath: wt.path
+                worktreePath: wt.path,
+                prNumber: wt.prNumber
             ))
         }
         await prManager.fetchAll(worktrees: infos)
@@ -470,7 +473,8 @@ public final class RPCRouter: Sendable {
             worktreeID: wt.id,
             branch: wt.branch,
             upstreamBranch: upstreamBranch,
-            repoPath: wt.path
+            repoPath: wt.path,
+            prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))
     }

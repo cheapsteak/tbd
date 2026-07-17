@@ -178,6 +178,7 @@ public enum RPCMethod {
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
     public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
     public static let repoListBranches = "repo.listBranches"
+    public static let repoListOpenPRs = "repo.listOpenPRs"
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
@@ -236,6 +237,39 @@ public struct RepoListBranchesParams: Codable, Sendable {
 public struct RepoListBranchesResult: Codable, Sendable {
     public let branches: [BranchInfo]
     public init(branches: [BranchInfo]) { self.branches = branches }
+}
+
+// MARK: - Open PR Listing
+
+/// One open PR on a repo, for the `repo.listOpenPRs` RPC (branch picker).
+public struct OpenPRInfo: Codable, Sendable, Equatable, Identifiable {
+    public let number: Int
+    public let title: String
+    public let headRefName: String
+    public let headOwner: String        // headRepositoryOwner.login; "" if absent
+    public let isCrossRepository: Bool
+    public let isDraft: Bool
+    public var id: Int { number }
+
+    public init(number: Int, title: String, headRefName: String, headOwner: String,
+                isCrossRepository: Bool, isDraft: Bool) {
+        self.number = number
+        self.title = title
+        self.headRefName = headRefName
+        self.headOwner = headOwner
+        self.isCrossRepository = isCrossRepository
+        self.isDraft = isDraft
+    }
+}
+
+public struct RepoListOpenPRsParams: Codable, Sendable {
+    public let repoID: UUID
+    public init(repoID: UUID) { self.repoID = repoID }
+}
+
+public struct RepoListOpenPRsResult: Codable, Sendable {
+    public let prs: [OpenPRInfo]
+    public init(prs: [OpenPRInfo]) { self.prs = prs }
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -827,7 +861,21 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil) {
+    /// GitHub PR number this worktree is being created from. Stamped on the row
+    /// (with `useExistingBranch == true`) so `PRStatusManager` tracks it by
+    /// number — set for BOTH decorated same-repo rows and fork rows.
+    /// Optional/defaulted for backward compatibility (old daemons ignore the
+    /// unknown key; old clients omit it).
+    public let prNumber: Int?
+    /// When true, the daemon fetches `refs/pull/<prNumber>/head` into a fresh
+    /// local branch and checks THAT out (fork PRs, whose head has no local
+    /// ref). When false/omitted, `branch` is checked out via the plain
+    /// existing-branch path even if `prNumber` is set — this is the decorated
+    /// same-repo row, which must behave exactly like picking that branch today.
+    /// `prNumber` alone can't disambiguate: a fork head name may coincide with
+    /// an unrelated local branch. Optional/defaulted for backward compatibility.
+    public let checkoutPRHead: Bool?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -837,6 +885,8 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
         self.claudeSettingsOverlay = claudeSettingsOverlay
+        self.prNumber = prNumber
+        self.checkoutPRHead = checkoutPRHead
     }
 }
 

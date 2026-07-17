@@ -455,10 +455,10 @@ actor DaemonClient {
     /// When `useExistingBranch` is true, `branch` MUST be set to an existing
     /// ref name (local like `foo` or remote like `origin/foo`) — the daemon
     /// checks it out instead of creating a new `tbd/*` branch.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil) async throws -> Worktree {
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID, prNumber: prNumber, checkoutPRHead: checkoutPRHead),
             resultType: Worktree.self
         )
     }
@@ -505,6 +505,17 @@ actor DaemonClient {
             resultType: RepoListBranchesResult.self
         )
         return result.branches
+    }
+
+    /// List open PRs for a repo (branch picker, two-phase load). Degrades to
+    /// `[]` daemon-side on any `gh`/GraphQL failure — never an RPC error.
+    func listOpenPRs(repoID: UUID) async throws -> [OpenPRInfo] {
+        let result = try await callAsync(
+            method: RPCMethod.repoListOpenPRs,
+            params: RepoListOpenPRsParams(repoID: repoID),
+            resultType: RepoListOpenPRsResult.self
+        )
+        return result.prs
     }
 
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
