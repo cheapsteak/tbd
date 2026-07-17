@@ -174,16 +174,16 @@ enum ProfileUsagePresentation {
         return trimmed.isEmpty ? "?" : trimmed
     }
 
-    /// Relative "how long until" a reset, at day/hour granularity: "in 2d 5h",
-    /// "in 5h", "in 43m", "now". The weekly window shows this (rather than an
-    /// absolute clock time like the 5h window) because at week scale the useful
-    /// planning question is time-remaining, not the wall-clock instant. nil
-    /// when there's no reset date to format.
+    /// Full phrase for relative "how long until" a reset, including the leading
+    /// "in " prefix: "in 2d 5h", "in 5h", "in 43m", "now". Returns nil if the
+    /// date is nil; otherwise always returns a string (even "now" for immediate resets).
+    /// Used for display contexts that want a complete phrase without additional
+    /// wrapping text.
     ///
-    /// Granularity rules: >= 1 day → "Nd Nh" (hours dropped when zero: "2d");
-    /// >= 1 hour but < 1 day → "Nh"; < 1 hour → "Nm"; already past / <1 min →
+    /// Granularity rules: >= 1 day → "in Nd Nh" (hours dropped when zero: "in 2d");
+    /// >= 1 hour but < 1 day → "in Nh"; < 1 hour → "in Nm"; already past / <1 min →
     /// "now". `now` is injectable for deterministic tests.
-    static func relativeResetText(_ date: Date?, now: Date = Date()) -> String? {
+    static func relativeResetPhrase(_ date: Date?, now: Date = Date()) -> String? {
         guard let date else { return nil }
         let seconds = date.timeIntervalSince(now)
         guard seconds >= 60 else { return "now" }
@@ -292,7 +292,7 @@ enum ProfileUsagePresentation {
             // week ends" — so it shows a relative countdown. Weekly buckets
             // share one reset instant, so it appears once, here.
             if let resets = weekly.resetsAt,
-               let relative = relativeResetText(resets, now: now) {
+               let relative = compactResetCountdown(resets, now: now) {
                 part += " · resets in \(relative)"
             }
             parts.append(part)
@@ -304,11 +304,13 @@ enum ProfileUsagePresentation {
         return parts.joined(separator: " · ")
     }
 
-    /// Compact relative countdown for planning-scale resets: "2d 5h", "3h",
-    /// "48m". nil when the instant is not in the future (a stale snapshot
-    /// shouldn't render a nonsense countdown). Minutes appear only under an
+    /// Compact relative countdown for planning-scale resets without a leading
+    /// prefix: "2d 5h", "3h", "48m". Returns nil when the instant is not in the
+    /// future (a stale snapshot shouldn't render a nonsense countdown). Used as
+    /// a building block for contexts that need just the duration, which they can
+    /// wrap in their own "resets in" or similar text. Minutes appear only under an
     /// hour; hour-scale drops minutes; day-scale carries the hour remainder.
-    static func relativeResetText(_ resetsAt: Date, now: Date = Date()) -> String? {
+    static func compactResetCountdown(_ resetsAt: Date, now: Date = Date()) -> String? {
         let interval = resetsAt.timeIntervalSince(now)
         guard interval > 0 else { return nil }
         let totalMinutes = Int((interval / 60).rounded(.up))
