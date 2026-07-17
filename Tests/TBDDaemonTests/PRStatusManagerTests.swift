@@ -1430,6 +1430,56 @@ struct PRStatusManagerTests {
         #expect(out.isEmpty)
     }
 
+    @Test("groupNumberedByRepo groups multi-repo entries by their own repo, in first-appearance order")
+    func groupNumberedByRepoGroupsMultiRepo() {
+        // One repo's owner/name must never be applied to another worktree's PR
+        // number — the wrong repo could hold an unrelated (even MERGED) PR.
+        let a = UUID(); let b = UUID(); let c = UUID()
+        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
+            (a, "b1", nil, "/wt/tbd-1", 457),
+            (b, "b2", nil, "/wt/acme-prod-1", 9),
+            (c, "b3", nil, "/wt/tbd-2", 460)
+        ]
+        let repos = ["/wt/tbd-1": ("acme", "tbd"), "/wt/tbd-2": ("acme", "tbd"),
+                     "/wt/acme-prod-1": ("acme", "acme-prod")]
+        let groups = PRStatusManager.groupNumberedByRepo(numbered) { repos[$0] }
+        #expect(groups.count == 2)
+        #expect(groups.first?.owner == "acme")
+        #expect(groups.first?.name == "tbd")
+        #expect(groups.first?.cwd == "/wt/tbd-1")
+        #expect(groups.first?.entries.map { $0.worktreeID } == [a, c])
+        #expect(groups.first?.entries.map { $0.number } == [457, 460])
+        #expect(groups.last?.name == "acme-prod")
+        #expect(groups.last?.entries.map { $0.worktreeID } == [b])
+    }
+
+    @Test("groupNumberedByRepo drops entries whose repo can't be resolved")
+    func groupNumberedByRepoDropsUnresolved() {
+        let a = UUID()
+        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
+            (a, "b1", nil, "/wt/known", 1),
+            (UUID(), "b2", nil, "/wt/unknown", 2)
+        ]
+        let groups = PRStatusManager.groupNumberedByRepo(numbered) {
+            $0 == "/wt/known" ? ("acme", "tbd") : nil
+        }
+        #expect(groups.count == 1)
+        #expect(groups.first?.entries.map { $0.worktreeID } == [a])
+    }
+
+    @Test("groupNumberedByRepo passes a single-repo set through as one group")
+    func groupNumberedByRepoSingleRepoPassthrough() {
+        let a = UUID(); let b = UUID()
+        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
+            (a, "b1", nil, "/wt/one", 10),
+            (b, "b2", nil, "/wt/two", 11)
+        ]
+        let groups = PRStatusManager.groupNumberedByRepo(numbered) { _ in ("acme", "tbd") }
+        #expect(groups.count == 1)
+        #expect(groups.first?.cwd == "/wt/one")
+        #expect(groups.first?.entries.map { $0.number } == [10, 11])
+    }
+
     // MARK: - Partial-results tolerance (regression guard, PR #208)
 
     @Test("parseOpenPRNodes yields nodes from a body carrying BOTH an errors array and valid data.repository")
