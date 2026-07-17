@@ -203,13 +203,16 @@ enum ProfileUsagePresentation {
     /// Compact usage summary without a leading separator:
     /// "5h 0% ↺23:10 · wk 76% · F 100%". nil when there is no snapshot or it
     /// has no buckets (never logged in / poller hasn't fetched yet).
+    /// Routes through `resetDisplay(forKind:)` so reset-display policy is
+    /// centralized; output strings remain unchanged.
     static func usageSummary(for snapshot: ProfileUsageSnapshot?,
                              timeZone: TimeZone = .current) -> String? {
         guard let snapshot, !snapshot.buckets.isEmpty else { return nil }
         var parts: [String] = []
         if let session = sessionBucket(snapshot) {
             var part = "5h \(percentText(session.percent))"
-            if let resets = session.resetsAt {
+            // Session always uses clock display per resetDisplay(forKind:).
+            if let resets = session.resetsAt, resetDisplay(forKind: session.kind) == .clock {
                 part += " ↺\(resetTimeText(resets, timeZone: timeZone))"
             }
             parts.append(part)
@@ -262,7 +265,7 @@ enum ProfileUsagePresentation {
     /// `usageSummary` this drops the ↺ glyph in favor of "resets " and uses
     /// full family names instead of the single-letter abbreviation — the
     /// second line has the width. nil when there is no snapshot or it has no
-    /// buckets.
+    /// buckets. Routes through `resetDisplay(forKind:)` for consistency.
     static func usageDetailLine(for snapshot: ProfileUsageSnapshot?,
                                 timeZone: TimeZone = .current,
                                 now: Date = Date()) -> String? {
@@ -279,19 +282,17 @@ enum ProfileUsagePresentation {
         }
         if let session = sessionBucket(snapshot) {
             var part = percentPart("5h", session.percent)
-            // Reset granularity matches window scale: the 5h window resets
-            // today, so absolute clock time reads best.
-            if let resets = session.resetsAt {
+            // Session always uses clock display per resetDisplay(forKind:).
+            if let resets = session.resetsAt, resetDisplay(forKind: session.kind) == .clock {
                 part += " · resets \(resetTimeText(resets, timeZone: timeZone))"
             }
             parts.append(part)
         }
         if let weekly = weeklyAllBucket(snapshot) {
             var part = percentPart("week", weekly.percent)
-            // The weekly window is a planning horizon — "how long until the
-            // week ends" — so it shows a relative countdown. Weekly buckets
-            // share one reset instant, so it appears once, here.
-            if let resets = weekly.resetsAt,
+            // Weekly shows countdown per resetDisplay(forKind:).
+            if resetDisplay(forKind: weekly.kind) == .countdown,
+               let resets = weekly.resetsAt,
                let relative = compactResetCountdown(resets, now: now) {
                 part += " · resets in \(relative)"
             }
@@ -472,6 +473,135 @@ enum ProfileUsagePresentation {
             return "\(base) · last data \(ageText(since: fetchedAt, now: now)) ago"
         }
         return base
+    }
+
+    // MARK: - Reset display policy
+
+    /// How a bucket should express its reset time: inline (clock or countdown)
+    /// or in tooltips only. Centralized so all five rendering surfaces agree.
+    /// This is the single decision point for reset-display policy.
+    public enum ResetDisplay: Equatable {
+        /// "· 23:10" inline; tooltip "resets 23:10" (absolute clock time, for 5h window).
+        case clock
+        /// "· 2d 5h" inline; tooltip "resets in 2d 5h" (relative countdown, for weekly).
+        case countdown
+        /// Nothing inline; tooltip "resets in 2d 5h" (relative countdown, for scoped/model rows).
+        case tooltipOnly
+    }
+
+    /// Determine how a bucket's reset time should be displayed based on its kind.
+    /// Routes all five rendering surfaces through one decision point.
+    ///
+    /// - sessionKind ("session") → `.clock` (5-hour window, absolute time best)
+    /// - weeklyAllKind ("weekly_all") → `.countdown` (planning horizon, relative time)
+    /// - any other kind → `.tooltipOnly` (scoped/per-model, less critical to the main view)
+    static func resetDisplay(forKind kind: String) -> ResetDisplay {
+        switch kind {
+        case sessionKind: return .clock
+        case weeklyAllKind: return .countdown
+        default: return .tooltipOnly
+        }
+    }
+
+    /// Window duration for a bucket based on its kind.
+    /// Used to calculate the elapsed fraction (time marker position on the bar)
+    /// and to feed into pace-aware fill-level calculations.
+    static func windowDuration(forKind kind: String) -> TimeInterval {
+        switch kind {
+        case weeklyAllKind, weeklyScopedKind: return weeklyWindow
+        default: return sessionWindow
+        }
+    }
+
+    // MARK: - Unified bucket presentation model
+
+    /// Complete presentation data for a usage bucket: combines the API data with
+    /// all policy decisions (reset display, pace-aware fill level, reset text
+    /// fragments). A single source of truth consumed by all five rendering surfaces.
+    struct BucketPresentation: Equatable {
+        let kind: String
+        let percent: Double
+        let percentText: String
+        /// Pace-aware fill tier (green/yellow/orange/red).
+        let fill: FillLevel
+        /// How the reset should be displayed (clock, countdown, or tooltip-only).
+        let resetDisplay: ResetDisplay
+        /// Compact reset value without separators/prefix: "23:10" (clock) or "2d 5h" (countdown).
+        /// nil when resetDisplay == .tooltipOnly, or there is no reset date, or a countdown is past.
+        let resetInline: String?
+        /// Full reset phrase with "resets" prefix: "resets 23:10" (clock) or "resets in 2d 5h" (countdown/tooltipOnly).
+        /// Present whenever a reset date exists (any kind) — for tooltips, help text, and roomy rows.
+        /// nil when there is no reset date.
+        let resetPhrase: String?
+        /// Elapsed fraction through the window (0...1), for time marker positioning on bars.
+        /// nil when there is no reset date, duration is non-positive, or the reset is already past.
+        let elapsedFraction: Double?
+    }
+
+    /// Compute the unified presentation model for a bucket. Routes through
+    /// all policy decisions (reset display, pace-aware fill, reset text) in one place.
+    static func bucketPresentation(_ bucket: ClaudeUsageLimitBucket,
+                                   now: Date = Date(),
+                                   timeZone: TimeZone = .current) -> BucketPresentation {
+        let display = resetDisplay(forKind: bucket.kind)
+        let windowDuration = self.windowDuration(forKind: bucket.kind)
+        let elapsed = elapsedFraction(resetsAt: bucket.resetsAt,
+                                     windowDuration: windowDuration,
+                                     now: now)
+        let fill = fillLevel(severity: bucket.severity,
+                            percent: bucket.percent,
+                            elapsedFraction: elapsed)
+        let percent = bucket.percent
+        let percentText = self.percentText(percent)
+
+        // Compute resetInline and resetPhrase based on display type and reset date.
+        var resetInline: String?
+        var resetPhrase: String?
+
+        if let resetsAt = bucket.resetsAt {
+            switch display {
+            case .clock:
+                let clockText = resetTimeText(resetsAt, timeZone: timeZone)
+                resetInline = clockText
+                resetPhrase = "resets \(clockText)"
+
+            case .countdown:
+                if let compact = compactResetCountdown(resetsAt, now: now) {
+                    resetInline = compact
+                    resetPhrase = "resets in \(compact)"
+                }
+                // When countdown is past (nil), both remain nil.
+
+            case .tooltipOnly:
+                if let compact = compactResetCountdown(resetsAt, now: now) {
+                    resetPhrase = "resets in \(compact)"
+                }
+                // resetInline stays nil; resetPhrase shows only when countdown is valid.
+            }
+        }
+
+        return BucketPresentation(
+            kind: bucket.kind,
+            percent: percent,
+            percentText: percentText,
+            fill: fill,
+            resetDisplay: display,
+            resetInline: resetInline,
+            resetPhrase: resetPhrase,
+            elapsedFraction: elapsed
+        )
+    }
+
+    /// Map a `FillLevel` to the corresponding `HoverCardTint`, preserving the
+    /// four-tier hierarchy. Used so the hover card and picker both render
+    /// pace-aware colors consistently.
+    static func hoverCardTint(for fillLevel: FillLevel) -> HoverCardTint {
+        switch fillLevel {
+        case .normal: return .normal
+        case .caution: return .caution
+        case .warning: return .warning
+        case .critical: return .critical
+        }
     }
 
     // MARK: - Per-session tooltips
