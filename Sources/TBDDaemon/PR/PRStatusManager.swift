@@ -117,8 +117,14 @@ public actor PRStatusManager {
         fetchAllInProgress = true
         defer { fetchAllInProgress = false }
         let batchStartedAt = Date()
-        // All worktrees share one repo; any path works as gh's working directory for auth.
+        // Worktrees may span multiple repos. repoPath is only gh's working
+        // directory for the viewer batch (gh auth is host-scoped, so any
+        // checkout works); by-number lookups resolve each worktree's own repo.
         let repoPath = worktrees[0].worktreePath
+        // Each worktree's own path, for the nightwatch callback: its policy is
+        // loaded from (and its audit trail labeled with) the repo it belongs to.
+        let pathByID = Dictionary(worktrees.map { ($0.id, $0.worktreePath) },
+                                  uniquingKeysWith: { first, _ in first })
 
         // Worktrees created from a PR row carry its number; resolve those
         // directly (a fork PR's head never appears in the viewer-authored batch).
@@ -133,15 +139,17 @@ public actor PRStatusManager {
 
         // Numbered path: one aliased by-number query (skipped when none stored).
         if !numbered.isEmpty {
-            matches += await fetchNumberedMatches(numbered, repoPath: repoPath)
+            matches += await fetchNumberedMatches(numbered)
         }
 
         // Legacy path: viewer-authored batch + branch-name matching. On a fetch
         // or parse failure it contributes no matches, but the numbered path above
         // has already resolved independently.
+        var batchSucceeded = false
         if !unnumbered.isEmpty {
             if let jsonData = await runGHGraphQL(repoPath: repoPath) {
                 if let nodes = try? Self.parsePRNodes(from: jsonData) {
+                    batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
                     let byBranch = Self.bestNodeByBranch(nodes)
                     for wt in unnumbered {
                         let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
@@ -153,6 +161,19 @@ public actor PRStatusManager {
                     logger.warning("Failed to parse GraphQL response")
                 }
             }
+        }
+
+        // Fallback: unnumbered worktrees a *successful* batch left unmatched
+        // whose cached status still carries a PR number — resolve those by
+        // number (one extra aliased round trip, only when such worktrees
+        // exist). See `cachedNumberFallback` for the gating rationale.
+        let fallback = Self.cachedNumberFallback(
+            unnumbered: unnumbered,
+            matchedIDs: Set(matches.map(\.worktreeID)),
+            batchSucceeded: batchSucceeded,
+            cachedStatus: { cache[$0] })
+        if !fallback.isEmpty {
+            matches += await fetchNumberedMatches(fallback)
         }
 
         // Fetch per-PR signals concurrently; only non-green OPEN PRs need the query.
@@ -197,7 +218,7 @@ public actor PRStatusManager {
             let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
                                   mergeQueuePosition: match.node.mergeQueuePosition)
             await apply(status, for: match.worktreeID)
-            await onPRStatusComputed?(match.worktreeID, status, repoPath)
+            await onPRStatusComputed?(match.worktreeID, status, pathByID[match.worktreeID] ?? repoPath)
         }
     }
 
@@ -674,6 +695,45 @@ public actor PRStatusManager {
         return (numbered, unnumbered)
     }
 
+    /// Select the unnumbered worktrees the viewer batch left unmatched whose
+    /// cached status still carries a PR number, rewriting each with that number
+    /// so `fetchNumberedMatches` can resolve it directly. Once 100 newer PRs
+    /// exist, an old PR falls out of the viewer-authored batch (first 100 by
+    /// CREATED_AT DESC) and the cached number is the only remaining handle —
+    /// without it the stale cached status (e.g. "in merge queue") persists
+    /// forever and the merged transition / auto-archive never fires. Batch
+    /// matches always win: a branch re-pointed to a NEW PR must not get pinned
+    /// to the stale cached number, so only unmatched worktrees fall back.
+    ///
+    /// `batchSucceeded` must reflect whether the viewer batch actually parsed
+    /// (empty nodes still counts — the viewer legitimately has no PRs). On a
+    /// fetch/parse failure "unmatched" means nothing, and falling back would
+    /// resolve stale cached numbers for branches that may point at NEW PRs
+    /// (worst case: a stale MERGED number fires auto-archive off an unrelated
+    /// PR) — keeping the stale cache on failure is the pre-existing, safe
+    /// behavior, so a failed batch yields no fallback at all.
+    ///
+    /// Terminal cached states are excluded: `.merged` has no further transition
+    /// to observe, and `.closed` would otherwise be a permanent per-poll
+    /// by-number re-query — a reopened PR is recovered by the on-select
+    /// `refresh()` path (or a restored batch match), not this fallback. The
+    /// merged-transition case is unaffected: the pre-transition cached state is
+    /// non-terminal by definition.
+    static func cachedNumberFallback(
+        unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        matchedIDs: Set<UUID>,
+        batchSucceeded: Bool,
+        cachedStatus: (UUID) -> PRStatus?
+    ) -> [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] {
+        guard batchSucceeded else { return [] }
+        return unnumbered.compactMap { wt in
+            guard !matchedIDs.contains(wt.id),
+                  let cached = cachedStatus(wt.id),
+                  cached.state != .merged, cached.state != .closed else { return nil }
+            return (wt.id, wt.branch, wt.upstreamBranch, wt.worktreePath, cached.number)
+        }
+    }
+
     /// Build the branch → best-PR lookup used by the legacy (unnumbered) path.
     /// When multiple PRs share a branch, pick the best: highest state priority
     /// (OPEN > MERGED > CLOSED), then newest `createdAt` within the same state.
@@ -923,45 +983,80 @@ public actor PRStatusManager {
         return resolved
     }
 
-    /// Resolve stored PR numbers directly via one aliased `pullRequest(number:)`
-    /// query — the only way to reach a fork PR, whose head branch never appears
-    /// in the viewer-authored batch. Degrades to no matches on any failure
+    /// Group by-number poll entries by their worktree's own repo. The daemon
+    /// manages worktrees across multiple repos, so one repo's owner/name must
+    /// never be applied to another worktree's PR number: the number usually
+    /// resolves to nothing in the wrong repo (silently dropping the match), but
+    /// can land on an unrelated PR — whose MERGED state would fire auto-archive
+    /// on the wrong worktree. Entries whose repo can't be resolved are dropped
+    /// (the caller keeps their cached status), matching the existing degrade
+    /// behavior. Group order follows first appearance; `cwd` is the first
+    /// grouped worktree's path, used as gh's working directory.
+    static func groupNumberedByRepo(
+        _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        resolve: (String) -> (owner: String, name: String)?
+    ) -> [(owner: String, name: String, cwd: String, entries: [(worktreeID: UUID, number: Int)])] {
+        var order: [String] = []
+        var groups: [String: (owner: String, name: String, cwd: String, entries: [(worktreeID: UUID, number: Int)])] = [:]
+        for wt in numbered {
+            guard let number = wt.prNumber, let repo = resolve(wt.worktreePath) else { continue }
+            let key = "\(repo.owner)/\(repo.name)"
+            if groups[key] == nil {
+                groups[key] = (repo.owner, repo.name, wt.worktreePath, [])
+                order.append(key)
+            }
+            groups[key]?.entries.append((wt.id, number))
+        }
+        return order.compactMap { groups[$0] }
+    }
+
+    /// Resolve stored PR numbers directly via aliased `pullRequest(number:)`
+    /// queries — the only way to reach a fork PR, whose head branch never
+    /// appears in the viewer-authored batch. Each worktree's number is scoped
+    /// to its OWN repo: one aliased query per repo group (see
+    /// `groupNumberedByRepo`), with the TTL cache keeping `gh repo view`
+    /// spawns bounded. Degrades per group to no matches on any failure
     /// (owner/name unresolved, gh missing, non-zero exit, unparseable); the
     /// caller keeps prior cached status for those worktrees.
     private nonisolated func fetchNumberedMatches(
-        _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
-        repoPath: String
+        _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)]
     ) async -> [(worktreeID: UUID, node: PRNode)] {
-        guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
-            logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(repoPath, privacy: .public)")
-            return []
+        var resolved: [String: (owner: String, name: String)] = [:]
+        for path in Set(numbered.map(\.worktreePath)) {
+            if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
+                resolved[path] = ownerRepo
+            } else {
+                logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(path, privacy: .public)")
+            }
         }
-        let entries: [(alias: String, number: Int, worktreeID: UUID)] = numbered.enumerated().compactMap { index, wt in
-            guard let number = wt.prNumber else { return nil }
-            return (alias: "pr\(index)", number: number, worktreeID: wt.id)
+        var matches: [(worktreeID: UUID, node: PRNode)] = []
+        for group in Self.groupNumberedByRepo(numbered, resolve: { resolved[$0] }) {
+            let aliased = group.entries.enumerated().map {
+                (alias: "pr\($0.offset)", worktreeID: $0.element.worktreeID, number: $0.element.number)
+            }
+            let query = Self.numberedPRQuery(aliases: aliased.map { ($0.alias, $0.number) })
+            let args = [
+                "api", "graphql",
+                "-f", "query=\(query)",
+                "-f", "owner=\(group.owner)",
+                "-f", "name=\(group.name)"
+            ]
+            guard let result = await runGHResult(args: args, repoPath: group.cwd),
+                  let data = Self.graphQLOutputData(stdout: result.stdout) else {
+                logger.debug("fetchAll: by-number query produced no data for \(group.owner, privacy: .public)/\(group.name, privacy: .public)")
+                continue
+            }
+            // `gh api graphql` exits non-zero when ONE aliased PR errors (stale,
+            // deleted, or inaccessible — likeliest for a fork PR) while still emitting
+            // usable `data` for the others. Parse whatever came back regardless of
+            // exit status; log the partial failure (regression guard, PR #208).
+            if result.exitStatus != 0 {
+                let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                logger.debug("fetchAll: by-number query exited \(result.exitStatus, privacy: .public) with partial data for \(group.owner, privacy: .public)/\(group.name, privacy: .public): \(errSuffix, privacy: .public)")
+            }
+            matches += Self.parseNumberedPRNodes(from: data, aliases: aliased.map { ($0.alias, $0.worktreeID) })
         }
-        guard !entries.isEmpty else { return [] }
-        let query = Self.numberedPRQuery(aliases: entries.map { ($0.alias, $0.number) })
-        let args = [
-            "api", "graphql",
-            "-f", "query=\(query)",
-            "-f", "owner=\(ownerRepo.owner)",
-            "-f", "name=\(ownerRepo.name)"
-        ]
-        guard let result = await runGHResult(args: args, repoPath: repoPath),
-              let data = Self.graphQLOutputData(stdout: result.stdout) else {
-            logger.debug("fetchAll: by-number query produced no data for numbered PRs at \(repoPath, privacy: .public)")
-            return []
-        }
-        // `gh api graphql` exits non-zero when ONE aliased PR errors (stale,
-        // deleted, or inaccessible — likeliest for a fork PR) while still emitting
-        // usable `data` for the others. Parse whatever came back regardless of
-        // exit status; log the partial failure (regression guard, PR #208).
-        if result.exitStatus != 0 {
-            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.debug("fetchAll: by-number query exited \(result.exitStatus, privacy: .public) with partial data at \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
-        }
-        return Self.parseNumberedPRNodes(from: data, aliases: entries.map { ($0.alias, $0.worktreeID) })
+        return matches
     }
 
     private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {

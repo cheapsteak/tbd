@@ -450,7 +450,8 @@ public final class RPCRouter: Sendable {
     }
 
     /// Scratch spaces are repo-less and have no PR — exclude them so the
-    /// poller's "all worktrees share one repo" assumption holds. Pulled out
+    /// poller only queries real checkouts (worktrees may span multiple repos;
+    /// by-number lookups scope to each worktree's own repo). Pulled out
     /// as a pure function (rather than inlined `.filter` in `computePRList`)
     /// so it's directly unit-testable without spinning up git/gh machinery.
     static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {

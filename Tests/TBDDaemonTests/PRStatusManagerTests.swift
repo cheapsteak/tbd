@@ -1362,6 +1362,124 @@ struct PRStatusManagerTests {
         #expect(node?.number == 7)
     }
 
+    @Test("cachedNumberFallback excludes a worktree the batch matched, even with a cached number")
+    func cachedNumberFallbackExcludesBatchMatched() {
+        // A branch re-pointed to a NEW PR must not get pinned to the stale cached number.
+        let wt = UUID()
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(wt, "feature-x", nil, "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [wt], batchSucceeded: true,
+            cachedStatus: { _ in PRStatus(number: 42, url: "https://example.com/pr/42", state: .pending) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("cachedNumberFallback includes an unmatched worktree, carrying its cached PR number")
+    func cachedNumberFallbackIncludesUnmatchedWithCachedNumber() {
+        // The stale PR fell out of the 100-PR viewer batch; the cached number is
+        // the only remaining handle to observe the merged transition.
+        let wt = UUID()
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(wt, "old-branch", "origin/old-branch", "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
+            cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
+        #expect(out.count == 1)
+        #expect(out.first?.id == wt)
+        #expect(out.first?.prNumber == 457)
+        #expect(out.first?.branch == "old-branch")
+    }
+
+    @Test("cachedNumberFallback excludes an unmatched worktree with no cached entry")
+    func cachedNumberFallbackExcludesNoCachedEntry() {
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(UUID(), "feature-y", nil, "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, cachedStatus: { _ in nil })
+        #expect(out.isEmpty)
+    }
+
+    @Test("cachedNumberFallback yields nothing when the viewer batch failed, even with unmatched cached numbers")
+    func cachedNumberFallbackSkippedOnBatchFailure() {
+        // On a fetch/parse failure "unmatched" means nothing — falling back could
+        // resolve a stale MERGED number and auto-archive off an unrelated PR.
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(UUID(), "old-branch", nil, "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: false,
+            cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("cachedNumberFallback excludes worktrees whose cached state is terminal (.merged / .closed)")
+    func cachedNumberFallbackExcludesTerminalCachedStates() {
+        // .merged has no further transition to observe; .closed is excluded to
+        // avoid a permanent per-poll re-query — a reopened PR is recovered by
+        // the on-select refresh() path (or a restored batch match), not the fallback.
+        let mergedWT = UUID(); let closedWT = UUID()
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(mergedWT, "merged-branch", nil, "/tmp/repo", nil),
+             (closedWT, "closed-branch", nil, "/tmp/repo", nil)]
+        let statuses: [UUID: PRStatus] = [
+            mergedWT: PRStatus(number: 11, url: "https://example.com/pr/11", state: .merged),
+            closedWT: PRStatus(number: 12, url: "https://example.com/pr/12", state: .closed)
+        ]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
+            cachedStatus: { statuses[$0] })
+        #expect(out.isEmpty)
+    }
+
+    @Test("groupNumberedByRepo groups multi-repo entries by their own repo, in first-appearance order")
+    func groupNumberedByRepoGroupsMultiRepo() {
+        // One repo's owner/name must never be applied to another worktree's PR
+        // number — the wrong repo could hold an unrelated (even MERGED) PR.
+        let a = UUID(); let b = UUID(); let c = UUID()
+        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
+            (a, "b1", nil, "/wt/tbd-1", 457),
+            (b, "b2", nil, "/wt/acme-prod-1", 9),
+            (c, "b3", nil, "/wt/tbd-2", 460)
+        ]
+        let repos = ["/wt/tbd-1": ("acme", "tbd"), "/wt/tbd-2": ("acme", "tbd"),
+                     "/wt/acme-prod-1": ("acme", "acme-prod")]
+        let groups = PRStatusManager.groupNumberedByRepo(numbered) { repos[$0] }
+        #expect(groups.count == 2)
+        #expect(groups.first?.owner == "acme")
+        #expect(groups.first?.name == "tbd")
+        #expect(groups.first?.cwd == "/wt/tbd-1")
+        #expect(groups.first?.entries.map { $0.worktreeID } == [a, c])
+        #expect(groups.first?.entries.map { $0.number } == [457, 460])
+        #expect(groups.last?.name == "acme-prod")
+        #expect(groups.last?.entries.map { $0.worktreeID } == [b])
+    }
+
+    @Test("groupNumberedByRepo drops entries whose repo can't be resolved")
+    func groupNumberedByRepoDropsUnresolved() {
+        let a = UUID()
+        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
+            (a, "b1", nil, "/wt/known", 1),
+            (UUID(), "b2", nil, "/wt/unknown", 2)
+        ]
+        let groups = PRStatusManager.groupNumberedByRepo(numbered) {
+            $0 == "/wt/known" ? ("acme", "tbd") : nil
+        }
+        #expect(groups.count == 1)
+        #expect(groups.first?.entries.map { $0.worktreeID } == [a])
+    }
+
+    @Test("groupNumberedByRepo passes a single-repo set through as one group")
+    func groupNumberedByRepoSingleRepoPassthrough() {
+        let a = UUID(); let b = UUID()
+        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
+            (a, "b1", nil, "/wt/one", 10),
+            (b, "b2", nil, "/wt/two", 11)
+        ]
+        let groups = PRStatusManager.groupNumberedByRepo(numbered) { _ in ("acme", "tbd") }
+        #expect(groups.count == 1)
+        #expect(groups.first?.cwd == "/wt/one")
+        #expect(groups.first?.entries.map { $0.number } == [10, 11])
+    }
+
     // MARK: - Partial-results tolerance (regression guard, PR #208)
 
     @Test("parseOpenPRNodes yields nodes from a body carrying BOTH an errors array and valid data.repository")
