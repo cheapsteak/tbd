@@ -743,33 +743,33 @@ struct SkipAccountPickerPersistenceTests {
 
 // MARK: - Relative weekly reset (granularity matches window scale)
 
-@Suite("RelativeResetText")
-struct RelativeResetTextTests {
+@Suite("CompactResetCountdown")
+struct CompactResetCountdownTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     @Test func minutesUnderAnHour() {
         let resets = now.addingTimeInterval(48 * 60)
-        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "48m")
+        #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == "48m")
     }
 
     @Test func hoursDropMinutes() {
         let resets = now.addingTimeInterval((3 * 60 + 20) * 60)
-        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "3h")
+        #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == "3h")
     }
 
     @Test func daysCarryHourRemainder() {
         let resets = now.addingTimeInterval(((2 * 24 + 5) * 60 + 10) * 60)
-        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "2d 5h")
+        #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == "2d 5h")
     }
 
     @Test func exactDaysOmitHours() {
         let resets = now.addingTimeInterval(3 * 24 * 60 * 60)
-        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "3d")
+        #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == "3d")
     }
 
     @Test func pastInstantYieldsNil() {
         let resets = now.addingTimeInterval(-60)
-        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == nil)
+        #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == nil)
     }
 
     @Test func weeklyResetAppearsOnceInDetailLine() {

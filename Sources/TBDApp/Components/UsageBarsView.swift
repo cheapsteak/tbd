@@ -114,7 +114,7 @@ private struct UsageBarRow: View {
     private var trailingResetHint: some View {
         let countdownText: String = {
             guard showsInlineReset, usesRelativeReset, let resetsAt = bucket.resetsAt,
-                  let compact = ProfileUsagePresentation.relativeResetText(resetsAt, now: now) else {
+                  let compact = ProfileUsagePresentation.compactResetCountdown(resetsAt, now: now) else {
                 return ""
             }
             return "· \(compact)"
@@ -209,7 +209,7 @@ private struct UsageBarRow: View {
         var text = "\(windowLabel): \(ProfileUsagePresentation.percentText(bucket.percent)) used"
         if let resets = bucket.resetsAt {
             if usesRelativeReset {
-                if let relative = ProfileUsagePresentation.relativeResetText(resets, now: now) {
+                if let relative = ProfileUsagePresentation.compactResetCountdown(resets, now: now) {
                     text += " · resets in \(relative)"
                 }
             } else {
