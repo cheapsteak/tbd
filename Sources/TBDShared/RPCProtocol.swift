@@ -875,7 +875,14 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// `prNumber` alone can't disambiguate: a fork head name may coincide with
     /// an unrelated local branch. Optional/defaulted for backward compatibility.
     public let checkoutPRHead: Bool?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) {
+    /// When true, the daemon arms this worktree's per-worktree
+    /// auto-archive-on-merge override (sets the `autoArchiveOnMerge` column to
+    /// true), so it self-archives when its PR merges regardless of the global
+    /// default. nil means "follow the global default" (unchanged behavior).
+    /// Optional/defaulted for backward compatibility (old daemons ignore the
+    /// unknown key; old clients omit it).
+    public let autoArchiveOnMerge: Bool?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -887,6 +894,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.prNumber = prNumber
         self.checkoutPRHead = checkoutPRHead
+        self.autoArchiveOnMerge = autoArchiveOnMerge
     }
 }
 
