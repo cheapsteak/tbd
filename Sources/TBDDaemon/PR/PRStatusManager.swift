@@ -139,9 +139,11 @@ public actor PRStatusManager {
         // Legacy path: viewer-authored batch + branch-name matching. On a fetch
         // or parse failure it contributes no matches, but the numbered path above
         // has already resolved independently.
+        var batchSucceeded = false
         if !unnumbered.isEmpty {
             if let jsonData = await runGHGraphQL(repoPath: repoPath) {
                 if let nodes = try? Self.parsePRNodes(from: jsonData) {
+                    batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
                     let byBranch = Self.bestNodeByBranch(nodes)
                     for wt in unnumbered {
                         let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
@@ -153,6 +155,19 @@ public actor PRStatusManager {
                     logger.warning("Failed to parse GraphQL response")
                 }
             }
+        }
+
+        // Fallback: unnumbered worktrees a *successful* batch left unmatched
+        // whose cached status still carries a PR number — resolve those by
+        // number (one extra aliased round trip, only when such worktrees
+        // exist). See `cachedNumberFallback` for the gating rationale.
+        let fallback = Self.cachedNumberFallback(
+            unnumbered: unnumbered,
+            matchedIDs: Set(matches.map(\.worktreeID)),
+            batchSucceeded: batchSucceeded,
+            cachedStatus: { cache[$0] })
+        if !fallback.isEmpty {
+            matches += await fetchNumberedMatches(fallback, repoPath: repoPath)
         }
 
         // Fetch per-PR signals concurrently; only non-green OPEN PRs need the query.
@@ -672,6 +687,45 @@ public actor PRStatusManager {
             if prNumber(item) != nil { numbered.append(item) } else { unnumbered.append(item) }
         }
         return (numbered, unnumbered)
+    }
+
+    /// Select the unnumbered worktrees the viewer batch left unmatched whose
+    /// cached status still carries a PR number, rewriting each with that number
+    /// so `fetchNumberedMatches` can resolve it directly. Once 100 newer PRs
+    /// exist, an old PR falls out of the viewer-authored batch (first 100 by
+    /// CREATED_AT DESC) and the cached number is the only remaining handle —
+    /// without it the stale cached status (e.g. "in merge queue") persists
+    /// forever and the merged transition / auto-archive never fires. Batch
+    /// matches always win: a branch re-pointed to a NEW PR must not get pinned
+    /// to the stale cached number, so only unmatched worktrees fall back.
+    ///
+    /// `batchSucceeded` must reflect whether the viewer batch actually parsed
+    /// (empty nodes still counts — the viewer legitimately has no PRs). On a
+    /// fetch/parse failure "unmatched" means nothing, and falling back would
+    /// resolve stale cached numbers for branches that may point at NEW PRs
+    /// (worst case: a stale MERGED number fires auto-archive off an unrelated
+    /// PR) — keeping the stale cache on failure is the pre-existing, safe
+    /// behavior, so a failed batch yields no fallback at all.
+    ///
+    /// Terminal cached states are excluded: `.merged` has no further transition
+    /// to observe, and `.closed` would otherwise be a permanent per-poll
+    /// by-number re-query — a reopened PR is recovered by the on-select
+    /// `refresh()` path (or a restored batch match), not this fallback. The
+    /// merged-transition case is unaffected: the pre-transition cached state is
+    /// non-terminal by definition.
+    static func cachedNumberFallback(
+        unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        matchedIDs: Set<UUID>,
+        batchSucceeded: Bool,
+        cachedStatus: (UUID) -> PRStatus?
+    ) -> [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] {
+        guard batchSucceeded else { return [] }
+        return unnumbered.compactMap { wt in
+            guard !matchedIDs.contains(wt.id),
+                  let cached = cachedStatus(wt.id),
+                  cached.state != .merged, cached.state != .closed else { return nil }
+            return (wt.id, wt.branch, wt.upstreamBranch, wt.worktreePath, cached.number)
+        }
     }
 
     /// Build the branch → best-PR lookup used by the legacy (unnumbered) path.

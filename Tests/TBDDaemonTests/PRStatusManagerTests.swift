@@ -1362,6 +1362,74 @@ struct PRStatusManagerTests {
         #expect(node?.number == 7)
     }
 
+    @Test("cachedNumberFallback excludes a worktree the batch matched, even with a cached number")
+    func cachedNumberFallbackExcludesBatchMatched() {
+        // A branch re-pointed to a NEW PR must not get pinned to the stale cached number.
+        let wt = UUID()
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(wt, "feature-x", nil, "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [wt], batchSucceeded: true,
+            cachedStatus: { _ in PRStatus(number: 42, url: "https://example.com/pr/42", state: .pending) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("cachedNumberFallback includes an unmatched worktree, carrying its cached PR number")
+    func cachedNumberFallbackIncludesUnmatchedWithCachedNumber() {
+        // The stale PR fell out of the 100-PR viewer batch; the cached number is
+        // the only remaining handle to observe the merged transition.
+        let wt = UUID()
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(wt, "old-branch", "origin/old-branch", "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
+            cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
+        #expect(out.count == 1)
+        #expect(out.first?.id == wt)
+        #expect(out.first?.prNumber == 457)
+        #expect(out.first?.branch == "old-branch")
+    }
+
+    @Test("cachedNumberFallback excludes an unmatched worktree with no cached entry")
+    func cachedNumberFallbackExcludesNoCachedEntry() {
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(UUID(), "feature-y", nil, "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, cachedStatus: { _ in nil })
+        #expect(out.isEmpty)
+    }
+
+    @Test("cachedNumberFallback yields nothing when the viewer batch failed, even with unmatched cached numbers")
+    func cachedNumberFallbackSkippedOnBatchFailure() {
+        // On a fetch/parse failure "unmatched" means nothing — falling back could
+        // resolve a stale MERGED number and auto-archive off an unrelated PR.
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(UUID(), "old-branch", nil, "/tmp/repo", nil)]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: false,
+            cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("cachedNumberFallback excludes worktrees whose cached state is terminal (.merged / .closed)")
+    func cachedNumberFallbackExcludesTerminalCachedStates() {
+        // .merged has no further transition to observe; .closed is excluded to
+        // avoid a permanent per-poll re-query — a reopened PR is recovered by
+        // the on-select refresh() path (or a restored batch match), not the fallback.
+        let mergedWT = UUID(); let closedWT = UUID()
+        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
+            [(mergedWT, "merged-branch", nil, "/tmp/repo", nil),
+             (closedWT, "closed-branch", nil, "/tmp/repo", nil)]
+        let statuses: [UUID: PRStatus] = [
+            mergedWT: PRStatus(number: 11, url: "https://example.com/pr/11", state: .merged),
+            closedWT: PRStatus(number: 12, url: "https://example.com/pr/12", state: .closed)
+        ]
+        let out = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
+            cachedStatus: { statuses[$0] })
+        #expect(out.isEmpty)
+    }
+
     // MARK: - Partial-results tolerance (regression guard, PR #208)
 
     @Test("parseOpenPRNodes yields nodes from a body carrying BOTH an errors array and valid data.repository")
