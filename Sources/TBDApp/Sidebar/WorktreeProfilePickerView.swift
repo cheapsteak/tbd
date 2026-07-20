@@ -273,6 +273,10 @@ private struct ClaudeProfileRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Let the row's natural content height (title + subtitle/bars) drive
+        // its size — the rail stretches to match, never the other way around,
+        // and the popover's minHeight can't balloon the row.
+        .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
@@ -321,17 +325,25 @@ private struct ModelRailView: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(Self.models, id: \.id) { model in
                 ModelRailButton(title: model.label, help: model.help) {
                     onSelectModel(model.id)
                 }
             }
         }
+        // Natural width (widest capsule), but stretch vertically to the row's
+        // full height so the three buttons divide it into equal-thirds hit
+        // areas.
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
-/// One small capsule button in the model rail.
+/// One segment of the model rail, styled like a vertical segmented control:
+/// the visible surface fills its full third of the rail (full rail width x
+/// 1/3 of the row height, minus a 1pt inset between segments), with the
+/// label centered. Hover feedback covers the whole segment; the hit area
+/// includes the inset so the thirds stay contiguous.
 private struct ModelRailButton: View {
     let title: String
     let help: String
@@ -345,12 +357,13 @@ private struct ModelRailButton: View {
                 .font(.system(size: 9))
                 .foregroundStyle(isHovered ? Color.primary : Color.secondary)
                 .padding(.horizontal, 5)
-                .padding(.vertical, 1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(
-                    Capsule()
+                    RoundedRectangle(cornerRadius: 4)
                         .fill(isHovered ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.06))
                 )
-                .contentShape(Capsule())
+                .padding(.vertical, 1)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
