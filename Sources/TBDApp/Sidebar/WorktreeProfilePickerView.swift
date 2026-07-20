@@ -101,13 +101,16 @@ struct WorktreeProfilePickerView: View {
                     let isSelectable = ProfileUsagePresentation.isSelectable(entry)
                     let isTheDefault = entry.profile.id == appState.defaultProfileID
                     Group {
-                        if showsUsageBars(for: entry) {
-                            // OAuth profile with a usage snapshot that has
-                            // buckets: render the two-bar meter instead of the
-                            // single-line usage text.
-                            UsageBarsProfileRow(
+                        if entry.profile.kind == .oauth && isSelectable {
+                            // Selectable Claude account: always render the
+                            // model rail — model selection must not depend on
+                            // usage data being available. The subtitle is the
+                            // two-bar meter when a snapshot has buckets, else
+                            // the same text/skeleton line as the plain rows.
+                            ClaudeProfileRow(
                                 entry: entry,
                                 highlighted: isTheDefault && highlightDefaultProfile,
+                                subtitle: claudeRowSubtitle(for: entry),
                                 onSelectModel: { model in
                                     pick(profileID: entry.profile.id, model: model)
                                 }
@@ -186,12 +189,21 @@ struct WorktreeProfilePickerView: View {
             || ProfileUsagePresentation.weeklyAllBucket(entry.usageSnapshot) != nil
     }
 
-    /// Resolve the fixed-height subtitle for a profile row. Precedence:
+    /// Subtitle for a selectable Claude row: the two-bar meter when the
+    /// snapshot has buckets, otherwise the same text/skeleton precedence as
+    /// `profileSubtitle` (usage note → first-poll skeleton → reserved blank).
+    private func claudeRowSubtitle(for entry: ModelProfileWithUsage) -> ClaudeProfileRow.Subtitle {
+        if showsUsageBars(for: entry) { return .bars }
+        let line = ProfileUsagePresentation.menuLine(for: entry)
+        return .text(line.secondary, showsSkeleton: line.secondary == nil && entry.usageSnapshot == nil)
+    }
+
+    /// Resolve the fixed-height subtitle for a non-Claude-row profile
+    /// (selectable OAuth rows render via `ClaudeProfileRow` instead).
+    /// Precedence:
     ///  1. A real usage / login note from `menuLine` (`usageNote`) — shown as-is.
-    ///  2. Logged-in OAuth awaiting its first usage poll → skeleton (the ONE
-    ///     genuine "loading" state).
-    ///  3. Logged-out OAuth → a plain "not logged in" note (no skeleton).
-    ///  4. API-key / Bedrock → the profile's own static kind descriptor.
+    ///  2. Logged-out OAuth → a plain "not logged in" note (no skeleton).
+    ///  3. API-key / Bedrock → the profile's own static kind descriptor.
     private func profileSubtitle(
         for entry: ModelProfileWithUsage,
         usageNote: String?
@@ -201,10 +213,7 @@ struct WorktreeProfilePickerView: View {
         }
         switch entry.profile.kind {
         case .oauth:
-            if ProfileUsagePresentation.isSelectable(entry) {
-                // Logged in; skeleton only until the first snapshot lands.
-                return (nil, entry.usageSnapshot == nil)
-            }
+            // Selectable OAuth never reaches this path; only logged-out rows.
             return ("Not logged in — run /login", false)
         case .apiKey, .bedrock:
             // Static descriptor from ModelProfile — never a loading state.
@@ -216,38 +225,36 @@ struct WorktreeProfilePickerView: View {
     }
 }
 
-/// A profile row whose subtitle is the two-bar usage meter rather than a text
-/// line. Mirrors `ProfilePickerRow`'s chrome (title, hover highlight) but
-/// hosts `UsageBarsView`, which sizes to its bars — the fixed-single-line
-/// reservation only applies to the text rows. The leading slot is a vertical
-/// rail of per-spawn model buttons (Fable/Opus/Sonnet): clicking one picks
-/// this profile AND requests that model for the spawn; clicking anywhere else
-/// on the row keeps the profile's default model. The rail sits OUTSIDE the
-/// row's Button so its buttons don't fight the row's hit-testing.
-private struct UsageBarsProfileRow: View {
+/// A selectable Claude (OAuth) profile row. Mirrors `ProfilePickerRow`'s
+/// chrome (title, hover highlight); the subtitle is either the two-bar usage
+/// meter (`.bars`) or the same fixed-height text/skeleton line as the plain
+/// rows (`.text`) so the rail never depends on usage data. The leading slot
+/// is a vertical rail of per-spawn model buttons (Fable/Opus/Sonnet):
+/// clicking one picks this profile AND requests that model for the spawn;
+/// clicking anywhere else on the row keeps the profile's default model. The
+/// rail sits OUTSIDE the row's Button so its buttons don't fight the row's
+/// hit-testing.
+private struct ClaudeProfileRow: View {
+    enum Subtitle {
+        /// Two-bar usage meter drawn from the entry's snapshot.
+        case bars
+        /// Single text line; skeleton is reserved for the ONE genuine loading
+        /// case (logged-in OAuth awaiting its first poll). Nil text with no
+        /// skeleton reserves the line's height so the row doesn't shift.
+        case text(String?, showsSkeleton: Bool)
+    }
+
     let entry: ModelProfileWithUsage
     var highlighted: Bool = false
+    let subtitle: Subtitle
     var onSelectModel: (String) -> Void = { _ in }
     let onSelect: () -> Void
 
     @State private var isHovered = false
 
-    /// Per-spawn model buttons: label + exact model id.
-    private static let models: [(label: String, id: String, help: String)] = [
-        ("Fable", "claude-fable-5", "Spawn with Claude Fable 5"),
-        ("Opus", "claude-opus-4-8", "Spawn with Claude Opus 4.8"),
-        ("Sonnet", "claude-sonnet-5", "Spawn with Claude Sonnet 5"),
-    ]
-
     var body: some View {
         HStack(spacing: 6) {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(Self.models, id: \.id) { model in
-                    ModelRailButton(title: model.label, help: model.help) {
-                        onSelectModel(model.id)
-                    }
-                }
-            }
+            ModelRailView(onSelectModel: onSelectModel)
             Button(action: onSelect) {
                 HStack(spacing: 6) {
                     VStack(alignment: .leading, spacing: 3) {
@@ -255,7 +262,7 @@ private struct UsageBarsProfileRow: View {
                             .font(.system(size: 12))
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        UsageBarsView(snapshot: entry.usageSnapshot)
+                        subtitleView
                     }
                     Spacer(minLength: 4)
                 }
@@ -271,6 +278,56 @@ private struct UsageBarsProfileRow: View {
                 .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
         )
         .onHover { isHovered = $0 }
+    }
+
+    @ViewBuilder
+    private var subtitleView: some View {
+        switch subtitle {
+        case .bars:
+            UsageBarsView(snapshot: entry.usageSnapshot)
+        case .text(let text, let showsSkeleton):
+            if let text, !text.isEmpty {
+                subtitleText(text)
+            } else if showsSkeleton {
+                subtitleText("resets 00:00 · week 00% used")
+                    .redacted(reason: .placeholder)
+            } else {
+                subtitleText(" ")
+                    .hidden()
+            }
+        }
+    }
+
+    /// Matches `ProfilePickerRow.subtitleText` so both Claude subtitle states
+    /// and the plain rows share font/size/line-limit.
+    private func subtitleText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+}
+
+/// The vertical rail of per-spawn model buttons on a Claude row.
+private struct ModelRailView: View {
+    let onSelectModel: (String) -> Void
+
+    /// Per-spawn model buttons: label + exact model id.
+    private static let models: [(label: String, id: String, help: String)] = [
+        ("Fable", "claude-fable-5", "Spawn with Claude Fable 5"),
+        ("Opus", "claude-opus-4-8", "Spawn with Claude Opus 4.8"),
+        ("Sonnet", "claude-sonnet-5", "Spawn with Claude Sonnet 5"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Self.models, id: \.id) { model in
+                ModelRailButton(title: model.label, help: model.help) {
+                    onSelectModel(model.id)
+                }
+            }
+        }
     }
 }
 
