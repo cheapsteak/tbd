@@ -449,7 +449,8 @@ import Testing
         folder: "my-folder",
         branch: "feat/my-branch",
         displayName: "My Display Name",
-        prompt: "Build the thing"
+        prompt: "Build the thing",
+        model: "claude-fable-5"
     )
     let data = try JSONEncoder().encode(params)
     let decoded = try JSONDecoder().decode(WorktreeCreateParams.self, from: data)
@@ -458,6 +459,7 @@ import Testing
     #expect(decoded.branch == "feat/my-branch")
     #expect(decoded.displayName == "My Display Name")
     #expect(decoded.prompt == "Build the thing")
+    #expect(decoded.model == "claude-fable-5")
 }
 
 @Test func testWorktreeCreateParamsRoundTripWithNilFields() throws {
@@ -470,6 +472,7 @@ import Testing
     #expect(decoded.branch == nil)
     #expect(decoded.displayName == nil)
     #expect(decoded.prompt == nil)
+    #expect(decoded.model == nil)
 }
 
 @Test func repoDecodesLegacyJSONWithoutNewFields() throws {

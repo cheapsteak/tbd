@@ -355,6 +355,73 @@ struct ModelProfileSpawnTests {
         #expect(recorder.joinedAll.contains("CLAUDE_CODE_USE_BEDROCK=1"))
     }
 
+    // MARK: - Spawn: per-creation model override (picker model buttons)
+
+    /// A worktree-create spawn with a model override injects it as
+    /// ANTHROPIC_MODEL, winning over the profile's own model for this spawn.
+    @Test("spawn: modelOverride wins over the profile's model as ANTHROPIC_MODEL")
+    func spawnModelOverrideWinsOverProfileModel() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let profile = try await db.modelProfiles.create(
+            name: "WithModel", kind: .oauth, model: "claude-opus-4-8"
+        )
+        try await db.config.setDefaultProfileID(profile.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil,
+            modelOverride: "claude-fable-5"
+        )
+
+        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-fable-5"))
+        #expect(!recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-opus-4-8"))
+    }
+
+    /// Branch guard: with no override, the profile's own model is injected
+    /// unchanged (today's behavior).
+    @Test("spawn: nil modelOverride keeps the profile's model")
+    func spawnNilModelOverrideKeepsProfileModel() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let profile = try await db.modelProfiles.create(
+            name: "WithModel", kind: .oauth, model: "claude-opus-4-8"
+        )
+        try await db.config.setDefaultProfileID(profile.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil
+        )
+
+        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-opus-4-8"))
+        #expect(!recorder.joinedAll.contains("claude-fable-5"))
+    }
+
+    /// Branch guard: an override on a profile WITHOUT a model still injects
+    /// the override (the `??` fallback isn't required for injection).
+    @Test("spawn: modelOverride injects even when the profile has no model")
+    func spawnModelOverrideWithoutProfileModel() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let profile = try await seedOAuthProfile(db, name: "NoModel")
+        try await db.config.setDefaultProfileID(profile.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil,
+            modelOverride: "claude-sonnet-5"
+        )
+
+        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-sonnet-5"))
+    }
+
     // MARK: - Spawn: fallbackModels overlay routing
 
     @Test("spawn: profile WITHOUT fallbackModels uses the global overlay path")

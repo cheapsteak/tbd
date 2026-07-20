@@ -107,7 +107,10 @@ struct WorktreeProfilePickerView: View {
                             // single-line usage text.
                             UsageBarsProfileRow(
                                 entry: entry,
-                                highlighted: isTheDefault && highlightDefaultProfile
+                                highlighted: isTheDefault && highlightDefaultProfile,
+                                onSelectModel: { model in
+                                    pick(profileID: entry.profile.id, model: model)
+                                }
                             ) {
                                 pick(profileID: entry.profile.id)
                             }
@@ -117,7 +120,6 @@ struct WorktreeProfilePickerView: View {
                             ProfilePickerRow(
                                 title: line.primary,
                                 subtitle: subtitle.text,
-                                systemImage: "person.crop.circle",
                                 highlighted: isTheDefault && highlightDefaultProfile,
                                 // Always reserve subtitle height so the row never
                                 // shifts, whichever state it resolves to.
@@ -166,10 +168,12 @@ struct WorktreeProfilePickerView: View {
         }
     }
 
-    private func pick(profileID: UUID?) {
+    /// `model` is an optional per-spawn Claude model override (the row's model
+    /// rail); nil keeps the profile's default model.
+    private func pick(profileID: UUID?, model: String? = nil) {
         dismiss()
         onClose()
-        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID)
+        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID, model: model)
     }
 
     /// Whether a profile row should render the two-bar usage meter (instead of
@@ -213,50 +217,96 @@ struct WorktreeProfilePickerView: View {
 }
 
 /// A profile row whose subtitle is the two-bar usage meter rather than a text
-/// line. Mirrors `ProfilePickerRow`'s chrome (icon, title, hover highlight,
-/// "default" chip) but hosts `UsageBarsView`, which sizes to its two bars — the
-/// fixed-single-line reservation only applies to the text rows.
+/// line. Mirrors `ProfilePickerRow`'s chrome (title, hover highlight) but
+/// hosts `UsageBarsView`, which sizes to its bars — the fixed-single-line
+/// reservation only applies to the text rows. The leading slot is a vertical
+/// rail of per-spawn model buttons (Fable/Opus/Sonnet): clicking one picks
+/// this profile AND requests that model for the spawn; clicking anywhere else
+/// on the row keeps the profile's default model. The rail sits OUTSIDE the
+/// row's Button so its buttons don't fight the row's hit-testing.
 private struct UsageBarsProfileRow: View {
     let entry: ModelProfileWithUsage
     var highlighted: Bool = false
+    var onSelectModel: (String) -> Void = { _ in }
     let onSelect: () -> Void
 
     @State private var isHovered = false
 
+    /// Per-spawn model buttons: label + exact model id.
+    private static let models: [(label: String, id: String, help: String)] = [
+        ("Fable", "claude-fable-5", "Spawn with Claude Fable 5"),
+        ("Opus", "claude-opus-4-8", "Spawn with Claude Opus 4.8"),
+        ("Sonnet", "claude-sonnet-5", "Spawn with Claude Sonnet 5"),
+    ]
+
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(ProfileLoginPresentation.menuItemTitle(for: entry))
-                        .font(.system(size: 12))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    UsageBarsView(snapshot: entry.usageSnapshot)
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Self.models, id: \.id) { model in
+                    ModelRailButton(title: model.label, help: model.help) {
+                        onSelectModel(model.id)
+                    }
                 }
-                Spacer(minLength: 4)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
-            )
-            .contentShape(Rectangle())
+            Button(action: onSelect) {
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(ProfileLoginPresentation.menuItemTitle(for: entry))
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        UsageBarsView(snapshot: entry.usageSnapshot)
+                    }
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .onHover { isHovered = $0 }
+    }
+}
+
+/// One small capsule button in the model rail.
+private struct ModelRailButton: View {
+    let title: String
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 9))
+                .foregroundStyle(isHovered ? Color.primary : Color.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(
+                    Capsule()
+                        .fill(isHovered ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.06))
+                )
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+        .help(help)
     }
 }
 
 private struct ProfilePickerRow: View {
     let title: String
     let subtitle: String?
-    let systemImage: String
+    /// Leading icon; nil renders no icon view (profile rows). The
+    /// "Choose a branch…" navigation row keeps its branch icon.
+    var systemImage: String? = nil
     var highlighted: Bool = false
     /// When true, a subtitle line is always rendered at full height — real text
     /// when available, otherwise an invisible placeholder — so the row height
@@ -279,10 +329,12 @@ private struct ProfilePickerRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14)
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+                }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
                         .font(.system(size: 12))

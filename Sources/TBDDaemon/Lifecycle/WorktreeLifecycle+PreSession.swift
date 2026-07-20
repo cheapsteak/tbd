@@ -281,6 +281,7 @@ extension WorktreeLifecycle {
         cols: Int? = nil, rows: Int? = nil,
         completionAction: PreSessionCompletionAction,
         overrideProfileID: UUID? = nil,
+        modelOverride: String? = nil,
         claudeSettingsOverlay: String? = nil
     ) async {
         let outcome = await waitForPreSessionCompletion(
@@ -349,6 +350,7 @@ extension WorktreeLifecycle {
                 // it into tab order. On failure it stays, at index 1 as before.
                 preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID,
+                modelOverride: modelOverride,
                 claudeSettingsOverlay: claudeSettingsOverlay
             )
             for terminal in created {

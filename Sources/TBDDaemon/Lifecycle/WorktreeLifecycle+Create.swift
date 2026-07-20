@@ -203,7 +203,7 @@ extension WorktreeLifecycle {
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -340,6 +340,7 @@ extension WorktreeLifecycle {
                         cols: cols, rows: rows,
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
+                        modelOverride: modelOverride,
                         claudeSettingsOverlay: claudeSettingsOverlay
                     )
                 }
@@ -357,6 +358,7 @@ extension WorktreeLifecycle {
                 rows: rows,
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
+                modelOverride: modelOverride,
                 claudeSettingsOverlay: claudeSettingsOverlay
             )
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
@@ -484,6 +486,7 @@ extension WorktreeLifecycle {
         rows: Int? = nil,
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
+        modelOverride: String? = nil,
         claudeSettingsOverlay: String? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
@@ -622,7 +625,9 @@ extension WorktreeLifecycle {
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
-                profileModel: resolvedProfile?.model,
+                // Per-spawn model override (picker model buttons) wins over
+                // the profile default for this initial spawn only.
+                profileModel: modelOverride ?? resolvedProfile?.model,
                 profileAwsRegion: resolvedProfile?.awsRegion,
                 profileAwsProfile: resolvedProfile?.awsProfile,
                 profileConfigDir: profileConfigDir,
@@ -764,7 +769,9 @@ extension WorktreeLifecycle {
                     profileSecret: resolvedProfile?.secret,
                     profileKind: resolvedProfile?.kind,
                     profileBaseURL: resolvedProfile?.baseURL,
-                    profileModel: resolvedProfile?.model,
+                    // Same per-spawn override as the primary terminal: these
+                    // restores happen at worktree-create time too.
+                    profileModel: modelOverride ?? resolvedProfile?.model,
                     profileAwsRegion: resolvedProfile?.awsRegion,
                     profileAwsProfile: resolvedProfile?.awsProfile,
                     profileConfigDir: restoreProfileConfigDir,
