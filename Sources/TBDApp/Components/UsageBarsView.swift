@@ -17,13 +17,18 @@ import TBDShared
 /// data at all.
 struct UsageBarsView: View {
     let snapshot: ProfileUsageSnapshot?
+    /// The user's reset-time display preference (time-of-reset vs time-until).
+    /// Injected by the hosting view from `@AppStorage(AppState.usageResetTimeStyleKey)`.
+    let resetStyle: ProfileUsagePresentation.ResetTimeStyle
     let now: Date
     let timeZone: TimeZone
 
     init(snapshot: ProfileUsageSnapshot?,
+         resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
          now: Date = Date(),
          timeZone: TimeZone = .current) {
         self.snapshot = snapshot
+        self.resetStyle = resetStyle
         self.now = now
         self.timeZone = timeZone
     }
@@ -31,21 +36,21 @@ struct UsageBarsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(session, now: now, timeZone: timeZone),
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(session, style: resetStyle, now: now, timeZone: timeZone),
                             label: "5h:",
                             windowLabel: "5-hour window",
                             now: now,
                             timeZone: timeZone)
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: timeZone),
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: resetStyle, now: now, timeZone: timeZone),
                             label: "wk:",
                             windowLabel: "Weekly window",
                             now: now,
                             timeZone: timeZone)
             }
             ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()), id: \.offset) { _, scoped in
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, now: now, timeZone: timeZone),
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: resetStyle, now: now, timeZone: timeZone),
                             label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
                             windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
                             now: now,
@@ -90,18 +95,18 @@ private struct UsageBarRow: View {
 
     // MARK: Trailing reset hint
 
-    /// Fourth column: reset display inline (clock for 5h, countdown for wk) on rows
-    /// where resetDisplay shows inline; empty but space-reserving on other rows
-    /// to keep bars aligned. The 46pt width reserves space for both "· 23:10" and
-    /// "· 2d 5h" at 9pt monospacedDigit.
+    /// Fourth column: reset display inline ("at 7:59 pm" / "at Fri 7 pm" /
+    /// "in 4d 2h", prefix baked into `resetInline`) on rows where resetDisplay
+    /// shows inline; empty but space-reserving on other rows to keep bars
+    /// aligned. The 78pt fixed width fits the widest form measured at this
+    /// font ("at Wed 12:59 pm" = 75pt at 9pt rounded monospacedDigit) while
+    /// keeping rows column-aligned; the flexible bar absorbs the difference.
     private var trailingResetHint: some View {
-        let hintText = presentation.resetInline.map { "· \($0)" } ?? ""
-
-        return Text(hintText)
+        Text(presentation.resetInline ?? "")
             .font(.system(size: 9, design: .rounded))
             .monospacedDigit()
             .foregroundStyle(.tertiary)
-            .frame(width: 46, alignment: .leading)
+            .frame(width: 78, alignment: .leading)
     }
 
     // MARK: Bar geometry

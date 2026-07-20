@@ -31,6 +31,7 @@ enum AccountHoverCards {
     /// is a feature-rich, easy-to-skim take on session-usage display.
     static func claudeTabCard(terminal: Terminal,
                               profiles: [ModelProfileWithUsage],
+                              resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
                               timeZone: TimeZone = .current,
                               now: Date = Date(),
                               enabled: Bool = true) -> HoverCardModel? {
@@ -47,6 +48,7 @@ enum AccountHoverCards {
                     model.titleCaption = notLoggedInCaption
                 }
                 model.rows.append(contentsOf: usageRows(for: entry.usageSnapshot,
+                                                        resetStyle: resetStyle,
                                                         timeZone: timeZone, now: now))
             } else {
                 model.title = removedProfileLabel
@@ -72,12 +74,13 @@ enum AccountHoverCards {
     /// The weekly row now shows its reset countdown when available (closing
     /// a gap where it silently omitted the weekly reset).
     static func usageRows(for snapshot: ProfileUsageSnapshot?,
+                          resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
                           timeZone: TimeZone = .current,
                           now: Date = Date()) -> [HoverCardRow] {
         guard let snapshot, !snapshot.buckets.isEmpty else { return [] }
         var rows: [HoverCardRow] = []
         if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-            let presentation = ProfileUsagePresentation.bucketPresentation(session, now: now, timeZone: timeZone)
+            let presentation = ProfileUsagePresentation.bucketPresentation(session, style: resetStyle, now: now, timeZone: timeZone)
             var value = presentation.percentText
             if let resetPhrase = presentation.resetPhrase {
                 value += " · \(resetPhrase)"
@@ -86,7 +89,7 @@ enum AccountHoverCards {
                                      monospacedDigits: true, tint: tint(for: presentation)))
         }
         if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-            let presentation = ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: timeZone)
+            let presentation = ProfileUsagePresentation.bucketPresentation(weekly, style: resetStyle, now: now, timeZone: timeZone)
             var value = presentation.percentText
             if let resetPhrase = presentation.resetPhrase {
                 value += " · \(resetPhrase)"

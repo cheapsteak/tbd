@@ -251,6 +251,8 @@ private struct ClaudeProfileRow: View {
     let onSelect: () -> Void
 
     @State private var isHovered = false
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
 
     var body: some View {
         HStack(spacing: 6) {
@@ -288,7 +290,7 @@ private struct ClaudeProfileRow: View {
     private var subtitleView: some View {
         switch subtitle {
         case .bars:
-            UsageBarsView(snapshot: entry.usageSnapshot)
+            UsageBarsView(snapshot: entry.usageSnapshot, resetStyle: usageResetTimeStyle)
         case .text(let text, let showsSkeleton):
             if let text, !text.isEmpty {
                 subtitleText(text)

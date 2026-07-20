@@ -7,7 +7,8 @@ import TBDShared
 
 private let utc = TimeZone(identifier: "UTC")!
 
-/// 2026-07-03 23:10:00 UTC — renders as "23:10" in the UTC fixtures below.
+/// 2026-07-03 23:10:00 UTC (a Friday) — renders as "11:10 pm" in the UTC
+/// fixtures below ("Fri 11:10 pm" in the weekday form).
 private let resetDate: Date = {
     var components = DateComponents()
     components.year = 2026
@@ -47,7 +48,7 @@ private func entry(name: String,
     )
 }
 
-/// The live-verified Gmail shape: 5h 0% resetting 23:10, weekly 76%, Fable 100%.
+/// The live-verified Gmail shape: 5h 0% resetting 11:10 pm, weekly 76%, Fable 100%.
 private let gmailSnapshot = snapshot(buckets: [
     bucket(kind: "session", percent: 0, severity: "normal", resetsAt: resetDate),
     bucket(kind: "weekly_all", percent: 76, severity: "warning"),
@@ -69,7 +70,7 @@ private func claudeTerminal(profileID: UUID? = nil,
 struct UsageSuffixTests {
     @Test func fullSnapshotComposesCompactSuffix() {
         let suffix = ProfileUsagePresentation.usageSuffix(for: gmailSnapshot, timeZone: utc)
-        #expect(suffix == " · 5h 0% ↺23:10 · wk 76% · F 100%")
+        #expect(suffix == " · 5h 0% ↺11:10 pm · wk 76% · F 100%")
     }
 
     @Test func missingSnapshotProducesEmptySuffix() {
@@ -103,7 +104,7 @@ struct UsageSuffixTests {
     @Test func menuItemTitleCombinesIdentityAndUsage() {
         let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
         #expect(ProfileUsagePresentation.menuItemTitle(for: gmail, timeZone: utc)
-                == "Gmail — g@x.co · 5h 0% ↺23:10 · wk 76% · F 100%")
+                == "Gmail — g@x.co · 5h 0% ↺11:10 pm · wk 76% · F 100%")
     }
 
     @Test func menuItemTitleWithoutSnapshotIsIdentityOnly() {
@@ -125,7 +126,7 @@ struct UsageSuffixTests {
 struct TwoLineMenuTests {
     @Test func fullSnapshotSpellsOutUsageWithUsedLabelOnce() {
         let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc)
-        #expect(line == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+        #expect(line == "5h 0% used · resets 11:10 pm · week 76% · Fable 100%")
     }
 
     @Test func usedLabelAppearsExactlyOnceOnTheFirstPercentage() {
@@ -149,7 +150,7 @@ struct TwoLineMenuTests {
             bucket(kind: "weekly_all", percent: 79),
         ])
         #expect(ProfileUsagePresentation.usageDetailLine(for: noFable, timeZone: utc)
-                == "5h 16% used · resets 23:10 · week 79%")
+                == "5h 16% used · resets 11:10 pm · week 79%")
     }
 
     @Test func sessionWithoutResetOmitsClockFragmentButKeepsUsed() {
@@ -170,7 +171,7 @@ struct TwoLineMenuTests {
         let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
         let line = ProfileUsagePresentation.menuLine(for: gmail, timeZone: utc)
         #expect(line.primary == "Gmail — g@x.co")
-        #expect(line.secondary == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+        #expect(line.secondary == "5h 0% used · resets 11:10 pm · week 76% · Fable 100%")
     }
 
     @Test func menuLineWithoutSnapshotHasNilSecondary() {
@@ -317,12 +318,14 @@ struct FillLevelTests {
 
 @Suite("ProfileUsagePresentation — resetDisplay policy")
 struct ResetDisplayPolicyTests {
-    @Test func sessionKindUsesClockDisplay() {
+    // Default style (timeOfReset): absolute times inline.
+
+    @Test func sessionKindUsesClockDisplayByDefault() {
         #expect(ProfileUsagePresentation.resetDisplay(forKind: "session") == .clock)
     }
 
-    @Test func weeklyAllKindUsesCountdownDisplay() {
-        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_all") == .countdown)
+    @Test func weeklyAllKindUsesWeekdayClockDisplayByDefault() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_all") == .weekdayClock)
     }
 
     @Test func scopedKindUsesTooltipOnlyDisplay() {
@@ -331,6 +334,25 @@ struct ResetDisplayPolicyTests {
 
     @Test func unknownKindDefaultsToTooltipOnly() {
         #expect(ProfileUsagePresentation.resetDisplay(forKind: "future_kind") == .tooltipOnly)
+    }
+
+    // timeUntilReset style: relative countdowns inline.
+
+    @Test func sessionKindUsesCountdownUnderTimeUntilStyle() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "session",
+                                                      style: .timeUntilReset) == .countdown)
+    }
+
+    @Test func weeklyAllKindUsesCountdownUnderTimeUntilStyle() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_all",
+                                                      style: .timeUntilReset) == .countdown)
+    }
+
+    @Test func scopedAndUnknownKindsStayTooltipOnlyUnderTimeUntilStyle() {
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_scoped",
+                                                      style: .timeUntilReset) == .tooltipOnly)
+        #expect(ProfileUsagePresentation.resetDisplay(forKind: "future_kind",
+                                                      style: .timeUntilReset) == .tooltipOnly)
     }
 }
 
@@ -375,13 +397,13 @@ struct BucketPresentationTests {
         #expect(presentation.elapsedFraction != nil)
     }
 
-    @Test func weeklyBucketBuildsCountdownDisplay() {
+    @Test func weeklyBucketBuildsWeekdayClockDisplay() {
         let weeklyBucket = bucket(kind: "weekly_all", percent: 76, severity: "warning")
         let presentation = ProfileUsagePresentation.bucketPresentation(weeklyBucket, now: now, timeZone: utc)
         #expect(presentation.kind == "weekly_all")
         #expect(presentation.percent == 76)
         #expect(presentation.percentText == "76%")
-        #expect(presentation.resetDisplay == .countdown)
+        #expect(presentation.resetDisplay == .weekdayClock)
         #expect(presentation.resetInline == nil)  // No reset date on weekly bucket
         #expect(presentation.resetPhrase == nil)
         #expect(presentation.fill == .warning)
@@ -411,12 +433,65 @@ struct BucketPresentationTests {
     }
 
     @Test func countdownInResetPhraseWhenValid() {
-        // Weekly bucket with a reset date (hypothetically added by API in future).
+        // Weekly bucket with a reset date, under the time-until preference.
         let weekly = bucket(kind: "weekly_all", percent: 50, resetsAt: now.addingTimeInterval(2 * 24 * 3600))
-        let presentation = ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: utc)
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, style: .timeUntilReset, now: now, timeZone: utc)
         #expect(presentation.resetDisplay == .countdown)
-        #expect(presentation.resetInline != nil)  // Now has countdown since we added a reset date
+        #expect(presentation.resetInline != nil)
         #expect(presentation.resetPhrase?.hasPrefix("resets in") ?? false)
+    }
+
+    // MARK: Preference modes — exact inline strings per bucket kind.
+
+    @Test func sessionTimeOfResetInlineIsAtClockTime() {
+        // now two hours before the 11:10 pm fixture reset.
+        let now = resetDate.addingTimeInterval(-2 * 3600)
+        let session = bucket(kind: "session", percent: 20, resetsAt: resetDate)
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            session, style: .timeOfReset, now: now, timeZone: utc)
+        #expect(presentation.resetInline == "at 11:10 pm")
+        #expect(presentation.resetPhrase == "resets at 11:10 pm")
+    }
+
+    @Test func weeklyTimeOfResetInlineIsAtWeekdayTime() {
+        // resetDate is a Friday; 4 days out → weekday + 12h time.
+        let now = resetDate.addingTimeInterval(-4 * 24 * 3600)
+        let weekly = bucket(kind: "weekly_all", percent: 50, resetsAt: resetDate)
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, style: .timeOfReset, now: now, timeZone: utc)
+        #expect(presentation.resetInline == "at Fri 11:10 pm")
+        #expect(presentation.resetPhrase == "resets at Fri 11:10 pm")
+    }
+
+    @Test func sessionTimeUntilInlineKeepsMinutePrecision() {
+        let session = bucket(kind: "session", percent: 20,
+                             resetsAt: now.addingTimeInterval((2 * 60 + 10) * 60))
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            session, style: .timeUntilReset, now: now, timeZone: utc)
+        #expect(presentation.resetInline == "in 2h 10m")
+        #expect(presentation.resetPhrase == "resets in 2h 10m")
+    }
+
+    @Test func weeklyTimeUntilInlineIsDayHourCountdown() {
+        let weekly = bucket(kind: "weekly_all", percent: 50,
+                            resetsAt: now.addingTimeInterval((4 * 24 + 2) * 3600))
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, style: .timeUntilReset, now: now, timeZone: utc)
+        #expect(presentation.resetInline == "in 4d 2h")
+        #expect(presentation.resetPhrase == "resets in 4d 2h")
+    }
+
+    @Test func scopedStaysTooltipOnlyInBothStyles() {
+        let scoped = bucket(kind: "weekly_scoped", percent: 45,
+                            resetsAt: now.addingTimeInterval(2 * 24 * 3600), family: "Fable")
+        for style in ProfileUsagePresentation.ResetTimeStyle.allCases {
+            let presentation = ProfileUsagePresentation.bucketPresentation(
+                scoped, style: style, now: now, timeZone: utc)
+            #expect(presentation.resetDisplay == .tooltipOnly)
+            #expect(presentation.resetInline == nil)
+            #expect(presentation.resetPhrase == "resets in 2d")
+        }
     }
 }
 
@@ -649,7 +724,7 @@ struct StalenessNoteTests {
 struct SecondaryLineHonestyTests {
     @Test func healthyFreshShowsUsageNumbers() {
         let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, timeZone: utc)
-        #expect(line == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+        #expect(line == "5h 0% used · resets 11:10 pm · week 76% · Fable 100%")
     }
 
     @Test func rateLimitedProfileShowsRetryNoteNotStaleNumbers() {
@@ -712,7 +787,7 @@ struct SessionTooltipTests {
         )
         #expect(tooltip == """
         Account: g@x.co (Gmail)
-        Usage: 5h 0% ↺23:10 · wk 76% · F 100%
+        Usage: 5h 0% ↺11:10 pm · wk 76% · F 100%
         Spawned: 2026-07-03 23:10
         """)
     }
@@ -883,6 +958,28 @@ struct CompactResetCountdownTests {
         #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == "3h")
     }
 
+    @Test func hourScaleKeepsMinutesWhenAsked() {
+        // The session window's countdown form: "2h 10m", not a lossy "2h".
+        let resets = now.addingTimeInterval((2 * 60 + 10) * 60)
+        #expect(ProfileUsagePresentation.compactResetCountdown(
+            resets, now: now, minutesAtHourScale: true) == "2h 10m")
+    }
+
+    @Test func hourScaleWithZeroMinutesStaysBare() {
+        let resets = now.addingTimeInterval(2 * 3600)
+        #expect(ProfileUsagePresentation.compactResetCountdown(
+            resets, now: now, minutesAtHourScale: true) == "2h")
+    }
+
+    @Test func minutesAtHourScaleLeavesSubHourAndDayScalesUnchanged() {
+        let subHour = now.addingTimeInterval(48 * 60)
+        #expect(ProfileUsagePresentation.compactResetCountdown(
+            subHour, now: now, minutesAtHourScale: true) == "48m")
+        let dayScale = now.addingTimeInterval(((2 * 24 + 5) * 60 + 10) * 60)
+        #expect(ProfileUsagePresentation.compactResetCountdown(
+            dayScale, now: now, minutesAtHourScale: true) == "2d 5h")
+    }
+
     @Test func daysCarryHourRemainder() {
         let resets = now.addingTimeInterval(((2 * 24 + 5) * 60 + 10) * 60)
         #expect(ProfileUsagePresentation.compactResetCountdown(resets, now: now) == "2d 5h")
@@ -908,8 +1005,56 @@ struct CompactResetCountdownTests {
                    resetsAt: weeklyReset, family: "Fable"),
         ])
         let line = ProfileUsagePresentation.usageDetailLine(for: snap, timeZone: utc, now: now)
-        #expect(line == "5h 16% used · resets 23:10 · week 79% · resets in 2d 5h · Fable 45%")
+        #expect(line == "5h 16% used · resets 11:10 pm · week 79% · resets in 2d 5h · Fable 45%")
         // The shared weekly instant renders once (on the week segment), not per family.
         #expect(line?.components(separatedBy: "resets in").count == 2)
+    }
+}
+
+// MARK: - Clock formatting (am/pm)
+
+@Suite("ProfileUsagePresentation — reset clock text")
+struct ResetClockTextTests {
+    /// Build a UTC instant from wall-clock components.
+    private func utcDate(month: Int, day: Int, hour: Int, minute: Int) -> Date {
+        var components = DateComponents()
+        components.year = 2026
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        return calendar.date(from: components)!
+    }
+
+    @Test func eveningRendersTwelveHourWithPM() {
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 19, minute: 59), timeZone: utc) == "7:59 pm")
+    }
+
+    @Test func morningRendersTwelveHourWithAM() {
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 9, minute: 5), timeZone: utc) == "9:05 am")
+    }
+
+    @Test func midnightAndNoonUseTwelve() {
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 0, minute: 15), timeZone: utc) == "12:15 am")
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 12, minute: 0), timeZone: utc) == "12:00 pm")
+    }
+
+    @Test func weekdayFormCarriesWeekdayAndMinutes() {
+        // 2026-07-03 is a Friday.
+        #expect(ProfileUsagePresentation.weekdayResetTimeText(
+            utcDate(month: 7, day: 3, hour: 18, minute: 59), timeZone: utc) == "Fri 6:59 pm")
+    }
+
+    @Test func weekdayFormDropsMinutesOnTheHour() {
+        #expect(ProfileUsagePresentation.weekdayResetTimeText(
+            utcDate(month: 7, day: 3, hour: 19, minute: 0), timeZone: utc) == "Fri 7 pm")
+        #expect(ProfileUsagePresentation.weekdayResetTimeText(
+            utcDate(month: 7, day: 6, hour: 9, minute: 0), timeZone: utc) == "Mon 9 am")
     }
 }

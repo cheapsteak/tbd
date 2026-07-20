@@ -1990,6 +1990,15 @@ final class AppState: ObservableObject {
     /// UI on very large transcripts, so it is opt-in and fails closed.
     static let enableTranscriptKey = "enableTranscript"
 
+    /// UserDefaults key for the usage reset-time display preference
+    /// (Settings → Claude → "Usage reset times"). Stores the raw value of
+    /// `ProfileUsagePresentation.ResetTimeStyle`; defaults to `.timeOfReset`.
+    /// Read via `@AppStorage` in the view layer and injected into the
+    /// presentation helpers as a parameter — never read from
+    /// `UserDefaults.standard` inside them (tests construct with explicit
+    /// values).
+    static let usageResetTimeStyleKey = "usageResetTimeStyle"
+
     /// Fail-closed read of the experimental live-transcript toggle for
     /// non-View callers (the View layer uses `@AppStorage` directly).
     /// Defaults to false when the user has never touched the toggle, matching
