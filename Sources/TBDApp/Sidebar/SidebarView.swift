@@ -72,6 +72,7 @@ struct SidebarView: View {
                     filterMenu
                 }
                 .padding(.horizontal, 12)
+                .padding(.top, nightwatchExperimental ? 0 : 8)
                 .padding(.bottom, 8)
             }
             .background(.bar)
