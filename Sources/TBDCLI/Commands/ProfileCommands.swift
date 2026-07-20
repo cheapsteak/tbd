@@ -173,7 +173,7 @@ struct ProfileList: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    @Flag(name: .long, help: "Force a fresh usage fetch for all logged-in OAuth profiles before listing")
+    @Flag(name: .long, help: "Refresh usage for stale logged-in OAuth profiles before listing (skips fresh or rate-limited profiles)")
     var refresh = false
 
     mutating func run() async throws {

@@ -453,11 +453,12 @@ extension AppState {
             }
     }
 
-    /// Force an immediate daemon-side OAuth usage sweep and merge the returned
-    /// snapshots into local state. The account picker calls this on open —
-    /// cached snapshots stay on screen and update in place when fresh data
-    /// lands. Failures are logged but never surfaced as a blocking alert
-    /// (the picker degrades to cached data).
+    /// Ask the daemon to refresh stale OAuth usage (fresh or backing-off
+    /// profiles are skipped server-side) and merge the returned snapshots
+    /// into local state. The account picker calls this on open — cached
+    /// snapshots stay on screen and update in place when fresh data lands.
+    /// Failures are logged but never surfaced as a blocking alert (the picker
+    /// degrades to cached data).
     func refreshUsageSnapshots(profileID: UUID? = nil) async {
         do {
             let result = try await daemonClient.refreshProfileUsage(id: profileID)

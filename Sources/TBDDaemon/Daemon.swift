@@ -656,14 +656,21 @@ public final class Daemon: Sendable {
             await poller.start()
 
             // 12c. Start per-profile OAuth usage poller (90s cadence,
-            // in-memory snapshots for the spawn-time account picker).
+            // snapshots for the spawn-time account picker, DB-cached so
+            // restarts show last-known bars instead of "usage unavailable").
             let configDirManager = rpcRouter.configDirManager
             let oauthPoller = OAuthProfileUsagePoller(
                 profilesProvider: { [database] in try await database.modelProfiles.list() },
                 loginIdentity: { id in configDirManager.loginIdentity(forProfileID: id) },
                 configDirPath: { id in configDirManager.configDirectory(forProfileID: id).path },
                 fetcher: LiveProfileUsageFetcher(),
-                broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) }
+                broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) },
+                loadPersisted: { [database] in
+                    (try? await database.oauthUsageSnapshots.loadAll()) ?? [:]
+                },
+                persist: { [database] id, snapshot in
+                    try? await database.oauthUsageSnapshots.upsert(profileID: id, snapshot: snapshot)
+                }
             )
             self.oauthUsagePoller = oauthPoller
             rpcRouter.oauthUsagePoller = oauthPoller

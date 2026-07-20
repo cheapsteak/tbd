@@ -620,10 +620,11 @@ public struct ModelProfileFetchUsageResult: Codable, Sendable {
     public init(usage: ModelProfileUsage) { self.usage = usage }
 }
 
-/// Params for `modelProfile.usageRefresh` — force an immediate usage sweep of
-/// the daemon's in-memory OAuth usage poller (the picker dialog calls this on
-/// open). `id == nil` refreshes every logged-in OAuth profile; a non-nil id
-/// refreshes just that profile.
+/// Params for `modelProfile.usageRefresh` — sweep the daemon's OAuth usage
+/// poller for stale, eligible profiles (the picker dialog calls this on
+/// open). Profiles with a fresh snapshot or inside a rate-limit backoff
+/// window are skipped; their cached snapshot is returned instead. `id == nil`
+/// covers every logged-in OAuth profile; a non-nil id just that profile.
 public struct ModelProfileUsageRefreshParams: Codable, Sendable {
     public let id: UUID?
     public init(id: UUID? = nil) { self.id = id }
