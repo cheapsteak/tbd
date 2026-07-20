@@ -7,9 +7,8 @@ import TBDShared
 /// orange/red — projection of end-of-window usage from the current burn rate,
 /// floored by the API severity so a warning/critical bucket never reads
 /// healthy), a neutral "time marker" tick showing how far through the window
-/// we are, and a trailing percent. Reset info renders as ONE compact line
-/// below the bars ("resets 14:59 · wk 4d 7h") instead of a per-row trailing
-/// column, so the bars get the full width.
+/// we are, and a trailing percent (and inline reset countdown on the weekly
+/// all-models row).
 ///
 /// Pure presentation over a `ProfileUsageSnapshot` (no picker/tab state), so it
 /// is reusable anywhere a snapshot is in hand. `now`/`timeZone` are injectable
@@ -52,40 +51,15 @@ struct UsageBarsView: View {
                             now: now,
                             timeZone: timeZone)
             }
-            if let resetLine {
-                Text(resetLine)
-                    .font(.system(size: 9, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
         }
-    }
-
-    /// One compact line combining the session clock and weekly countdown,
-    /// e.g. "resets 14:59 · wk 4d 7h". Segments without reset data are
-    /// omitted; nil (no line) when neither window has any. Scoped ("F:")
-    /// buckets stay tooltip-only, as before.
-    private var resetLine: String? {
-        var parts: [String] = []
-        if let session = ProfileUsagePresentation.sessionBucket(snapshot),
-           let inline = ProfileUsagePresentation.bucketPresentation(session, now: now, timeZone: timeZone).resetInline {
-            parts.append("resets \(inline)")
-        }
-        if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot),
-           let inline = ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: timeZone).resetInline {
-            parts.append("wk \(inline)")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
 // MARK: - One bar row
 
 /// A single window's row: a fixed-width label, the flexible bar (fill + time
-/// marker), and a fixed-width trailing percent. The fixed columns keep bars
-/// vertically aligned across rows; reset info lives on the shared line below
-/// the bars (and in each row's tooltip).
+/// marker), a fixed-width trailing percent, and a fixed-width trailing hint
+/// column. The four fixed columns keep bars vertically aligned across rows.
 private struct UsageBarRow: View {
     let presentation: ProfileUsagePresentation.BucketPresentation
     /// Leading label ("5h:" / "wk:" / "F:").
@@ -109,8 +83,25 @@ private struct UsageBarRow: View {
                 .monospacedDigit()
                 .foregroundStyle(fillColor)
                 .frame(width: 30, alignment: .trailing)
+            trailingResetHint
         }
         .help(helpText)
+    }
+
+    // MARK: Trailing reset hint
+
+    /// Fourth column: reset display inline (clock for 5h, countdown for wk) on rows
+    /// where resetDisplay shows inline; empty but space-reserving on other rows
+    /// to keep bars aligned. The 46pt width reserves space for both "· 23:10" and
+    /// "· 2d 5h" at 9pt monospacedDigit.
+    private var trailingResetHint: some View {
+        let hintText = presentation.resetInline.map { "· \($0)" } ?? ""
+
+        return Text(hintText)
+            .font(.system(size: 9, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
+            .frame(width: 46, alignment: .leading)
     }
 
     // MARK: Bar geometry
