@@ -17,6 +17,7 @@ public final class TBDDatabase: Sendable {
     public let notes: NoteStore
     public let modelProfiles: ModelProfileStore
     public let modelProfileUsage: ModelProfileUsageStore
+    public let oauthUsageSnapshots: OAuthUsageSnapshotStore
     public let config: ConfigStore
     public let meta: TBDMetaStore
     public let tabs: TabStore
@@ -50,6 +51,7 @@ public final class TBDDatabase: Sendable {
         self.notes = NoteStore(writer: pool)
         self.modelProfiles = ModelProfileStore(writer: pool)
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
+        self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: pool)
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
@@ -83,6 +85,7 @@ public final class TBDDatabase: Sendable {
         self.notes = NoteStore(writer: queue)
         self.modelProfiles = ModelProfileStore(writer: queue)
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
+        self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: queue)
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
@@ -906,6 +909,19 @@ public final class TBDDatabase: Sendable {
         // which is the only way fork PRs (no matching local branch) get tracked.
         migrator.registerMigration("v54_worktree_pr_number") { db in
             try db.addColumnIfMissing(table: "worktree", column: "pr_number", type: .integer)
+        }
+
+        // Last-known OAuth usage snapshot per profile (JSON blob of the shared
+        // ProfileUsageSnapshot model), so daemon restarts render stale-but-real
+        // usage bars immediately instead of "usage unavailable" and the
+        // startup sweep can skip profiles whose data is still fresh. Cache
+        // state — rows regenerate on the next successful fetch.
+        migrator.registerMigration("v55_oauth_usage_snapshot_cache") { db in
+            try db.createTableIfNotExists("oauth_profile_usage_snapshot") { t in
+                t.primaryKey("profile_id", .text).notNull()
+                    .references("model_profiles", onDelete: .cascade)
+                t.column("snapshot_json", .text).notNull()
+            }
         }
 
         return migrator

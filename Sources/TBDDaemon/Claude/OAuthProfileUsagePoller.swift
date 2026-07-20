@@ -9,9 +9,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 /// Complements `ClaudeUsagePoller` (which serves API-key profiles from
 /// TBD-stored secrets on a 30-min cadence, persisted in the DB): this one
 /// sweeps every logged-in OAuth profile roughly every 90 seconds using
-/// CLI-mediated credentials (`LiveProfileUsageFetcher`), holding results
-/// purely in memory — the spawn-time account picker renders instantly from
-/// this cache and can force a fresh sweep via `modelProfile.usageRefresh`.
+/// CLI-mediated credentials (`LiveProfileUsageFetcher`). Results live in
+/// memory and — on successful fetches — in a DB-backed cache
+/// (`OAuthUsageSnapshotStore`), so a daemon restart shows the last-known
+/// bars (stale) instead of "usage unavailable". The spawn-time account
+/// picker renders instantly from this cache and can request a
+/// refresh-if-stale sweep via `modelProfile.usageRefresh`.
 ///
 /// Rules:
 /// - Eligible profiles: `kind == .oauth` with a non-nil login identity
@@ -30,6 +33,11 @@ public actor OAuthProfileUsagePoller {
     public static let cadence: TimeInterval = 90
     public static let interProfileStagger: TimeInterval = 2
 
+    /// `sweepNow` (the RPC / picker-open path) skips profiles whose snapshot
+    /// was fetched more recently than this — opening the picker repeatedly
+    /// must not turn into a fetch per open.
+    public static let refreshFreshness: TimeInterval = 30
+
     /// Backoff schedule for a profile whose fetch failed. Doubles per
     /// consecutive failure, jittered, capped. A 429 with a `Retry-After`
     /// overrides this with the server's own value. Kept below the picker's
@@ -41,6 +49,10 @@ public actor OAuthProfileUsagePoller {
     // MARK: - Dependencies (closures so tests need no DB or filesystem)
 
     public typealias ProfilesProvider = @Sendable () async throws -> [ModelProfile]
+    public typealias SnapshotLoader = @Sendable () async -> [UUID: ProfileUsageSnapshot]
+    public typealias SnapshotPersister = @Sendable (UUID, ProfileUsageSnapshot) async -> Void
+    /// Deletes persisted rows for every profile NOT in the given set.
+    public typealias SnapshotPruner = @Sendable (Set<UUID>) async -> Void
 
     private let profilesProvider: ProfilesProvider
     private let loginIdentity: @Sendable (UUID) -> String?
@@ -50,17 +62,29 @@ public actor OAuthProfileUsagePoller {
     private let sleeper: @Sendable (TimeInterval) async throws -> Void
     private let now: @Sendable () -> Date
     private let jitter: @Sendable (TimeInterval) -> TimeInterval
+    /// Persistence seams (nil = memory-only, e.g. most tests). `loadPersisted`
+    /// seeds the in-memory cache at `start()`; `persist` is called on every
+    /// successful fetch. Backoff state is deliberately NOT persisted.
+    private let loadPersisted: SnapshotLoader?
+    private let persist: SnapshotPersister?
+    /// Called on every full sweep with the eligible profile set, so DB rows
+    /// for deleted/logged-out profiles don't reload as ghosts each restart.
+    private let prunePersisted: SnapshotPruner?
 
     // MARK: - State
 
     private var snapshots: [UUID: ProfileUsageSnapshot] = [:]
     private var loopTask: Task<Void, Never>?
+    /// Set before `start()`'s first suspension so a reentrant double-start
+    /// can't launch a second loop.
+    private var started = false
 
     /// Per-profile backoff bookkeeping. `consecutiveFailures` drives the
-    /// exponential schedule; `nextEligibleAt` is when a scheduled sweep may try
-    /// this profile again. Isolated per profile so one account's rate limit
-    /// never delays another's polling. A forced sweep (`sweepNow`) ignores this
-    /// gate — the user explicitly asked.
+    /// exponential schedule; `nextEligibleAt` is when a sweep may try this
+    /// profile again. Isolated per profile so one account's rate limit never
+    /// delays another's polling. Every sweep honors this gate — including the
+    /// picker-open RPC path (`sweepNow`), which must not re-hammer a
+    /// rate-limited endpoint. In-memory only; a daemon restart resets it.
     private struct BackoffState {
         var consecutiveFailures: Int = 0
         var nextEligibleAt: Date?
@@ -77,8 +101,14 @@ public actor OAuthProfileUsagePoller {
         broadcast: @escaping @Sendable () -> Void,
         sleeper: (@Sendable (TimeInterval) async throws -> Void)? = nil,
         now: (@Sendable () -> Date)? = nil,
-        jitter: (@Sendable (TimeInterval) -> TimeInterval)? = nil
+        jitter: (@Sendable (TimeInterval) -> TimeInterval)? = nil,
+        loadPersisted: SnapshotLoader? = nil,
+        persist: SnapshotPersister? = nil,
+        prunePersisted: SnapshotPruner? = nil
     ) {
+        self.loadPersisted = loadPersisted
+        self.persist = persist
+        self.prunePersisted = prunePersisted
         self.profilesProvider = profilesProvider
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
@@ -94,9 +124,12 @@ public actor OAuthProfileUsagePoller {
 
     // MARK: - Lifecycle
 
-    /// Launches the sweep loop. Idempotent.
-    public func start() {
-        guard loopTask == nil else { return }
+    /// Loads persisted snapshots (so readers immediately see last-known data,
+    /// stale or not), then launches the sweep loop. Idempotent.
+    public func start() async {
+        guard !started else { return }
+        started = true
+        await loadPersistedSnapshots()
         loopTask = Task { [weak self] in
             await self?.runLoop()
         }
@@ -106,14 +139,43 @@ public actor OAuthProfileUsagePoller {
     public func stop() {
         loopTask?.cancel()
         loopTask = nil
+        started = false
     }
 
     private func runLoop() async {
+        // Startup sweep: skip profiles whose persisted snapshot is younger
+        // than the cadence — they'd have been swept at most one tick ago by
+        // the previous daemon, and the next scheduled sweep covers them.
+        var skipFresherThan: TimeInterval? = Self.cadence
         while !Task.isCancelled {
             // Scheduled sweeps honor per-profile backoff windows.
-            await sweep(only: nil, forced: false)
+            await sweep(only: nil, skipFresherThan: skipFresherThan)
+            skipFresherThan = nil
             try? await sleeper(Self.cadence)
         }
+    }
+
+    /// Seed the in-memory cache from the DB-backed store before any sweep.
+    /// Ineligible ghosts (deleted profiles, logged-out accounts) are pruned —
+    /// from memory AND their persisted rows — by the first full sweep.
+    ///
+    /// Actors are reentrant across the `await`: an RPC-triggered `sweepNow`
+    /// can fetch fresher data while the load is in flight. So the result is
+    /// MERGED per profile, keeping whichever snapshot has the newer
+    /// `fetchedAt`, never replacing the dict wholesale.
+    private func loadPersistedSnapshots() async {
+        guard let loadPersisted else { return }
+        let loaded = await loadPersisted()
+        var changed = false
+        for (id, persisted) in loaded {
+            if let current = snapshots[id],
+               (current.fetchedAt ?? .distantPast) >= (persisted.fetchedAt ?? .distantPast) {
+                continue
+            }
+            snapshots[id] = persisted
+            changed = true
+        }
+        if changed { broadcast() }
     }
 
     // MARK: - Reads
@@ -124,35 +186,42 @@ public actor OAuthProfileUsagePoller {
         snapshots[profileID]
     }
 
-    // MARK: - Forced sweep (RPC `modelProfile.usageRefresh`)
+    // MARK: - Refresh-if-stale sweep (RPC `modelProfile.usageRefresh`)
 
-    /// Fetch fresh usage now — all logged-in OAuth profiles when `profileID`
-    /// is nil, or just the one profile. Returns the post-sweep snapshots
-    /// (filtered to the requested profile when one was given).
+    /// Refresh usage for stale, eligible profiles — all logged-in OAuth
+    /// profiles when `profileID` is nil, or just the one profile. Returns the
+    /// post-sweep snapshots (filtered to the requested profile when one was
+    /// given).
     ///
-    /// This is the user-explicit path (RPC `modelProfile.usageRefresh`), so it
-    /// bypasses per-profile backoff windows — the user asked, so we try even a
-    /// rate-limited profile.
+    /// This is the RPC path (`modelProfile.usageRefresh`, fired on every
+    /// picker open and by `tbd profile list --refresh`). It does NOT bypass
+    /// per-profile backoff windows — opening the picker against a 429ing
+    /// endpoint must not re-hammer it — and skips profiles whose snapshot is
+    /// younger than `refreshFreshness`.
     @discardableResult
     public func sweepNow(profileID: UUID? = nil) async -> [UUID: ProfileUsageSnapshot] {
-        await sweep(only: profileID, forced: true)
+        await sweep(only: profileID, skipFresherThan: Self.refreshFreshness)
         if let profileID {
             return snapshots.filter { $0.key == profileID }
         }
         return snapshots
     }
 
-    /// Test seam: run the SCHEDULED sweep path (honoring backoff) synchronously,
-    /// as the background loop would. Not part of the public runtime API.
+    /// Test seams. Not part of the public runtime API.
     @discardableResult
-    func sweepNow(profileID: UUID?, forcedForTest: Bool) async -> [UUID: ProfileUsageSnapshot] {
-        await sweep(only: profileID, forced: forcedForTest)
+    func sweepForTest(only: UUID? = nil,
+                      skipFresherThan: TimeInterval? = nil) async -> [UUID: ProfileUsageSnapshot] {
+        await sweep(only: only, skipFresherThan: skipFresherThan)
         return snapshots
+    }
+
+    func loadPersistedForTest() async {
+        await loadPersistedSnapshots()
     }
 
     // MARK: - Sweep
 
-    private func sweep(only: UUID?, forced: Bool) async {
+    private func sweep(only: UUID?, skipFresherThan: TimeInterval?) async {
         let allProfiles: [ModelProfile]
         do {
             allProfiles = try await profilesProvider()
@@ -171,16 +240,26 @@ public actor OAuthProfileUsagePoller {
         if only == nil {
             snapshots = snapshots.filter { eligibleIDs.contains($0.key) }
             backoff = backoff.filter { eligibleIDs.contains($0.key) }
+            if let prunePersisted {
+                await prunePersisted(eligibleIDs)
+            }
         }
 
-        // A forced sweep (only != nil) always tries the requested profile.
-        // A scheduled sweep skips any profile still inside its backoff window,
-        // so a rate-limited account isn't hammered every cadence tick — but the
-        // stagger + isolation mean the others still poll normally.
+        // Every sweep skips profiles still inside their backoff window, so a
+        // rate-limited account isn't hammered — by the cadence tick OR by the
+        // picker-open RPC. Stagger + isolation mean the others still poll
+        // normally. `skipFresherThan` additionally skips profiles whose data
+        // is recent enough (startup sweep, picker-open refresh).
         let candidates = only.map { id in eligible.filter { $0.id == id } } ?? eligible
         let currentTime = now()
         let targets = candidates.filter { profile in
-            forced || isEligibleNow(profile.id, at: currentTime)
+            guard isEligibleNow(profile.id, at: currentTime) else { return false }
+            if let window = skipFresherThan,
+               let fetchedAt = snapshots[profile.id]?.fetchedAt,
+               currentTime.timeIntervalSince(fetchedAt) < window {
+                return false
+            }
+            return true
         }
 
         var didFetch = false
@@ -191,7 +270,7 @@ public actor OAuthProfileUsagePoller {
             if Task.isCancelled { break }
             didFetch = true
             let status = await fetcher.fetchUsage(configDirPath: configDirPath(profile.id))
-            record(status, for: profile.id)
+            await record(status, for: profile.id)
         }
 
         if hasMeaningfulChange(from: before, to: snapshots) {
@@ -206,18 +285,22 @@ public actor OAuthProfileUsagePoller {
         return time >= next
     }
 
-    private func record(_ status: ProfileUsageFetchStatus, for profileID: UUID) {
+    private func record(_ status: ProfileUsageFetchStatus, for profileID: UUID) async {
         let timestamp = now()
         switch status {
         case .ok(let buckets):
             backoff[profileID] = BackoffState()  // reset schedule on success
-            snapshots[profileID] = ProfileUsageSnapshot(
+            let snapshot = ProfileUsageSnapshot(
                 buckets: buckets,
                 fetchedAt: timestamp,
                 lastAttemptAt: timestamp,
                 status: "ok",
                 statusKind: .ok
             )
+            snapshots[profileID] = snapshot
+            if let persist {
+                await persist(profileID, snapshot)
+            }
             logger.debug("usage sweep ok for profile \(profileID, privacy: .public): \(buckets.count, privacy: .public) buckets")
         default:
             let reason = status.failureReason ?? "unknown"

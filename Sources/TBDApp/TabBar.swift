@@ -530,6 +530,8 @@ private struct TabBarItem: View {
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
     @EnvironmentObject private var appState: AppState
 
     private var showClose: Bool {
@@ -571,6 +573,7 @@ private struct TabBarItem: View {
         return AccountHoverCards.claudeTabCard(
             terminal: terminal,
             profiles: appState.modelProfiles,
+            resetStyle: usageResetTimeStyle,
             enabled: showClaudeTabUsageTooltip
         )
     }

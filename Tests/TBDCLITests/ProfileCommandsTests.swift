@@ -42,6 +42,22 @@ struct ProfileCommandsTests {
         #expect(profileIdentityCell(kind: .bedrock, loginIdentity: "stray@example.com") == "—")
     }
 
+    // MARK: - Usage age marker
+
+    @Test func usageAgeMarker_freshOrUnknown_isNil() {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        #expect(usageAgeMarker(fetchedAt: nil, now: now) == nil)
+        #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-299), now: now) == nil)
+    }
+
+    @Test func usageAgeMarker_formatsMinutesHoursDays() {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-300), now: now) == "(updated 5m ago)")
+        #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-59 * 60), now: now) == "(updated 59m ago)")
+        #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-3 * 3600), now: now) == "(updated 3h ago)")
+        #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-49 * 3600), now: now) == "(updated 2d ago)")
+    }
+
     // MARK: - Name resolution
 
     @Test func resolveProfile_exactName() throws {

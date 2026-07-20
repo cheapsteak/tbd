@@ -620,10 +620,11 @@ public struct ModelProfileFetchUsageResult: Codable, Sendable {
     public init(usage: ModelProfileUsage) { self.usage = usage }
 }
 
-/// Params for `modelProfile.usageRefresh` — force an immediate usage sweep of
-/// the daemon's in-memory OAuth usage poller (the picker dialog calls this on
-/// open). `id == nil` refreshes every logged-in OAuth profile; a non-nil id
-/// refreshes just that profile.
+/// Params for `modelProfile.usageRefresh` — sweep the daemon's OAuth usage
+/// poller for stale, eligible profiles (the picker dialog calls this on
+/// open). Profiles with a fresh snapshot or inside a rate-limit backoff
+/// window are skipped; their cached snapshot is returned instead. `id == nil`
+/// covers every logged-in OAuth profile; a non-nil id just that profile.
 public struct ModelProfileUsageRefreshParams: Codable, Sendable {
     public let id: UUID?
     public init(id: UUID? = nil) { self.id = id }
@@ -856,6 +857,12 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// existing precedence-based resolution. Not persisted — creation-time only.
     /// Optional/defaulted for backward compatibility with older clients.
     public let profileID: UUID?
+    /// Explicit per-creation Claude model override (e.g. "claude-fable-5"),
+    /// injected as ANTHROPIC_MODEL for the new worktree's INITIAL Claude spawn
+    /// only — later respawns (hibernation wake, new sessions) fall back to the
+    /// profile default. nil preserves the profile's own model. Optional/
+    /// defaulted for backward compatibility with older clients.
+    public let model: String?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
     /// per-session `--settings` overlay for this spawn's Claude agent. General
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
@@ -882,7 +889,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Optional/defaulted for backward compatibility (old daemons ignore the
     /// unknown key; old clients omit it).
     public let autoArchiveOnMerge: Bool?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -891,6 +898,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.suppressAutoParent = suppressAutoParent
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
+        self.model = model
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.prNumber = prNumber
         self.checkoutPRHead = checkoutPRHead

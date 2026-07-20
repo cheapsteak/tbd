@@ -101,6 +101,8 @@ private struct AccountPickerRow: View {
 
     @State private var isHovering = false
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
 
     private var isSelectable: Bool {
         ProfileUsagePresentation.isSelectable(entry)
@@ -170,14 +172,14 @@ private struct AccountPickerRow: View {
     private func bucketRows(_ snapshot: ProfileUsageSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(session), label: "5h")
+                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(session, style: usageResetTimeStyle), label: "5h")
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly), label: "week")
+                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: usageResetTimeStyle), label: "week")
             }
             ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()),
                     id: \.offset) { _, scoped in
-                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped),
+                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: usageResetTimeStyle),
                           label: scoped.modelDisplayName ?? "model")
             }
         }

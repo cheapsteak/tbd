@@ -3,8 +3,8 @@ import TBDShared
 
 /// A compact usage meter for a Claude OAuth profile: the 5-hour session
 /// window, the weekly all-models window, and per-model-family weekly windows,
-/// each drawn as a thin bar with a pace-aware colored fill (green/yellow/
-/// orange/red — projection of end-of-window usage from the current burn rate,
+/// each drawn as a thin bar with a pace-aware colored fill (green/orange/
+/// red — projection of end-of-window usage from the current burn rate,
 /// floored by the API severity so a warning/critical bucket never reads
 /// healthy), a neutral "time marker" tick showing how far through the window
 /// we are, and a trailing percent (and inline reset countdown on the weekly
@@ -17,13 +17,18 @@ import TBDShared
 /// data at all.
 struct UsageBarsView: View {
     let snapshot: ProfileUsageSnapshot?
+    /// The user's reset-time display preference (time-of-reset vs time-until).
+    /// Injected by the hosting view from `@AppStorage(AppState.usageResetTimeStyleKey)`.
+    let resetStyle: ProfileUsagePresentation.ResetTimeStyle
     let now: Date
     let timeZone: TimeZone
 
     init(snapshot: ProfileUsageSnapshot?,
+         resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
          now: Date = Date(),
          timeZone: TimeZone = .current) {
         self.snapshot = snapshot
+        self.resetStyle = resetStyle
         self.now = now
         self.timeZone = timeZone
     }
@@ -31,21 +36,21 @@ struct UsageBarsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(session, now: now, timeZone: timeZone),
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(session, style: resetStyle, now: now, timeZone: timeZone),
                             label: "5h:",
                             windowLabel: "5-hour window",
                             now: now,
                             timeZone: timeZone)
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, now: now, timeZone: timeZone),
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: resetStyle, now: now, timeZone: timeZone),
                             label: "wk:",
                             windowLabel: "Weekly window",
                             now: now,
                             timeZone: timeZone)
             }
             ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()), id: \.offset) { _, scoped in
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, now: now, timeZone: timeZone),
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: resetStyle, now: now, timeZone: timeZone),
                             label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
                             windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
                             now: now,
@@ -90,18 +95,26 @@ private struct UsageBarRow: View {
 
     // MARK: Trailing reset hint
 
-    /// Fourth column: reset display inline (clock for 5h, countdown for wk) on rows
-    /// where resetDisplay shows inline; empty but space-reserving on other rows
-    /// to keep bars aligned. The 46pt width reserves space for both "· 23:10" and
-    /// "· 2d 5h" at 9pt monospacedDigit.
+    /// Fourth column: reset display inline ("at 8pm" / "at Fri 7pm" /
+    /// "in 4d 2h", prefix baked into `resetInline`) on rows where resetDisplay
+    /// shows inline; empty but space-reserving on other rows to keep bars
+    /// aligned. The 74pt fixed width fits the true worst case at FULL size —
+    /// "at Wed 10:30pm" / "at Wed 12:30pm" = 72.6pt at 9pt rounded
+    /// monospacedDigit — with no minimumScaleFactor, so every string renders
+    /// at identical size (a visible scale-down on one row next to a full-size
+    /// neighbor read as a glitch). Leading alignment keeps every reset string
+    /// starting at the same x across rows. The width win over the old 75pt
+    /// column comes from the strings themselves (ceil-rounding + dropped ":00"
+    /// make "at 8pm" the common case); the flexible bar absorbs the difference.
+    /// `.secondary` (not `.tertiary`) keeps the reset legible in the popover
+    /// while still subordinate to the semibold percent column.
     private var trailingResetHint: some View {
-        let hintText = presentation.resetInline.map { "· \($0)" } ?? ""
-
-        return Text(hintText)
+        Text(presentation.resetInline ?? "")
             .font(.system(size: 9, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.tertiary)
-            .frame(width: 46, alignment: .leading)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .frame(width: 74, alignment: .leading)
     }
 
     // MARK: Bar geometry
@@ -136,9 +149,9 @@ private struct UsageBarRow: View {
     // MARK: Colors
 
     /// Pace-aware fill (shared by the bar and the trailing percent): green
-    /// (adaptive) when on a sustainable pace, yellow (adaptive) when the
-    /// projected end-of-window usage is warming (75–90%), orange when it will
-    /// likely graze the limit (90–100%), red when on pace to exceed. The API
+    /// (adaptive) when on a sustainable pace, orange when the projected
+    /// end-of-window usage is warming (75–90%) or will likely graze the
+    /// limit (90–100%), red when on pace to exceed. The API
     /// severity (or the >=75/>=90 percent fallback) floors the tier, so a
     /// warning/critical bucket never renders healthier than before; without
     /// pace data (no reset date, <15% elapsed) this is exactly the old
@@ -196,7 +209,7 @@ private struct UsageBarRow: View {
 
         // Mid usage — the projection lands in the caution/warning bands even
         // while the marker sits just ahead of the fill. Session projects to
-        // ~85% (yellow "warming"); weekly projects to ~95% (orange) despite
+        // ~85% (caution "warming"); weekly projects to ~95% (warning) despite
         // the API still saying "normal".
         UsageBarsView(snapshot: snap([
             bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),

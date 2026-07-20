@@ -637,8 +637,11 @@ public enum ProfileUsageStatusKind: String, Codable, Sendable, Equatable {
     case unknown
 }
 
-/// In-memory per-profile usage snapshot for logged-in OAuth profiles,
-/// maintained by the daemon's background poller (never persisted).
+/// Per-profile usage snapshot for logged-in OAuth profiles, maintained by
+/// the daemon's background poller. Persisted by the daemon as a regenerating
+/// JSON cache (`oauth_profile_usage_snapshot` table, migration v55), so new
+/// fields MUST stay decode-compatible with older stored JSON (optional or
+/// defaulted).
 public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     /// Buckets from the last successful fetch (empty if none succeeded yet).
     public var buckets: [ClaudeUsageLimitBucket]

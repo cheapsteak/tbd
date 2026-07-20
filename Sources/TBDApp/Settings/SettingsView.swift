@@ -40,6 +40,8 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -169,6 +171,11 @@ struct GeneralSettingsTab: View {
                 .help("When a turn dies on a transient API error (connection drop, server error, overload), TBD types \"continue\" after a backoff (60s, 2m, 5m, 10m) and gives up after 4 straight failures. Off by default. Auth and billing errors are never retried.")
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
+                Picker("Usage reset times", selection: $usageResetTimeStyle) {
+                    Text("Time of reset").tag(ProfileUsagePresentation.ResetTimeStyle.timeOfReset)
+                    Text("Time until reset").tag(ProfileUsagePresentation.ResetTimeStyle.timeUntilReset)
+                }
+                .help("How usage-window resets are shown: the wall-clock time they reset (\"at 7:59pm\", \"at Fri 7pm\") or the time remaining (\"in 2h 10m\", \"in 4d 2h\").")
             }
 
             Section("Session Hibernation") {

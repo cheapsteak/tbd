@@ -20,7 +20,10 @@ extension AppState {
     /// `profileID` is an optional explicit model-profile override chosen at
     /// creation time (sidebar `+` profile picker). nil resolves the profile via
     /// the daemon's normal repo/scratch/global precedence chain (today's behavior).
-    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, displayName: String? = nil) {
+    /// `model` is an optional per-spawn Claude model override (picker model
+    /// buttons); it applies to the initial spawn only — later respawns fall
+    /// back to the profile default.
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, model: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, displayName: String? = nil) {
         // Optimistic placeholder so the row appears instantly. When picking an
         // existing branch we use its local name so the placeholder name
         // doesn't briefly show a fake `tbd/*` value.
@@ -69,6 +72,7 @@ extension AppState {
                     parentWorktreeID: parentWorktreeID,
                     useExistingBranch: existingBranch != nil,
                     profileID: profileID,
+                    model: model,
                     prNumber: prNumber,
                     checkoutPRHead: checkoutPRHead
                 )

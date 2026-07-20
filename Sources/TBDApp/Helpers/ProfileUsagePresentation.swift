@@ -59,7 +59,7 @@ enum ProfileUsagePresentation {
     // MARK: - Pace-aware fill tier
 
     /// Fill tiers for the usage bars, ordered by urgency. A superset of
-    /// `SeverityLevel` with one extra `caution` (yellow) tier between normal
+    /// `SeverityLevel` with one extra `caution` tier between normal
     /// and warning that only pace projection can produce — "you're burning
     /// faster than the window, but not yet alarmingly so".
     enum FillLevel: Int, Comparable {
@@ -83,7 +83,7 @@ enum ProfileUsagePresentation {
     /// and tier it —
     ///
     /// - projected < 0.75 → `.normal` (green: sustainable pace)
-    /// - 0.75 ..< 0.90 → `.caution` (yellow: warming — on track to land close)
+    /// - 0.75 ..< 0.90 → `.caution` (orange, same hue as warning: warming — on track to land close)
     /// - 0.90 ..< 1.00 → `.warning` (orange: will likely graze the limit)
     /// - >= 1.00 → `.critical` (red: on pace to exceed)
     ///
@@ -152,12 +152,39 @@ enum ProfileUsagePresentation {
         "\(Int(percent.rounded()))%"
     }
 
-    /// "23:10" — reset times are compact 24h clock times (menu width is precious).
+    /// "8pm" / "7:30pm" — reset clock times render 12-hour with lowercase
+    /// am/pm (no space, keeps the fragment narrow) so they can't be misread
+    /// as an hour count ("19:59" ≈ "in 19h 59m"). Minutes are dropped on the
+    /// hour, and the instant is ceiled to the next minute first — the API's
+    /// reset instants land a fraction under the hour (7:59:59.9), which a
+    /// flooring formatter renders as the misleading "7:59pm".
+    /// POSIX locale + explicit symbols keep the output locale-stable.
     static func resetTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
+        clockText(date, weekday: false, timeZone: timeZone)
+    }
+
+    /// "Fri 7pm" / "Fri 6:30pm" — weekday + 12h time for resets days away
+    /// (the weekly window's time-of-reset form). Same ceil-to-minute and
+    /// drop-:00 rules as `resetTimeText`.
+    static func weekdayResetTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
+        clockText(date, weekday: true, timeZone: timeZone)
+    }
+
+    /// Shared impl for the two clock fragments: ceil to the next minute,
+    /// then format, omitting ":00" minutes.
+    private static func clockText(_ date: Date, weekday: Bool, timeZone: TimeZone) -> String {
+        let rounded = Date(timeIntervalSinceReferenceDate:
+            (date.timeIntervalSinceReferenceDate / 60).rounded(.up) * 60)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let onTheHour = calendar.component(.minute, from: rounded) == 0
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = (weekday ? "EEE " : "") + (onTheHour ? "ha" : "h:mma")
+        formatter.amSymbol = "am"
+        formatter.pmSymbol = "pm"
         formatter.timeZone = timeZone
-        return formatter.string(from: date)
+        return formatter.string(from: rounded)
     }
 
     /// "F" for "Fable" — single-letter family abbreviation for menu rows.
@@ -201,18 +228,18 @@ enum ProfileUsagePresentation {
     }
 
     /// Compact usage summary without a leading separator:
-    /// "5h 0% ↺23:10 · wk 76% · F 100%". nil when there is no snapshot or it
-    /// has no buckets (never logged in / poller hasn't fetched yet).
-    /// Routes through `resetDisplay(forKind:)` so reset-display policy is
-    /// centralized; output strings remain unchanged.
+    /// "5h 0% ↺11:10pm · wk 76% · F 100%". nil when there is no snapshot or
+    /// it has no buckets (never logged in / poller hasn't fetched yet).
+    /// This legacy flat-string form keeps a FIXED format (clock for 5h,
+    /// nothing for weekly) regardless of the `ResetTimeStyle` preference —
+    /// the preference flows through `BucketPresentation` surfaces.
     static func usageSummary(for snapshot: ProfileUsageSnapshot?,
                              timeZone: TimeZone = .current) -> String? {
         guard let snapshot, !snapshot.buckets.isEmpty else { return nil }
         var parts: [String] = []
         if let session = sessionBucket(snapshot) {
             var part = "5h \(percentText(session.percent))"
-            // Session always uses clock display per resetDisplay(forKind:).
-            if let resets = session.resetsAt, resetDisplay(forKind: session.kind) == .clock {
+            if let resets = session.resetsAt {
                 part += " ↺\(resetTimeText(resets, timeZone: timeZone))"
             }
             parts.append(part)
@@ -261,11 +288,13 @@ enum ProfileUsagePresentation {
     }
 
     /// Spelled-out usage line for the roomier second row: "5h 16% used ·
-    /// resets 23:09 · week 79% · resets in 2d 5h · Fable 100%". Unlike
+    /// resets 11:09pm · week 79% · resets in 2d 5h · Fable 100%". Unlike
     /// `usageSummary` this drops the ↺ glyph in favor of "resets " and uses
     /// full family names instead of the single-letter abbreviation — the
     /// second line has the width. nil when there is no snapshot or it has no
-    /// buckets. Routes through `resetDisplay(forKind:)` for consistency.
+    /// buckets. Like `usageSummary`, this legacy flat-string form keeps a
+    /// FIXED format (clock for 5h, countdown for weekly) regardless of the
+    /// `ResetTimeStyle` preference.
     static func usageDetailLine(for snapshot: ProfileUsageSnapshot?,
                                 timeZone: TimeZone = .current,
                                 now: Date = Date()) -> String? {
@@ -282,17 +311,14 @@ enum ProfileUsagePresentation {
         }
         if let session = sessionBucket(snapshot) {
             var part = percentPart("5h", session.percent)
-            // Session always uses clock display per resetDisplay(forKind:).
-            if let resets = session.resetsAt, resetDisplay(forKind: session.kind) == .clock {
+            if let resets = session.resetsAt {
                 part += " · resets \(resetTimeText(resets, timeZone: timeZone))"
             }
             parts.append(part)
         }
         if let weekly = weeklyAllBucket(snapshot) {
             var part = percentPart("week", weekly.percent)
-            // Weekly shows countdown per resetDisplay(forKind:).
-            if resetDisplay(forKind: weekly.kind) == .countdown,
-               let resets = weekly.resetsAt,
+            if let resets = weekly.resetsAt,
                let relative = compactResetCountdown(resets, now: now) {
                 part += " · resets in \(relative)"
             }
@@ -310,20 +336,27 @@ enum ProfileUsagePresentation {
     /// future (a stale snapshot shouldn't render a nonsense countdown). Used as
     /// a building block for contexts that need just the duration, which they can
     /// wrap in their own "resets in" or similar text. Minutes appear only under an
-    /// hour; hour-scale drops minutes; day-scale carries the hour remainder.
-    static func compactResetCountdown(_ resetsAt: Date, now: Date = Date()) -> String? {
+    /// hour; hour-scale drops minutes (unless `minutesAtHourScale` — used for the
+    /// 5h session window, where a bare "2h" loses too much: "2h 10m"); day-scale
+    /// carries the hour remainder.
+    static func compactResetCountdown(_ resetsAt: Date, now: Date = Date(),
+                                      minutesAtHourScale: Bool = false) -> String? {
         let interval = resetsAt.timeIntervalSince(now)
         guard interval > 0 else { return nil }
         let totalMinutes = Int((interval / 60).rounded(.up))
         let days = totalMinutes / (24 * 60)
         let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
         if days > 0 {
             return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
         }
         if hours > 0 {
+            if minutesAtHourScale, minutes > 0 {
+                return "\(hours)h \(minutes)m"
+            }
             return "\(hours)h"
         }
-        return "\(max(totalMinutes % 60, 1))m"
+        return "\(max(minutes, 1))m"
     }
 
     /// Two-line menu-row model for a profile: identity on the primary line, and
@@ -477,28 +510,45 @@ enum ProfileUsagePresentation {
 
     // MARK: - Reset display policy
 
-    /// How a bucket should express its reset time: inline (clock or countdown)
-    /// or in tooltips only. Centralized so all five rendering surfaces agree.
-    /// This is the single decision point for reset-display policy.
+    /// User display preference for reset instants (Settings → Claude →
+    /// "Usage reset times", `AppState.usageResetTimeStyleKey`): absolute
+    /// time-of-reset (default) or relative time-until-reset. Injected as a
+    /// parameter — never read from UserDefaults here — so tests construct
+    /// with explicit values.
+    enum ResetTimeStyle: String, CaseIterable {
+        /// "at 7:59pm" (session) / "at Fri 7pm" (weekly). The default.
+        case timeOfReset
+        /// "in 2h 10m" (session) / "in 4d 2h" (weekly).
+        case timeUntilReset
+    }
+
+    /// How a bucket should express its reset time: inline (clock, weekday
+    /// clock, or countdown) or in tooltips only. Centralized so all rendering
+    /// surfaces agree. This is the single decision point for reset-display policy.
     public enum ResetDisplay: Equatable {
-        /// "· 23:10" inline; tooltip "resets 23:10" (absolute clock time, for 5h window).
+        /// "at 7:59pm" inline; tooltip "resets at 7:59pm" (absolute clock time, 5h window).
         case clock
-        /// "· 2d 5h" inline; tooltip "resets in 2d 5h" (relative countdown, for weekly).
+        /// "at Fri 7pm" inline; tooltip "resets at Fri 7pm" (weekday + time, weekly window).
+        case weekdayClock
+        /// "in 2h 10m" / "in 4d 2h" inline; tooltip "resets in …" (relative countdown).
         case countdown
         /// Nothing inline; tooltip "resets in 2d 5h" (relative countdown, for scoped/model rows).
         case tooltipOnly
     }
 
-    /// Determine how a bucket's reset time should be displayed based on its kind.
-    /// Routes all five rendering surfaces through one decision point.
+    /// Determine how a bucket's reset time should be displayed based on its
+    /// kind and the user's `ResetTimeStyle` preference. Routes all rendering
+    /// surfaces through one decision point.
     ///
-    /// - sessionKind ("session") → `.clock` (5-hour window, absolute time best)
-    /// - weeklyAllKind ("weekly_all") → `.countdown` (planning horizon, relative time)
-    /// - any other kind → `.tooltipOnly` (scoped/per-model, less critical to the main view)
-    static func resetDisplay(forKind kind: String) -> ResetDisplay {
+    /// - sessionKind ("session") → `.clock` (time-of-reset) / `.countdown` (time-until)
+    /// - weeklyAllKind ("weekly_all") → `.weekdayClock` (time-of-reset) / `.countdown` (time-until)
+    /// - any other kind → `.tooltipOnly` in BOTH styles (scoped/per-model,
+    ///   less critical to the main view)
+    static func resetDisplay(forKind kind: String,
+                             style: ResetTimeStyle = .timeOfReset) -> ResetDisplay {
         switch kind {
-        case sessionKind: return .clock
-        case weeklyAllKind: return .countdown
+        case sessionKind: return style == .timeOfReset ? .clock : .countdown
+        case weeklyAllKind: return style == .timeOfReset ? .weekdayClock : .countdown
         default: return .tooltipOnly
         }
     }
@@ -522,14 +572,16 @@ enum ProfileUsagePresentation {
         let kind: String
         let percent: Double
         let percentText: String
-        /// Pace-aware fill tier (green/yellow/orange/red).
+        /// Pace-aware fill tier (green/orange/orange/red — caution shares warning's hue).
         let fill: FillLevel
-        /// How the reset should be displayed (clock, countdown, or tooltip-only).
+        /// How the reset should be displayed (clock, weekday clock, countdown, or tooltip-only).
         let resetDisplay: ResetDisplay
-        /// Compact reset value without separators/prefix: "23:10" (clock) or "2d 5h" (countdown).
+        /// Inline reset column text, prefix included: "at 7:59pm" (clock),
+        /// "at Fri 7pm" (weekday clock), or "in 4d 2h" (countdown).
         /// nil when resetDisplay == .tooltipOnly, or there is no reset date, or a countdown is past.
         let resetInline: String?
-        /// Full reset phrase with "resets" prefix: "resets 23:10" (clock) or "resets in 2d 5h" (countdown/tooltipOnly).
+        /// Full reset phrase with "resets" prefix: "resets at 7:59pm" (clock),
+        /// "resets at Fri 7pm" (weekday clock), or "resets in 2d 5h" (countdown/tooltipOnly).
         /// Present whenever a reset date exists (any kind) — for tooltips, help text, and roomy rows.
         /// nil when there is no reset date.
         let resetPhrase: String?
@@ -539,11 +591,15 @@ enum ProfileUsagePresentation {
     }
 
     /// Compute the unified presentation model for a bucket. Routes through
-    /// all policy decisions (reset display, pace-aware fill, reset text) in one place.
+    /// all policy decisions (reset display, pace-aware fill, reset text) in
+    /// one place. `style` is the user's reset-time display preference — the
+    /// caller reads it (via `@AppStorage(AppState.usageResetTimeStyleKey)`)
+    /// and injects it here.
     static func bucketPresentation(_ bucket: ClaudeUsageLimitBucket,
+                                   style: ResetTimeStyle = .timeOfReset,
                                    now: Date = Date(),
                                    timeZone: TimeZone = .current) -> BucketPresentation {
-        let display = resetDisplay(forKind: bucket.kind)
+        let display = resetDisplay(forKind: bucket.kind, style: style)
         let windowDuration = self.windowDuration(forKind: bucket.kind)
         let elapsed = elapsedFraction(resetsAt: bucket.resetsAt,
                                      windowDuration: windowDuration,
@@ -561,14 +617,18 @@ enum ProfileUsagePresentation {
         if let resetsAt = bucket.resetsAt {
             switch display {
             case .clock:
-                let clockText = resetTimeText(resetsAt, timeZone: timeZone)
-                resetInline = clockText
-                resetPhrase = "resets \(clockText)"
+                resetInline = "at \(resetTimeText(resetsAt, timeZone: timeZone))"
+
+            case .weekdayClock:
+                resetInline = "at \(weekdayResetTimeText(resetsAt, timeZone: timeZone))"
 
             case .countdown:
-                if let compact = compactResetCountdown(resetsAt, now: now) {
-                    resetInline = compact
-                    resetPhrase = "resets in \(compact)"
+                // Session countdowns keep minute precision ("in 2h 10m") —
+                // on a 5h window a bare "2h" loses too much; weekly stays "4d 2h".
+                if let compact = compactResetCountdown(
+                    resetsAt, now: now,
+                    minutesAtHourScale: bucket.kind == sessionKind) {
+                    resetInline = "in \(compact)"
                 }
                 // When countdown is past (nil), both remain nil.
 
@@ -577,6 +637,10 @@ enum ProfileUsagePresentation {
                     resetPhrase = "resets in \(compact)"
                 }
                 // resetInline stays nil; resetPhrase shows only when countdown is valid.
+            }
+            if let inline = resetInline {
+                // "resets at 7:59pm" / "resets at Fri 7pm" / "resets in 4d 2h".
+                resetPhrase = "resets \(inline)"
             }
         }
 

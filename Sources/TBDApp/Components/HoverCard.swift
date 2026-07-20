@@ -306,7 +306,7 @@ struct HoverCardView: View {
 
     private func valueColor(_ row: HoverCardRow) -> Color {
         switch row.tint {
-        case .caution: return .yellow
+        case .caution: return .orange  // matches warning: tracker's bars have no yellow tier
         case .warning: return .orange
         case .critical: return .red
         case .normal: return row.valueStyle == .mutedItalic ? Color.secondary : Color.primary

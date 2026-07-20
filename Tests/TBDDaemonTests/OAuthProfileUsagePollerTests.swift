@@ -62,7 +62,9 @@ private func makePoller(
     loggedIn: Set<UUID>,
     fetcher: ScriptedProfileUsageFetcher,
     broadcasts: BroadcastCounter,
-    now: Date = Date(timeIntervalSince1970: 1_750_000_000)
+    now: Date = Date(timeIntervalSince1970: 1_750_000_000),
+    loadPersisted: OAuthProfileUsagePoller.SnapshotLoader? = nil,
+    persist: OAuthProfileUsagePoller.SnapshotPersister? = nil
 ) -> OAuthProfileUsagePoller {
     OAuthProfileUsagePoller(
         profilesProvider: { profiles },
@@ -71,8 +73,20 @@ private func makePoller(
         fetcher: fetcher,
         broadcast: { broadcasts.bump() },
         sleeper: { _ in },
-        now: { now }
+        now: { now },
+        loadPersisted: loadPersisted,
+        persist: persist
     )
+}
+
+/// Thread-safe recorder for the poller's `persist` seam.
+private final class SnapshotBox: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "SnapshotBox")
+    private var _saved: [UUID: ProfileUsageSnapshot] = [:]
+    var saved: [UUID: ProfileUsageSnapshot] { queue.sync { _saved } }
+    func save(_ id: UUID, _ snapshot: ProfileUsageSnapshot) {
+        queue.sync { _saved[id] = snapshot }
+    }
 }
 
 // MARK: - Tests
@@ -146,7 +160,8 @@ struct OAuthProfileUsagePollerTests {
         let successFetchedAt = first[profile.id]?.fetchedAt
         #expect(first[profile.id]?.status == "ok")
 
-        let second = await poller.sweepNow()
+        // Scheduled-path sweep (sweepNow would skip: the snapshot is fresh).
+        let second = await poller.sweepForTest()
         let stale = second[profile.id]
         #expect(stale?.buckets == okBuckets)             // old data retained
         #expect(stale?.fetchedAt == successFetchedAt)    // success timestamp preserved
@@ -174,15 +189,25 @@ struct OAuthProfileUsagePollerTests {
         let profile = oauthProfile(named: "Dead")
         let fetcher = ScriptedProfileUsageFetcher(default: .httpError(401))
         let broadcasts = BroadcastCounter()
-        let poller = makePoller(
-            profiles: [profile], loggedIn: [profile.id],
-            fetcher: fetcher, broadcasts: broadcasts
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_750_000_000))
+        let poller = OAuthProfileUsagePoller(
+            profilesProvider: { [profile] },
+            loginIdentity: { _ in "someone@example.com" },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            broadcast: { broadcasts.bump() },
+            sleeper: { _ in },
+            now: { clock.now },
+            jitter: { _ in 0 }
         )
 
-        await poller.sweepNow()
+        await poller.sweepForTest()
         #expect(broadcasts.count == 1)  // nil → failed is a change
-        await poller.sweepNow()
-        await poller.sweepNow()
+        clock.advance(31)               // past the 30s backoff from failure 1
+        await poller.sweepForTest()
+        clock.advance(61)               // past the 60s backoff from failure 2
+        await poller.sweepForTest()
+        #expect(fetcher.calls.count == 3)
         #expect(broadcasts.count == 1)  // same failure text: no re-broadcast
     }
 
@@ -288,6 +313,169 @@ struct OAuthProfileUsagePollerTests {
         #expect(second[profile.id]?.status == "ok")
         #expect(broadcasts.count == 1)
     }
+
+    // MARK: - Persistence across restarts
+
+    @Test func persistedSnapshotsAreVisibleBeforeAnyFetch() async {
+        let profile = oauthProfile(named: "Cached")
+        let fixedNow = Date(timeIntervalSince1970: 1_750_000_000)
+        let saved = ProfileUsageSnapshot(
+            buckets: okBuckets,
+            fetchedAt: fixedNow.addingTimeInterval(-600),
+            lastAttemptAt: fixedNow.addingTimeInterval(-600),
+            status: "ok", statusKind: .ok
+        )
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [profile], loggedIn: [profile.id],
+            fetcher: fetcher, broadcasts: broadcasts,
+            loadPersisted: { [profile.id: saved] }
+        )
+
+        await poller.loadPersistedForTest()
+
+        #expect(await poller.snapshot(for: profile.id) == saved)
+        #expect(fetcher.calls.isEmpty)          // load is not a fetch
+        #expect(broadcasts.count == 1)          // loaded cache is announced
+    }
+
+    @Test func successfulFetchPersistsAndReloadsIntoFreshPoller() async {
+        let profile = oauthProfile(named: "P")
+        let box = SnapshotBox()
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [profile], loggedIn: [profile.id],
+            fetcher: fetcher, broadcasts: broadcasts,
+            persist: { box.save($0, $1) }
+        )
+        _ = await poller.sweepNow()
+        #expect(box.saved[profile.id]?.buckets == okBuckets)
+        #expect(box.saved[profile.id]?.fetchedAt != nil)  // staleness computable
+
+        // "Daemon restart": a fresh poller instance loads the persisted data.
+        let reloaded = makePoller(
+            profiles: [profile], loggedIn: [profile.id],
+            fetcher: fetcher, broadcasts: broadcasts,
+            loadPersisted: { box.saved }
+        )
+        await reloaded.loadPersistedForTest()
+        #expect(await reloaded.snapshot(for: profile.id) == box.saved[profile.id])
+    }
+
+    @Test func failedFetchDoesNotPersist() async {
+        let profile = oauthProfile(named: "Bad")
+        let box = SnapshotBox()
+        let fetcher = ScriptedProfileUsageFetcher(default: .httpError(500))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [profile], loggedIn: [profile.id],
+            fetcher: fetcher, broadcasts: broadcasts,
+            persist: { box.save($0, $1) }
+        )
+        _ = await poller.sweepNow()
+        #expect(box.saved.isEmpty)
+    }
+
+    @Test func startupSweepSkipsFreshPersistedAndFetchesStale() async {
+        let fresh = oauthProfile(named: "Fresh")
+        let stale = oauthProfile(named: "Stale")
+        let fixedNow = Date(timeIntervalSince1970: 1_750_000_000)
+        func snap(age: TimeInterval) -> ProfileUsageSnapshot {
+            ProfileUsageSnapshot(
+                buckets: okBuckets,
+                fetchedAt: fixedNow.addingTimeInterval(-age),
+                lastAttemptAt: fixedNow.addingTimeInterval(-age),
+                status: "ok", statusKind: .ok
+            )
+        }
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let persisted = [fresh.id: snap(age: 10), stale.id: snap(age: 300)]
+        let poller = makePoller(
+            profiles: [fresh, stale], loggedIn: [fresh.id, stale.id],
+            fetcher: fetcher, broadcasts: broadcasts, now: fixedNow,
+            loadPersisted: { persisted }
+        )
+        await poller.loadPersistedForTest()
+
+        // Startup sweep gates on the cadence: only the stale profile fetches.
+        _ = await poller.sweepForTest(skipFresherThan: OAuthProfileUsagePoller.cadence)
+
+        #expect(fetcher.calls == ["/profiles/\(stale.id.uuidString.lowercased())/claude"])
+        // The fresh profile keeps its persisted snapshot untouched.
+        #expect(await poller.snapshot(for: fresh.id)?.fetchedAt == fixedNow.addingTimeInterval(-10))
+        // The stale one was refetched now.
+        #expect(await poller.snapshot(for: stale.id)?.fetchedAt == fixedNow)
+    }
+
+    /// Actor reentrancy: a sweep can land fresher data while `start()` is
+    /// suspended in `loadPersisted()`. The load must merge per profile by
+    /// `fetchedAt` — never clobber a fresher in-memory snapshot — while still
+    /// seeding profiles the sweep didn't cover.
+    @Test func loadPersistedMergesByFreshnessInsteadOfReplacing() async {
+        let sweptProfile = oauthProfile(named: "Swept")
+        let cachedOnly = oauthProfile(named: "CachedOnly")
+        let fixedNow = Date(timeIntervalSince1970: 1_750_000_000)
+        func snap(age: TimeInterval) -> ProfileUsageSnapshot {
+            ProfileUsageSnapshot(
+                buckets: okBuckets,
+                fetchedAt: fixedNow.addingTimeInterval(-age),
+                lastAttemptAt: fixedNow.addingTimeInterval(-age),
+                status: "ok", statusKind: .ok
+            )
+        }
+        let persisted = [sweptProfile.id: snap(age: 600), cachedOnly.id: snap(age: 600)]
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [sweptProfile], loggedIn: [sweptProfile.id],
+            fetcher: fetcher, broadcasts: broadcasts, now: fixedNow,
+            loadPersisted: { persisted }
+        )
+
+        // Racing sweep fetches sweptProfile fresh (fetchedAt == fixedNow)...
+        _ = await poller.sweepNow()
+        // ...then the interleaved load resumes.
+        await poller.loadPersistedForTest()
+
+        // Fresher in-memory snapshot survives; stale persisted one loses.
+        #expect(await poller.snapshot(for: sweptProfile.id)?.fetchedAt == fixedNow)
+        // Profile only present in the cache is still seeded.
+        #expect(await poller.snapshot(for: cachedOnly.id) == persisted[cachedOnly.id])
+    }
+
+    @Test func fullSweepPrunesPersistedRowsForIneligibleProfiles() async {
+        let eligible = oauthProfile(named: "In")
+        let loggedOut = oauthProfile(named: "Out")
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let prunedSets = LockedBox<[Set<UUID>]>([])
+        let poller = OAuthProfileUsagePoller(
+            profilesProvider: { [eligible, loggedOut] },
+            loginIdentity: { id in id == eligible.id ? "someone@example.com" : nil },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            broadcast: { broadcasts.bump() },
+            sleeper: { _ in },
+            prunePersisted: { ids in prunedSets.mutate { $0.append(ids) } }
+        )
+
+        _ = await poller.sweepNow()                          // full sweep: prunes
+        _ = await poller.sweepNow(profileID: eligible.id)    // targeted: must not
+
+        #expect(prunedSets.value == [[eligible.id]])
+    }
+}
+
+/// Minimal thread-safe box for recording seam calls.
+private final class LockedBox<T: Sendable>: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "LockedBox")
+    private var _value: T
+    init(_ value: T) { _value = value }
+    var value: T { queue.sync { _value } }
+    func mutate(_ body: (inout T) -> Void) { queue.sync { body(&_value) } }
 }
 
 // MARK: - Backoff scheduling
@@ -332,7 +520,7 @@ private final class MutableClock: @unchecked Sendable {
         let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
         let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
 
-        // Forced sweep records the 429 and arms the 300s backoff.
+        // First sweep records the 429 and arms the 300s backoff.
         _ = await poller.sweepNow()
         #expect(fetcher.calls.count == 1)
         #expect(await poller.snapshot(for: profile.id)?.statusKind == .rateLimited)
@@ -340,28 +528,52 @@ private final class MutableClock: @unchecked Sendable {
         // A scheduled sweep only 100s later must SKIP this profile (still inside
         // the 300s Retry-After window).
         clock.advance(100)
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         #expect(fetcher.calls.count == 1)  // no new fetch
 
         // Past the window: scheduled sweep tries again and recovers.
         clock.advance(300)
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         #expect(fetcher.calls.count == 2)
         #expect(await poller.snapshot(for: profile.id)?.statusKind == .ok)
     }
 
-    @Test func forcedSweepIgnoresBackoffWindow() async {
+    @Test func refreshSweepRespectsBackoffWindow() async {
         let profile = oauthProfile(named: "Limited")
         let dir = "/profiles/\(profile.id.uuidString.lowercased())/claude"
-        let fetcher = ScriptedProfileUsageFetcher(default: .rateLimited(retryAfter: 600))
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
         fetcher.enqueue(configDirPath: dir, .rateLimited(retryAfter: 600))
         let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
         let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
 
         _ = await poller.sweepNow()               // arms 600s backoff
         #expect(fetcher.calls.count == 1)
-        // A user-forced refresh 1s later still fetches (explicit intent).
+        // Picker-open refresh 1s later must NOT bypass the backoff window —
+        // reopening the picker against a 429ing endpoint stays quiet.
         clock.advance(1)
+        _ = await poller.sweepNow()
+        #expect(fetcher.calls.count == 1)
+        // Past the window, the refresh fetches again and recovers.
+        clock.advance(600)
+        _ = await poller.sweepNow()
+        #expect(fetcher.calls.count == 2)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .ok)
+    }
+
+    @Test func refreshSweepSkipsFreshSnapshots() async {
+        let profile = oauthProfile(named: "Healthy")
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
+
+        _ = await poller.sweepNow()
+        #expect(fetcher.calls.count == 1)
+        // Reopening the picker 10s later: snapshot is fresh (< 30s) → no fetch.
+        clock.advance(10)
+        _ = await poller.sweepNow()
+        #expect(fetcher.calls.count == 1)
+        // 31s after the fetch it's stale enough to refresh.
+        clock.advance(21)
         _ = await poller.sweepNow()
         #expect(fetcher.calls.count == 2)
     }
@@ -375,24 +587,24 @@ private final class MutableClock: @unchecked Sendable {
 
         // Failure 1 → base backoff (30s). A scheduled sweep at +29s is skipped,
         // at +31s it runs (failure 2), which arms ~60s.
-        _ = await poller.sweepNow()  // forced; failure 1, arms 30s
+        _ = await poller.sweepForTest()  // failure 1, arms 30s
         #expect(fetcher.calls.count == 1)
 
         clock.advance(29)
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         #expect(fetcher.calls.count == 1)  // still gated
 
         clock.advance(2)  // now +31s
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         #expect(fetcher.calls.count == 2)  // failure 2, arms ~60s
 
         // +31s from failure-2 is NOT enough now (window doubled to 60s).
         clock.advance(31)
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         #expect(fetcher.calls.count == 2)  // still gated by the longer window
 
         clock.advance(30)  // +61s total from failure 2
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         #expect(fetcher.calls.count == 3)
     }
 
@@ -421,7 +633,7 @@ private final class MutableClock: @unchecked Sendable {
         // Scheduled sweep shortly after: limited is gated, but healthy still
         // polls — proving isolation.
         clock.advance(10)
-        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        _ = await poller.sweepForTest()
         // Only the healthy profile fetched again.
         #expect(fetcher.calls.count == firstCalls + 1)
         #expect(await poller.snapshot(for: healthy.id)?.statusKind == .ok)

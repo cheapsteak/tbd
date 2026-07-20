@@ -80,7 +80,7 @@ struct ClaudeTabCardTests {
         let rows = card?.rows ?? []
         #expect(rows.count == 5)
         #expect(rows[0] == HoverCardRow(label: "Profile", value: "Gmail"))
-        #expect(rows[1] == HoverCardRow(label: "5h window", value: "0% · resets 23:10",
+        #expect(rows[1] == HoverCardRow(label: "5h window", value: "0% · resets at 11:10pm",
                                         monospacedDigits: true, tint: .normal))
         #expect(rows[2] == HoverCardRow(label: "Week", value: "76%",
                                         monospacedDigits: true, tint: .warning))
