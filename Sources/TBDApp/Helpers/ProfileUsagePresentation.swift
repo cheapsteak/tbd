@@ -152,20 +152,21 @@ enum ProfileUsagePresentation {
         "\(Int(percent.rounded()))%"
     }
 
-    /// "7:59 pm" — reset clock times render 12-hour with lowercase am/pm so
-    /// they can't be misread as an hour count ("19:59" ≈ "in 19h 59m").
+    /// "7:59pm" — reset clock times render 12-hour with lowercase am/pm (no
+    /// space, keeps the fragment narrow) so they can't be misread as an hour
+    /// count ("19:59" ≈ "in 19h 59m").
     /// POSIX locale + explicit symbols keep the output locale-stable.
     static func resetTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "h:mm a"
+        formatter.dateFormat = "h:mma"
         formatter.amSymbol = "am"
         formatter.pmSymbol = "pm"
         formatter.timeZone = timeZone
         return formatter.string(from: date)
     }
 
-    /// "Fri 7 pm" / "Fri 6:59 pm" — weekday + 12h time for resets days away
+    /// "Fri 7pm" / "Fri 6:59pm" — weekday + 12h time for resets days away
     /// (the weekly window's time-of-reset form). Minutes are dropped on the
     /// hour to keep the fragment compact.
     static func weekdayResetTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
@@ -174,7 +175,7 @@ enum ProfileUsagePresentation {
         let onTheHour = calendar.component(.minute, from: date) == 0
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = onTheHour ? "EEE h a" : "EEE h:mm a"
+        formatter.dateFormat = onTheHour ? "EEE ha" : "EEE h:mma"
         formatter.amSymbol = "am"
         formatter.pmSymbol = "pm"
         formatter.timeZone = timeZone
@@ -222,7 +223,7 @@ enum ProfileUsagePresentation {
     }
 
     /// Compact usage summary without a leading separator:
-    /// "5h 0% ↺11:10 pm · wk 76% · F 100%". nil when there is no snapshot or
+    /// "5h 0% ↺11:10pm · wk 76% · F 100%". nil when there is no snapshot or
     /// it has no buckets (never logged in / poller hasn't fetched yet).
     /// This legacy flat-string form keeps a FIXED format (clock for 5h,
     /// nothing for weekly) regardless of the `ResetTimeStyle` preference —
@@ -282,7 +283,7 @@ enum ProfileUsagePresentation {
     }
 
     /// Spelled-out usage line for the roomier second row: "5h 16% used ·
-    /// resets 11:09 pm · week 79% · resets in 2d 5h · Fable 100%". Unlike
+    /// resets 11:09pm · week 79% · resets in 2d 5h · Fable 100%". Unlike
     /// `usageSummary` this drops the ↺ glyph in favor of "resets " and uses
     /// full family names instead of the single-letter abbreviation — the
     /// second line has the width. nil when there is no snapshot or it has no
@@ -510,7 +511,7 @@ enum ProfileUsagePresentation {
     /// parameter — never read from UserDefaults here — so tests construct
     /// with explicit values.
     enum ResetTimeStyle: String, CaseIterable {
-        /// "at 7:59 pm" (session) / "at Fri 7 pm" (weekly). The default.
+        /// "at 7:59pm" (session) / "at Fri 7pm" (weekly). The default.
         case timeOfReset
         /// "in 2h 10m" (session) / "in 4d 2h" (weekly).
         case timeUntilReset
@@ -520,9 +521,9 @@ enum ProfileUsagePresentation {
     /// clock, or countdown) or in tooltips only. Centralized so all rendering
     /// surfaces agree. This is the single decision point for reset-display policy.
     public enum ResetDisplay: Equatable {
-        /// "at 7:59 pm" inline; tooltip "resets at 7:59 pm" (absolute clock time, 5h window).
+        /// "at 7:59pm" inline; tooltip "resets at 7:59pm" (absolute clock time, 5h window).
         case clock
-        /// "at Fri 7 pm" inline; tooltip "resets at Fri 7 pm" (weekday + time, weekly window).
+        /// "at Fri 7pm" inline; tooltip "resets at Fri 7pm" (weekday + time, weekly window).
         case weekdayClock
         /// "in 2h 10m" / "in 4d 2h" inline; tooltip "resets in …" (relative countdown).
         case countdown
@@ -570,12 +571,12 @@ enum ProfileUsagePresentation {
         let fill: FillLevel
         /// How the reset should be displayed (clock, weekday clock, countdown, or tooltip-only).
         let resetDisplay: ResetDisplay
-        /// Inline reset column text, prefix included: "at 7:59 pm" (clock),
-        /// "at Fri 7 pm" (weekday clock), or "in 4d 2h" (countdown).
+        /// Inline reset column text, prefix included: "at 7:59pm" (clock),
+        /// "at Fri 7pm" (weekday clock), or "in 4d 2h" (countdown).
         /// nil when resetDisplay == .tooltipOnly, or there is no reset date, or a countdown is past.
         let resetInline: String?
-        /// Full reset phrase with "resets" prefix: "resets at 7:59 pm" (clock),
-        /// "resets at Fri 7 pm" (weekday clock), or "resets in 2d 5h" (countdown/tooltipOnly).
+        /// Full reset phrase with "resets" prefix: "resets at 7:59pm" (clock),
+        /// "resets at Fri 7pm" (weekday clock), or "resets in 2d 5h" (countdown/tooltipOnly).
         /// Present whenever a reset date exists (any kind) — for tooltips, help text, and roomy rows.
         /// nil when there is no reset date.
         let resetPhrase: String?
@@ -633,7 +634,7 @@ enum ProfileUsagePresentation {
                 // resetInline stays nil; resetPhrase shows only when countdown is valid.
             }
             if let inline = resetInline {
-                // "resets at 7:59 pm" / "resets at Fri 7 pm" / "resets in 4d 2h".
+                // "resets at 7:59pm" / "resets at Fri 7pm" / "resets in 4d 2h".
                 resetPhrase = "resets \(inline)"
             }
         }

@@ -95,18 +95,20 @@ private struct UsageBarRow: View {
 
     // MARK: Trailing reset hint
 
-    /// Fourth column: reset display inline ("at 7:59 pm" / "at Fri 7 pm" /
+    /// Fourth column: reset display inline ("at 7:59pm" / "at Fri 7pm" /
     /// "in 4d 2h", prefix baked into `resetInline`) on rows where resetDisplay
     /// shows inline; empty but space-reserving on other rows to keep bars
-    /// aligned. The 78pt fixed width fits the widest form measured at this
-    /// font ("at Wed 12:59 pm" = 75pt at 9pt rounded monospacedDigit) while
+    /// aligned. The 75pt fixed width fits the widest form measured at this
+    /// font ("at Wed 12:59pm" = 72.6pt at 9pt rounded monospacedDigit) while
     /// keeping rows column-aligned; the flexible bar absorbs the difference.
+    /// `.secondary` (not `.tertiary`) keeps the reset legible in the popover
+    /// while still subordinate to the semibold percent column.
     private var trailingResetHint: some View {
         Text(presentation.resetInline ?? "")
             .font(.system(size: 9, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.tertiary)
-            .frame(width: 78, alignment: .leading)
+            .foregroundStyle(.secondary)
+            .frame(width: 75, alignment: .leading)
     }
 
     // MARK: Bar geometry

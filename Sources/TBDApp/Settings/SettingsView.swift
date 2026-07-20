@@ -175,7 +175,7 @@ struct GeneralSettingsTab: View {
                     Text("Time of reset").tag(ProfileUsagePresentation.ResetTimeStyle.timeOfReset)
                     Text("Time until reset").tag(ProfileUsagePresentation.ResetTimeStyle.timeUntilReset)
                 }
-                .help("How usage-window resets are shown: the wall-clock time they reset (\"at 7:59 pm\", \"at Fri 7 pm\") or the time remaining (\"in 2h 10m\", \"in 4d 2h\").")
+                .help("How usage-window resets are shown: the wall-clock time they reset (\"at 7:59pm\", \"at Fri 7pm\") or the time remaining (\"in 2h 10m\", \"in 4d 2h\").")
             }
 
             Section("Session Hibernation") {
