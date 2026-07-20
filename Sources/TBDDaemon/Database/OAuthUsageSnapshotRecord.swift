@@ -41,6 +41,18 @@ public struct OAuthUsageSnapshotStore: Sendable {
         }
     }
 
+    /// Delete rows for every profile NOT in `profileIDs`. Full sweeps call
+    /// this so snapshots for deleted or logged-out profiles don't reload as
+    /// ghosts on the next daemon restart.
+    public func deleteExcept(profileIDs: Set<UUID>) async throws {
+        let keep = profileIDs.map(\.uuidString)
+        try await writer.write { db in
+            _ = try OAuthUsageSnapshotRecord
+                .filter(!keep.contains(Column("profile_id")))
+                .deleteAll(db)
+        }
+    }
+
     /// All persisted snapshots keyed by profile ID. Malformed rows (bad UUID
     /// or undecodable JSON) are skipped with a logged warning, never thrown —
     /// this is a cache, and the poller refills it.

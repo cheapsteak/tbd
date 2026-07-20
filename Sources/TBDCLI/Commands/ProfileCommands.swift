@@ -73,6 +73,21 @@ func usageResetCell(_ date: Date?, now: Date = Date()) -> String {
     return formatter.string(from: date)
 }
 
+/// Age marker for a usage snapshot: nil while fresh (under 5 minutes),
+/// otherwise "(updated 12m ago)" / "(updated 3h ago)" / "(updated 2d ago)".
+/// The daemon persists snapshots across restarts, so an "ok" row can carry
+/// arbitrarily old numbers — this makes that visible.
+func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
+    guard let fetchedAt else { return nil }
+    let age = now.timeIntervalSince(fetchedAt)
+    guard age >= 5 * 60 else { return nil }
+    let minutes = Int(age / 60)
+    if minutes < 60 { return "(updated \(minutes)m ago)" }
+    let hours = minutes / 60
+    if hours < 24 { return "(updated \(hours)h ago)" }
+    return "(updated \(hours / 24)d ago)"
+}
+
 /// Resolve a user-supplied profile reference against the daemon's profile
 /// list. Accepts an exact name, a unique case-insensitive name, or a profile
 /// UUID (escape hatch for scripting). Throws a `CLIError` with actionable
@@ -243,6 +258,9 @@ struct ProfileList: AsyncParsableCommand {
             if let snapshot, !snapshot.isOK {
                 trailing.append("[stale*]")
                 staleNotes.append("  * \(entry.profile.name): \(snapshot.status)")
+            }
+            if let marker = usageAgeMarker(fetchedAt: snapshot?.fetchedAt) {
+                trailing.append(marker)
             }
             cells.append((trailing.joined(separator: " "), 0))
             print(tableRow(cells))

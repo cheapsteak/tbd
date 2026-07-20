@@ -670,6 +670,9 @@ public final class Daemon: Sendable {
                 },
                 persist: { [database] id, snapshot in
                     try? await database.oauthUsageSnapshots.upsert(profileID: id, snapshot: snapshot)
+                },
+                prunePersisted: { [database] eligibleIDs in
+                    try? await database.oauthUsageSnapshots.deleteExcept(profileIDs: eligibleIDs)
                 }
             )
             self.oauthUsagePoller = oauthPoller

@@ -409,6 +409,73 @@ struct OAuthProfileUsagePollerTests {
         // The stale one was refetched now.
         #expect(await poller.snapshot(for: stale.id)?.fetchedAt == fixedNow)
     }
+
+    /// Actor reentrancy: a sweep can land fresher data while `start()` is
+    /// suspended in `loadPersisted()`. The load must merge per profile by
+    /// `fetchedAt` — never clobber a fresher in-memory snapshot — while still
+    /// seeding profiles the sweep didn't cover.
+    @Test func loadPersistedMergesByFreshnessInsteadOfReplacing() async {
+        let sweptProfile = oauthProfile(named: "Swept")
+        let cachedOnly = oauthProfile(named: "CachedOnly")
+        let fixedNow = Date(timeIntervalSince1970: 1_750_000_000)
+        func snap(age: TimeInterval) -> ProfileUsageSnapshot {
+            ProfileUsageSnapshot(
+                buckets: okBuckets,
+                fetchedAt: fixedNow.addingTimeInterval(-age),
+                lastAttemptAt: fixedNow.addingTimeInterval(-age),
+                status: "ok", statusKind: .ok
+            )
+        }
+        let persisted = [sweptProfile.id: snap(age: 600), cachedOnly.id: snap(age: 600)]
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [sweptProfile], loggedIn: [sweptProfile.id],
+            fetcher: fetcher, broadcasts: broadcasts, now: fixedNow,
+            loadPersisted: { persisted }
+        )
+
+        // Racing sweep fetches sweptProfile fresh (fetchedAt == fixedNow)...
+        _ = await poller.sweepNow()
+        // ...then the interleaved load resumes.
+        await poller.loadPersistedForTest()
+
+        // Fresher in-memory snapshot survives; stale persisted one loses.
+        #expect(await poller.snapshot(for: sweptProfile.id)?.fetchedAt == fixedNow)
+        // Profile only present in the cache is still seeded.
+        #expect(await poller.snapshot(for: cachedOnly.id) == persisted[cachedOnly.id])
+    }
+
+    @Test func fullSweepPrunesPersistedRowsForIneligibleProfiles() async {
+        let eligible = oauthProfile(named: "In")
+        let loggedOut = oauthProfile(named: "Out")
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        let broadcasts = BroadcastCounter()
+        let prunedSets = LockedBox<[Set<UUID>]>([])
+        let poller = OAuthProfileUsagePoller(
+            profilesProvider: { [eligible, loggedOut] },
+            loginIdentity: { id in id == eligible.id ? "someone@example.com" : nil },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            broadcast: { broadcasts.bump() },
+            sleeper: { _ in },
+            prunePersisted: { ids in prunedSets.mutate { $0.append(ids) } }
+        )
+
+        _ = await poller.sweepNow()                          // full sweep: prunes
+        _ = await poller.sweepNow(profileID: eligible.id)    // targeted: must not
+
+        #expect(prunedSets.value == [[eligible.id]])
+    }
+}
+
+/// Minimal thread-safe box for recording seam calls.
+private final class LockedBox<T: Sendable>: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "LockedBox")
+    private var _value: T
+    init(_ value: T) { _value = value }
+    var value: T { queue.sync { _value } }
+    func mutate(_ body: (inout T) -> Void) { queue.sync { body(&_value) } }
 }
 
 // MARK: - Backoff scheduling

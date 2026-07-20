@@ -75,4 +75,18 @@ struct OAuthUsageSnapshotStoreTests {
         let all = try await db.oauthUsageSnapshots.loadAll()
         #expect(all == [good.id: snap])
     }
+
+    @Test func deleteExceptRemovesOnlyRowsOutsideTheKeepSet() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let keep = try await db.modelProfiles.create(name: "Keep", kind: .oauth)
+        let drop = try await db.modelProfiles.create(name: "Drop", kind: .oauth)
+        let snap = snapshot(fetchedAt: Date(timeIntervalSince1970: 1))
+        try await db.oauthUsageSnapshots.upsert(profileID: keep.id, snapshot: snap)
+        try await db.oauthUsageSnapshots.upsert(profileID: drop.id, snapshot: snap)
+
+        try await db.oauthUsageSnapshots.deleteExcept(profileIDs: [keep.id])
+
+        let all = try await db.oauthUsageSnapshots.loadAll()
+        #expect(all == [keep.id: snap])
+    }
 }
