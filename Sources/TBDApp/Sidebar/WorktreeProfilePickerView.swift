@@ -258,21 +258,23 @@ private struct ClaudeProfileRow: View {
         HStack(spacing: 6) {
             ModelRailView(onSelectModel: onSelectModel)
             Button(action: onSelect) {
-                HStack(spacing: 6) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(ProfileLoginPresentation.menuItemTitle(for: entry))
-                            .font(.system(size: 12))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        subtitleView
-                    }
-                    Spacer(minLength: 4)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(ProfileLoginPresentation.menuItemTitle(for: entry))
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    subtitleView
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 10)
+        // Tighter than the plain rows' 10pt: the usage-bars table should run
+        // to within ~8pt of the popover's right edge (the old inner
+        // Spacer + shared 10pt inset left ~20pt of dead space there).
+        .padding(.trailing, 8)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Let the row's natural content height (title + subtitle/bars) drive
