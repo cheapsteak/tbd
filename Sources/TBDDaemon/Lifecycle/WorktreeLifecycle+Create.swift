@@ -769,9 +769,10 @@ extension WorktreeLifecycle {
                     profileSecret: resolvedProfile?.secret,
                     profileKind: resolvedProfile?.kind,
                     profileBaseURL: resolvedProfile?.baseURL,
-                    // Same per-spawn override as the primary terminal: these
-                    // restores happen at worktree-create time too.
-                    profileModel: modelOverride ?? resolvedProfile?.model,
+                    // No per-spawn model override here: archived-session
+                    // restores only happen on revive/recovery, whose callers
+                    // never pass one (create never carries archived sessions).
+                    profileModel: resolvedProfile?.model,
                     profileAwsRegion: resolvedProfile?.awsRegion,
                     profileAwsProfile: resolvedProfile?.awsProfile,
                     profileConfigDir: restoreProfileConfigDir,
