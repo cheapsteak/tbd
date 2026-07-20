@@ -152,34 +152,39 @@ enum ProfileUsagePresentation {
         "\(Int(percent.rounded()))%"
     }
 
-    /// "7:59pm" — reset clock times render 12-hour with lowercase am/pm (no
-    /// space, keeps the fragment narrow) so they can't be misread as an hour
-    /// count ("19:59" ≈ "in 19h 59m").
+    /// "8pm" / "7:30pm" — reset clock times render 12-hour with lowercase
+    /// am/pm (no space, keeps the fragment narrow) so they can't be misread
+    /// as an hour count ("19:59" ≈ "in 19h 59m"). Minutes are dropped on the
+    /// hour, and the instant is ceiled to the next minute first — the API's
+    /// reset instants land a fraction under the hour (7:59:59.9), which a
+    /// flooring formatter renders as the misleading "7:59pm".
     /// POSIX locale + explicit symbols keep the output locale-stable.
     static func resetTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "h:mma"
-        formatter.amSymbol = "am"
-        formatter.pmSymbol = "pm"
-        formatter.timeZone = timeZone
-        return formatter.string(from: date)
+        clockText(date, weekday: false, timeZone: timeZone)
     }
 
-    /// "Fri 7pm" / "Fri 6:59pm" — weekday + 12h time for resets days away
-    /// (the weekly window's time-of-reset form). Minutes are dropped on the
-    /// hour to keep the fragment compact.
+    /// "Fri 7pm" / "Fri 6:30pm" — weekday + 12h time for resets days away
+    /// (the weekly window's time-of-reset form). Same ceil-to-minute and
+    /// drop-:00 rules as `resetTimeText`.
     static func weekdayResetTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
+        clockText(date, weekday: true, timeZone: timeZone)
+    }
+
+    /// Shared impl for the two clock fragments: ceil to the next minute,
+    /// then format, omitting ":00" minutes.
+    private static func clockText(_ date: Date, weekday: Bool, timeZone: TimeZone) -> String {
+        let rounded = Date(timeIntervalSinceReferenceDate:
+            (date.timeIntervalSinceReferenceDate / 60).rounded(.up) * 60)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
-        let onTheHour = calendar.component(.minute, from: date) == 0
+        let onTheHour = calendar.component(.minute, from: rounded) == 0
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = onTheHour ? "EEE ha" : "EEE h:mma"
+        formatter.dateFormat = (weekday ? "EEE " : "") + (onTheHour ? "ha" : "h:mma")
         formatter.amSymbol = "am"
         formatter.pmSymbol = "pm"
         formatter.timeZone = timeZone
-        return formatter.string(from: date)
+        return formatter.string(from: rounded)
     }
 
     /// "F" for "Fable" — single-letter family abbreviation for menu rows.

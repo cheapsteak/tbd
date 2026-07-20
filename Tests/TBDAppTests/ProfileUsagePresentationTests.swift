@@ -1016,13 +1016,15 @@ struct CompactResetCountdownTests {
 @Suite("ProfileUsagePresentation — reset clock text")
 struct ResetClockTextTests {
     /// Build a UTC instant from wall-clock components.
-    private func utcDate(month: Int, day: Int, hour: Int, minute: Int) -> Date {
+    private func utcDate(month: Int, day: Int, hour: Int, minute: Int,
+                         second: Int = 0) -> Date {
         var components = DateComponents()
         components.year = 2026
         components.month = month
         components.day = day
         components.hour = hour
         components.minute = minute
+        components.second = second
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = utc
         return calendar.date(from: components)!
@@ -1042,7 +1044,26 @@ struct ResetClockTextTests {
         #expect(ProfileUsagePresentation.resetTimeText(
             utcDate(month: 7, day: 3, hour: 0, minute: 15), timeZone: utc) == "12:15am")
         #expect(ProfileUsagePresentation.resetTimeText(
-            utcDate(month: 7, day: 3, hour: 12, minute: 0), timeZone: utc) == "12:00pm")
+            utcDate(month: 7, day: 3, hour: 12, minute: 0), timeZone: utc) == "12pm")
+    }
+
+    @Test func clockFormDropsMinutesOnTheHour() {
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 20, minute: 0), timeZone: utc) == "8pm")
+    }
+
+    @Test func secondsUnderTheHourCeilToNextHour() {
+        // The API's reset instants land a fraction under the hour; a flooring
+        // formatter renders the misleading "7:59pm" — ceil to the minute first.
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 19, minute: 59, second: 59), timeZone: utc) == "8pm")
+        #expect(ProfileUsagePresentation.weekdayResetTimeText(
+            utcDate(month: 7, day: 3, hour: 17, minute: 59, second: 59), timeZone: utc) == "Fri 6pm")
+    }
+
+    @Test func exactHalfHourKeepsMinutes() {
+        #expect(ProfileUsagePresentation.resetTimeText(
+            utcDate(month: 7, day: 3, hour: 19, minute: 30), timeZone: utc) == "7:30pm")
     }
 
     @Test func weekdayFormCarriesWeekdayAndMinutes() {

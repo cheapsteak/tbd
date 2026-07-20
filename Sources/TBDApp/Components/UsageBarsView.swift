@@ -95,12 +95,17 @@ private struct UsageBarRow: View {
 
     // MARK: Trailing reset hint
 
-    /// Fourth column: reset display inline ("at 7:59pm" / "at Fri 7pm" /
+    /// Fourth column: reset display inline ("at 8pm" / "at Fri 7pm" /
     /// "in 4d 2h", prefix baked into `resetInline`) on rows where resetDisplay
     /// shows inline; empty but space-reserving on other rows to keep bars
-    /// aligned. The 75pt fixed width fits the widest form measured at this
-    /// font ("at Wed 12:59pm" = 72.6pt at 9pt rounded monospacedDigit) while
-    /// keeping rows column-aligned; the flexible bar absorbs the difference.
+    /// aligned. The 74pt fixed width fits the true worst case at FULL size —
+    /// "at Wed 10:30pm" / "at Wed 12:30pm" = 72.6pt at 9pt rounded
+    /// monospacedDigit — with no minimumScaleFactor, so every string renders
+    /// at identical size (a visible scale-down on one row next to a full-size
+    /// neighbor read as a glitch). Leading alignment keeps every reset string
+    /// starting at the same x across rows. The width win over the old 75pt
+    /// column comes from the strings themselves (ceil-rounding + dropped ":00"
+    /// make "at 8pm" the common case); the flexible bar absorbs the difference.
     /// `.secondary` (not `.tertiary`) keeps the reset legible in the popover
     /// while still subordinate to the semibold percent column.
     private var trailingResetHint: some View {
@@ -108,7 +113,8 @@ private struct UsageBarRow: View {
             .font(.system(size: 9, design: .rounded))
             .monospacedDigit()
             .foregroundStyle(.secondary)
-            .frame(width: 75, alignment: .leading)
+            .lineLimit(1)
+            .frame(width: 74, alignment: .leading)
     }
 
     // MARK: Bar geometry
