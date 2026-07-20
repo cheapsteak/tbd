@@ -3,8 +3,8 @@ import TBDShared
 
 /// A compact usage meter for a Claude OAuth profile: the 5-hour session
 /// window, the weekly all-models window, and per-model-family weekly windows,
-/// each drawn as a thin bar with a pace-aware colored fill (green/yellow/
-/// orange/red — projection of end-of-window usage from the current burn rate,
+/// each drawn as a thin bar with a pace-aware colored fill (green/orange/
+/// red — projection of end-of-window usage from the current burn rate,
 /// floored by the API severity so a warning/critical bucket never reads
 /// healthy), a neutral "time marker" tick showing how far through the window
 /// we are, and a trailing percent (and inline reset countdown on the weekly
@@ -143,9 +143,9 @@ private struct UsageBarRow: View {
     // MARK: Colors
 
     /// Pace-aware fill (shared by the bar and the trailing percent): green
-    /// (adaptive) when on a sustainable pace, yellow (adaptive) when the
-    /// projected end-of-window usage is warming (75–90%), orange when it will
-    /// likely graze the limit (90–100%), red when on pace to exceed. The API
+    /// (adaptive) when on a sustainable pace, orange when the projected
+    /// end-of-window usage is warming (75–90%) or will likely graze the
+    /// limit (90–100%), red when on pace to exceed. The API
     /// severity (or the >=75/>=90 percent fallback) floors the tier, so a
     /// warning/critical bucket never renders healthier than before; without
     /// pace data (no reset date, <15% elapsed) this is exactly the old
@@ -203,7 +203,7 @@ private struct UsageBarRow: View {
 
         // Mid usage — the projection lands in the caution/warning bands even
         // while the marker sits just ahead of the fill. Session projects to
-        // ~85% (yellow "warming"); weekly projects to ~95% (orange) despite
+        // ~85% (caution "warming"); weekly projects to ~95% (warning) despite
         // the API still saying "normal".
         UsageBarsView(snapshot: snap([
             bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),

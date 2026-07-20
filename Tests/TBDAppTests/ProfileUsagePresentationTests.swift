@@ -227,7 +227,7 @@ struct FillLevelTests {
     }
 
     @Test func projectionInWarmingBandIsCaution() {
-        // 55% used at 0.65 elapsed → projected ≈ 0.846 → yellow.
+        // 55% used at 0.65 elapsed → projected ≈ 0.846 → caution.
         #expect(ProfileUsagePresentation.fillLevel(
             severity: "normal", percent: 55, elapsedFraction: 0.65) == .caution)
         // Band edges: exactly 0.75 is caution, just below is normal.
@@ -423,8 +423,8 @@ struct BucketPresentationTests {
         #expect(presentation.elapsedFraction == nil)
     }
 
-    @Test func paceAwareYellowTierInPresentation() {
-        // 55% at 0.65 elapsed on a session bucket → caution (yellow).
+    @Test func paceAwareCautionTierInPresentation() {
+        // 55% at 0.65 elapsed on a session bucket → caution.
         // elapsed = 0.65 * window means remaining = 0.35 * window
         let sessionBucket = bucket(kind: "session", percent: 55, severity: "normal",
                                    resetsAt: now.addingTimeInterval(0.35 * ProfileUsagePresentation.sessionWindow))

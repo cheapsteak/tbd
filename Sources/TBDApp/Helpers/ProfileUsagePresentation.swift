@@ -59,7 +59,7 @@ enum ProfileUsagePresentation {
     // MARK: - Pace-aware fill tier
 
     /// Fill tiers for the usage bars, ordered by urgency. A superset of
-    /// `SeverityLevel` with one extra `caution` (yellow) tier between normal
+    /// `SeverityLevel` with one extra `caution` tier between normal
     /// and warning that only pace projection can produce — "you're burning
     /// faster than the window, but not yet alarmingly so".
     enum FillLevel: Int, Comparable {
@@ -83,7 +83,7 @@ enum ProfileUsagePresentation {
     /// and tier it —
     ///
     /// - projected < 0.75 → `.normal` (green: sustainable pace)
-    /// - 0.75 ..< 0.90 → `.caution` (yellow: warming — on track to land close)
+    /// - 0.75 ..< 0.90 → `.caution` (orange, same hue as warning: warming — on track to land close)
     /// - 0.90 ..< 1.00 → `.warning` (orange: will likely graze the limit)
     /// - >= 1.00 → `.critical` (red: on pace to exceed)
     ///
@@ -567,7 +567,7 @@ enum ProfileUsagePresentation {
         let kind: String
         let percent: Double
         let percentText: String
-        /// Pace-aware fill tier (green/yellow/orange/red).
+        /// Pace-aware fill tier (green/orange/orange/red — caution shares warning's hue).
         let fill: FillLevel
         /// How the reset should be displayed (clock, weekday clock, countdown, or tooltip-only).
         let resetDisplay: ResetDisplay
