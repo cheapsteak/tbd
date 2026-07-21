@@ -9,6 +9,9 @@ set -e
 #   scripts/restart.sh --app    # restart app only (no rebuild, no daemon restart)
 #   scripts/restart.sh --daemon # restart daemon only (no rebuild, no app restart)
 #   scripts/restart.sh --quick  # skip rebuild, restart everything
+#   scripts/restart.sh --dry-run # print blessed/not-blessed decision, touch nothing
+#   scripts/restart.sh --wip    # force install even if on a WIP branch
+#   TBD_INSTALL_WIP=1 scripts/restart.sh # same as --wip
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/.build/debug"
@@ -16,14 +19,65 @@ BUILD_DIR="$REPO_ROOT/.build/debug"
 app_only=false
 daemon_only=false
 skip_build=false
+dry_run=false
+force_wip=false
 
 for arg in "$@"; do
     case "$arg" in
         --app) app_only=true ;;
         --daemon) daemon_only=true ;;
         --quick) skip_build=true ;;
+        --dry-run) dry_run=true ;;
+        --wip) force_wip=true ;;
     esac
 done
+
+# Check TBD_INSTALL_WIP env var as well
+if [ -n "${TBD_INSTALL_WIP:-}" ]; then
+    force_wip=true
+fi
+
+# MARK: - WIP Guard
+#
+# Blessed builds (clean tree + HEAD on/before main) install to /Applications
+# and restart the shared daemon. WIP builds warn and launch from .build only.
+# Escape hatch: --wip / TBD_INSTALL_WIP=1. Helpers live in a sourceable lib so
+# they can be unit-tested (scripts/restart-guard-lib.test.sh).
+source "$REPO_ROOT/scripts/restart-guard-lib.sh"
+
+# Determine install strategy and possibly print dry-run summary.
+build_is_blessed=false
+install_to_applications=true
+
+if ! is_build_blessed; then
+    build_is_blessed=false
+    if [ "$force_wip" = false ]; then
+        install_to_applications=false
+    fi
+else
+    build_is_blessed=true
+fi
+
+if [ "$dry_run" = true ]; then
+    if [ "$build_is_blessed" = true ]; then
+        echo "BLESSED: Working tree is clean and HEAD is on/before main."
+        echo "Would install to /Applications and restart daemon."
+    else
+        echo "NOT BLESSED: WIP branch or dirty working tree."
+        if [ "$force_wip" = true ]; then
+            echo "Would install to /Applications and restart daemon (--wip override)."
+        else
+            echo "Would SKIP /Applications install and daemon restart."
+            echo "Would launch app from .build/debug/TBD.app instead."
+        fi
+    fi
+    exit 0
+fi
+
+# Print warning if not blessed (unless --wip forces it).
+if [ "$build_is_blessed" = false ] && [ "$force_wip" = false ]; then
+    warn_wip_build
+fi
 
 # MARK: - Opportunistic background disk reclaim
 #
@@ -157,60 +211,71 @@ fi
 # exec path now that it runs from /Applications instead of .build/.
 printf '%s' "$REPO_ROOT" > "$BUNDLE_DIR/Contents/SourceWorktreePath.txt"
 
-# Sign + install to /Applications to satisfy macOS UNUserNotificationCenter:
-#  - Re-signing with --force --deep makes the codesign identifier match
-#    CFBundleIdentifier (com.tbd.app); SPM's default ad-hoc signature uses
-#    TBDApp-<hash>, which macOS uses for permission tracking and rejects.
-#  - /Applications is the only path macOS 15 accepts for requestAuthorization;
-#    bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
-#  - cp -cR uses APFS clonefile (copy-on-write, ~zero disk cost).
-#  - All TBD worktrees share CFBundleIdentifier=com.tbd.app, so whichever
-#    worktree most recently ran restart.sh "wins" /Applications — same
-#    last-restart-wins behavior already documented for tbd:// URL routing.
-# Prefer a stable self-signed identity so TCC permission grants/denials persist
-# across rebuilds. Ad-hoc signing (`--sign -`) gives TCC only a bare cdhash with
-# no stable anchor, so every rebuild — and even repeated accesses within one
-# build, when access is attributed via a spawned child like a `claude` session —
-# fails the stored code-requirement check and re-prompts (Desktop/Documents/
-# Downloads/Photos/etc.). A persistent leaf-cert anchor fixes that.
-# One-time setup creates the "TBD Dev Signing" identity in a dedicated
-# tbd-signing keychain (see docs/tcc-signing.md). If it's absent (e.g. a fresh
-# clone or another contributor's machine), fall back to ad-hoc so restart still works.
-SIGN_KEYCHAIN="$HOME/Library/Keychains/tbd-signing.keychain-db"
-SIGN_IDENTITY="TBD Dev Signing"
-if security find-identity -p codesigning "$SIGN_KEYCHAIN" 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
-    security unlock-keychain -p tbd-signing "$SIGN_KEYCHAIN" 2>/dev/null || true
-    codesign --force --deep --identifier com.github.cheapsteak.tbd \
-        --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" "$BUNDLE_DIR" >/dev/null
-else
-    codesign --force --deep --sign - "$BUNDLE_DIR" >/dev/null
-fi
-
+# Conditionally sign + install to /Applications (only if blessed or --wip).
+# For WIP builds not blessed, we'll skip this and launch from .build/debug instead.
 INSTALLED_BUNDLE="/Applications/TBD.app"
-rm -rf "$INSTALLED_BUNDLE"
-cp -cR "$BUNDLE_DIR" "$INSTALLED_BUNDLE"
-
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
-if [ -x "$LSREGISTER" ]; then
-    "$LSREGISTER" -f "$INSTALLED_BUNDLE" >/dev/null 2>&1 || true
-fi
-
-# Bump the installed bundle's mtime so Notification Center / System Settings
-# pick up an updated AppIcon.icns instead of serving a stale icon-cache entry.
-# `lsregister -f` alone doesn't always invalidate those caches; `touch` does.
-touch "$INSTALLED_BUNDLE"
-
-# The running TBDApp's command line is the installed bundle's binary, since
-# we launch from /Applications below. Match against that for pgrep/pkill so
-# we only ever affect THIS worktree's running TBDApp (it's the one that most
-# recently won /Applications). Sibling worktrees launched from their own
-# .build/.../TBD.app would not match.
 BUNDLED_EXEC_PATH="$INSTALLED_BUNDLE/Contents/MacOS/TBDApp"
-APP_EXEC_PATTERN="$(printf '%s' "$BUNDLED_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+APP_EXEC_PATTERN=""
+
+if [ "$install_to_applications" = true ]; then
+    # Sign + install to /Applications to satisfy macOS UNUserNotificationCenter:
+    #  - Re-signing with --force --deep makes the codesign identifier match
+    #    CFBundleIdentifier (com.tbd.app); SPM's default ad-hoc signature uses
+    #    TBDApp-<hash>, which macOS uses for permission tracking and rejects.
+    #  - /Applications is the only path macOS 15 accepts for requestAuthorization;
+    #    bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
+    #  - cp -cR uses APFS clonefile (copy-on-write, ~zero disk cost).
+    #  - All TBD worktrees share CFBundleIdentifier=com.tbd.app, so whichever
+    #    worktree most recently ran restart.sh "wins" /Applications — same
+    #    last-restart-wins behavior already documented for tbd:// URL routing.
+    # Prefer a stable self-signed identity so TCC permission grants/denials persist
+    # across rebuilds. Ad-hoc signing (`--sign -`) gives TCC only a bare cdhash with
+    # no stable anchor, so every rebuild — and even repeated accesses within one
+    # build, when access is attributed via a spawned child like a `claude` session —
+    # fails the stored code-requirement check and re-prompts (Desktop/Documents/
+    # Downloads/Photos/etc.). A persistent leaf-cert anchor fixes that.
+    # One-time setup creates the "TBD Dev Signing" identity in a dedicated
+    # tbd-signing keychain (see docs/tcc-signing.md). If it's absent (e.g. a fresh
+    # clone or another contributor's machine), fall back to ad-hoc so restart still works.
+    SIGN_KEYCHAIN="$HOME/Library/Keychains/tbd-signing.keychain-db"
+    SIGN_IDENTITY="TBD Dev Signing"
+    if security find-identity -p codesigning "$SIGN_KEYCHAIN" 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+        security unlock-keychain -p tbd-signing "$SIGN_KEYCHAIN" 2>/dev/null || true
+        codesign --force --deep --identifier com.github.cheapsteak.tbd \
+            --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" "$BUNDLE_DIR" >/dev/null
+    else
+        codesign --force --deep --sign - "$BUNDLE_DIR" >/dev/null
+    fi
+
+    rm -rf "$INSTALLED_BUNDLE"
+    cp -cR "$BUNDLE_DIR" "$INSTALLED_BUNDLE"
+
+    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+    if [ -x "$LSREGISTER" ]; then
+        "$LSREGISTER" -f "$INSTALLED_BUNDLE" >/dev/null 2>&1 || true
+    fi
+
+    # Bump the installed bundle's mtime so Notification Center / System Settings
+    # pick up an updated AppIcon.icns instead of serving a stale icon-cache entry.
+    # `lsregister -f` alone doesn't always invalidate those caches; `touch` does.
+    touch "$INSTALLED_BUNDLE"
+
+    # The running TBDApp's command line is the installed bundle's binary, since
+    # we launch from /Applications below. Match against that for pgrep/pkill so
+    # we only ever affect THIS worktree's running TBDApp (it's the one that most
+    # recently won /Applications). Sibling worktrees launched from their own
+    # .build/.../TBD.app would not match.
+    APP_EXEC_PATTERN="$(printf '%s' "$BUNDLED_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+else
+    # WIP build: skip /Applications install, launch from .build/debug instead.
+    # Use the unwrapped binary path for pgrep/pkill matching.
+    APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUILD_DIR/TBDApp")"
+    APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+fi
 
 # MARK: - Restart Daemon
 
-if [ "$app_only" = false ]; then
+if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
     echo "Stopping daemon..."
     if [ -f ~/tbd/tbdd.pid ]; then
         pid=$(cat ~/tbd/tbdd.pid)
@@ -235,6 +300,8 @@ if [ "$app_only" = false ]; then
     else
         echo "  WARNING: Daemon socket not found after 3s"
     fi
+elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then
+    echo "(Skipping daemon restart for WIP worktree)"
 fi
 
 # MARK: - Restart App
@@ -244,20 +311,39 @@ if [ "$daemon_only" = false ]; then
     # Match end-anchored against the resolved exec path so we only ever
     # affect THIS worktree's running TBDApp — never swift build subprocesses,
     # editors, or sibling worktrees whose command line contains "TBDApp".
-    pkill -f "^${APP_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
+    if [ -n "$APP_EXEC_PATTERN" ]; then
+        pkill -f "^${APP_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
+    fi
 
     echo "Starting app..."
-    open "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+    if [ "$install_to_applications" = true ]; then
+        # Launch from /Applications (blessed or --wip override)
+        open "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+    else
+        # Launch from .build/debug (WIP worktree, no install to /Applications)
+        open "$BUNDLE_DIR" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+    fi
+
     # `open` returns immediately after asking LaunchServices to spawn the app.
     # Give it a moment, then verify the process is alive.
     sleep 0.5
-    if pgrep -f "^${APP_EXEC_PATTERN}\$" >/dev/null; then
+    if [ -n "$APP_EXEC_PATTERN" ] && pgrep -f "^${APP_EXEC_PATTERN}\$" >/dev/null; then
         APP_PID=$(pgrep -f "^${APP_EXEC_PATTERN}\$" | head -1)
-        echo "  App launched (PID $APP_PID) — logs: /tmp/tbdapp.log"
+        if [ "$install_to_applications" = true ]; then
+            echo "  App launched from /Applications (PID $APP_PID) — logs: /tmp/tbdapp.log"
+        else
+            echo "  App launched from .build/debug (PID $APP_PID) — logs: /tmp/tbdapp.log"
+        fi
     else
         echo "  ERROR: App failed to launch. Last lines of /tmp/tbdapp.log:"
         tail -20 /tmp/tbdapp.log
     fi
+fi
+
+if [ "$install_to_applications" = false ] && [ "$daemon_only" = false ]; then
+    echo ""
+    echo "Note: Deep links (tbd://) will NOT route to this app. Restart the"
+    echo "intended worktree to make it the handler for tbd:// URLs."
 fi
 
 echo "Done. Tmux sessions preserved."
