@@ -13,6 +13,7 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Only stage and commit files you actually changed — never commit unrelated or other agents' modifications.
 - Always commit after completing work. Don't wait to be asked.
 - Use conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
+- Banned words — never use these in code or in PR titles, descriptions, or commit messages: "blessed", "golden"
 - Verify your changes compile (`swift build`) before committing.
 - Run `swift test` if you changed daemon or shared code.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
