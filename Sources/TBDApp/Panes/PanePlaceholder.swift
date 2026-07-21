@@ -101,6 +101,14 @@ struct PanePlaceholder: View {
     @ViewBuilder
     private var toolbar: some View {
         HStack(spacing: 8) {
+            // Leading so the chevrons sit in a stable spot on every viewer
+            // pane, unaffected by which trailing buttons a pane type has.
+            // Both buttons always render (16x16 fixed frames, disabled when
+            // unavailable), so the title never jumps.
+            if content.isViewerClass {
+                historyNavigation
+            }
+
             paneLabel
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -225,8 +233,6 @@ struct PanePlaceholder: View {
             }
 
         case .webview:
-            historyNavigation
-
             Button(action: copyWebviewURL) {
                 Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
                     .font(.caption)
@@ -235,8 +241,6 @@ struct PanePlaceholder: View {
             .help("Copy URL")
 
         case .codeViewer:
-            historyNavigation
-
             if hasRenderableContent {
                 Button(action: { showSourceCode.toggle() }) {
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
@@ -247,11 +251,8 @@ struct PanePlaceholder: View {
                 .help(showSourceCode ? "Show rendered view" : "Show source code")
             }
 
-        case .note:
+        case .note, .liveTranscript:
             EmptyView()
-
-        case .liveTranscript:
-            historyNavigation
         }
     }
 
