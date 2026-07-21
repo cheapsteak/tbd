@@ -255,13 +255,14 @@ struct PanePlaceholder: View {
     // MARK: - Slot History Navigation
 
     /// Back/forward chevrons for viewer-class slot panes. Primary click steps
-    /// one entry; the attached menu lists up to 10 entries for direct jumps.
+    /// one entry; both buttons' attached menus show the SAME full MRU list
+    /// (newest first, checkmark on the current entry) for direct jumps.
     @ViewBuilder
     private var historyNavigation: some View {
         let history = appState.paneHistories[content.paneID] ?? PaneHistory()
 
         historyMenu(
-            entries: history.backEntries,
+            history: history,
             icon: "chevron.left",
             help: "Back",
             primaryAction: { navigateHistory { $0.goBack() } }
@@ -269,7 +270,7 @@ struct PanePlaceholder: View {
         .disabled(!history.canGoBack)
 
         historyMenu(
-            entries: history.forwardEntries,
+            history: history,
             icon: "chevron.right",
             help: "Forward",
             primaryAction: { navigateHistory { $0.goForward() } }
@@ -278,20 +279,27 @@ struct PanePlaceholder: View {
     }
 
     private func historyMenu(
-        entries: [(index: Int, content: PaneContent)],
+        history: PaneHistory,
         icon: String,
         help: String,
         primaryAction: @escaping () -> Void
     ) -> some View {
         Menu {
-            ForEach(entries.prefix(PaneHistory.maxEntries), id: \.index) { entry in
-                Button(historyEntryLabel(entry.content)) {
-                    navigateHistory { $0.go(to: entry.index) }
-                }
+            ForEach(Array(history.entries.enumerated()), id: \.offset) { index, entry in
+                // Toggle renders as a checkmarked menu item on the cursor
+                // entry; selecting jumps the cursor without reordering.
+                Toggle(historyEntryLabel(entry), isOn: Binding(
+                    get: { index == history.cursor },
+                    set: { _ in navigateHistory { $0.go(to: index) } }
+                ))
             }
         } label: {
+            // Glyph matches the close button's spec exactly; the 16x16 frame
+            // + contentShape keeps the full hit target despite the smaller icon.
             Image(systemName: icon)
-                .font(.caption)
+                .font(.system(size: 9, weight: .bold))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
         } primaryAction: {
             primaryAction()
         }

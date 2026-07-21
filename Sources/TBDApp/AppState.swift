@@ -914,19 +914,22 @@ final class AppState: ObservableObject {
     }
 
     /// Resolves the removal side of a viewer route (transcript toggle-off).
-    /// A reused slot keeps its pre-transcript content in history: step back
-    /// and return the content to restore in place — the toggle round-trip
-    /// must not destroy the viewer the transcript replaced. With no back
-    /// history the pane is really going away, so forget its history.
+    /// A reused slot keeps its pre-transcript content in history: jump the
+    /// cursor to the nearest non-transcript entry (older side first — that's
+    /// what the transcript replaced — then newer) and return it to restore in
+    /// place. Skipping transcript entries means chained
+    /// transcript-for-another-terminal swaps never resurrect another
+    /// terminal's transcript. With no non-transcript entry the pane is
+    /// really going away, so forget its history.
     func popHistoryForRemovedPane(_ paneID: UUID) -> PaneContent? {
         if var history = paneHistories[paneID] {
-            // Toggle-off means "stop showing a transcript": skip past older
-            // transcript entries (chained transcript-for-another-terminal
-            // swaps) to the nearest non-transcript content.
-            while let previous = history.goBack() {
-                if case .liveTranscript = previous { continue }
+            let older = Array((history.cursor + 1)..<history.entries.count)
+            let newer = Array(stride(from: history.cursor - 1, through: 0, by: -1))
+            for index in older + newer {
+                if case .liveTranscript = history.entries[index] { continue }
+                guard let restored = history.go(to: index) else { continue }
                 paneHistories[paneID] = history
-                return previous
+                return restored
             }
         }
         paneHistories.removeValue(forKey: paneID)

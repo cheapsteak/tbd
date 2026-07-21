@@ -1,19 +1,25 @@
 import Foundation
 
-/// Back/forward navigation history for one viewer-class "slot" pane.
+/// Tab-like MRU navigation history for one viewer-class "slot" pane.
 ///
-/// `entries` is the full trail (oldest first) INCLUDING the slot's current
-/// content; `cursor` indexes the current content. Every entry carries the
-/// slot's own `paneID`, so applying an entry via
-/// `LayoutNode.replacingContent(at:with:)` preserves view identity.
+/// `entries[0]` is the most recently committed content; `cursor` indexes the
+/// entry currently shown — the slot's current content IS `entries[cursor]`.
+/// Back/forward/jump only move the cursor and never reorder the list; a real
+/// navigation (`recordReplacement`) commits the current entry to the front,
+/// dedupes the incoming content (an entry moves rather than duplicates), and
+/// inserts it at index 0. Every entry carries the slot's own `paneID`, so
+/// applying an entry via `LayoutNode.replacingContent(at:with:)` preserves
+/// view identity.
 struct PaneHistory: Codable, Equatable, Sendable {
     static let maxEntries = 10
 
     private(set) var entries: [PaneContent] = []
     private(set) var cursor: Int = -1
 
-    var canGoBack: Bool { cursor > 0 }
-    var canGoForward: Bool { !entries.isEmpty && cursor < entries.count - 1 }
+    /// Back moves toward older entries (higher indices).
+    var canGoBack: Bool { !entries.isEmpty && cursor < entries.count - 1 }
+    /// Forward moves toward newer entries (lower indices).
+    var canGoForward: Bool { cursor > 0 }
 
     /// True when `(entries, cursor)` is internally consistent. In-process
     /// mutations preserve this; only decoded (persisted) data can violate it.
@@ -21,55 +27,45 @@ struct PaneHistory: Codable, Equatable, Sendable {
         entries.isEmpty ? cursor == -1 : entries.indices.contains(cursor)
     }
 
-    /// Entries behind the cursor, nearest first, paired with their absolute
-    /// index for `go(to:)`.
-    var backEntries: [(index: Int, content: PaneContent)] {
-        guard canGoBack else { return [] }
-        return (0..<cursor).reversed().map { ($0, entries[$0]) }
-    }
-
-    /// Entries ahead of the cursor, nearest first.
-    var forwardEntries: [(index: Int, content: PaneContent)] {
-        guard canGoForward else { return [] }
-        return ((cursor + 1)..<entries.count).map { ($0, entries[$0]) }
-    }
-
-    /// Records a content-navigation replacement: drops any forward entries,
-    /// appends the incoming content, and caps the trail at `maxEntries`
-    /// (dropping oldest). No-op when nothing actually changed.
+    /// Records a real content navigation (file click, transcript toggle):
+    /// moves the current entry to index 0, removes any existing occurrence
+    /// of `incoming` (one entry per content), inserts `incoming` at index 0,
+    /// and caps at `maxEntries` by evicting the tail — never the current
+    /// entry, which was just moved to the front. No-op when nothing changed.
     mutating func recordReplacement(outgoing: PaneContent, incoming: PaneContent) {
         guard outgoing != incoming else { return }
         if entries.isEmpty {
             entries = [outgoing]
-            cursor = 0
         } else {
-            entries.removeSubrange((cursor + 1)...)
             // The slot's live content is authoritative for the current entry.
             entries[cursor] = outgoing
+            entries.insert(entries.remove(at: cursor), at: 0)
         }
-        entries.append(incoming)
+        entries.removeAll { $0 == incoming }
+        entries.insert(incoming, at: 0)
         if entries.count > Self.maxEntries {
-            entries.removeFirst(entries.count - Self.maxEntries)
+            entries.removeLast(entries.count - Self.maxEntries)
         }
-        cursor = entries.count - 1
+        cursor = 0
     }
 
-    /// Moves the cursor back one entry and returns it. Navigation only moves
-    /// the cursor — it never re-pushes.
+    /// Moves the cursor one entry toward older and returns it. Navigation
+    /// only moves the cursor — it never reorders or re-pushes.
     mutating func goBack() -> PaneContent? {
         guard canGoBack else { return nil }
-        cursor -= 1
-        return entries[cursor]
-    }
-
-    /// Moves the cursor forward one entry and returns it.
-    mutating func goForward() -> PaneContent? {
-        guard canGoForward else { return nil }
         cursor += 1
         return entries[cursor]
     }
 
+    /// Moves the cursor one entry toward newer and returns it.
+    mutating func goForward() -> PaneContent? {
+        guard canGoForward else { return nil }
+        cursor -= 1
+        return entries[cursor]
+    }
+
     /// Jumps the cursor to an absolute entry index (from a history menu).
+    /// No reorder — selecting a menu entry only moves the cursor.
     mutating func go(to index: Int) -> PaneContent? {
         guard entries.indices.contains(index), index != cursor else { return nil }
         cursor = index

@@ -11,14 +11,15 @@ struct PaneHistoryTests {
         .codeViewer(id: slotID, path: path)
     }
 
-    @Test func recordReplacement_bootstrapsWithOutgoingThenIncoming() {
+    @Test func recordReplacement_bootstrapsMRUNewestFirst() {
         var history = PaneHistory()
         #expect(!history.canGoBack)
         #expect(!history.canGoForward)
 
         history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
 
-        #expect(history.entries == [viewer("/a"), viewer("/b")])
+        #expect(history.entries == [viewer("/b"), viewer("/a")], "entries[0] is newest")
+        #expect(history.cursor == 0)
         #expect(history.canGoBack)
         #expect(!history.canGoForward)
     }
@@ -34,6 +35,7 @@ struct PaneHistoryTests {
         history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
         history.recordReplacement(outgoing: viewer("/b"), incoming: viewer("/c"))
 
+        #expect(history.entries == [viewer("/c"), viewer("/b"), viewer("/a")])
         #expect(history.goBack() == viewer("/b"))
         #expect(history.goBack() == viewer("/a"))
         #expect(history.goBack() == nil, "at the oldest entry")
@@ -43,50 +45,98 @@ struct PaneHistoryTests {
         #expect(history.entries.count == 3, "navigation must not add entries")
     }
 
-    @Test func replacementAfterGoingBackDropsForwardEntries() {
+    /// The spec's worked example: navigating after going back COMMITS the
+    /// current entry to the front instead of truncating forward entries —
+    /// nothing is ever dropped by going back.
+    @Test func navigatingAfterGoingBackKeepsAllEntries() {
+        var history = PaneHistory()
+        history.recordReplacement(outgoing: viewer("/A"), incoming: viewer("/B"))
+        #expect(history.entries == [viewer("/B"), viewer("/A")])
+
+        #expect(history.goBack() == viewer("/A"))
+        #expect(history.entries == [viewer("/B"), viewer("/A")], "back never reorders")
+
+        history.recordReplacement(outgoing: viewer("/A"), incoming: viewer("/C"))
+        #expect(history.entries == [viewer("/C"), viewer("/A"), viewer("/B")],
+                "commit moves A to front, C inserted — B still reachable")
+        #expect(history.cursor == 0)
+
+        #expect(history.goBack() == viewer("/A"))
+        #expect(history.goBack() == viewer("/B"))
+        #expect(history.goForward() == viewer("/A"))
+    }
+
+    @Test func recordReplacement_dedupeMovesExistingEntryToFront() {
         var history = PaneHistory()
         history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
         history.recordReplacement(outgoing: viewer("/b"), incoming: viewer("/c"))
-        _ = history.goBack()  // now at /b
 
-        history.recordReplacement(outgoing: viewer("/b"), incoming: viewer("/d"))
+        // Navigating to /a — already in the list — moves it, never duplicates.
+        history.recordReplacement(outgoing: viewer("/c"), incoming: viewer("/a"))
 
-        #expect(history.entries == [viewer("/a"), viewer("/b"), viewer("/d")])
-        #expect(!history.canGoForward, "/c must be gone")
+        #expect(history.entries == [viewer("/a"), viewer("/c"), viewer("/b")])
+        #expect(history.cursor == 0)
     }
 
-    @Test func capsAtMaxEntriesDroppingOldest() {
+    @Test func capsAtMaxEntriesEvictingTail() {
         var history = PaneHistory()
         for i in 1...20 {
             history.recordReplacement(outgoing: viewer("/\(i - 1)"), incoming: viewer("/\(i)"))
         }
 
         #expect(history.entries.count == PaneHistory.maxEntries)
-        #expect(history.entries.first == viewer("/11"), "oldest entries dropped")
-        #expect(history.entries.last == viewer("/20"))
+        #expect(history.entries.first == viewer("/20"), "newest at index 0")
+        #expect(history.entries.last == viewer("/11"), "oldest entries evicted")
         #expect(!history.canGoForward)
     }
 
-    @Test func goToJumpsToAbsoluteIndex() {
+    @Test func capEvictsTailNeverTheCurrentEntry() {
+        var history = PaneHistory()
+        for i in 1...10 {
+            history.recordReplacement(outgoing: viewer("/\(i - 1)"), incoming: viewer("/\(i)"))
+        }
+        // Walk back to the oldest entry (/1) at the tail.
+        for _ in 1...9 { _ = history.goBack() }
+        #expect(history.cursor == 9)
+
+        // Navigating from /1 first commits it to the front, so the cap
+        // evicts the tail (/2) — never the entry the user was viewing.
+        history.recordReplacement(outgoing: viewer("/1"), incoming: viewer("/new"))
+
+        #expect(history.entries.count == PaneHistory.maxEntries)
+        #expect(history.entries[0] == viewer("/new"))
+        #expect(history.entries[1] == viewer("/1"), "current entry survived the cap")
+        #expect(!history.entries.contains(viewer("/2")), "tail evicted")
+        #expect(history.cursor == 0)
+    }
+
+    @Test func goToJumpsCursorWithoutReordering() {
         var history = PaneHistory()
         history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
         history.recordReplacement(outgoing: viewer("/b"), incoming: viewer("/c"))
+        let before = history.entries
 
-        #expect(history.go(to: 0) == viewer("/a"))
-        #expect(!history.canGoBack)
+        #expect(history.go(to: 2) == viewer("/a"))
+        #expect(history.entries == before, "jump never reorders")
+        #expect(!history.canGoBack, "cursor at the oldest entry")
         #expect(history.canGoForward)
-        #expect(history.go(to: 0) == nil, "jumping to the cursor is a no-op")
+        #expect(history.go(to: 2) == nil, "jumping to the cursor is a no-op")
         #expect(history.go(to: 99) == nil)
     }
 
-    @Test func backAndForwardEntriesAreNearestFirst() {
+    @Test func buttonEnablementFollowsCursor() {
         var history = PaneHistory()
         history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
         history.recordReplacement(outgoing: viewer("/b"), incoming: viewer("/c"))
-        _ = history.goBack()  // at /b
 
-        #expect(history.backEntries.map(\.content) == [viewer("/a")])
-        #expect(history.forwardEntries.map(\.content) == [viewer("/c")])
+        // cursor 0: back only.
+        #expect(history.canGoBack && !history.canGoForward)
+        _ = history.goBack()
+        // cursor 1 (middle): both.
+        #expect(history.canGoBack && history.canGoForward)
+        _ = history.goBack()
+        // cursor 2 (oldest): forward only.
+        #expect(!history.canGoBack && history.canGoForward)
     }
 }
 
@@ -148,7 +198,8 @@ struct PaneHistoryAppStateTests {
             #expect(state.popHistoryForRemovedPane(slotID) == viewer)
             #expect(state.paneHistories[slotID]?.canGoForward == true)
 
-            // No back history left: the pane really goes away, history with it.
+            // Only the transcript remains besides the cursor entry: the pane
+            // really goes away, history with it.
             #expect(state.popHistoryForRemovedPane(slotID) == nil)
             #expect(state.paneHistories[slotID] == nil)
         }
@@ -169,7 +220,7 @@ struct PaneHistoryAppStateTests {
         }
     }
 
-    @Test func popHistoryForRemovedPaneRemovesWhenOnlyTranscriptsBehind() {
+    @Test func popHistoryForRemovedPaneRemovesWhenOnlyTranscriptsRemain() {
         withIsolatedDefaults { defaults in
             let state = AppState(userDefaults: defaults)
             let slotID = UUID()
@@ -180,6 +231,21 @@ struct PaneHistoryAppStateTests {
             // Nothing non-transcript to restore: pane really closes, history goes.
             #expect(state.popHistoryForRemovedPane(slotID) == nil)
             #expect(state.paneHistories[slotID] == nil)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneFindsViewerOnTheNewerSide() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let transcript = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            let viewer = PaneContent.codeViewer(id: slotID, path: "/a")
+            // transcript → viewer, then jump BACK onto the transcript entry.
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: transcript, incoming: viewer))
+            _ = state.paneHistories[slotID]?.goBack()
+
+            // No older non-transcript entry — the newer viewer is restored.
+            #expect(state.popHistoryForRemovedPane(slotID) == viewer)
         }
     }
 
@@ -198,7 +264,7 @@ struct PaneHistoryAppStateTests {
             // Corrupt the persisted blob: cursor beyond entries.count.
             let key = "com.tbd.app.paneHistories"
             let blob = String(data: defaults.data(forKey: key)!, encoding: .utf8)!
-                .replacingOccurrences(of: "\"cursor\":1", with: "\"cursor\":9")
+                .replacingOccurrences(of: "\"cursor\":0", with: "\"cursor\":9")
             defaults.set(Data(blob.utf8), forKey: key)
 
             let restored = AppState(userDefaults: defaults)
