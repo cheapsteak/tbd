@@ -105,6 +105,10 @@ struct PanePlaceholder: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                // Scoped to the title only (not the whole header row) so
+                // right-click on the history chevrons / close button isn't
+                // swallowed by the file menu.
+                .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
 
             Spacer()
 
@@ -125,7 +129,6 @@ struct PanePlaceholder: View {
         .onHover { hovering in
             isHeaderHovering = hovering
         }
-        .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
     }
 
     /// Resolved Claude session JSONL path for liveTranscript panes; nil otherwise.
@@ -254,59 +257,64 @@ struct PanePlaceholder: View {
 
     // MARK: - Slot History Navigation
 
-    /// Back/forward chevrons for viewer-class slot panes. Primary click steps
-    /// one entry; both buttons' attached menus show the SAME full MRU list
+    /// Back/forward chevrons for viewer-class slot panes. Left-click steps
+    /// one entry; right-click either chevron shows the SAME full MRU list
     /// (newest first, checkmark on the current entry) for direct jumps.
     @ViewBuilder
     private var historyNavigation: some View {
         let history = appState.paneHistories[content.paneID] ?? PaneHistory()
 
-        historyMenu(
+        historyButton(
             history: history,
             icon: "chevron.left",
             help: "Back",
-            primaryAction: { navigateHistory { $0.goBack() } }
+            action: { navigateHistory { $0.goBack() } }
         )
         .disabled(!history.canGoBack)
 
-        historyMenu(
+        historyButton(
             history: history,
             icon: "chevron.right",
             help: "Forward",
-            primaryAction: { navigateHistory { $0.goForward() } }
+            action: { navigateHistory { $0.goForward() } }
         )
         .disabled(!history.canGoForward)
     }
 
-    private func historyMenu(
+    /// Plain Button + .contextMenu — NOT Menu(primaryAction:), whose label
+    /// right-click fell through to the header's context menu, and never
+    /// .onTapGesture, which blocks .contextMenu on macOS.
+    private func historyButton(
         history: PaneHistory,
         icon: String,
         help: String,
-        primaryAction: @escaping () -> Void
+        action: @escaping () -> Void
     ) -> some View {
-        Menu {
-            ForEach(Array(history.entries.enumerated()), id: \.offset) { index, entry in
-                // Toggle renders as a checkmarked menu item on the cursor
-                // entry; selecting jumps the cursor without reordering.
-                Toggle(historyEntryLabel(entry), isOn: Binding(
-                    get: { index == history.cursor },
-                    set: { _ in navigateHistory { $0.go(to: index) } }
-                ))
-            }
-        } label: {
-            // Glyph matches the close button's spec exactly; the 16x16 frame
-            // + contentShape keeps the full hit target despite the smaller icon.
+        Button(action: action) {
+            // Glyph sized a notch below the close button's 9pt; the 16x16
+            // frame + contentShape keeps the full hit target.
             Image(systemName: icon)
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 8, weight: .bold))
                 .frame(width: 16, height: 16)
                 .contentShape(Rectangle())
-        } primaryAction: {
-            primaryAction()
         }
-        .menuIndicator(.hidden)
         .buttonStyle(.borderless)
-        .fixedSize()
         .help(help)
+        .contextMenu {
+            ForEach(Array(history.entries.enumerated()), id: \.offset) { index, entry in
+                Button {
+                    navigateHistory { $0.go(to: index) }
+                } label: {
+                    // Explicit checkmark symbol on the cursor entry — renders
+                    // reliably in a .contextMenu, unlike Toggle state.
+                    if index == history.cursor {
+                        Label(historyEntryLabel(entry), systemImage: "checkmark")
+                    } else {
+                        Text(historyEntryLabel(entry))
+                    }
+                }
+            }
+        }
     }
 
     /// Applies a history navigation to this slot: mutate the slot's history,
