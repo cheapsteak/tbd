@@ -39,133 +39,17 @@ fi
 
 # MARK: - WIP Guard
 #
-# Detect whether the current build is "blessed" — i.e., safe to install to
-# /Applications and restart the shared daemon. A blessed build must have:
-#  (a) A clean working tree (no tracked file changes)
-#  (b) HEAD as an ancestor of the main branch (upstream/main, origin/main, or main)
-#
-# Blessed builds proceed with full install + daemon restart. Non-blessed (WIP)
-# builds warn loudly and skip /Applications install + daemon restart, instead
-# launching from the worktree's own .build/debug/TBD.app so the dev loop works.
-# Escape hatch: --wip flag or TBD_INSTALL_WIP=1 forces the install anyway.
-
-is_wip_guard_enabled=true
-
-# Determine the main-branch ref to use for ancestry check.
-resolve_main_ref() {
-    # Try upstream/main first, then origin/main, then local main
-    if git -C "$REPO_ROOT" rev-parse upstream/main >/dev/null 2>&1; then
-        echo "upstream/main"
-    elif git -C "$REPO_ROOT" rev-parse origin/main >/dev/null 2>&1; then
-        echo "origin/main"
-    elif git -C "$REPO_ROOT" rev-parse main >/dev/null 2>&1; then
-        echo "main"
-    else
-        echo ""
-    fi
-}
-
-# Check if the working tree is clean (no tracked file changes).
-is_working_tree_clean() {
-    local output
-    output=$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null || echo "error")
-    if [ "$output" = "error" ]; then
-        return 1  # not a git repo or error
-    fi
-    [ -z "$output" ]
-}
-
-# Check if HEAD is an ancestor of the given ref.
-is_head_ancestor_of() {
-    local ref="$1"
-    if [ -z "$ref" ]; then
-        return 1
-    fi
-    git -C "$REPO_ROOT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
-}
-
-# Determine if the build is blessed.
-is_build_blessed() {
-    if ! is_working_tree_clean; then
-        return 1
-    fi
-    local main_ref
-    main_ref=$(resolve_main_ref)
-    if [ -z "$main_ref" ]; then
-        return 1
-    fi
-    is_head_ancestor_of "$main_ref"
-}
-
-# Get the currently installed worktree path from /Applications/TBD.app.
-get_installed_worktree_path() {
-    if [ -f "/Applications/TBD.app/Contents/SourceWorktreePath.txt" ]; then
-        cat "/Applications/TBD.app/Contents/SourceWorktreePath.txt"
-    else
-        echo "(not installed)"
-    fi
-}
-
-# Print a loud warning when the build is not blessed.
-warn_wip_build() {
-    local current_branch
-    current_branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-
-    local dirty_count=0
-    if ! is_working_tree_clean; then
-        dirty_count=$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null | wc -l)
-    fi
-
-    local installed_path
-    installed_path=$(get_installed_worktree_path)
-
-    cat >&2 << 'EOF'
-
-===============================================================================
-WARNING: NOT BLESSED — WIP WORKTREE GUARD ACTIVE
-===============================================================================
-
-This worktree is on a feature branch or has uncommitted changes. To prevent
-accidental takeover of the shared daemon and /Applications/TBD.app, the full
-install is SKIPPED. Instead, the app will build and launch from this worktree's
-own .build/debug/TBD.app.
-
-CONSEQUENCES:
-  • Deep links (tbd://) will NOT route to this app (they'll route to the
-    currently-installed build in /Applications)
-  • The daemon continues running the previous worktree's build
-  • Dev loop works normally (build, code, reload)
-
-DETAILS:
-EOF
-    printf '  Branch: %s\n' "$current_branch" >&2
-    if [ "$dirty_count" -gt 0 ]; then
-        printf '  Dirty tracked files: %d\n' "$dirty_count" >&2
-    fi
-    printf '  Currently installed from: %s\n' "$installed_path" >&2
-
-    cat >&2 << 'EOF'
-
-TO OVERRIDE (force full install):
-  scripts/restart.sh --wip
-  or
-  TBD_INSTALL_WIP=1 scripts/restart.sh
-
-TO FIX (make it blessed):
-  • Commit your changes: git add -A && git commit -m "..."
-  • Rebase onto upstream/main: git rebase upstream/main
-  • Or push to a tracking branch
-
-===============================================================================
-
-EOF
-}
+# Blessed builds (clean tree + HEAD on/before main) install to /Applications
+# and restart the shared daemon. WIP builds warn and launch from .build only.
+# Escape hatch: --wip / TBD_INSTALL_WIP=1. Helpers live in a sourceable lib so
+# they can be unit-tested (scripts/restart-guard-lib.test.sh).
+source "$REPO_ROOT/scripts/restart-guard-lib.sh"
 
 # Determine install strategy and possibly print dry-run summary.
 build_is_blessed=false
 install_to_applications=true
 
-if [ "$is_wip_guard_enabled" = true ] && ! is_build_blessed; then
+if ! is_build_blessed; then
     build_is_blessed=false
     if [ "$force_wip" = false ]; then
         install_to_applications=false
