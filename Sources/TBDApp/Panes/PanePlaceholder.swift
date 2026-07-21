@@ -610,7 +610,13 @@ struct PanePlaceholder: View {
             appState.recordPaneReplacement(replaced)
         }
         if let removed = result.removedPaneID {
-            appState.paneHistories.removeValue(forKey: removed)
+            // Reused slot: restore its pre-transcript content in place instead
+            // of applying the removal layout.
+            if let previous = appState.popHistoryForRemovedPane(removed),
+               let restored = layout.replacingContent(at: removed, with: previous) {
+                layout = restored
+                return
+            }
         }
         layout = result.layout
     }

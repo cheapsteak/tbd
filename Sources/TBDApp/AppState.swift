@@ -901,7 +901,9 @@ final class AppState: ObservableObject {
     private func restorePaneHistories() {
         guard let data = userDefaults.data(forKey: Self.paneHistoriesKey),
               let restored = try? JSONDecoder().decode([UUID: PaneHistory].self, from: data) else { return }
-        paneHistories = restored
+        // Corrupt/skewed persisted data with an out-of-range cursor would
+        // crash entries[cursor] lookups in the pane header's view body.
+        paneHistories = restored.filter { $0.value.isWellFormed }
     }
 
     /// Pushes the outgoing content of an in-place slot replacement onto that
@@ -909,6 +911,26 @@ final class AppState: ObservableObject {
     func recordPaneReplacement(_ replacement: ViewerRouteResult.Replacement) {
         paneHistories[replacement.paneID, default: PaneHistory()]
             .recordReplacement(outgoing: replacement.outgoing, incoming: replacement.incoming)
+    }
+
+    /// Resolves the removal side of a viewer route (transcript toggle-off).
+    /// A reused slot keeps its pre-transcript content in history: step back
+    /// and return the content to restore in place — the toggle round-trip
+    /// must not destroy the viewer the transcript replaced. With no back
+    /// history the pane is really going away, so forget its history.
+    func popHistoryForRemovedPane(_ paneID: UUID) -> PaneContent? {
+        if var history = paneHistories[paneID] {
+            // Toggle-off means "stop showing a transcript": skip past older
+            // transcript entries (chained transcript-for-another-terminal
+            // swaps) to the nearest non-transcript content.
+            while let previous = history.goBack() {
+                if case .liveTranscript = previous { continue }
+                paneHistories[paneID] = history
+                return previous
+            }
+        }
+        paneHistories.removeValue(forKey: paneID)
+        return nil
     }
 
     /// Drops histories for slot panes no longer present in any tab layout or

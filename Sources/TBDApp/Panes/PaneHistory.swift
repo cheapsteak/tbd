@@ -15,6 +15,12 @@ struct PaneHistory: Codable, Equatable, Sendable {
     var canGoBack: Bool { cursor > 0 }
     var canGoForward: Bool { !entries.isEmpty && cursor < entries.count - 1 }
 
+    /// True when `(entries, cursor)` is internally consistent. In-process
+    /// mutations preserve this; only decoded (persisted) data can violate it.
+    var isWellFormed: Bool {
+        entries.isEmpty ? cursor == -1 : entries.indices.contains(cursor)
+    }
+
     /// Entries behind the cursor, nearest first, paired with their absolute
     /// index for `go(to:)`.
     var backEntries: [(index: Int, content: PaneContent)] {

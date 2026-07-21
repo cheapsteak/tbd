@@ -135,6 +135,78 @@ struct PaneHistoryAppStateTests {
         }
     }
 
+    @Test func popHistoryForRemovedPaneRestoresPreviousContent() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let viewer = PaneContent.codeViewer(id: slotID, path: "/a")
+            let transcript = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: viewer, incoming: transcript))
+
+            // Toggle-off on a reused slot restores the pre-transcript content
+            // instead of destroying the pane; the transcript stays reachable.
+            #expect(state.popHistoryForRemovedPane(slotID) == viewer)
+            #expect(state.paneHistories[slotID]?.canGoForward == true)
+
+            // No back history left: the pane really goes away, history with it.
+            #expect(state.popHistoryForRemovedPane(slotID) == nil)
+            #expect(state.paneHistories[slotID] == nil)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneSkipsChainedTranscripts() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let viewer = PaneContent.codeViewer(id: slotID, path: "/a")
+            let transcriptT1 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            let transcriptT2 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: viewer, incoming: transcriptT1))
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: transcriptT1, incoming: transcriptT2))
+
+            // Toggling T2's transcript off must not resurrect T1's transcript.
+            #expect(state.popHistoryForRemovedPane(slotID) == viewer)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneRemovesWhenOnlyTranscriptsBehind() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let transcriptT1 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            let transcriptT2 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: transcriptT1, incoming: transcriptT2))
+
+            // Nothing non-transcript to restore: pane really closes, history goes.
+            #expect(state.popHistoryForRemovedPane(slotID) == nil)
+            #expect(state.paneHistories[slotID] == nil)
+        }
+    }
+
+    @Test func restoreDropsMalformedPersistedHistory() {
+        withIsolatedDefaults { defaults in
+            let slotID = UUID()
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: slotID, path: "/a"),
+                incoming: .codeViewer(id: slotID, path: "/b")
+            )
+
+            let state = AppState(userDefaults: defaults)
+            state.paneHistories = [slotID: history]
+
+            // Corrupt the persisted blob: cursor beyond entries.count.
+            let key = "com.tbd.app.paneHistories"
+            let blob = String(data: defaults.data(forKey: key)!, encoding: .utf8)!
+                .replacingOccurrences(of: "\"cursor\":1", with: "\"cursor\":9")
+            defaults.set(Data(blob.utf8), forKey: key)
+
+            let restored = AppState(userDefaults: defaults)
+            #expect(restored.paneHistories[slotID] == nil,
+                    "an out-of-range cursor must not be restored (crashes entries[cursor])")
+        }
+    }
+
     @Test func prunePaneHistoriesDropsOrphansKeepsLiveSlots() {
         withIsolatedDefaults { defaults in
             let state = AppState(userDefaults: defaults)
