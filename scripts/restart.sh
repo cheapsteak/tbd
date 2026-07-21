@@ -268,8 +268,11 @@ if [ "$install_to_applications" = true ]; then
     APP_EXEC_PATTERN="$(printf '%s' "$BUNDLED_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
 else
     # WIP build: skip /Applications install, launch from .build/debug instead.
-    # Use the unwrapped binary path for pgrep/pkill matching.
-    APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUILD_DIR/TBDApp")"
+    # We launch via `open "$BUNDLE_DIR"` below, so the running process's
+    # command line is the bundle binary (.../TBD.app/Contents/MacOS/TBDApp),
+    # not the unwrapped swift-build output. Match pgrep/pkill against the
+    # resolved bundle path so the end-anchored pattern actually hits.
+    APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
     APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
 fi
 
