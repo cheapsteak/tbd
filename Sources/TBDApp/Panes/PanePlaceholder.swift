@@ -101,10 +101,22 @@ struct PanePlaceholder: View {
     @ViewBuilder
     private var toolbar: some View {
         HStack(spacing: 8) {
+            // Leading so the chevrons sit in a stable spot on every viewer
+            // pane, unaffected by which trailing buttons a pane type has.
+            // Both buttons always render (16x16 fixed frames, disabled when
+            // unavailable), so the title never jumps.
+            if content.isViewerClass {
+                historyNavigation
+            }
+
             paneLabel
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                // Scoped to the title only (not the whole header row) so
+                // right-click on the history chevrons / close button isn't
+                // swallowed by the file menu.
+                .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
 
             Spacer()
 
@@ -125,7 +137,6 @@ struct PanePlaceholder: View {
         .onHover { hovering in
             isHeaderHovering = hovering
         }
-        .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
     }
 
     /// Resolved Claude session JSONL path for liveTranscript panes; nil otherwise.
@@ -222,21 +233,6 @@ struct PanePlaceholder: View {
             }
 
         case .webview:
-            // Placeholder for back/forward — will be wired in Task 6
-            Button(action: {}) {
-                Image(systemName: "chevron.left")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
-
-            Button(action: {}) {
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
-
             Button(action: copyWebviewURL) {
                 Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
                     .font(.caption)
@@ -255,11 +251,98 @@ struct PanePlaceholder: View {
                 .help(showSourceCode ? "Show rendered view" : "Show source code")
             }
 
-        case .note:
+        case .note, .liveTranscript:
             EmptyView()
+        }
+    }
 
+    // MARK: - Slot History Navigation
+
+    /// Back/forward chevrons for viewer-class slot panes. Left-click steps
+    /// one entry; right-click either chevron shows the SAME full MRU list
+    /// (newest first, checkmark on the current entry) for direct jumps.
+    @ViewBuilder
+    private var historyNavigation: some View {
+        let history = appState.paneHistories[content.paneID] ?? PaneHistory()
+
+        historyButton(
+            history: history,
+            icon: "chevron.left",
+            help: "Back",
+            action: { navigateHistory { $0.goBack() } }
+        )
+        .disabled(!history.canGoBack)
+
+        historyButton(
+            history: history,
+            icon: "chevron.right",
+            help: "Forward",
+            action: { navigateHistory { $0.goForward() } }
+        )
+        .disabled(!history.canGoForward)
+    }
+
+    /// Plain Button + .contextMenu — NOT Menu(primaryAction:), whose label
+    /// right-click fell through to the header's context menu, and never
+    /// .onTapGesture, which blocks .contextMenu on macOS.
+    private func historyButton(
+        history: PaneHistory,
+        icon: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            // Glyph sized a notch below the close button's 9pt; the 16x16
+            // frame + contentShape keeps the full hit target.
+            Image(systemName: icon)
+                .font(.system(size: 8, weight: .bold))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+        .contextMenu {
+            ForEach(Array(history.entries.enumerated()), id: \.offset) { index, entry in
+                Button {
+                    navigateHistory { $0.go(to: index) }
+                } label: {
+                    // Explicit checkmark symbol on the cursor entry — renders
+                    // reliably in a .contextMenu, unlike Toggle state.
+                    if index == history.cursor {
+                        Label(historyEntryLabel(entry), systemImage: "checkmark")
+                    } else {
+                        Text(historyEntryLabel(entry))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies a history navigation to this slot: mutate the slot's history,
+    /// then swap the layout content in place keeping the pane UUID. Goes
+    /// through `replacingContent` directly — never through the routing
+    /// functions — so navigating does not push new history entries.
+    private func navigateHistory(_ step: (inout PaneHistory) -> PaneContent?) {
+        guard var history = appState.paneHistories[content.paneID],
+              let target = step(&history),
+              let updated = layout.replacingContent(at: content.paneID, with: target)
+        else { return }
+        appState.paneHistories[content.paneID] = history
+        layout = updated
+    }
+
+    private func historyEntryLabel(_ content: PaneContent) -> String {
+        switch content {
+        case .codeViewer(_, let path):
+            return URL(fileURLWithPath: path).lastPathComponent
+        case .webview(_, let url):
+            return (url.host ?? "") + url.path
         case .liveTranscript:
-            EmptyView()
+            return "Transcript"
+        case .terminal:
+            return "Terminal"
+        case .note:
+            return "Note"
         }
     }
 
@@ -352,7 +435,11 @@ struct PanePlaceholder: View {
                     worktreePath: worktree.path,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
-                        layout = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                        let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                        if let replaced = result.replaced {
+                            appState.recordPaneReplacement(replaced)
+                        }
+                        layout = result.layout
                     },
                     onTerminalNotification: { title, body in
                         debugLog("OSC 777: \(title) — \(body)")
@@ -491,6 +578,8 @@ struct PanePlaceholder: View {
             Task { await appState.deleteNote(noteID: noteID, worktreeID: worktree.id) }
         }
 
+        appState.paneHistories.removeValue(forKey: content.paneID)
+
         if let newLayout = layout.removePane(id: content.paneID) {
             layout = newLayout
         } else {
@@ -533,7 +622,20 @@ struct PanePlaceholder: View {
     }
 
     private func toggleTranscriptPane(terminalID: UUID) {
-        layout = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+        let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+        if let replaced = result.replaced {
+            appState.recordPaneReplacement(replaced)
+        }
+        if let removed = result.removedPaneID {
+            // Reused slot: restore its pre-transcript content in place instead
+            // of applying the removal layout.
+            if let previous = appState.popHistoryForRemovedPane(removed),
+               let restored = layout.replacingContent(at: removed, with: previous) {
+                layout = restored
+                return
+            }
+        }
+        layout = result.layout
     }
 
     private func isTranscriptOpen(terminalID: UUID) -> Bool {

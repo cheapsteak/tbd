@@ -164,6 +164,7 @@ extension AppState {
         arr.remove(at: index)
         tabs[worktreeID] = arr
         worktreeTabOrders[worktreeID] = arr.map(\.id)
+        prunePaneHistories()
 
         for terminalID in terminalIDsInTab {
             Task {

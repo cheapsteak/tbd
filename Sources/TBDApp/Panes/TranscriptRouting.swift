@@ -14,25 +14,37 @@ func isLiveTranscriptPane(_ content: PaneContent, for terminalID: UUID) -> Bool 
 
 /// Toggles the live-transcript pane for `terminalID`.
 ///
-/// If the tab's layout already contains a `.liveTranscript` pane for this
-/// terminal, that pane is removed (toggle off). Otherwise a new transcript
-/// pane is split horizontally off `fromPaneID` (toggle on), matching the
-/// original always-open behavior.
-func toggleTranscript(into layout: LayoutNode, terminalID: UUID, fromPaneID: UUID) -> LayoutNode {
+/// Toggle off: the tab already shows a transcript for this terminal — remove
+/// that pane. Toggle on: reuse an existing viewer-class slot in place
+/// (preserving its `paneID`, see `routeFileClick`); otherwise split
+/// horizontally off `fromPaneID`, matching the original always-open behavior.
+func toggleTranscript(into layout: LayoutNode, terminalID: UUID, fromPaneID: UUID) -> ViewerRouteResult {
     if let transcriptID = layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) {
         if let updated = layout.removePane(id: transcriptID) {
             logger.debug("toggleTranscript[close]: transcriptID=\(transcriptID, privacy: .public)")
-            return updated
+            return ViewerRouteResult(layout: updated, removedPaneID: transcriptID)
         }
         // The toggle is driven from a sibling terminal pane, so a transcript is
         // never the sole pane here — this branch is defensive and unreachable.
-        return layout
+        return ViewerRouteResult(layout: layout)
+    }
+
+    if let outgoing = layout.firstPaneContent(where: \.isViewerClass) {
+        let slotID = outgoing.paneID
+        let incoming = PaneContent.liveTranscript(id: slotID, terminalID: terminalID)
+        if let updated = layout.replacingContent(at: slotID, with: incoming) {
+            logger.debug("toggleTranscript[swap]: slotID=\(slotID, privacy: .public) terminalID=\(terminalID, privacy: .public)")
+            return ViewerRouteResult(
+                layout: updated,
+                replaced: .init(paneID: slotID, outgoing: outgoing, incoming: incoming)
+            )
+        }
     }
 
     logger.debug("toggleTranscript[open]: terminalID=\(terminalID, privacy: .public) fromPaneID=\(fromPaneID, privacy: .public)")
-    return layout.splitPane(
+    return ViewerRouteResult(layout: layout.splitPane(
         id: fromPaneID,
         direction: .horizontal,
         newContent: .liveTranscript(id: UUID(), terminalID: terminalID)
-    )
+    ))
 }

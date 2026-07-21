@@ -18,6 +18,16 @@ enum PaneContent: Codable, Equatable, Sendable {
         case .liveTranscript(let id, _): return id
         }
     }
+
+    /// Viewer-class panes form one interchangeable "slot" per tab:
+    /// content-navigation gestures replace within the slot (preserving the
+    /// pane UUID); explicit split gestures still create new panes.
+    var isViewerClass: Bool {
+        switch self {
+        case .codeViewer, .webview, .liveTranscript: return true
+        case .terminal, .note: return false
+        }
+    }
 }
 
 // MARK: - Tab
