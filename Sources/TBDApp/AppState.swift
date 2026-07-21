@@ -727,6 +727,14 @@ final class AppState: ObservableObject {
         if !Self.isRunningUnderTests {
             Task {
                 await connectAndLoadInitialState()
+                // Eager ensure: a macOS-driven relaunch (reboot + Spotlight, OS
+                // "quit and reopen") often finds the daemon dead with stale
+                // socket/pid files. `connectAndLoadInitialState`'s plain connect
+                // can't clear those, so recovery would otherwise wait for the
+                // 2s poll to route to the cleanup-aware spawn. Run it now.
+                if !isConnected {
+                    await startDaemonAndConnect()
+                }
                 startPolling()
             }
         }

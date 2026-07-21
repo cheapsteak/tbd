@@ -252,13 +252,16 @@ public final class Daemon: Sendable {
         // 2. Clean up stale PID/socket files
         pidFile.cleanupIfStale()
 
-        // 3. Check if another daemon is already running
-        if let existingPID = pidFile.read() {
-            // Process is alive (kill(pid, 0) == 0 means it exists)
-            if kill(existingPID, 0) == 0 {
-                daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
-                Foundation.exit(1)
-            }
+        // 3. Check if another daemon is already running. Verify the pid is a
+        // live TBDDaemon, not merely a live process: after a reboot the recorded
+        // pid can be recycled by something unrelated, and a bare kill(pid, 0)
+        // would make this fresh daemon abort forever until that pid frees —
+        // exactly the multi-minute "disconnected on restart" gap. cleanupIfStale
+        // above already removed the pid/socket in that case, so read() is nil.
+        if let existingPID = pidFile.read(),
+           ProcessLiveness.isLiveNamedProcess(pid: existingPID, name: ProcessLiveness.daemonExecutableName) {
+            daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
+            Foundation.exit(1)
         }
 
         // 4. Write PID file
