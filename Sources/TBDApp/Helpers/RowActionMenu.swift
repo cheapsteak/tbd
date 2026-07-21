@@ -22,6 +22,8 @@ enum RowActionMenu {
         case openInFinder
         case copyPath
         case copyBranch
+        /// Copy the shareable https deep link that opens this worktree.
+        case copyLink
         case archiveScratch
         case deleteScratch
         /// Manually hibernate all idle Claude sessions in this worktree.
@@ -283,6 +285,7 @@ enum RowActionMenu {
         var items: [Item] = [
             .action(Action(kind: .openInFinder, title: "Open in Finder")),
             .action(Action(kind: .copyPath, title: "Copy Path")),
+            .action(Action(kind: .copyLink, title: "Copy Link")),
         ]
         if !context.branch.isEmpty {
             items.append(.action(Action(kind: .copyBranch, title: "Copy Branch Name")))

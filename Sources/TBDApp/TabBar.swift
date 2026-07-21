@@ -841,6 +841,17 @@ private struct TabBarItem: View {
         return "Copy Path"
     }
 
+    /// The terminal this tab renders, for deep-link anchoring — nil for
+    /// non-terminal panes (webview, code viewer, note), whose links fall back
+    /// to the worktree alone.
+    private var linkTerminalID: UUID? {
+        switch tab.content {
+        case .terminal(let terminalID): return terminalID
+        case .liveTranscript(_, let terminalID): return terminalID
+        default: return nil
+        }
+    }
+
     @ViewBuilder
     private var contextMenuContent: some View {
         if let path = copyablePath {
@@ -848,8 +859,16 @@ private struct TabBarItem: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(path, forType: .string)
             }
-            Divider()
         }
+
+        Button("Copy Link") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString,
+                forType: .string
+            )
+        }
+        Divider()
 
         if isClaudeTerminal {
             Button(formatProfileHeader(terminal?.profileID)) {}

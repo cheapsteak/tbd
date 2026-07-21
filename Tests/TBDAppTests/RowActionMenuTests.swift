@@ -71,6 +71,7 @@ struct RowActionMenuRegularTests {
             .createPreSessionHook,
             .openInFinder,
             .copyPath,
+            .copyLink,
             .copyBranch,
         ])
         // Section boundaries: after archive, after the hibernation block,
@@ -93,6 +94,7 @@ struct RowActionMenuRegularTests {
             .createPreSessionHook,
             .openInFinder,
             .copyPath,
+            .copyLink,
             .copyBranch,
         ])
         #expect(dividerIndices(items) == [2, 5, 7])
@@ -104,7 +106,7 @@ struct RowActionMenuRegularTests {
         // filesystem sections remain, joined by a single divider.
         let ctx = RowActionMenu.Context(hasRepoID: false, branch: "")
         let items = RowActionMenu.items(context: ctx)
-        #expect(kinds(items) == [.rename, .archive, .openInFinder, .copyPath])
+        #expect(kinds(items) == [.rename, .archive, .openInFinder, .copyPath, .copyLink])
         #expect(dividerIndices(items) == [2])
         expectWellFormedDividers(items)
     }
@@ -252,9 +254,10 @@ struct RowActionMenuScratchTests {
             .forkSession(terminalID: s.terminalID, profileID: s.profileID),
             .openInFinder,
             .copyPath,
+            .copyLink,
             .deleteScratch,
         ])
-        #expect(dividerIndices(items) == [2, 7, 9, 12])
+        #expect(dividerIndices(items) == [2, 7, 9, 13])
         // Promote hint caption is the very last item, under Delete.
         #expect(items.last == .caption(RowActionMenu.promoteHint))
         #expect(kinds(items).last == .deleteScratch)
@@ -272,9 +275,10 @@ struct RowActionMenuScratchTests {
             .archiveScratch,
             .openInFinder,
             .copyPath,
+            .copyLink,
             .deleteScratch,
         ])
-        #expect(dividerIndices(items) == [2, 5])
+        #expect(dividerIndices(items) == [2, 6])
         #expect(items.last == .caption(RowActionMenu.promoteHint))
         expectWellFormedDividers(items)
     }
@@ -303,6 +307,7 @@ struct RowActionMenuScratchTests {
             .forkSession(terminalID: s.terminalID, profileID: s.profileID),
             .openInFinder,
             .copyPath,
+            .copyLink,
             .deleteScratch,
         ])
         expectWellFormedDividers(items)
@@ -327,12 +332,12 @@ struct RowActionMenuScratchTests {
 struct RowActionMenuMainTests {
     @Test func mainShowsOnlyFinderAndCopyWhenPathPresent() {
         let ctx = RowActionMenu.Context(pathIsEmpty: false, status: .main)
-        #expect(kinds(RowActionMenu.items(context: ctx)) == [.openInFinder, .copyPath])
+        #expect(kinds(RowActionMenu.items(context: ctx)) == [.openInFinder, .copyPath, .copyLink])
     }
 
     @Test func creatingBehavesLikeMain() {
         let ctx = RowActionMenu.Context(pathIsEmpty: false, status: .creating)
-        #expect(kinds(RowActionMenu.items(context: ctx)) == [.openInFinder, .copyPath])
+        #expect(kinds(RowActionMenu.items(context: ctx)) == [.openInFinder, .copyPath, .copyLink])
     }
 
     @Test func emptyPathMainYieldsNoItems() {
