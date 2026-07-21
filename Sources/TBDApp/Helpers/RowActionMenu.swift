@@ -206,7 +206,7 @@ enum RowActionMenu {
     ///    Create Nested Worktree / New worktree from this branch.
     /// 4. Maintenance — Re-run pre-session hook when one resolves, else Create
     ///    pre-session hook… (repo-backed rows only).
-    /// 5. Filesystem — Open in Finder, Copy Path.
+    /// 5. Filesystem — Open in Finder, Copy Path, Copy Link.
     /// 6. (scratch only) Delete Scratch Space, with the promote-hint caption
     ///    beneath it.
     ///
@@ -278,9 +278,9 @@ enum RowActionMenu {
         Array(sections.filter { !$0.isEmpty }.joined(separator: [Item.divider]))
     }
 
-    /// Filesystem section: Open in Finder, Copy Path, and Copy Branch Name (the
-    /// last only when the worktree has a branch to copy). Shared by all three
-    /// branches so they stay in lockstep.
+    /// Filesystem section: Open in Finder, Copy Path, Copy Link, and Copy
+    /// Branch Name (the last only when the worktree has a branch to copy).
+    /// Shared by all three branches so they stay in lockstep.
     private static func filesystemActions(context: Context) -> [Item] {
         var items: [Item] = [
             .action(Action(kind: .openInFinder, title: "Open in Finder")),
