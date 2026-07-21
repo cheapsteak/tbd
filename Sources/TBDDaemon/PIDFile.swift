@@ -23,9 +23,16 @@ public struct PIDFile: Sendable {
         return pid
     }
 
-    public func isStale() -> Bool {
+    /// Stale when the recorded pid is not a *live TBDDaemon*. A bare
+    /// `kill(pid, 0)` is insufficient: after a reboot the recorded pid can be
+    /// recycled by an unrelated process, which would read as "daemon alive" and
+    /// leave the dead socket in place — so a freshly-spawned daemon aborts (see
+    /// Daemon.start's existing-pid gate). Verify the executable name too.
+    public func isStale(
+        isLiveDaemon: (pid_t) -> Bool = { ProcessLiveness.isLiveNamedProcess(pid: $0, name: ProcessLiveness.daemonExecutableName) }
+    ) -> Bool {
         guard let pid = read() else { return false }
-        return kill(pid, 0) != 0
+        return !isLiveDaemon(pid)
     }
 
     public func remove() {
