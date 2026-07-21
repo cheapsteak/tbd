@@ -10,10 +10,10 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "deeplink")
 enum DeepLinkHandler {
     @MainActor
     static func handle(_ url: URL, appState: AppState) {
-        guard let worktreeID = DeepLink.parseOpenURL(url) else {
+        guard let target = DeepLink.parseOpenURL(url) else {
             logger.warning("Ignoring malformed deep link: \(url.absoluteString, privacy: .public)")
             return
         }
-        appState.navigateToWorktree(worktreeID)
+        appState.navigateToWorktree(target.worktree, terminalID: target.terminal)
     }
 }

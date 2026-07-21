@@ -54,6 +54,10 @@
       var raw = params.get('worktree') || '';
       // Accept either a UUID or a worktree slug (letters, digits, hyphens, underscores).
       var ok = /^[A-Za-z0-9_-]{1,128}$/.test(raw);
+      // Optional terminal anchor: same validation; invalid → drop it but keep
+      // the worktree (graceful degradation, mirrors the app's parser).
+      var rawTerminal = params.get('terminal') || '';
+      var terminalOk = /^[A-Za-z0-9_-]{1,128}$/.test(rawTerminal);
       var status = document.getElementById('status');
       var manual = document.getElementById('manual');
       var link = document.getElementById('link');
@@ -67,6 +71,11 @@
       }
 
       var target = 'tbd://open?worktree=' + encodeURIComponent(raw);
+      if (terminalOk) {
+        target += '&terminal=' + encodeURIComponent(rawTerminal);
+      } else if (rawTerminal) {
+        console.log('[tbd-open] terminal param invalid — dropping it, keeping worktree');
+      }
       console.log('[tbd-open] computed target:', target);
       link.href = target;
       manual.hidden = false;

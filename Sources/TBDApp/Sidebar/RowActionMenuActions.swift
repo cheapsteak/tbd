@@ -107,6 +107,13 @@ struct RowActionMenuActions {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(worktree.branch, forType: .string)
 
+        case .copyLink:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                DeepLink.makeShareableOpenURL(worktree.id).absoluteString,
+                forType: .string
+            )
+
         case .archiveScratch:
             let wtID = worktree.id
             Task { await appState.archiveScratch(id: wtID) }
