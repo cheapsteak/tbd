@@ -222,20 +222,7 @@ struct PanePlaceholder: View {
             }
 
         case .webview:
-            // Placeholder for back/forward — will be wired in Task 6
-            Button(action: {}) {
-                Image(systemName: "chevron.left")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
-
-            Button(action: {}) {
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
+            historyNavigation
 
             Button(action: copyWebviewURL) {
                 Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
@@ -245,6 +232,8 @@ struct PanePlaceholder: View {
             .help("Copy URL")
 
         case .codeViewer:
+            historyNavigation
+
             if hasRenderableContent {
                 Button(action: { showSourceCode.toggle() }) {
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
@@ -259,7 +248,84 @@ struct PanePlaceholder: View {
             EmptyView()
 
         case .liveTranscript:
-            EmptyView()
+            historyNavigation
+        }
+    }
+
+    // MARK: - Slot History Navigation
+
+    /// Back/forward chevrons for viewer-class slot panes. Primary click steps
+    /// one entry; the attached menu lists up to 10 entries for direct jumps.
+    @ViewBuilder
+    private var historyNavigation: some View {
+        let history = appState.paneHistories[content.paneID] ?? PaneHistory()
+
+        historyMenu(
+            entries: history.backEntries,
+            icon: "chevron.left",
+            help: "Back",
+            primaryAction: { navigateHistory { $0.goBack() } }
+        )
+        .disabled(!history.canGoBack)
+
+        historyMenu(
+            entries: history.forwardEntries,
+            icon: "chevron.right",
+            help: "Forward",
+            primaryAction: { navigateHistory { $0.goForward() } }
+        )
+        .disabled(!history.canGoForward)
+    }
+
+    private func historyMenu(
+        entries: [(index: Int, content: PaneContent)],
+        icon: String,
+        help: String,
+        primaryAction: @escaping () -> Void
+    ) -> some View {
+        Menu {
+            ForEach(entries.prefix(PaneHistory.maxEntries), id: \.index) { entry in
+                Button(historyEntryLabel(entry.content)) {
+                    navigateHistory { $0.go(to: entry.index) }
+                }
+            }
+        } label: {
+            Image(systemName: icon)
+                .font(.caption)
+        } primaryAction: {
+            primaryAction()
+        }
+        .menuIndicator(.hidden)
+        .buttonStyle(.borderless)
+        .fixedSize()
+        .help(help)
+    }
+
+    /// Applies a history navigation to this slot: mutate the slot's history,
+    /// then swap the layout content in place keeping the pane UUID. Goes
+    /// through `replacingContent` directly — never through the routing
+    /// functions — so navigating does not push new history entries.
+    private func navigateHistory(_ step: (inout PaneHistory) -> PaneContent?) {
+        guard var history = appState.paneHistories[content.paneID],
+              let target = step(&history),
+              let updated = layout.replacingContent(at: content.paneID, with: target)
+        else { return }
+        appState.paneHistories[content.paneID] = history
+        layout = updated
+    }
+
+    private func historyEntryLabel(_ content: PaneContent) -> String {
+        switch content {
+        case .codeViewer(_, let path):
+            return URL(fileURLWithPath: path).lastPathComponent
+        case .webview(_, let url):
+            return (url.host ?? "") + url.path
+        case .liveTranscript:
+            return "Transcript"
+        case .terminal:
+            return "Terminal"
+        case .note:
+            return "Note"
         }
     }
 
@@ -352,7 +418,11 @@ struct PanePlaceholder: View {
                     worktreePath: worktree.path,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
-                        layout = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                        let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                        if let replaced = result.replaced {
+                            appState.recordPaneReplacement(replaced)
+                        }
+                        layout = result.layout
                     },
                     onTerminalNotification: { title, body in
                         debugLog("OSC 777: \(title) — \(body)")
@@ -491,6 +561,8 @@ struct PanePlaceholder: View {
             Task { await appState.deleteNote(noteID: noteID, worktreeID: worktree.id) }
         }
 
+        appState.paneHistories.removeValue(forKey: content.paneID)
+
         if let newLayout = layout.removePane(id: content.paneID) {
             layout = newLayout
         } else {
@@ -533,7 +605,14 @@ struct PanePlaceholder: View {
     }
 
     private func toggleTranscriptPane(terminalID: UUID) {
-        layout = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+        let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+        if let replaced = result.replaced {
+            appState.recordPaneReplacement(replaced)
+        }
+        if let removed = result.removedPaneID {
+            appState.paneHistories.removeValue(forKey: removed)
+        }
+        layout = result.layout
     }
 
     private func isTranscriptOpen(terminalID: UUID) -> Bool {

@@ -401,6 +401,11 @@ final class AppState: ObservableObject {
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }
+    /// Back/forward history per viewer-class slot pane, keyed by the slot's
+    /// paneID (stable across in-place content replacements).
+    @Published var paneHistories: [UUID: PaneHistory] = [:] {
+        didSet { persistPaneHistories() }
+    }
     @Published var tabs: [UUID: [Tab]] = [:]
     @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
@@ -692,6 +697,7 @@ final class AppState: ObservableObject {
     let macNotificationManager = MacNotificationManager()
 
     private static let layoutsKey = "com.tbd.app.layouts"
+    private static let paneHistoriesKey = "com.tbd.app.paneHistories"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
@@ -707,6 +713,7 @@ final class AppState: ObservableObject {
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         restoreLayouts()
+        restorePaneHistories()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
@@ -884,6 +891,41 @@ final class AppState: ObservableObject {
         guard let data = userDefaults.data(forKey: Self.layoutsKey),
               let restored = try? JSONDecoder().decode([UUID: LayoutNode].self, from: data) else { return }
         layouts = restored
+    }
+
+    private func persistPaneHistories() {
+        guard let data = try? JSONEncoder().encode(paneHistories) else { return }
+        userDefaults.set(data, forKey: Self.paneHistoriesKey)
+    }
+
+    private func restorePaneHistories() {
+        guard let data = userDefaults.data(forKey: Self.paneHistoriesKey),
+              let restored = try? JSONDecoder().decode([UUID: PaneHistory].self, from: data) else { return }
+        paneHistories = restored
+    }
+
+    /// Pushes the outgoing content of an in-place slot replacement onto that
+    /// slot's history (see `ViewerRouteResult.replaced`).
+    func recordPaneReplacement(_ replacement: ViewerRouteResult.Replacement) {
+        paneHistories[replacement.paneID, default: PaneHistory()]
+            .recordReplacement(outgoing: replacement.outgoing, incoming: replacement.incoming)
+    }
+
+    /// Drops histories for slot panes no longer present in any tab layout or
+    /// tab root — closed panes and panes dropped by reconciliation. Keyed off
+    /// the GLOBAL layouts dict, so a per-worktree reconcile never prunes
+    /// another worktree's slots.
+    func prunePaneHistories() {
+        guard !paneHistories.isEmpty else { return }
+        var liveIDs = Set<UUID>()
+        for layout in layouts.values { liveIDs.formUnion(layout.allPaneIDs()) }
+        for tabList in tabs.values {
+            for tab in tabList { liveIDs.insert(tab.content.paneID) }
+        }
+        let pruned = paneHistories.filter { liveIDs.contains($0.key) }
+        if pruned.count != paneHistories.count {
+            paneHistories = pruned
+        }
     }
 
     // MARK: - Selection Persistence
@@ -1743,6 +1785,7 @@ final class AppState: ObservableObject {
 
         tabs[worktreeID] = currentTabs
         applyStoredOrder(worktreeID: worktreeID)
+        prunePaneHistories()
         if !alreadyLoadedOrder {
             Task { await loadTabStates(worktreeID: worktreeID) }
         }

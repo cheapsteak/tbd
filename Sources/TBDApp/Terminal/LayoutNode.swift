@@ -149,12 +149,18 @@ extension LayoutNode {
     /// Returns the id of the first pane (in pre-order, left-to-right traversal)
     /// whose content matches the predicate, or nil if none match.
     func firstPaneID(where predicate: (PaneContent) -> Bool) -> UUID? {
+        firstPaneContent(where: predicate)?.paneID
+    }
+
+    /// Returns the content of the first pane (in pre-order, left-to-right
+    /// traversal) matching the predicate, or nil if none match.
+    func firstPaneContent(where predicate: (PaneContent) -> Bool) -> PaneContent? {
         switch self {
         case .pane(let content):
-            return predicate(content) ? content.paneID : nil
+            return predicate(content) ? content : nil
         case .split(_, let children, _):
             for child in children {
-                if let found = child.firstPaneID(where: predicate) {
+                if let found = child.firstPaneContent(where: predicate) {
                     return found
                 }
             }
