@@ -85,6 +85,68 @@ struct PanelSurfaceReducerOpenTests {
         }
     }
 
+    // Base for insertion-branch tests: root horizontal split [primary | A] at [0.6, 0.4].
+    private func splitState(rootID: SplitID, panelA: PanelSlot) -> PanelSurfaceState {
+        PanelSurfaceState(
+            surface: WorkspaceTabSurface(
+                id: UUID(), worktreeID: UUID(),
+                primary: .terminal(terminalID: primaryTerminal),
+                layout: .split(SplitNode(
+                    id: rootID, direction: .horizontal,
+                    children: [.primary, .panel(panelA)], ratios: [0.6, 0.4])),
+                revision: 0),
+            histories: [panelA.id: .seeded(with: panelA.content)])
+    }
+
+    @Test func openBesideMatchingAxis_splicesAdjacentAndRescalesSiblings() throws {
+        let rootID = UUID()
+        let panelA = PanelSlot(id: UUID(), content: file("/a"))
+        let newID = UUID()
+        let out = try PanelSurfaceReducer.apply(
+            .open(content: file("/n"),
+                  placement: .beside(target: .panel(panelA.id), edge: .right, share: 0.3)),
+            to: splitState(rootID: rootID, panelA: panelA),
+            makeID: { newID })
+        guard case .split(let split) = out.surface.layout else {
+            Issue.record("expected split"); return
+        }
+        // Same split spliced — no extra nesting, sibling order preserved.
+        #expect(split.id == rootID)
+        #expect(split.direction == .horizontal)
+        #expect(split.children == [
+            .primary, .panel(panelA), .panel(PanelSlot(id: newID, content: file("/n")))])
+        // Exact arithmetic: siblings scaled by (1 - share), new panel gets share.
+        #expect(split.ratios == [0.6 * (1 - 0.3), 0.4 * (1 - 0.3), 0.3])
+        #expect(out.histories[newID]?.entries == [file("/n")], "history seeded")
+        #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
+    }
+
+    @Test func openBesideCrossAxis_wrapsAnchorInPlaceLeavingOuterRatiosUntouched() throws {
+        let rootID = UUID()
+        let panelA = PanelSlot(id: UUID(), content: file("/a"))
+        var ids = [UUID(), UUID()]  // makeID order: new panel slot, then wrap split
+        let (newPanelID, wrapSplitID) = (ids[0], ids[1])
+        let out = try PanelSurfaceReducer.apply(
+            .open(content: file("/n"),
+                  placement: .beside(target: .panel(panelA.id), edge: .below, share: 0.4)),
+            to: splitState(rootID: rootID, panelA: panelA),
+            makeID: { ids.removeFirst() })
+        guard case .split(let root) = out.surface.layout else {
+            Issue.record("expected split"); return
+        }
+        // Outer split untouched: same ID, direction, ratios; primary still first.
+        #expect(root.id == rootID)
+        #expect(root.direction == .horizontal)
+        #expect(root.ratios == [0.6, 0.4])
+        #expect(root.children[0] == .primary)
+        // Anchor wrapped in place: vertical pair [A above, new below] at [1-share, share].
+        #expect(root.children[1] == .split(SplitNode(
+            id: wrapSplitID, direction: .vertical,
+            children: [.panel(panelA), .panel(PanelSlot(id: newPanelID, content: file("/n")))],
+            ratios: [1 - 0.4, 0.4])))
+        #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
+    }
+
     @Test func selectTab_throwsNotTabScoped() {
         #expect(throws: PanelOperationError.notTabScoped) {
             _ = try PanelSurfaceReducer.apply(.selectTab(tabID: UUID()), to: bareState())
