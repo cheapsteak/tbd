@@ -55,10 +55,12 @@ struct WorktreeProfilePickerView: View {
         }
         .frame(width: 300)
         // Height is per-page: `.branches` needs a 320pt minimum so the
-        // searchable list stays usable, while `.profiles` hugs its rows. The
-        // hosting `FloatingPanel` tracks SwiftUI content-size changes
-        // (NSHostingView sizing), so switching pages resizes the panel in
-        // place with its top edge pinned.
+        // searchable list stays usable, while `.profiles` hugs its rows.
+        // `FloatingPanel` never re-fits after `showAsMenu`, and doesn't need
+        // to: `NSHostingView`'s default `sizingOptions` constrain the panel to
+        // the SwiftUI content's ideal size, so AppKit autolayout resizes the
+        // borderless panel in place (top edge pinned) when `page` flips — no
+        // explicit `setFrame` hook (cf. `HoverCard.apply`) is required.
         .frame(minHeight: page == .branches ? 320 : nil, alignment: .top)
         .task {
             // Ensure the list (and usage suffixes) are populated even if the
