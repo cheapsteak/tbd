@@ -32,7 +32,7 @@ struct TerminalAutofocusTests {
             Tab(id: tabID, content: .note(noteID: UUID()), label: nil),
         ]
         state.layouts[tabID] = .split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.codeViewer(id: UUID(), path: "/tmp/file.swift")),
                 .pane(.terminal(terminalID: firstTerminalID)),

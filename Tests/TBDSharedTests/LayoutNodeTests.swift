@@ -15,7 +15,7 @@ struct LayoutNodeTests {
 
         let result = node.splitPane(id: id, direction: .horizontal, newContent: newContent)
 
-        if case .split(let dir, let children, let ratios) = result {
+        if case .split(_, let dir, let children, let ratios) = result {
             #expect(dir == .horizontal)
             #expect(children.count == 2)
             #expect(ratios == [0.5, 0.5])
@@ -40,6 +40,7 @@ struct LayoutNodeTests {
         let id2 = UUID()
         let newContent = PaneContent.webview(id: UUID(), url: URL(string: "https://example.com")!)
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [.pane(.terminal(terminalID: id1)), .pane(.terminal(terminalID: id2))],
             ratios: [0.5, 0.5]
@@ -47,9 +48,9 @@ struct LayoutNodeTests {
 
         let result = node.splitPane(id: id2, direction: .vertical, newContent: newContent)
 
-        if case .split(_, let children, _) = result {
+        if case .split(_, _, let children, _) = result {
             #expect(children[0] == .pane(.terminal(terminalID: id1)))
-            if case .split(let dir, let innerChildren, _) = children[1] {
+            if case .split(_, let dir, let innerChildren, _) = children[1] {
                 #expect(dir == .vertical)
                 #expect(innerChildren.count == 2)
             } else {
@@ -80,6 +81,7 @@ struct LayoutNodeTests {
         let id1 = UUID()
         let id2 = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [.pane(.terminal(terminalID: id1)), .pane(.terminal(terminalID: id2))],
             ratios: [0.5, 0.5]
@@ -94,6 +96,7 @@ struct LayoutNodeTests {
         let id2 = UUID()
         let id3 = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: id1)),
@@ -104,7 +107,7 @@ struct LayoutNodeTests {
         )
 
         let result = node.removePane(id: id1)
-        if case .split(_, let children, let ratios) = result {
+        if case .split(_, _, let children, let ratios) = result {
             #expect(children.count == 2)
             // 0.25/(0.25+0.5) ≈ 0.333, 0.5/(0.25+0.5) ≈ 0.667
             let sum = ratios.reduce(0, +)
@@ -127,10 +130,12 @@ struct LayoutNodeTests {
         let webID = UUID()
         let codeID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: termID)),
                 .split(
+                    id: UUID(),
                     direction: .vertical,
                     children: [
                         .pane(.webview(id: webID, url: URL(string: "https://example.com")!)),
@@ -153,6 +158,7 @@ struct LayoutNodeTests {
         let termID = UUID()
         let webID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: termID)),
@@ -169,6 +175,7 @@ struct LayoutNodeTests {
         let localID = UUID()
         let foreignID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: localID)),
@@ -186,6 +193,7 @@ struct LayoutNodeTests {
         let localID = UUID()
         let webID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .vertical,
             children: [
                 .pane(.terminal(terminalID: localID)),
@@ -229,15 +237,18 @@ struct LayoutNodeTests {
         let data = json.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(LayoutNode.self, from: data)
 
-        let expected = LayoutNode.split(
-            direction: .horizontal,
-            children: [
-                .pane(.terminal(terminalID: id1)),
-                .pane(.terminal(terminalID: id2)),
-            ],
-            ratios: [0.5, 0.5]
-        )
-        #expect(decoded == expected)
+        // The legacy wire format has no split id — decode generates one, so
+        // compare everything except that generated id.
+        guard case .split(let id, let direction, let children, let ratios) = decoded else {
+            Issue.record("Expected split node"); return
+        }
+        #expect(id != UUID(uuid: UUID_NULL))
+        #expect(direction == .horizontal)
+        #expect(children == [
+            .pane(.terminal(terminalID: id1)),
+            .pane(.terminal(terminalID: id2)),
+        ])
+        #expect(ratios == [0.5, 0.5])
     }
 
     // MARK: - Codable roundtrip (new format)
@@ -265,10 +276,12 @@ struct LayoutNodeTests {
 
     @Test func codable_roundtrip_complexTree() throws {
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: UUID())),
                 .split(
+                    id: UUID(),
                     direction: .vertical,
                     children: [
                         .pane(.webview(id: UUID(), url: URL(string: "https://example.com")!)),
@@ -311,6 +324,7 @@ struct LayoutNodeTests {
         let leftID = UUID()
         let rightID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.codeViewer(id: leftID, path: "/left")),
@@ -330,10 +344,12 @@ struct LayoutNodeTests {
         let terminalID = UUID()
         let viewerID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .split(
+                    id: UUID(),
                     direction: .vertical,
                     children: [
                         .pane(.terminal(terminalID: UUID())),
@@ -378,7 +394,9 @@ struct LayoutNodeTests {
     @Test func replacingContent_replacesInsideSplitPreservingSiblingsAndRatios() {
         let terminalID = UUID()
         let viewerID = UUID()
+        let splitID = UUID()
         let node = LayoutNode.split(
+            id: splitID,
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
@@ -391,6 +409,7 @@ struct LayoutNodeTests {
         let result = node.replacingContent(at: viewerID, with: newContent)
 
         #expect(result == .split(
+            id: splitID,
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
@@ -404,10 +423,12 @@ struct LayoutNodeTests {
         let terminalID = UUID()
         let viewerID = UUID()
         let node = LayoutNode.split(
+            id: UUID(),
             direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .split(
+                    id: UUID(),
                     direction: .vertical,
                     children: [
                         .pane(.terminal(terminalID: UUID())),
@@ -422,8 +443,8 @@ struct LayoutNodeTests {
 
         let result = node.replacingContent(at: viewerID, with: newContent)
 
-        guard case .split(_, let topChildren, let topRatios) = result,
-              case .split(_, let nestedChildren, let nestedRatios) = topChildren[1]
+        guard case .split(_, _, let topChildren, let topRatios) = result,
+              case .split(_, _, let nestedChildren, let nestedRatios) = topChildren[1]
         else {
             Issue.record("Expected nested split structure")
             return
@@ -431,5 +452,58 @@ struct LayoutNodeTests {
         #expect(topRatios == [0.5, 0.5])
         #expect(nestedRatios == [0.4, 0.6])
         #expect(nestedChildren[1] == .pane(newContent))
+    }
+
+    // MARK: - Stable split IDs
+
+    @Test func splitID_roundTripsThroughCodable() throws {
+        let node = LayoutNode.split(
+            id: UUID(),
+            direction: .horizontal,
+            children: [.pane(.terminal(terminalID: UUID())), .pane(.note(noteID: UUID()))],
+            ratios: [0.5, 0.5]
+        )
+        let decoded = try JSONDecoder().decode(LayoutNode.self, from: JSONEncoder().encode(node))
+        #expect(decoded == node, "split id survives encode/decode")
+    }
+
+    @Test func decode_generatesSplitIDWhenAbsent() throws {
+        let legacy = """
+        {"type":"split","direction":"horizontal","ratios":[0.5,0.5],
+         "children":[{"type":"terminal","terminalID":"\(UUID().uuidString)"},
+                     {"type":"pane","paneContent":{"note":{"noteID":"\(UUID().uuidString)"}}}]}
+        """.data(using: .utf8)!
+        let node = try JSONDecoder().decode(LayoutNode.self, from: legacy)
+        guard case .split(let id, _, let children, _) = node else {
+            Issue.record("expected split"); return
+        }
+        #expect(id != UUID(uuid: UUID_NULL))
+        #expect(children.count == 2)
+        if case .pane(.terminal) = children[0] {} else { Issue.record("legacy terminal leaf lost") }
+    }
+
+    @Test func updatingRatios_targetsSplitByID() {
+        let innerID = UUID(), outerID = UUID()
+        let paneA = UUID(), paneB = UUID(), paneC = UUID()
+        let tree = LayoutNode.split(
+            id: outerID, direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: paneA)),
+                .split(id: innerID, direction: .vertical,
+                       children: [.pane(.codeViewer(id: paneB, path: "/b")),
+                                  .pane(.codeViewer(id: paneC, path: "/c"))],
+                       ratios: [0.5, 0.5]),
+            ],
+            ratios: [0.6, 0.4]
+        )
+        let updated = tree.updatingRatios(forSplitID: innerID, to: [0.3, 0.7])
+        guard case .split(_, _, let children, let outerRatios) = updated,
+              case .split(let id, _, _, let innerRatios) = children[1] else {
+            Issue.record("tree shape changed"); return
+        }
+        #expect(outerRatios == [0.6, 0.4], "outer split untouched")
+        #expect(id == innerID)
+        #expect(innerRatios == [0.3, 0.7])
+        #expect(tree.updatingRatios(forSplitID: UUID(), to: [0.1, 0.9]) == tree, "unknown id is a no-op")
     }
 }

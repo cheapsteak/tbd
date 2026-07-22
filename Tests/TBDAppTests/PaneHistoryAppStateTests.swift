@@ -149,7 +149,7 @@ struct PaneHistoryAppStateTests {
             let liveSlotID = UUID()
             let orphanID = UUID()
             state.layouts[tabID] = .split(
-                direction: .horizontal,
+                id: UUID(), direction: .horizontal,
                 children: [
                     .pane(.terminal(terminalID: tabID)),
                     .pane(.codeViewer(id: liveSlotID, path: "/a")),

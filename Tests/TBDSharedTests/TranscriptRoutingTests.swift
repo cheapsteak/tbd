@@ -14,7 +14,7 @@ struct TranscriptRoutingTests {
 
         #expect(result.replaced == nil)
         #expect(result.removedPaneID == nil)
-        guard case .split(let dir, let children, _) = result.layout else {
+        guard case .split(_, let dir, let children, _) = result.layout else {
             Issue.record("Expected split result"); return
         }
         #expect(dir == .horizontal)
@@ -30,7 +30,7 @@ struct TranscriptRoutingTests {
         let terminalID = UUID()
         let transcriptID = UUID()
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(.liveTranscript(id: transcriptID, terminalID: terminalID)),
@@ -52,7 +52,7 @@ struct TranscriptRoutingTests {
         let slotID = UUID()
         let outgoing = PaneContent.liveTranscript(id: slotID, terminalID: terminalB)
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalA)),
                 .pane(outgoing),
@@ -64,7 +64,7 @@ struct TranscriptRoutingTests {
 
         // B's transcript is a viewer-class slot: A's transcript replaces it in
         // place, keeping the slot UUID.
-        guard case .split(_, let children, _) = result.layout,
+        guard case .split(_, _, let children, _) = result.layout,
               case .pane(.liveTranscript(let id, let tid)) = children[1]
         else {
             Issue.record("Expected transcript slot in right child"); return
@@ -83,7 +83,7 @@ struct TranscriptRoutingTests {
         let slotID = UUID()
         let outgoing = PaneContent.codeViewer(id: slotID, path: "/a.md")
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(outgoing),
@@ -93,7 +93,7 @@ struct TranscriptRoutingTests {
 
         let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: terminalID)
 
-        guard case .split(_, let children, _) = result.layout,
+        guard case .split(_, _, let children, _) = result.layout,
               case .pane(.liveTranscript(let id, let tid)) = children[1]
         else {
             Issue.record("Expected codeViewer slot replaced by transcript"); return
@@ -106,7 +106,7 @@ struct TranscriptRoutingTests {
     @Test func toggleTranscript_splitsWhenOnlyNonViewerPanesExist() {
         let terminalID = UUID()
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(.note(noteID: UUID())),

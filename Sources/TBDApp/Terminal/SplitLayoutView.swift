@@ -18,7 +18,7 @@ struct SplitLayoutView: View {
                 tabID: tabID,
                 layout: $layout
             )
-        case .split(let direction, let children, let ratios):
+        case .split(_, let direction, let children, let ratios):
             SplitContainer(
                 direction: direction,
                 children: children,
@@ -142,14 +142,14 @@ struct SplitContainer: View {
         switch node {
         case .pane:
             return node
-        case .split(let dir, let nodeChildren, let nodeRatios):
+        case .split(let id, let dir, let nodeChildren, let nodeRatios):
             if nodeChildren == targetChildren {
-                return .split(direction: dir, children: nodeChildren, ratios: newRatios)
+                return .split(id: id, direction: dir, children: nodeChildren, ratios: newRatios)
             }
             let updatedChildren = nodeChildren.map { child in
                 updateRatios(in: child, for: targetChildren, newRatios: newRatios)
             }
-            return .split(direction: dir, children: updatedChildren, ratios: nodeRatios)
+            return .split(id: id, direction: dir, children: updatedChildren, ratios: nodeRatios)
         }
     }
 }

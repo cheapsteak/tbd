@@ -11,7 +11,33 @@ public enum SplitDirection: String, Codable, Sendable {
 
 public indirect enum LayoutNode: Equatable, Sendable {
     case pane(PaneContent)
-    case split(direction: SplitDirection, children: [LayoutNode], ratios: [CGFloat])
+    case split(id: UUID, direction: SplitDirection, children: [LayoutNode], ratios: [CGFloat])
+
+    /// Stable render identity: a pane's content ID, or the split's own ID.
+    public var nodeID: UUID {
+        switch self {
+        case .pane(let content): return content.paneID
+        case .split(let id, _, _, _): return id
+        }
+    }
+
+    /// Returns a copy with `newRatios` applied to the split whose `id` matches.
+    /// Unknown IDs return `self` unchanged.
+    public func updatingRatios(forSplitID targetID: UUID, to newRatios: [CGFloat]) -> LayoutNode {
+        switch self {
+        case .pane:
+            return self
+        case .split(let id, let direction, let children, let ratios):
+            if id == targetID {
+                return .split(id: id, direction: direction, children: children, ratios: newRatios)
+            }
+            return .split(
+                id: id, direction: direction,
+                children: children.map { $0.updatingRatios(forSplitID: targetID, to: newRatios) },
+                ratios: ratios
+            )
+        }
+    }
 
     // MARK: - Helpers
 
@@ -22,6 +48,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
         case .pane(let content):
             if content.paneID == id {
                 return .split(
+                    id: UUID(),
                     direction: direction,
                     children: [
                         .pane(content),
@@ -32,11 +59,11 @@ public indirect enum LayoutNode: Equatable, Sendable {
             }
             return self
 
-        case .split(let dir, let children, let ratios):
+        case .split(let splitID, let dir, let children, let ratios):
             let newChildren = children.map { child in
                 child.splitPane(id: id, direction: direction, newContent: newContent)
             }
-            return .split(direction: dir, children: newChildren, ratios: ratios)
+            return .split(id: splitID, direction: dir, children: newChildren, ratios: ratios)
         }
     }
 
@@ -50,7 +77,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
             }
             return self
 
-        case .split(let direction, let children, let ratios):
+        case .split(let splitID, let direction, let children, let ratios):
             var newChildren: [LayoutNode] = []
             var newRatios: [CGFloat] = []
 
@@ -75,7 +102,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
                 newRatios = newRatios.map { $0 / total }
             }
 
-            return .split(direction: direction, children: newChildren, ratios: newRatios)
+            return .split(id: splitID, direction: direction, children: newChildren, ratios: newRatios)
         }
     }
 
@@ -84,7 +111,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
         switch self {
         case .pane(let content):
             return [content.paneID]
-        case .split(_, let children, _):
+        case .split(_, _, let children, _):
             return children.flatMap { $0.allPaneIDs() }
         }
     }
@@ -99,7 +126,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
                 return [id]
             }
             return []
-        case .split(_, let children, _):
+        case .split(_, _, let children, _):
             return children.flatMap { $0.allTerminalIDs() }
         }
     }
@@ -115,7 +142,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
             }
             return self
 
-        case .split(let direction, let children, let ratios):
+        case .split(let splitID, let direction, let children, let ratios):
             var keptChildren: [LayoutNode] = []
             var keptRatios: [CGFloat] = []
 
@@ -138,7 +165,7 @@ public indirect enum LayoutNode: Equatable, Sendable {
                 keptRatios = keptRatios.map { $0 / total }
             }
 
-            return .split(direction: direction, children: keptChildren, ratios: keptRatios)
+            return .split(id: splitID, direction: direction, children: keptChildren, ratios: keptRatios)
         }
     }
 }
@@ -158,7 +185,7 @@ extension LayoutNode {
         switch self {
         case .pane(let content):
             return predicate(content) ? content : nil
-        case .split(_, let children, _):
+        case .split(_, _, let children, _):
             for child in children {
                 if let found = child.firstPaneContent(where: predicate) {
                     return found
@@ -176,7 +203,7 @@ extension LayoutNode {
         case .pane(let content):
             return content.paneID == paneID ? .pane(newContent) : nil
 
-        case .split(let direction, let children, let ratios):
+        case .split(let splitID, let direction, let children, let ratios):
             var newChildren = children
             var replaced = false
             for (index, child) in children.enumerated() {
@@ -187,7 +214,7 @@ extension LayoutNode {
                 }
             }
             return replaced
-                ? .split(direction: direction, children: newChildren, ratios: ratios)
+                ? .split(id: splitID, direction: direction, children: newChildren, ratios: ratios)
                 : nil
         }
     }
@@ -200,6 +227,7 @@ extension LayoutNode: Codable {
         case type
         case terminalID    // legacy key for backward compat
         case paneContent   // new key
+        case id
         case direction
         case children
         case ratios
@@ -224,10 +252,14 @@ extension LayoutNode: Codable {
             let content = try container.decode(PaneContent.self, forKey: .paneContent)
             self = .pane(content)
         case .split:
+            // Absent in older persisted layouts; generate a fresh id so decode
+            // never fails, at the cost of losing render identity for that split
+            // until it's next encoded.
+            let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
             let direction = try container.decode(SplitDirection.self, forKey: .direction)
             let children = try container.decode([LayoutNode].self, forKey: .children)
             let ratios = try container.decode([CGFloat].self, forKey: .ratios)
-            self = .split(direction: direction, children: children, ratios: ratios)
+            self = .split(id: id, direction: direction, children: children, ratios: ratios)
         }
     }
 
@@ -238,8 +270,9 @@ extension LayoutNode: Codable {
         case .pane(let content):
             try container.encode(NodeType.pane, forKey: .type)
             try container.encode(content, forKey: .paneContent)
-        case .split(let direction, let children, let ratios):
+        case .split(let id, let direction, let children, let ratios):
             try container.encode(NodeType.split, forKey: .type)
+            try container.encode(id, forKey: .id)
             try container.encode(direction, forKey: .direction)
             try container.encode(children, forKey: .children)
             try container.encode(ratios, forKey: .ratios)
