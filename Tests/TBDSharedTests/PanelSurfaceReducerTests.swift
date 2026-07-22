@@ -153,3 +153,95 @@ struct PanelSurfaceReducerOpenTests {
         }
     }
 }
+
+@Suite("PanelSurfaceReducer.closeMoveResize")
+struct PanelSurfaceReducerEditTests {
+    private func file(_ p: String) -> PanelContent { .file(FileReference(path: p)) }
+
+    /// primary | /a | /b in one horizontal split.
+    private func threeUp() throws -> (PanelSurfaceState, PanelID, PanelID) {
+        var state = PanelSurfaceState(
+            surface: WorkspaceTabSurface(
+                id: UUID(), worktreeID: UUID(),
+                primary: .terminal(terminalID: UUID()),
+                layout: .primary, revision: 0),
+            histories: [:])
+        state = try PanelSurfaceReducer.apply(
+            .open(content: file("/a"),
+                  placement: .beside(target: .primary, edge: .right, share: 0.4)),
+            to: state)
+        let a = state.surface.layout.allPanelIDs[0]
+        state = try PanelSurfaceReducer.apply(
+            .open(content: file("/b"),
+                  placement: .beside(target: .panel(a), edge: .right, share: 0.5)),
+            to: state)
+        let b = state.surface.layout.allPanelIDs.first { $0 != a }!
+        return (state, a, b)
+    }
+
+    @Test func close_removesSlotHistoryAndUnwraps() throws {
+        let (state, a, b) = try threeUp()
+        let closedB = try PanelSurfaceReducer.apply(.close(panelID: b), to: state)
+        #expect(closedB.surface.layout.allPanelIDs == [a])
+        #expect(closedB.histories[b] == nil)
+        #expect(PanelSurfaceValidator.violations(in: closedB).isEmpty)
+
+        let closedBoth = try PanelSurfaceReducer.apply(.close(panelID: a), to: closedB)
+        #expect(closedBoth.surface.layout == .primary, "last panel closed → bare primary")
+        #expect(PanelSurfaceValidator.violations(in: closedBoth).isEmpty)
+    }
+
+    @Test func close_unknownPanel_throws() throws {
+        let (state, _, _) = try threeUp()
+        let ghost = UUID()
+        #expect(throws: PanelOperationError.panelNotFound(ghost)) {
+            _ = try PanelSurfaceReducer.apply(.close(panelID: ghost), to: state)
+        }
+    }
+
+    @Test func move_besideKeepsIdentityAndHistory() throws {
+        let (state, a, b) = try threeUp()
+        let historyBefore = state.histories[b]
+        let moved = try PanelSurfaceReducer.apply(
+            .move(panelID: b, placement: .beside(target: .primary, edge: .below, share: nil)),
+            to: state)
+        #expect(Set(moved.surface.layout.allPanelIDs) == Set([a, b]), "identity preserved")
+        #expect(moved.histories[b] == historyBefore, "history rides along")
+        #expect(PanelSurfaceValidator.violations(in: moved).isEmpty)
+    }
+
+    @Test func move_rejectsNonBesidePlacements() throws {
+        let (state, a, _) = try threeUp()
+        #expect(throws: PanelOperationError.self) {
+            _ = try PanelSurfaceReducer.apply(.move(panelID: a, placement: .automatic), to: state)
+        }
+        #expect(throws: PanelOperationError.self) {
+            _ = try PanelSurfaceReducer.apply(
+                .move(panelID: a, placement: .beside(target: .panel(a), edge: .left, share: nil)),
+                to: state)
+        }
+    }
+
+    @Test func resize_validatesAndNormalizes() throws {
+        let (state, _, _) = try threeUp()
+        guard case .split(let outer) = state.surface.layout else {
+            Issue.record("expected split"); return
+        }
+        let resized = try PanelSurfaceReducer.apply(
+            .resize(splitID: outer.id, ratios: Array(repeating: 1.0, count: outer.children.count)),
+            to: state)
+        guard case .split(let after) = resized.surface.layout else {
+            Issue.record("expected split"); return
+        }
+        #expect(abs(after.ratios.reduce(0, +) - 1.0) < 0.001, "normalized")
+
+        #expect(throws: PanelOperationError.self) {
+            _ = try PanelSurfaceReducer.apply(
+                .resize(splitID: outer.id, ratios: [1.0]), to: state)  // count mismatch
+        }
+        #expect(throws: PanelOperationError.self) {
+            _ = try PanelSurfaceReducer.apply(
+                .resize(splitID: UUID(), ratios: [0.5, 0.5]), to: state)
+        }
+    }
+}

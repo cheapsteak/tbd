@@ -42,10 +42,14 @@ public enum PanelSurfaceReducer {
             try applyNavigate(panelID: panelID, destination: destination, to: &next)
         case .history(let panelID, let action):
             try applyHistory(panelID: panelID, action: action, to: &next)
+        case .close(let panelID):
+            try applyClose(panelID: panelID, to: &next)
+        case .move(let panelID, let placement):
+            try applyMove(panelID: panelID, placement: placement, to: &next, makeID: makeID)
+        case .resize(let splitID, let ratios):
+            try applyResize(splitID: splitID, ratios: ratios, to: &next)
         case .selectTab:
             throw PanelOperationError.notTabScoped
-        case .close, .move, .resize:
-            throw PanelOperationError.invalidPlacement(reason: "unimplemented")
         }
         next.surface.revision += 1
         return next
@@ -127,6 +131,52 @@ public enum PanelSurfaceReducer {
         }
         state.surface.layout = updatedTree
         state.histories[panelID] = history
+    }
+
+    // MARK: - close
+
+    private static func applyClose(panelID: PanelID, to state: inout PanelSurfaceState) throws {
+        guard let (updatedTree, _) = removingPanel(panelID, from: state.surface.layout) else {
+            throw PanelOperationError.panelNotFound(panelID)
+        }
+        state.surface.layout = updatedTree
+        state.histories[panelID] = nil
+    }
+
+    // MARK: - move
+
+    private static func applyMove(
+        panelID: PanelID, placement: PanelPlacement,
+        to state: inout PanelSurfaceState, makeID: () -> UUID
+    ) throws {
+        guard case .beside(let target, let edge, let share) = placement else {
+            throw PanelOperationError.invalidPlacement(reason: "move requires a .beside placement")
+        }
+        if case .panel(let targetID) = target, targetID == panelID {
+            throw PanelOperationError.invalidPlacement(reason: "cannot move a panel beside itself")
+        }
+        guard let (strippedTree, removedSlot) = removingPanel(panelID, from: state.surface.layout) else {
+            throw PanelOperationError.panelNotFound(panelID)
+        }
+        let shareValue = share ?? defaultSideShare
+        guard let updatedTree = inserting(
+            .panel(removedSlot), beside: target, edge: edge, share: shareValue,
+            in: strippedTree, makeID: makeID
+        ) else {
+            throw PanelOperationError.anchorNotFound
+        }
+        state.surface.layout = updatedTree
+    }
+
+    // MARK: - resize
+
+    private static func applyResize(
+        splitID: SplitID, ratios: [Double], to state: inout PanelSurfaceState
+    ) throws {
+        guard let updatedTree = try resizingSplit(splitID, to: ratios, in: state.surface.layout) else {
+            throw PanelOperationError.splitNotFound(splitID)
+        }
+        state.surface.layout = updatedTree
     }
 
     // MARK: - tree edit helpers
@@ -229,6 +279,77 @@ public enum PanelSurfaceReducer {
         switch edge {
         case .left, .right: return .horizontal
         case .above, .below: return .vertical
+        }
+    }
+
+    // Remove a panel; unwrap single-child splits; renormalize sibling ratios.
+    // Returns nil when the id is absent. `.primary` is unremovable by type:
+    // only `.panel` nodes match a PanelID.
+    private static func removingPanel(
+        _ panelID: PanelID, from tree: PanelLayoutNode
+    ) -> (tree: PanelLayoutNode, removed: PanelSlot)? {
+        guard case .split(let split) = tree else { return nil }
+
+        var newChildren: [PanelLayoutNode] = []
+        var newRatios: [Double] = []
+        var removedSlot: PanelSlot?
+
+        for (index, child) in split.children.enumerated() {
+            if case .panel(let slot) = child, slot.id == panelID {
+                removedSlot = slot
+                continue  // drop this child and its ratio
+            }
+            if removedSlot == nil, let (updatedChild, removed) = removingPanel(panelID, from: child) {
+                removedSlot = removed
+                newChildren.append(updatedChild)
+                newRatios.append(split.ratios[index])
+                continue
+            }
+            newChildren.append(child)
+            newRatios.append(split.ratios[index])
+        }
+
+        guard let removed = removedSlot else { return nil }
+
+        if newChildren.count == 1 {
+            return (newChildren[0], removed)
+        }
+
+        let total = newRatios.reduce(0, +)
+        let normalizedRatios = total > 0 ? newRatios.map { $0 / total } : newRatios
+        return (.split(SplitNode(
+            id: split.id, direction: split.direction,
+            children: newChildren, ratios: normalizedRatios)), removed)
+    }
+
+    // Replace the ratios of the split whose id matches, after validation.
+    private static func resizingSplit(
+        _ splitID: SplitID, to ratios: [Double], in tree: PanelLayoutNode
+    ) throws -> PanelLayoutNode? {
+        switch tree {
+        case .primary, .panel:
+            return nil
+        case .split(var split):
+            if split.id == splitID {
+                guard ratios.count == split.children.count else {
+                    throw PanelOperationError.invalidRatios(
+                        reason: "expected \(split.children.count) ratios, got \(ratios.count)")
+                }
+                guard ratios.allSatisfy({ $0 >= PanelSurfaceValidator.minShare }) else {
+                    throw PanelOperationError.invalidRatios(
+                        reason: "ratio below minimum share \(PanelSurfaceValidator.minShare)")
+                }
+                let total = ratios.reduce(0, +)
+                split.ratios = total > 0 ? ratios.map { $0 / total } : ratios
+                return .split(split)
+            }
+            for (index, child) in split.children.enumerated() {
+                if let updated = try resizingSplit(splitID, to: ratios, in: child) {
+                    split.children[index] = updated
+                    return .split(split)
+                }
+            }
+            return nil
         }
     }
 }
