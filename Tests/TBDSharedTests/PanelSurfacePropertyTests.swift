@@ -15,7 +15,10 @@ private struct SeededRNG: RandomNumberGenerator {
     }
 }
 
-@Suite("PanelSurfaceProperties")
+// NOTE: `swift test --filter` matches the TYPE name (PanelSurfacePropertyTests),
+// not this display string — a filter on the display string matches zero tests
+// and exits green. Suite string kept identical to the type name on purpose.
+@Suite("PanelSurfacePropertyTests")
 struct PanelSurfacePropertyTests {
     private func file(_ n: Int) -> PanelContent { .file(FileReference(path: "/f\(n)")) }
 
@@ -34,7 +37,9 @@ struct PanelSurfacePropertyTests {
             return .open(content: file(counter),
                          placement: .beside(target: anchors.randomElement(using: &rng)!,
                                             edge: edges.randomElement(using: &rng)!,
-                                            share: Double.random(in: 0.1...0.5, using: &rng)))
+                                            // Deliberately dips below minShare (0.1) so the
+                                            // suite probes the reject path in `wrapped()`.
+                                            share: Double.random(in: 0.02...0.5, using: &rng)))
         case 2:
             return .close(panelID: panels.randomElement(using: &rng) ?? UUID())
         case 3:

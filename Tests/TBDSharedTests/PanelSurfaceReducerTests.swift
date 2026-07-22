@@ -147,6 +147,21 @@ struct PanelSurfaceReducerOpenTests {
         #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
     }
 
+    @Test func openBesideCrossAxis_subFloorShare_throwsInvalidRatiosStateUntouched() throws {
+        let panelA = PanelSlot(id: UUID(), content: file("/a"))
+        let state = splitState(rootID: UUID(), panelA: panelA)
+        #expect(throws: PanelOperationError.invalidRatios(
+            reason: "share 0.05 leaves a side below minimum share 0.1")) {
+            _ = try PanelSurfaceReducer.apply(
+                .open(content: file("/n"),
+                      placement: .beside(target: .panel(panelA.id), edge: .below, share: 0.05)),
+                to: state)
+        }
+        // Reject-don't-corrupt: the input value is untouched by construction
+        // (apply mutates only a local copy), pinned here anyway.
+        #expect(PanelSurfaceValidator.violations(in: state).isEmpty)
+    }
+
     @Test func selectTab_throwsNotTabScoped() {
         #expect(throws: PanelOperationError.notTabScoped) {
             _ = try PanelSurfaceReducer.apply(.selectTab(tabID: UUID()), to: bareState())

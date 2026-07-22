@@ -193,7 +193,7 @@ public enum PanelSurfaceReducer {
         makeID: () -> UUID
     ) throws -> PanelLayoutNode? {
         if matches(tree, anchor: anchor) {
-            return wrapped(node: node, around: tree, edge: edge, share: share, makeID: makeID)
+            return try wrapped(node: node, around: tree, edge: edge, share: share, makeID: makeID)
         }
         guard case .split(var split) = tree else { return nil }
         let splitAxis = axis(for: edge)
@@ -212,7 +212,7 @@ public enum PanelSurfaceReducer {
                 }
                 split.ratios = ratios
             } else {
-                split.children[index] = wrapped(
+                split.children[index] = try wrapped(
                     node: node, around: split.children[index],
                     edge: edge, share: share, makeID: makeID)
             }
@@ -274,10 +274,19 @@ public enum PanelSurfaceReducer {
         }
     }
 
+    /// Throws `.invalidRatios` when the new two-child split's ratios
+    /// (`share`, `1 - share`) would violate the minimum share — same
+    /// reject-don't-corrupt contract as the same-axis insert guard above.
     private static func wrapped(
         node: PanelLayoutNode, around existing: PanelLayoutNode,
         edge: PanelEdge, share: Double, makeID: () -> UUID
-    ) -> PanelLayoutNode {
+    ) throws -> PanelLayoutNode {
+        guard share >= PanelSurfaceValidator.minShare,
+              1 - share >= PanelSurfaceValidator.minShare else {
+            throw PanelOperationError.invalidRatios(
+                reason: "share \(share) leaves a side below "
+                    + "minimum share \(PanelSurfaceValidator.minShare)")
+        }
         let newFirst = edge == .left || edge == .above
         let children = newFirst ? [node, existing] : [existing, node]
         let ratios = newFirst ? [share, 1 - share] : [1 - share, share]
