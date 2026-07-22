@@ -2,6 +2,9 @@ import Foundation
 
 // MARK: - PaneContent
 
+/// Legacy pane-content model (Phase 1). Spec C's successor is `PanelContent`
+/// in `PanelSurfaceModel.swift` — note the deliberate one-letter difference:
+/// `Pane*` is legacy, `Panel*` is the new model.
 public enum PaneContent: Codable, Equatable, Sendable {
     case terminal(terminalID: UUID)
     case webview(id: UUID, url: URL)
@@ -32,6 +35,9 @@ public enum PaneContent: Codable, Equatable, Sendable {
 
 // MARK: - Tab
 
+/// Collides in name with `SwiftUI.Tab` (the macOS 15 `TabView` builder), so
+/// app call sites qualify this as `TBDShared.Tab`. Legacy type; successor is
+/// `WorkspaceTabSurface`.
 public struct Tab: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     public var content: PaneContent

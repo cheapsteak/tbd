@@ -9,6 +9,7 @@ public enum SplitDirection: String, Codable, Sendable {
 
 // MARK: - LayoutNode
 
+/// Legacy layout tree (Phase 1). Successor is `PanelLayoutNode`.
 public indirect enum LayoutNode: Equatable, Sendable {
     case pane(PaneContent)
     case split(id: UUID, direction: SplitDirection, children: [LayoutNode], ratios: [CGFloat])
