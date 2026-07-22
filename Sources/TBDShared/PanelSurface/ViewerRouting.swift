@@ -1,5 +1,4 @@
 import Foundation
-import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "ViewerRouting")
@@ -12,16 +11,28 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "ViewerRouting")
 /// "slot" pane in place — the call site pushes `outgoing` onto that slot's
 /// `PaneHistory`. `removedPaneID` is non-nil when the gesture closed a pane
 /// (transcript toggle-off) — the call site prunes that pane's history.
-struct ViewerRouteResult: Equatable {
-    struct Replacement: Equatable {
-        let paneID: UUID
-        let outgoing: PaneContent
-        let incoming: PaneContent
+public struct ViewerRouteResult: Equatable {
+    public struct Replacement: Equatable {
+        public let paneID: UUID
+        public let outgoing: PaneContent
+        public let incoming: PaneContent
+
+        public init(paneID: UUID, outgoing: PaneContent, incoming: PaneContent) {
+            self.paneID = paneID
+            self.outgoing = outgoing
+            self.incoming = incoming
+        }
     }
 
-    let layout: LayoutNode
-    var replaced: Replacement? = nil
-    var removedPaneID: UUID? = nil
+    public let layout: LayoutNode
+    public var replaced: Replacement? = nil
+    public var removedPaneID: UUID? = nil
+
+    public init(layout: LayoutNode, replaced: Replacement? = nil, removedPaneID: UUID? = nil) {
+        self.layout = layout
+        self.replaced = replaced
+        self.removedPaneID = removedPaneID
+    }
 }
 
 // MARK: - routeFileClick
@@ -37,7 +48,7 @@ struct ViewerRouteResult: Equatable {
 /// In-place replacements preserve the pane's `paneID` so SwiftUI keeps the
 /// view identity stable, including any `@StateObject` it owns — notably the
 /// `FileWatcher` — and so the slot's `PaneHistory` stays keyed to one UUID.
-func routeFileClick(into layout: LayoutNode, terminalID: UUID, path: String) -> ViewerRouteResult {
+public func routeFileClick(into layout: LayoutNode, terminalID: UUID, path: String) -> ViewerRouteResult {
     let isCodeViewer: (PaneContent) -> Bool = { content in
         if case .codeViewer = content { return true } else { return false }
     }

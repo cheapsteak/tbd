@@ -1,8 +1,7 @@
 import Foundation
 import Testing
-import TBDShared
 
-@testable import TBDApp
+@testable import TBDShared
 
 @Suite("ViewerRouting")
 struct ViewerRoutingTests {

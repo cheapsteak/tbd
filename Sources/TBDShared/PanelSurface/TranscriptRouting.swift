@@ -1,5 +1,4 @@
 import Foundation
-import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TranscriptRouting")
@@ -8,7 +7,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "TranscriptRouti
 ///
 /// Shared by `toggleTranscript` and the toolbar button's open-state check so
 /// the two never drift apart.
-func isLiveTranscriptPane(_ content: PaneContent, for terminalID: UUID) -> Bool {
+public func isLiveTranscriptPane(_ content: PaneContent, for terminalID: UUID) -> Bool {
     if case .liveTranscript(_, let tid) = content { return tid == terminalID }
     return false
 }
@@ -19,7 +18,7 @@ func isLiveTranscriptPane(_ content: PaneContent, for terminalID: UUID) -> Bool 
 /// that pane. Toggle on: reuse an existing viewer-class slot in place
 /// (preserving its `paneID`, see `routeFileClick`); otherwise split
 /// horizontally off `fromPaneID`, matching the original always-open behavior.
-func toggleTranscript(into layout: LayoutNode, terminalID: UUID, fromPaneID: UUID) -> ViewerRouteResult {
+public func toggleTranscript(into layout: LayoutNode, terminalID: UUID, fromPaneID: UUID) -> ViewerRouteResult {
     if let transcriptID = layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) {
         if let updated = layout.removePane(id: transcriptID) {
             logger.debug("toggleTranscript[close]: transcriptID=\(transcriptID, privacy: .public)")
