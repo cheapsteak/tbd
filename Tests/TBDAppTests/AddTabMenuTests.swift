@@ -74,6 +74,20 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     #expect(availability.codex)
 }
 
+@Test func agentExecutableAvailability_detectsVoltaBinFallback() throws {
+    let home = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-agent-home-\(UUID().uuidString)", isDirectory: true)
+    let voltaBin = home.appendingPathComponent(".volta/bin", isDirectory: true)
+    try FileManager.default.createDirectory(at: voltaBin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    try makeExecutable(named: "codex", in: voltaBin)
+
+    let availability = AgentExecutableAvailability.detect(path: nil, homeDir: home.path)
+
+    #expect(availability.claude == false)
+    #expect(availability.codex)
+}
+
 @MainActor
 @Test func addTabMenu_withNoProfiles_insertsNoProfileItems() {
     let menu = AddTabMenu.build(profiles: [], coordinator: makeCoordinator())
