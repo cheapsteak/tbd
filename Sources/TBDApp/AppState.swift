@@ -401,6 +401,11 @@ final class AppState: ObservableObject {
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }
+    /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
+    /// (spec C §3.12): never persisted, never mirrored, never part of the
+    /// panel surface. Kept separate from `layouts` (tab-ID-keyed) so the two
+    /// keying schemes can't collide in one dictionary.
+    @Published var gridLayouts: [UUID: LayoutNode] = [:]
     /// Back/forward history per viewer-class slot pane, keyed by the slot's
     /// paneID (stable across in-place content replacements).
     @Published var paneHistories: [UUID: PaneHistory] = [:] {

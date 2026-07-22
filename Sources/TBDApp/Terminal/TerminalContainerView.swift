@@ -569,11 +569,11 @@ private struct MultiWorktreeCell: View {
         if let worktree, let terminal = primaryTerminal {
             let layoutBinding = Binding<LayoutNode>(
                 get: {
-                    appState.layouts[worktreeID]
+                    appState.gridLayouts[worktreeID]
                         ?? .pane(.terminal(terminalID: terminal.id))
                 },
                 set: { newLayout in
-                    appState.layouts[worktreeID] = newLayout
+                    appState.gridLayouts[worktreeID] = newLayout
                 }
             )
             PanePlaceholder(
