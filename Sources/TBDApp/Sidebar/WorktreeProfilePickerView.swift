@@ -16,7 +16,9 @@ import TBDShared
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
 ///
-/// Modeled on `BranchPickerView` for consistent popover sizing/styling.
+/// Width matches `BranchPickerView` for consistent popover styling; height is
+/// per-page (see `body`) so the short profiles list isn't padded out to the
+/// branch list's minimum.
 struct WorktreeProfilePickerView: View {
     let repoID: UUID
     /// When set, created worktrees are nested under this parent (the nested `+`
@@ -52,7 +54,12 @@ struct WorktreeProfilePickerView: View {
             }
         }
         .frame(width: 300)
-        .frame(minHeight: 320)
+        // Height is per-page: `.branches` needs a 320pt minimum so the
+        // searchable list stays usable, while `.profiles` hugs its rows. The
+        // hosting `FloatingPanel` tracks SwiftUI content-size changes
+        // (NSHostingView sizing), so switching pages resizes the panel in
+        // place with its top edge pinned.
+        .frame(minHeight: page == .branches ? 320 : nil, alignment: .top)
         .task {
             // Ensure the list (and usage suffixes) are populated even if the
             // user hasn't opened Settings yet this session.
