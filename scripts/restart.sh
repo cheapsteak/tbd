@@ -217,6 +217,14 @@ INSTALLED_BUNDLE="/Applications/TBD.app"
 BUNDLED_EXEC_PATH="$INSTALLED_BUNDLE/Contents/MacOS/TBDApp"
 APP_EXEC_PATTERN=""
 
+# THIS worktree's bundle binary, resolved and escaped for end-anchored
+# pgrep/pkill. Needed on both paths: it's the launch target on the WIP path,
+# and on the install path it identifies a leftover WIP instance launched from
+# this worktree's .build bundle before the install. Never matches sibling
+# worktrees — their bundles live under their own paths.
+WORKTREE_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
+WORKTREE_EXEC_PATTERN="$(printf '%s' "$WORKTREE_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+
 if [ "$install_to_applications" = true ]; then
     # Sign + install to /Applications to satisfy macOS UNUserNotificationCenter:
     #  - Re-signing with --force --deep makes the codesign identifier match
@@ -272,8 +280,7 @@ else
     # command line is the bundle binary (.../TBD.app/Contents/MacOS/TBDApp),
     # not the unwrapped swift-build output. Match pgrep/pkill against the
     # resolved bundle path so the end-anchored pattern actually hits.
-    APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
-    APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+    APP_EXEC_PATTERN="$WORKTREE_EXEC_PATTERN"
 fi
 
 # MARK: - Restart Daemon
@@ -316,6 +323,14 @@ if [ "$daemon_only" = false ]; then
     # editors, or sibling worktrees whose command line contains "TBDApp".
     if [ -n "$APP_EXEC_PATTERN" ]; then
         pkill -f "^${APP_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
+    fi
+    # On a full install, also kill a leftover WIP instance launched from THIS
+    # worktree's own .build bundle (before the install), or two TBDApp
+    # processes survive. Still never touches sibling worktrees. On the WIP
+    # path the patterns are identical, so this is skipped — no double-kill.
+    if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
+        && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
+        pkill -f "^${WORKTREE_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
     fi
 
     echo "Starting app..."
