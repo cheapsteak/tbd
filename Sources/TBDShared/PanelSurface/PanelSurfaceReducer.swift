@@ -335,12 +335,19 @@ public enum PanelSurfaceReducer {
                     throw PanelOperationError.invalidRatios(
                         reason: "expected \(split.children.count) ratios, got \(ratios.count)")
                 }
-                guard ratios.allSatisfy({ $0 >= PanelSurfaceValidator.minShare }) else {
-                    throw PanelOperationError.invalidRatios(
-                        reason: "ratio below minimum share \(PanelSurfaceValidator.minShare)")
-                }
                 let total = ratios.reduce(0, +)
-                split.ratios = total > 0 ? ratios.map { $0 / total } : ratios
+                guard total > 0 else {
+                    throw PanelOperationError.invalidRatios(reason: "ratios sum to zero")
+                }
+                // Validate min-share on NORMALIZED ratios: raw values that pass
+                // the floor can still normalize below it (e.g. [0.1, 1.0]),
+                // which would land an invalid state without throwing.
+                let normalized = ratios.map { $0 / total }
+                guard normalized.allSatisfy({ $0 >= PanelSurfaceValidator.minShare }) else {
+                    throw PanelOperationError.invalidRatios(
+                        reason: "normalized ratio below minimum share \(PanelSurfaceValidator.minShare)")
+                }
+                split.ratios = normalized
                 return .split(split)
             }
             for (index, child) in split.children.enumerated() {

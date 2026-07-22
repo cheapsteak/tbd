@@ -239,9 +239,32 @@ struct PanelSurfaceReducerEditTests {
             _ = try PanelSurfaceReducer.apply(
                 .resize(splitID: outer.id, ratios: [1.0]), to: state)  // count mismatch
         }
-        #expect(throws: PanelOperationError.self) {
+        let ghost = UUID()
+        #expect(throws: PanelOperationError.splitNotFound(ghost)) {
             _ = try PanelSurfaceReducer.apply(
-                .resize(splitID: UUID(), ratios: [0.5, 0.5]), to: state)
+                .resize(splitID: ghost, ratios: [0.5, 0.5]), to: state)
         }
+    }
+
+    @Test func resize_rejectsRatiosThatNormalizeBelowMinShare() throws {
+        let (state, a, _) = try threeUp()
+        // Two-panel inner state: close /b so the root split has exactly 2 children.
+        let twoUp = try PanelSurfaceReducer.apply(.close(panelID: a), to: state)
+        guard case .split(let split) = twoUp.surface.layout else {
+            Issue.record("expected split"); return
+        }
+        // Raw [0.1, 1.0] passes a raw-value floor check but normalizes to
+        // [0.0909, 0.909] — below minShare. Must throw, not land invalid state.
+        #expect(throws: PanelOperationError.invalidRatios(
+            reason: "normalized ratio below minimum share \(PanelSurfaceValidator.minShare)")) {
+            _ = try PanelSurfaceReducer.apply(
+                .resize(splitID: split.id, ratios: [0.1, 1.0]), to: twoUp)
+        }
+        // Throwing apply leaves the caller's state untouched.
+        #expect(PanelSurfaceValidator.violations(in: twoUp).isEmpty)
+        guard case .split(let after) = twoUp.surface.layout else {
+            Issue.record("expected split"); return
+        }
+        #expect(after.ratios == split.ratios, "pre-op ratios survive the throw")
     }
 }
