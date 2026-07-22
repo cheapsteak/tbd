@@ -234,6 +234,7 @@ struct AgentExecutableAvailability: Equatable {
             .map(String.init)
         let fallbackDirs = [
             "\(homeDir)/.local/bin",
+            "\(homeDir)/.volta/bin",
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "/usr/bin",
