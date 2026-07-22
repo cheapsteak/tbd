@@ -124,24 +124,6 @@ struct TBDCommands: Commands {
             }
             .keyboardShortcut("w", modifiers: .command)
             .disabled(!appState.canCloseFocusedTab)
-
-            Divider()
-
-            Button("Split Horizontally") {
-                Task { @MainActor in
-                    appState.splitTerminalHorizontally()
-                }
-            }
-            .keyboardShortcut("d", modifiers: .command)
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
-
-            Button("Split Vertically") {
-                Task { @MainActor in
-                    appState.splitTerminalVertically()
-                }
-            }
-            .keyboardShortcut("d", modifiers: [.command, .shift])
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
         }
 
         // Worktree selection by index (Cmd-1 through Cmd-9)

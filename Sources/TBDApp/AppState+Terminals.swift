@@ -247,23 +247,6 @@ extension AppState {
         }
     }
 
-    /// Create a terminal via the daemon without adding a tab.
-    /// Used when splitting an existing tab — the terminal lives inside
-    /// the parent tab's layout tree, not as its own tab.
-    func createTerminalForSplit(worktreeID: UUID) async -> Terminal? {
-        do {
-            let size = mainAreaTerminalSize()
-            let colorFgBg = appearance?.currentColorFgBg
-            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
-            terminals[worktreeID, default: []].append(terminal)
-            return terminal
-        } catch {
-            logger.error("Failed to create terminal for split: \(error)")
-            handleConnectionError(error)
-            return nil
-        }
-    }
-
     /// Delete a terminal (kills tmux window and removes from daemon DB).
     func deleteTerminal(terminalID: UUID, worktreeID: UUID) async {
         do {
