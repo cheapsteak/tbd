@@ -70,4 +70,16 @@ struct PanelSurfaceValidatorTests {
             ratios: [0.3, 0.3]))))
             .contains(.ratioSumInvalid(badSum)))
     }
+
+    @Test func nestedSplitViolationsAreCaught() {
+        let outer = UUID(), inner = UUID()
+        let s = surface(layout: .split(SplitNode(
+            id: outer, direction: .horizontal,
+            children: [.primary, .split(SplitNode(
+                id: inner, direction: .vertical,
+                children: [slot("/a"), slot("/b")], ratios: [0.95, 0.05]))],
+            ratios: [0.5, 0.5])))
+        let violations = PanelSurfaceValidator.violations(in: s)
+        #expect(violations == [.ratioBelowMinimum(inner)])
+    }
 }
