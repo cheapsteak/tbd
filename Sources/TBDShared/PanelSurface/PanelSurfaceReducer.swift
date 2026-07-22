@@ -76,7 +76,7 @@ public enum PanelSurfaceReducer {
         case .beside(let target, let edge, let share):
             let shareValue = share ?? defaultSideShare
             let newSlot = PanelSlot(id: makeID(), content: content)
-            guard let updatedTree = inserting(
+            guard let updatedTree = try inserting(
                 .panel(newSlot), beside: target, edge: edge, share: shareValue,
                 in: state.surface.layout, makeID: makeID
             ) else {
@@ -159,7 +159,7 @@ public enum PanelSurfaceReducer {
             throw PanelOperationError.panelNotFound(panelID)
         }
         let shareValue = share ?? defaultSideShare
-        guard let updatedTree = inserting(
+        guard let updatedTree = try inserting(
             .panel(removedSlot), beside: target, edge: edge, share: shareValue,
             in: strippedTree, makeID: makeID
         ) else {
@@ -182,11 +182,16 @@ public enum PanelSurfaceReducer {
     // MARK: - tree edit helpers
 
     /// Insert `node` beside the anchor. Returns nil when the anchor is absent.
+    /// Throws `.invalidRatios` when inserting into an existing same-axis split
+    /// would compress a sibling below the minimum share — compounding
+    /// inserts into the same split otherwise shrink older siblings silently
+    /// (caught by the Task 13 property suite: `open`/`move` must reject like
+    /// `resize` does, never corrupt).
     private static func inserting(
         _ node: PanelLayoutNode, beside anchor: PanelAnchor,
         edge: PanelEdge, share: Double, in tree: PanelLayoutNode,
         makeID: () -> UUID
-    ) -> PanelLayoutNode? {
+    ) throws -> PanelLayoutNode? {
         if matches(tree, anchor: anchor) {
             return wrapped(node: node, around: tree, edge: edge, share: share, makeID: makeID)
         }
@@ -200,6 +205,11 @@ public enum PanelSurfaceReducer {
                 split.children.insert(node, at: insertIndex)
                 var ratios = split.ratios.map { $0 * (1 - share) }
                 ratios.insert(share, at: insertIndex)
+                guard ratios.allSatisfy({ $0 >= PanelSurfaceValidator.minShare }) else {
+                    throw PanelOperationError.invalidRatios(
+                        reason: "inserting share \(share) would push a sibling below "
+                            + "minimum share \(PanelSurfaceValidator.minShare)")
+                }
                 split.ratios = ratios
             } else {
                 split.children[index] = wrapped(
@@ -210,7 +220,7 @@ public enum PanelSurfaceReducer {
         }
 
         for (index, child) in split.children.enumerated() {
-            if let updated = inserting(
+            if let updated = try inserting(
                 node, beside: anchor, edge: edge, share: share, in: child, makeID: makeID
             ) {
                 split.children[index] = updated
