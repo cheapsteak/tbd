@@ -482,6 +482,22 @@ struct LayoutNodeTests {
         if case .pane(.terminal) = children[0] {} else { Issue.record("legacy terminal leaf lost") }
     }
 
+    @Test func decodeEncodeDecode_preservesGeneratedSplitID() throws {
+        // Legacy no-id blob: first decode mints an id; once re-encoded, that
+        // id must survive every subsequent decode (Task 5 keys SwiftUI
+        // identity on it).
+        let legacy = """
+        {"type":"split","direction":"horizontal","ratios":[0.5,0.5],
+         "children":[{"type":"terminal","terminalID":"\(UUID().uuidString)"},
+                     {"type":"terminal","terminalID":"\(UUID().uuidString)"}]}
+        """.data(using: .utf8)!
+        let first = try JSONDecoder().decode(LayoutNode.self, from: legacy)
+        let generatedID = first.nodeID
+        let second = try JSONDecoder().decode(LayoutNode.self, from: JSONEncoder().encode(first))
+        #expect(second.nodeID == generatedID, "id generated on first decode must survive re-encode")
+        #expect(second == first)
+    }
+
     @Test func updatingRatios_targetsSplitByID() {
         let innerID = UUID(), outerID = UUID()
         let paneA = UUID(), paneB = UUID(), paneC = UUID()

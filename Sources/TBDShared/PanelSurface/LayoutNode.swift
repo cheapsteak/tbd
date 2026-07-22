@@ -254,7 +254,9 @@ extension LayoutNode: Codable {
         case .split:
             // Absent in older persisted layouts; generate a fresh id so decode
             // never fails, at the cost of losing render identity for that split
-            // until it's next encoded.
+            // until it's next encoded. Two independent decodes of the same
+            // still-unmigrated legacy blob mint different ids (inherent,
+            // expected) — stability begins once the value is re-encoded.
             let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
             let direction = try container.decode(SplitDirection.self, forKey: .direction)
             let children = try container.decode([LayoutNode].self, forKey: .children)
