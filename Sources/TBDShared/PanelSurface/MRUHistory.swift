@@ -1,39 +1,47 @@
 import Foundation
-import TBDShared
 
-/// Tab-like MRU navigation history for one viewer-class "slot" pane.
+/// Tab-like MRU navigation history (shipped semantics of PR #472).
 ///
-/// `entries[0]` is the most recently committed content; `cursor` indexes the
-/// entry currently shown — the slot's current content IS `entries[cursor]`.
-/// Back/forward/jump only move the cursor and never reorder the list; a real
-/// navigation (`recordReplacement`) commits the current entry to the front,
-/// dedupes the incoming content (an entry moves rather than duplicates), and
-/// inserts it at index 0. Every entry carries the slot's own `paneID`, so
-/// applying an entry via `LayoutNode.replacingContent(at:with:)` preserves
-/// view identity.
-struct PaneHistory: Codable, Equatable, Sendable {
-    static let maxEntries = 10
+/// `entries[0]` is the most recently committed element; `cursor` indexes the
+/// currently shown entry. Back/forward/jump only move the cursor and never
+/// reorder; `recordReplacement` commits the current entry to the front,
+/// dedupes the incoming element (an entry moves rather than duplicates),
+/// inserts it at index 0, and caps at `maxEntries` by evicting the tail —
+/// never the current entry.
+public struct MRUHistory<Element: Codable & Equatable & Sendable>: Codable, Equatable, Sendable {
+    public static var maxEntries: Int { 10 }
 
-    private(set) var entries: [PaneContent] = []
-    private(set) var cursor: Int = -1
+    public private(set) var entries: [Element] = []
+    public private(set) var cursor: Int = -1
+
+    public init() {}
+
+    /// A history whose single entry is the panel's initial content
+    /// (`entries[cursor] == content` from birth — Spec C §6).
+    public static func seeded(with element: Element) -> MRUHistory {
+        var history = MRUHistory()
+        history.entries = [element]
+        history.cursor = 0
+        return history
+    }
 
     /// Back moves toward older entries (higher indices).
-    var canGoBack: Bool { !entries.isEmpty && cursor < entries.count - 1 }
+    public var canGoBack: Bool { !entries.isEmpty && cursor < entries.count - 1 }
     /// Forward moves toward newer entries (lower indices).
-    var canGoForward: Bool { cursor > 0 }
+    public var canGoForward: Bool { cursor > 0 }
 
     /// True when `(entries, cursor)` is internally consistent. In-process
     /// mutations preserve this; only decoded (persisted) data can violate it.
-    var isWellFormed: Bool {
+    public var isWellFormed: Bool {
         entries.isEmpty ? cursor == -1 : entries.indices.contains(cursor)
     }
 
     /// Records a real content navigation (file click, transcript toggle):
     /// moves the current entry to index 0, removes any existing occurrence
-    /// of `incoming` (one entry per content), inserts `incoming` at index 0,
+    /// of `incoming` (one entry per element), inserts `incoming` at index 0,
     /// and caps at `maxEntries` by evicting the tail — never the current
     /// entry, which was just moved to the front. No-op when nothing changed.
-    mutating func recordReplacement(outgoing: PaneContent, incoming: PaneContent) {
+    public mutating func recordReplacement(outgoing: Element, incoming: Element) {
         guard outgoing != incoming else { return }
         if entries.isEmpty {
             entries = [outgoing]
@@ -52,14 +60,14 @@ struct PaneHistory: Codable, Equatable, Sendable {
 
     /// Moves the cursor one entry toward older and returns it. Navigation
     /// only moves the cursor — it never reorders or re-pushes.
-    mutating func goBack() -> PaneContent? {
+    public mutating func goBack() -> Element? {
         guard canGoBack else { return nil }
         cursor += 1
         return entries[cursor]
     }
 
     /// Moves the cursor one entry toward newer and returns it.
-    mutating func goForward() -> PaneContent? {
+    public mutating func goForward() -> Element? {
         guard canGoForward else { return nil }
         cursor -= 1
         return entries[cursor]
@@ -67,9 +75,12 @@ struct PaneHistory: Codable, Equatable, Sendable {
 
     /// Jumps the cursor to an absolute entry index (from a history menu).
     /// No reorder — selecting a menu entry only moves the cursor.
-    mutating func go(to index: Int) -> PaneContent? {
+    public mutating func go(to index: Int) -> Element? {
         guard entries.indices.contains(index), index != cursor else { return nil }
         cursor = index
         return entries[index]
     }
 }
+
+/// PR #472's app-side history, now shared. Same name, same wire shape.
+public typealias PaneHistory = MRUHistory<PaneContent>
