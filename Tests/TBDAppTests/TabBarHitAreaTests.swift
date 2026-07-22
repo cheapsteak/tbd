@@ -11,7 +11,7 @@ struct TabBarHitAreaTests {
     func selectionTargetIncludesTabPadding() {
         let worktreeID = UUID()
         let terminalID = UUID()
-        let tab = Tab(id: terminalID, content: .terminal(terminalID: terminalID), label: "A")
+        let tab = TBDShared.Tab(id: terminalID, content: .terminal(terminalID: terminalID), label: "A")
         let suiteName = "TabBarHitAreaTests-\(UUID().uuidString)"
 
         do {

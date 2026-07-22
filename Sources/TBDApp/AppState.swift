@@ -406,7 +406,7 @@ final class AppState: ObservableObject {
     @Published var paneHistories: [UUID: PaneHistory] = [:] {
         didSet { persistPaneHistories() }
     }
-    @Published var tabs: [UUID: [Tab]] = [:]
+    @Published var tabs: [UUID: [TBDShared.Tab]] = [:]
     @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
     @Published var draggingTabID: UUID? = nil
@@ -1281,7 +1281,7 @@ final class AppState: ObservableObject {
     /// uses (`layouts[tab.id] ?? .pane(tab.content)` then `allTerminalIDs()`),
     /// then unions the `tab.content` terminal so `.liveTranscript` tabs — whose
     /// IDs `allTerminalIDs()` does not enumerate — stay covered.
-    func terminalIDs(in tab: Tab) -> Set<UUID> {
+    func terminalIDs(in tab: TBDShared.Tab) -> Set<UUID> {
         let layout = layouts[tab.id] ?? .pane(tab.content)
         var ids = Set(layout.allTerminalIDs())
         switch tab.content {
@@ -1809,7 +1809,7 @@ final class AppState: ObservableObject {
 
         // 3. Add tabs for terminals not already in any surviving layout.
         for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
-            currentTabs.append(Tab(
+            currentTabs.append(TBDShared.Tab(
                 id: terminal.id,
                 content: .terminal(terminalID: terminal.id),
                 label: initialTabLabel(for: terminal)
@@ -1845,7 +1845,7 @@ final class AppState: ObservableObject {
 
         // Add tabs for notes not already represented
         for note in notes where !noteIDsInTabs.contains(note.id) {
-            currentTabs.append(Tab(id: note.id, content: .note(noteID: note.id), label: nil))
+            currentTabs.append(TBDShared.Tab(id: note.id, content: .note(noteID: note.id), label: nil))
         }
 
         tabs[worktreeID] = currentTabs

@@ -3,13 +3,13 @@ import CoreGraphics
 
 // MARK: - SplitDirection
 
-enum SplitDirection: String, Codable, Sendable {
+public enum SplitDirection: String, Codable, Sendable {
     case horizontal, vertical
 }
 
 // MARK: - LayoutNode
 
-indirect enum LayoutNode: Equatable, Sendable {
+public indirect enum LayoutNode: Equatable, Sendable {
     case pane(PaneContent)
     case split(direction: SplitDirection, children: [LayoutNode], ratios: [CGFloat])
 
@@ -17,7 +17,7 @@ indirect enum LayoutNode: Equatable, Sendable {
 
     /// Finds the pane with the given ID and replaces it with a split
     /// containing the original + new pane at 50/50 ratio.
-    func splitPane(id: UUID, direction: SplitDirection, newContent: PaneContent) -> LayoutNode {
+    public func splitPane(id: UUID, direction: SplitDirection, newContent: PaneContent) -> LayoutNode {
         switch self {
         case .pane(let content):
             if content.paneID == id {
@@ -42,7 +42,7 @@ indirect enum LayoutNode: Equatable, Sendable {
 
     /// Removes a pane, simplifying the tree. If a split has one child left,
     /// unwrap it. Returns nil if the last pane is removed.
-    func removePane(id: UUID) -> LayoutNode? {
+    public func removePane(id: UUID) -> LayoutNode? {
         switch self {
         case .pane(let content):
             if content.paneID == id {
@@ -80,7 +80,7 @@ indirect enum LayoutNode: Equatable, Sendable {
     }
 
     /// Flat list of all pane IDs in the tree.
-    func allPaneIDs() -> [UUID] {
+    public func allPaneIDs() -> [UUID] {
         switch self {
         case .pane(let content):
             return [content.paneID]
@@ -92,7 +92,7 @@ indirect enum LayoutNode: Equatable, Sendable {
     // MARK: - Backward-compatible convenience
 
     /// Flat list of all terminal IDs in the tree (terminals only).
-    func allTerminalIDs() -> [UUID] {
+    public func allTerminalIDs() -> [UUID] {
         switch self {
         case .pane(let content):
             if case .terminal(let id) = content {
@@ -107,7 +107,7 @@ indirect enum LayoutNode: Equatable, Sendable {
     /// Returns a copy of the layout with terminal panes outside `allowedIDs`
     /// removed. Non-terminal panes are preserved. If every pane is removed,
     /// returns nil.
-    func removingTerminalPanes(notIn allowedIDs: Set<UUID>) -> LayoutNode? {
+    public func removingTerminalPanes(notIn allowedIDs: Set<UUID>) -> LayoutNode? {
         switch self {
         case .pane(let content):
             if case .terminal(let id) = content, !allowedIDs.contains(id) {
@@ -148,13 +148,13 @@ indirect enum LayoutNode: Equatable, Sendable {
 extension LayoutNode {
     /// Returns the id of the first pane (in pre-order, left-to-right traversal)
     /// whose content matches the predicate, or nil if none match.
-    func firstPaneID(where predicate: (PaneContent) -> Bool) -> UUID? {
+    public func firstPaneID(where predicate: (PaneContent) -> Bool) -> UUID? {
         firstPaneContent(where: predicate)?.paneID
     }
 
     /// Returns the content of the first pane (in pre-order, left-to-right
     /// traversal) matching the predicate, or nil if none match.
-    func firstPaneContent(where predicate: (PaneContent) -> Bool) -> PaneContent? {
+    public func firstPaneContent(where predicate: (PaneContent) -> Bool) -> PaneContent? {
         switch self {
         case .pane(let content):
             return predicate(content) ? content : nil
@@ -171,7 +171,7 @@ extension LayoutNode {
     /// Returns a copy of the tree with the pane identified by `paneID` replaced
     /// by `newContent`. Sibling panes and split ratios are preserved exactly.
     /// Returns nil if no pane has that id.
-    func replacingContent(at paneID: UUID, with newContent: PaneContent) -> LayoutNode? {
+    public func replacingContent(at paneID: UUID, with newContent: PaneContent) -> LayoutNode? {
         switch self {
         case .pane(let content):
             return content.paneID == paneID ? .pane(newContent) : nil
@@ -211,7 +211,7 @@ extension LayoutNode: Codable {
         case split
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(NodeType.self, forKey: .type)
 
@@ -231,7 +231,7 @@ extension LayoutNode: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {

@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "ViewerRouting")

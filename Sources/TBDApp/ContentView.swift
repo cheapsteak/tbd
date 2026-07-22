@@ -243,7 +243,7 @@ struct ContentView: View {
                                 } else {
                                     // Create and focus new PR tab
                                     let webviewID = UUID()
-                                    let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
+                                    let tab = TBDShared.Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
                                     appState.tabs[worktreeID, default: []].append(tab)
                                     appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
                                 }

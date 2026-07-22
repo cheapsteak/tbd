@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Tab-like MRU navigation history for one viewer-class "slot" pane.
 ///

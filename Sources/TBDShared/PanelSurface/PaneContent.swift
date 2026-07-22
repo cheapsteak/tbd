@@ -2,14 +2,14 @@ import Foundation
 
 // MARK: - PaneContent
 
-enum PaneContent: Codable, Equatable, Sendable {
+public enum PaneContent: Codable, Equatable, Sendable {
     case terminal(terminalID: UUID)
     case webview(id: UUID, url: URL)
     case codeViewer(id: UUID, path: String)
     case note(noteID: UUID)
     case liveTranscript(id: UUID, terminalID: UUID)
 
-    var paneID: UUID {
+    public var paneID: UUID {
         switch self {
         case .terminal(let id): return id
         case .webview(let id, _): return id
@@ -22,7 +22,7 @@ enum PaneContent: Codable, Equatable, Sendable {
     /// Viewer-class panes form one interchangeable "slot" per tab:
     /// content-navigation gestures replace within the slot (preserving the
     /// pane UUID); explicit split gestures still create new panes.
-    var isViewerClass: Bool {
+    public var isViewerClass: Bool {
         switch self {
         case .codeViewer, .webview, .liveTranscript: return true
         case .terminal, .note: return false
@@ -32,8 +32,14 @@ enum PaneContent: Codable, Equatable, Sendable {
 
 // MARK: - Tab
 
-struct Tab: Identifiable, Codable, Equatable, Sendable {
-    let id: UUID
-    var content: PaneContent
-    var label: String?
+public struct Tab: Identifiable, Codable, Equatable, Sendable {
+    public let id: UUID
+    public var content: PaneContent
+    public var label: String?
+
+    public init(id: UUID, content: PaneContent, label: String? = nil) {
+        self.id = id
+        self.content = content
+        self.label = label
+    }
 }
