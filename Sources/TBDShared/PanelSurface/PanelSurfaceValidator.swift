@@ -38,6 +38,22 @@ public enum PanelSurfaceValidator {
         return found
     }
 
+    public static func violations(in state: PanelSurfaceState) -> [PanelSurfaceViolation] {
+        var found = violations(in: state.surface)
+        for (panelID, history) in state.histories {
+            if !history.isWellFormed {
+                found.append(.malformedHistory(panelID))
+                continue
+            }
+            if let slot = state.surface.layout.panelSlot(id: panelID),
+               !history.entries.isEmpty,
+               history.entries[history.cursor] != slot.content {
+                found.append(.historyContentMismatch(panelID))
+            }
+        }
+        return found
+    }
+
     private static func appendSplitViolations(
         of node: PanelLayoutNode, to found: inout [PanelSurfaceViolation]
     ) {
