@@ -23,7 +23,7 @@ struct AppStateTerminalReconciliationTests {
             Tab(id: localID, content: .terminal(terminalID: localID), label: nil),
         ]
         state.layouts[localID] = .split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: localID)),
                 .pane(.terminal(terminalID: foreignID)),
@@ -84,8 +84,9 @@ struct AppStateTerminalReconciliationTests {
         state.tabs[worktreeID] = [
             Tab(id: tabID, content: .terminal(terminalID: localID), label: nil),
         ]
+        let splitID = UUID()
         state.layouts[tabID] = .split(
-            direction: .horizontal,
+            id: splitID, direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: localID)),
                 .pane(.webview(id: webID, url: URL(string: "https://example.com")!)),
@@ -97,7 +98,7 @@ struct AppStateTerminalReconciliationTests {
         state.reconcileTabs(worktreeID: worktreeID, terminals: [localTerminal])
 
         #expect(state.layouts[tabID] == .split(
-            direction: .horizontal,
+            id: splitID, direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: localID)),
                 .pane(.webview(id: webID, url: URL(string: "https://example.com")!)),

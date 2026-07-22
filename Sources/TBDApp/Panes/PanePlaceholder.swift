@@ -197,25 +197,6 @@ struct PanePlaceholder: View {
     private var toolbarActions: some View {
         switch content {
         case .terminal(let terminalID):
-            Button(action: splitRight) {
-                HStack(spacing: 2) {
-                    Image(systemName: "rectangle.split.1x2")
-                        .rotationEffect(.degrees(90))
-                    Text("Split Right")
-                }
-                .font(.caption)
-            }
-            .buttonStyle(.borderless)
-
-            Button(action: splitDown) {
-                HStack(spacing: 2) {
-                    Image(systemName: "rectangle.split.1x2")
-                    Text("Split Down")
-                }
-                .font(.caption)
-            }
-            .buttonStyle(.borderless)
-
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
                 let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
                 Button(action: { toggleTranscriptPane(terminalID: terminalID) }) {
@@ -607,20 +588,6 @@ struct PanePlaceholder: View {
         }
     }
 
-    // MARK: - Split Actions
-
-    private func splitRight() {
-        Task {
-            await createTerminalSplit(direction: .horizontal)
-        }
-    }
-
-    private func splitDown() {
-        Task {
-            await createTerminalSplit(direction: .vertical)
-        }
-    }
-
     private func toggleTranscriptPane(terminalID: UUID) {
         let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
         if let replaced = result.replaced {
@@ -640,18 +607,6 @@ struct PanePlaceholder: View {
 
     private func isTranscriptOpen(terminalID: UUID) -> Bool {
         layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) != nil
-    }
-
-    /// Creates a real terminal via the daemon, then inserts it as a split pane.
-    /// Uses createTerminalForSplit so no extra tab is created — the terminal
-    /// lives inside this tab's layout tree.
-    private func createTerminalSplit(direction: SplitDirection) async {
-        guard let newTerminal = await appState.createTerminalForSplit(worktreeID: worktree.id) else { return }
-        layout = layout.splitPane(
-            id: content.paneID,
-            direction: direction,
-            newContent: .terminal(terminalID: newTerminal.id)
-        )
     }
 }
 

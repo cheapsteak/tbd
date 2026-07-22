@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Testing
+import TBDShared
 @testable import TBDApp
 
 @Suite("Header file actions")

@@ -265,7 +265,7 @@ struct TabUnreadCompletionTests {
             ]
             state.layouts = [
                 tabID: .split(
-                    direction: .horizontal,
+                    id: UUID(), direction: .horizontal,
                     children: [
                         .pane(.terminal(terminalID: primaryTerminal)),
                         .pane(.terminal(terminalID: secondaryTerminal)),
@@ -302,7 +302,7 @@ struct TabUnreadCompletionTests {
             ]
             state.layouts = [
                 tabID: .split(
-                    direction: .horizontal,
+                    id: UUID(), direction: .horizontal,
                     children: [
                         .pane(.terminal(terminalID: primaryTerminal)),
                         .pane(.terminal(terminalID: secondaryTerminal)),
@@ -337,7 +337,7 @@ struct TabUnreadCompletionTests {
             ]
             state.layouts = [
                 splitTabID: .split(
-                    direction: .horizontal,
+                    id: UUID(), direction: .horizontal,
                     children: [
                         .pane(.terminal(terminalID: primaryTerminal)),
                         .pane(.terminal(terminalID: secondaryTerminal)),

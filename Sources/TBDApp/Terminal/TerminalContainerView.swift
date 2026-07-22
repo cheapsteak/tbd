@@ -108,7 +108,7 @@ struct SingleWorktreeView: View {
         appState.findWorktree(id: worktreeID)
     }
 
-    private var worktreeTabs: [Tab] {
+    private var worktreeTabs: [TBDShared.Tab] {
         appState.tabs[worktreeID] ?? []
     }
 
@@ -305,7 +305,7 @@ struct SingleWorktreeView: View {
         }
     }
 
-    private var activeTab: Tab? {
+    private var activeTab: TBDShared.Tab? {
         let tabs = worktreeTabs
         guard !tabs.isEmpty else { return nil }
         return tabs[min(activeTabIndex, tabs.count - 1)]
@@ -514,7 +514,7 @@ private struct MultiWorktreeCell: View {
         return appState.terminals[worktreeID]?.first { $0.id == firstID }
     }
 
-    private var activeTab: Tab? {
+    private var activeTab: TBDShared.Tab? {
         let tabs = appState.tabs[worktreeID] ?? []
         guard !tabs.isEmpty else { return nil }
         let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
@@ -569,11 +569,11 @@ private struct MultiWorktreeCell: View {
         if let worktree, let terminal = primaryTerminal {
             let layoutBinding = Binding<LayoutNode>(
                 get: {
-                    appState.layouts[worktreeID]
+                    appState.gridLayouts[worktreeID]
                         ?? .pane(.terminal(terminalID: terminal.id))
                 },
                 set: { newLayout in
-                    appState.layouts[worktreeID] = newLayout
+                    appState.gridLayouts[worktreeID] = newLayout
                 }
             )
             PanePlaceholder(

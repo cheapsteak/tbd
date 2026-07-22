@@ -82,7 +82,7 @@ private struct TabDropDelegate: DropDelegate {
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
 /// Replaces the former TerminalTabBar.
 struct TabBar: View {
-    let tabs: [Tab]
+    let tabs: [TBDShared.Tab]
     let worktreeID: UUID
     @EnvironmentObject private var appState: AppState
     @Binding var activeTabIndex: Int
@@ -515,7 +515,7 @@ enum TabParkMenuModel {
 // MARK: - TabBarItem
 
 private struct TabBarItem: View {
-    let tab: Tab
+    let tab: TBDShared.Tab
     let index: Int
     let worktreeID: UUID
     let isSelected: Bool

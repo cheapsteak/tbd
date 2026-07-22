@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import TBDApp
+@testable import TBDShared
 
 @Suite("PaneContent")
 struct PaneContentTests {

@@ -31,18 +31,6 @@ struct ContentView: View {
         }
     }
 
-    /// Returns the set of terminal IDs currently rendered anywhere in the
-    /// detail layout. Used so the window-root fallback overlay only fires
-    /// when the bound terminal is NOT visible (closed terminal, History
-    /// pane, single-pane mode, etc.).
-    private var visibleTerminalIDs: Set<UUID> {
-        var ids: Set<UUID> = []
-        for layout in appState.layouts.values {
-            ids.formUnion(layout.allTerminalIDs())
-        }
-        return ids
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             // Persistent, non-blocking cross-build warning: the shared daemon
@@ -105,8 +93,14 @@ struct ContentView: View {
                     })
                     .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
                     .overlay {
+                        // Uses the canonical tab-keyed set — never iterate
+                        // `layouts.values` unkeyed: stale worktree-keyed
+                        // entries persisted by the pre-split grid path would
+                        // make hidden terminals look visible. Those entries
+                        // are not pruned at restore time (keys can't be
+                        // classified at init; Phase 2 import drops them).
                         if let frame = overlayCoordinator.current,
-                           overlayFrameIsWindowRoot(frame, visibleTerminalIDs: visibleTerminalIDs) {
+                           overlayFrameIsWindowRoot(frame, visibleTerminalIDs: appState.visibleTerminalIDs) {
                             TranscriptOverlayView(
                                 frame: frame,
                                 hasBack: overlayCoordinator.hasBack,
@@ -243,7 +237,7 @@ struct ContentView: View {
                                 } else {
                                     // Create and focus new PR tab
                                     let webviewID = UUID()
-                                    let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
+                                    let tab = TBDShared.Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
                                     appState.tabs[worktreeID, default: []].append(tab)
                                     appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
                                 }

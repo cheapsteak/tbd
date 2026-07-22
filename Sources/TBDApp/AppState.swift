@@ -401,12 +401,17 @@ final class AppState: ObservableObject {
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }
+    /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
+    /// (spec C §3.12): never persisted, never mirrored, never part of the
+    /// panel surface. Kept separate from `layouts` (tab-ID-keyed) so the two
+    /// keying schemes can't collide in one dictionary.
+    @Published var gridLayouts: [UUID: LayoutNode] = [:]
     /// Back/forward history per viewer-class slot pane, keyed by the slot's
     /// paneID (stable across in-place content replacements).
     @Published var paneHistories: [UUID: PaneHistory] = [:] {
         didSet { persistPaneHistories() }
     }
-    @Published var tabs: [UUID: [Tab]] = [:]
+    @Published var tabs: [UUID: [TBDShared.Tab]] = [:]
     @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
     @Published var draggingTabID: UUID? = nil
@@ -1281,7 +1286,7 @@ final class AppState: ObservableObject {
     /// uses (`layouts[tab.id] ?? .pane(tab.content)` then `allTerminalIDs()`),
     /// then unions the `tab.content` terminal so `.liveTranscript` tabs — whose
     /// IDs `allTerminalIDs()` does not enumerate — stay covered.
-    func terminalIDs(in tab: Tab) -> Set<UUID> {
+    func terminalIDs(in tab: TBDShared.Tab) -> Set<UUID> {
         let layout = layouts[tab.id] ?? .pane(tab.content)
         var ids = Set(layout.allTerminalIDs())
         switch tab.content {
@@ -1809,7 +1814,7 @@ final class AppState: ObservableObject {
 
         // 3. Add tabs for terminals not already in any surviving layout.
         for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
-            currentTabs.append(Tab(
+            currentTabs.append(TBDShared.Tab(
                 id: terminal.id,
                 content: .terminal(terminalID: terminal.id),
                 label: initialTabLabel(for: terminal)
@@ -1845,7 +1850,7 @@ final class AppState: ObservableObject {
 
         // Add tabs for notes not already represented
         for note in notes where !noteIDsInTabs.contains(note.id) {
-            currentTabs.append(Tab(id: note.id, content: .note(noteID: note.id), label: nil))
+            currentTabs.append(TBDShared.Tab(id: note.id, content: .note(noteID: note.id), label: nil))
         }
 
         tabs[worktreeID] = currentTabs

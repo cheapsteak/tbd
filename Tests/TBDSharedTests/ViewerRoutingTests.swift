@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import TBDApp
+@testable import TBDShared
 
 @Suite("ViewerRouting")
 struct ViewerRoutingTests {
@@ -13,7 +13,7 @@ struct ViewerRoutingTests {
         let result = routeFileClick(into: layout, terminalID: terminalID, path: "/a.md")
 
         #expect(result.replaced == nil, "a split is not a replacement — no history push")
-        guard case .split(let dir, let children, _) = result.layout else {
+        guard case .split(_, let dir, let children, _) = result.layout else {
             Issue.record("Expected split result"); return
         }
         #expect(dir == .horizontal)
@@ -29,7 +29,7 @@ struct ViewerRoutingTests {
         let terminalID = UUID()
         let viewerID = UUID()
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(.codeViewer(id: viewerID, path: "/old.md")),
@@ -39,7 +39,7 @@ struct ViewerRoutingTests {
 
         let result = routeFileClick(into: layout, terminalID: terminalID, path: "/new.md")
 
-        guard case .split(_, let children, let ratios) = result.layout,
+        guard case .split(_, _, let children, let ratios) = result.layout,
               case .pane(.codeViewer(let id, let path)) = children[1]
         else {
             Issue.record("Expected codeViewer in right child"); return
@@ -58,11 +58,11 @@ struct ViewerRoutingTests {
         let terminalID = UUID()
         let viewerID = UUID()
         let layout = LayoutNode.split(
-            direction: .vertical,
+            id: UUID(), direction: .vertical,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .split(
-                    direction: .horizontal,
+                    id: UUID(), direction: .horizontal,
                     children: [
                         .pane(.terminal(terminalID: UUID())),
                         .pane(.codeViewer(id: viewerID, path: "/old")),
@@ -75,8 +75,8 @@ struct ViewerRoutingTests {
 
         let result = routeFileClick(into: layout, terminalID: terminalID, path: "/new")
 
-        guard case .split(_, let topChildren, _) = result.layout,
-              case .split(_, let nested, _) = topChildren[1],
+        guard case .split(_, _, let topChildren, _) = result.layout,
+              case .split(_, _, let nested, _) = topChildren[1],
               case .pane(.codeViewer(let id, let path)) = nested[1]
         else {
             Issue.record("Expected nested codeViewer"); return
@@ -90,7 +90,7 @@ struct ViewerRoutingTests {
         let slotID = UUID()
         let outgoing = PaneContent.liveTranscript(id: slotID, terminalID: terminalID)
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(outgoing),
@@ -100,7 +100,7 @@ struct ViewerRoutingTests {
 
         let result = routeFileClick(into: layout, terminalID: terminalID, path: "/a.md")
 
-        guard case .split(_, let children, _) = result.layout,
+        guard case .split(_, _, let children, _) = result.layout,
               case .pane(.codeViewer(let id, let path)) = children[1]
         else {
             Issue.record("Expected transcript slot replaced by codeViewer"); return
@@ -119,7 +119,7 @@ struct ViewerRoutingTests {
         let slotID = UUID()
         let outgoing = PaneContent.webview(id: slotID, url: URL(string: "https://example.com/x")!)
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(outgoing),
@@ -129,7 +129,7 @@ struct ViewerRoutingTests {
 
         let result = routeFileClick(into: layout, terminalID: terminalID, path: "/a.md")
 
-        guard case .split(_, let children, _) = result.layout,
+        guard case .split(_, _, let children, _) = result.layout,
               case .pane(.codeViewer(let id, _)) = children[1]
         else {
             Issue.record("Expected webview slot replaced by codeViewer"); return
@@ -143,7 +143,7 @@ struct ViewerRoutingTests {
         let transcriptID = UUID()
         let viewerID = UUID()
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 // Transcript comes FIRST in traversal order — the code viewer
                 // must still win.
@@ -157,7 +157,7 @@ struct ViewerRoutingTests {
         let result = routeFileClick(into: layout, terminalID: terminalID, path: "/new.md")
 
         #expect(result.replaced?.paneID == viewerID)
-        guard case .split(_, let children, _) = result.layout,
+        guard case .split(_, _, let children, _) = result.layout,
               case .pane(.liveTranscript(let tid, _)) = children[0]
         else {
             Issue.record("Expected transcript untouched"); return
@@ -168,7 +168,7 @@ struct ViewerRoutingTests {
     @Test func routeFileClick_doesNotReuseNotePane() {
         let terminalID = UUID()
         let layout = LayoutNode.split(
-            direction: .horizontal,
+            id: UUID(), direction: .horizontal,
             children: [
                 .pane(.terminal(terminalID: terminalID)),
                 .pane(.note(noteID: UUID())),

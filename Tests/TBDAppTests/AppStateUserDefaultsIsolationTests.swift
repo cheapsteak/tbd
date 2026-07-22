@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TBDShared
 @testable import TBDApp
 
 /// Regression coverage for the UserDefaults-isolation invariant that PR #133

@@ -1041,14 +1041,4 @@ extension AppState {
     func closeTerminalTab() {
         closeFocusedTab()
     }
-
-    /// Placeholder: split terminal horizontally.
-    func splitTerminalHorizontally() {
-        // TODO: implement horizontal split
-    }
-
-    /// Placeholder: split terminal vertically.
-    func splitTerminalVertically() {
-        // TODO: implement vertical split
-    }
 }
