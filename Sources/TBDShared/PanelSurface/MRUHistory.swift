@@ -16,6 +16,15 @@ public struct MRUHistory<Element: Codable & Equatable & Sendable>: Codable, Equa
 
     public init() {}
 
+    /// Reconstructs a history from already-known entries/cursor — e.g.
+    /// re-keying a legacy history during import (`LegacySurfaceImporter`).
+    /// No validation performed; callers are responsible for consistency
+    /// (typically checked via `isWellFormed` / `PanelSurfaceValidator`).
+    public init(entries: [Element], cursor: Int) {
+        self.entries = entries
+        self.cursor = cursor
+    }
+
     /// A history whose single entry is the panel's initial content
     /// (`entries[cursor] == content` from birth — Spec C §6).
     public static func seeded(with element: Element) -> MRUHistory {
