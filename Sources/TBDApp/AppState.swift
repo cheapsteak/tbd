@@ -6,6 +6,9 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
+/// Spec C §11.3 — log-only shadow-compare diagnostic. Dedicated category so
+/// it can be streamed/filtered independently of the rest of AppState.
+private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "panelShadow")
 /// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
@@ -708,6 +711,10 @@ final class AppState: ObservableObject {
     /// no protocol), so trigger tests can record calls without a real daemon.
     lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
         { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
+    /// How the shadow-compare diagnostic (spec C §11.3) fetches the daemon's
+    /// imported surface — injectable for the same reason as `panelImportTrigger`.
+    lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
+        { [daemonClient] worktreeID in try await daemonClient.panelGet(worktreeID: worktreeID) }
     /// Guards the one-shot legacy panel import to at most once per launch.
     /// Deliberately NOT persisted — the daemon's create-if-absent import guard
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
@@ -1066,9 +1073,46 @@ final class AppState: ObservableObject {
                     _ = try await panelImportTrigger(params)
                 } catch {
                     logger.error("panelImportLegacy failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+                    continue
                 }
+                // Spec C §11.3 — shadow compare runs once, right after this
+                // worktree's import call succeeds (whether it imported just
+                // now or the daemon already had a surface from a prior
+                // launch). Diagnostics only; never blocks/gates the import
+                // above, which has already completed by this point.
+                await runPanelShadowCompare(worktreeID: worktreeID)
             }
         }
+    }
+
+    /// Spec C §11.3 — migration-validation shadow compare. Log-only: never
+    /// mutates state, never surfaces to the user, never throws in a way that
+    /// affects the caller (all failures are logged and swallowed here).
+    /// Re-converts the CURRENT live legacy state (not the params already sent
+    /// to `panelImportTrigger` — state may have moved on since) via the same
+    /// `LegacySurfaceImporter.convert` the daemon's import path used, fetches
+    /// the daemon's imported surface, and logs any divergence.
+    private func runPanelShadowCompare(worktreeID: UUID) async {
+        let params = buildPanelImportParams(worktreeID: worktreeID)
+        let local = LegacySurfaceImporter.convert(
+            worktreeID: worktreeID, tabs: params.tabs, tabOrder: params.tabOrder,
+            paneHistories: params.paneHistories)
+        let daemon: PanelGetResult
+        do {
+            daemon = try await panelGetFetcher(worktreeID)
+        } catch {
+            shadowCompareLogger.error("panel.get failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+            return
+        }
+        let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
+        guard !mismatches.isEmpty else {
+            shadowCompareLogger.debug("\(worktreeID, privacy: .public): no divergence")
+            return
+        }
+        for mismatch in mismatches {
+            shadowCompareLogger.error("\(worktreeID, privacy: .public): \(mismatch, privacy: .public)")
+        }
+        shadowCompareLogger.info("\(worktreeID, privacy: .public): \(mismatches.count, privacy: .public) mismatch(es)")
     }
 
     // MARK: - Selection Persistence
