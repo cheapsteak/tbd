@@ -13,6 +13,10 @@ import TBDShared
 /// - `resumeID` non-nil → `claude --resume <id> --dangerously-skip-permissions`
 ///   with optional trailing initial-prompt arg (delivered atomically with the
 ///   resume — no post-spawn paste, so it can never land in the wrong process).
+///   With `forkSession: true`, ` --fork-session` is appended: Claude Code's
+///   `--resume` REUSES the original session ID unless that flag is passed, and
+///   the `.fork` swap mode needs a genuinely new ID because the source session
+///   stays live (otherwise both processes write the same session JSONL).
 /// - `freshSessionID` non-nil → `claude --session-id <id> --dangerously-skip-permissions`
 ///   with optional `--append-system-prompt` and trailing initial-prompt arg.
 /// - Otherwise → `cmd` if set, else `shellFallback`.
@@ -47,6 +51,7 @@ enum ClaudeSpawnCommandBuilder {
 
     static func build(
         resumeID: String?,
+        forkSession: Bool = false,
         freshSessionID: String?,
         appendSystemPrompt: String?,
         initialPrompt: String?,
@@ -87,7 +92,8 @@ enum ClaudeSpawnCommandBuilder {
 
         let base: String
         if let resumeID {
-            var b = "claude --resume \(resumeID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
+            let forkFlag = forkSession ? " --fork-session" : ""
+            var b = "claude --resume \(resumeID)\(forkFlag) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
             if let p = initialPrompt, !p.isEmpty {
                 b += " \(SystemPromptBuilder.shellEscape(p))"
             }

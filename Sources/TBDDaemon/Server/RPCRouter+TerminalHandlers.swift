@@ -973,10 +973,15 @@ extension RPCRouter {
         //   .fork — explicit "Fork session": spawn a NEW window + terminal row,
         //     leaving the source session untouched (the old behavior).
         //
-        // In both modes, if the existing session has conversation content,
-        // `claude --resume` forks it into a fresh session file (recaptured
-        // below). If the session is blank, resuming would produce "no
-        // conversation found", so we spawn a brand-new session instead.
+        // In both modes, if the existing session has conversation content we
+        // `claude --resume` it. `--resume` REUSES the original session ID;
+        // `.fork` mode additionally passes `--fork-session` so the fork gets a
+        // genuinely new ID (the source session stays live — same-ID resume
+        // would have both processes writing the same session JSONL), and the
+        // recapture below picks up that new ID. `.inPlace` keeps the same ID:
+        // the original process is killed, so same-ID resume is correct. If the
+        // session is blank, resuming would produce "no conversation found",
+        // so we spawn a brand-new session instead.
         let mode = params.resolvedMode
         let repo: Repo?
         if let rid = worktree.repoID {
@@ -1074,6 +1079,7 @@ extension RPCRouter {
             logger.debug("swap: resuming session \(resumeID, privacy: .public)")
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: resumeID,
+                forkSession: mode == .fork,
                 freshSessionID: nil,
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
