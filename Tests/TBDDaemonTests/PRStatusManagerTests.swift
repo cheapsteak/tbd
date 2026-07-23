@@ -1327,10 +1327,11 @@ struct PRStatusManagerTests {
         #expect(matches.isEmpty)
     }
 
-    @Test("unnumbered worktree still resolves via the legacy viewer-authored branch match (regression)")
+    @Test("unnumbered worktree still resolves via the viewer-authored branch match when the repo matches (regression)")
     func unnumberedResolvesViaLegacyBranchMatch() throws {
         // The viewer batch carries a node for the worktree's branch; a worktree
-        // with no stored number must still match it exactly as before.
+        // with no stored number must still match it when its own repo agrees
+        // with the node's URL repo.
         let json = """
         {
           "data": {
@@ -1356,10 +1357,201 @@ struct PRStatusManagerTests {
         """.data(using: .utf8)!
 
         let nodes = try PRStatusManager.parsePRNodes(from: json)
-        let byBranch = PRStatusManager.bestNodeByBranch(nodes)
-        let candidates = PRStatusManager.branchCandidates(localBranch: "feature-x", upstreamBranch: nil)
-        let node = candidates.compactMap { byBranch[$0] }.first
-        #expect(node?.number == 7)
+        let wt = UUID()
+        let matches = PRStatusManager.matchUnnumbered(
+            [(wt, "feature-x", nil, "/wt/acme", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in ("acme", "acme") })
+        #expect(matches.count == 1)
+        #expect(matches.first?.worktreeID == wt)
+        #expect(matches.first?.node.number == 7)
+    }
+
+    // MARK: - Repo-scoped viewer-batch branch matching (cross-repo collision regression)
+
+    /// Convenience PRNode factory for the matching tests.
+    private func prNode(number: Int, url: String, branch: String, state: String = "OPEN",
+                        createdAt: String = "2026-07-01T00:00:00Z") -> PRStatusManager.PRNode {
+        PRStatusManager.PRNode(number: number, url: url, state: state, mergeStateStatus: "CLEAN",
+                               reviewDecision: "", headRefName: branch, createdAt: createdAt,
+                               isDraft: false, statusCheckRollupState: nil, mergeQueuePosition: nil)
+    }
+
+    @Test("matchUnnumbered gives each worktree its own repo's PR when two repos share a branch name")
+    func matchUnnumberedScopesSameBranchAcrossRepos() {
+        // The reported bug: identical branch name in mdg-private/monorepo and
+        // mdg-private/studio-ui; the studio-ui PR must not win both worktrees.
+        let branch = "Jephuff/BILL-149-remove-billingplan-userroles"
+        let monorepoWT = UUID(); let studioWT = UUID()
+        let nodes = [
+            prNode(number: 13113, url: "https://github.com/mdg-private/studio-ui/pull/13113", branch: branch),
+            prNode(number: 555, url: "https://github.com/mdg-private/monorepo/pull/555", branch: branch)
+        ]
+        let repos: [String: (owner: String, name: String)] = [
+            "/wt/monorepo": ("mdg-private", "monorepo"),
+            "/wt/studio-ui": ("mdg-private", "studio-ui")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(monorepoWT, branch, nil, "/wt/monorepo", nil),
+             (studioWT, branch, nil, "/wt/studio-ui", nil)],
+            nodes: nodes,
+            resolveRepo: { repos[$0] })
+        #expect(matches.count == 2)
+        let byID = Dictionary(uniqueKeysWithValues: matches.map { ($0.worktreeID, $0.node.number) })
+        #expect(byID[monorepoWT] == 555)
+        #expect(byID[studioWT] == 13113)
+    }
+
+    @Test("matchUnnumbered yields no match when the branch's only PR lives in another repo")
+    func matchUnnumberedNoMatchAcrossRepos() {
+        let nodes = [
+            prNode(number: 13113, url: "https://github.com/mdg-private/studio-ui/pull/13113",
+                   branch: "shared-branch")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(UUID(), "shared-branch", nil, "/wt/monorepo", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in ("mdg-private", "monorepo") })
+        #expect(matches.isEmpty)
+    }
+
+    @Test("matchUnnumbered yields no match when the worktree's repo can't be resolved")
+    func matchUnnumberedNoMatchWhenRepoUnresolved() {
+        // Degrade like the numbered path: an unscoped match could apply another
+        // repo's PR, so an unresolvable repo means no match at all.
+        let nodes = [
+            prNode(number: 7, url: "https://github.com/acme/acme/pull/7", branch: "feature-x")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(UUID(), "feature-x", nil, "/wt/acme", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in nil })
+        #expect(matches.isEmpty)
+    }
+
+    @Test("matchUnnumbered compares owner/name case-insensitively")
+    func matchUnnumberedCaseInsensitiveRepoCompare() {
+        let nodes = [
+            prNode(number: 8, url: "https://github.com/Acme/Widgets/pull/8", branch: "feature-y")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(UUID(), "feature-y", nil, "/wt/widgets", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in ("acme", "widgets") })
+        #expect(matches.first?.node.number == 8)
+    }
+
+    @Test("matchUnnumbered still honors the upstream-branch candidate when the repo matches")
+    func matchUnnumberedUpstreamCandidate() {
+        // Local branch has no PR; the upstream branch does, in the same repo.
+        let nodes = [
+            prNode(number: 9, url: "https://github.com/acme/acme/pull/9", branch: "upstream-x")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(UUID(), "local-x", "upstream-x", "/wt/acme", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in ("acme", "acme") })
+        #expect(matches.first?.node.number == 9)
+    }
+
+    @Test("bestNodeByRepoBranch keeps the tie-break within one repo: OPEN beats MERGED, newest wins within a state")
+    func bestNodeByRepoBranchTieBreakWithinRepo() {
+        let key = PRStatusManager.repoBranchKey(owner: "acme", name: "acme", branch: "reused")
+        // OPEN beats MERGED regardless of age.
+        let openVsMerged = PRStatusManager.bestNodeByRepoBranch([
+            prNode(number: 1, url: "https://github.com/acme/acme/pull/1", branch: "reused",
+                   state: "MERGED", createdAt: "2026-07-02T00:00:00Z"),
+            prNode(number: 2, url: "https://github.com/acme/acme/pull/2", branch: "reused",
+                   state: "OPEN", createdAt: "2026-07-01T00:00:00Z")
+        ])
+        #expect(openVsMerged[key]?.number == 2)
+        // Within the same state, newest createdAt wins.
+        let newestWins = PRStatusManager.bestNodeByRepoBranch([
+            prNode(number: 3, url: "https://github.com/acme/acme/pull/3", branch: "reused",
+                   state: "CLOSED", createdAt: "2026-07-01T00:00:00Z"),
+            prNode(number: 4, url: "https://github.com/acme/acme/pull/4", branch: "reused",
+                   state: "CLOSED", createdAt: "2026-07-03T00:00:00Z")
+        ])
+        #expect(newestWins[key]?.number == 4)
+    }
+
+    @Test("bestNodeByRepoBranch drops a node whose URL doesn't parse to owner/name")
+    func bestNodeByRepoBranchDropsUnparseableURL() {
+        let byKey = PRStatusManager.bestNodeByRepoBranch([
+            prNode(number: 5, url: "not a url", branch: "feature-z")
+        ])
+        #expect(byKey.isEmpty)
+    }
+
+    // MARK: - Poisoned-cache invalidation (cross-repo heal)
+
+    @Test("poisonedCacheEntries flags a cached status whose PR URL belongs to a different repo")
+    func poisonedCacheEntriesFlagsRepoMismatch() {
+        let wt = UUID()
+        let cached = PRStatus(number: 13113, url: "https://github.com/mdg-private/studio-ui/pull/13113",
+                              state: .mergeable)
+        let out = PRStatusManager.poisonedCacheEntries(
+            unnumbered: [(wt, "shared-branch", nil, "/wt/monorepo", nil)],
+            resolveRepo: { _ in ("mdg-private", "monorepo") },
+            cachedStatus: { _ in cached })
+        #expect(out.count == 1)
+        #expect(out.first?.worktreeID == wt)
+        #expect(out.first?.cachedRepo == "mdg-private/studio-ui")
+        #expect(out.first?.worktreeRepo == "mdg-private/monorepo")
+    }
+
+    @Test("poisonedCacheEntries keeps a cached status from the worktree's own repo")
+    func poisonedCacheEntriesKeepsSameRepo() {
+        let cached = PRStatus(number: 555, url: "https://github.com/mdg-private/monorepo/pull/555",
+                              state: .mergeable)
+        let out = PRStatusManager.poisonedCacheEntries(
+            unnumbered: [(UUID(), "shared-branch", nil, "/wt/monorepo", nil)],
+            resolveRepo: { _ in ("mdg-private", "monorepo") },
+            cachedStatus: { _ in cached })
+        #expect(out.isEmpty)
+    }
+
+    @Test("poisonedCacheEntries treats owner/name casing differences as the same repo")
+    func poisonedCacheEntriesCaseInsensitive() {
+        let cached = PRStatus(number: 1, url: "https://github.com/MDG-Private/Monorepo/pull/1",
+                              state: .pending)
+        let out = PRStatusManager.poisonedCacheEntries(
+            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            resolveRepo: { _ in ("mdg-private", "monorepo") },
+            cachedStatus: { _ in cached })
+        #expect(out.isEmpty)
+    }
+
+    @Test("poisonedCacheEntries keeps an entry whose cached URL doesn't parse")
+    func poisonedCacheEntriesKeepsUnparseableURL() {
+        let cached = PRStatus(number: 1, url: "not a pr url", state: .pending)
+        let out = PRStatusManager.poisonedCacheEntries(
+            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            resolveRepo: { _ in ("mdg-private", "monorepo") },
+            cachedStatus: { _ in cached })
+        #expect(out.isEmpty)
+    }
+
+    @Test("poisonedCacheEntries keeps an entry whose worktree repo can't be resolved")
+    func poisonedCacheEntriesKeepsUnresolvedRepo() {
+        // Absence of evidence is not proof of poisoning: never invalidate when
+        // either side fails to resolve.
+        let cached = PRStatus(number: 13113, url: "https://github.com/mdg-private/studio-ui/pull/13113",
+                              state: .mergeable)
+        let out = PRStatusManager.poisonedCacheEntries(
+            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            resolveRepo: { _ in nil },
+            cachedStatus: { _ in cached })
+        #expect(out.isEmpty)
+    }
+
+    @Test("poisonedCacheEntries skips a worktree with no cached status")
+    func poisonedCacheEntriesSkipsNoCache() {
+        let out = PRStatusManager.poisonedCacheEntries(
+            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            resolveRepo: { _ in ("mdg-private", "monorepo") },
+            cachedStatus: { _ in nil })
+        #expect(out.isEmpty)
     }
 
     @Test("cachedNumberFallback excludes a worktree the batch matched, even with a cached number")
