@@ -31,7 +31,7 @@ public actor PRStatusManager {
 
     private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
 
-    private var onStatusPersist: (@Sendable (UUID, PRStatus) async -> Void)?
+    private var onStatusPersist: (@Sendable (UUID, PRStatus?) async -> Void)?
 
     private var onPRStatusComputed: (@Sendable (UUID, PRStatus, String) async -> Void)?
 
@@ -53,8 +53,11 @@ public actor PRStatusManager {
     }
 
     /// Register a callback fired whenever a worktree's cached PR status actually
-    /// changes, so the daemon can persist it to the DB.
-    public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus) async -> Void) {
+    /// changes, so the daemon can persist it to the DB. A nil status means the
+    /// entry was cleared (cross-repo cache heal in `fetchAll`) and the DB row
+    /// must be cleared too, or `hydrate` would resurrect the stale value at the
+    /// next daemon start.
+    public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus?) async -> Void) {
         self.onStatusPersist = cb
     }
 
@@ -128,8 +131,8 @@ public actor PRStatusManager {
 
         // Worktrees created from a PR row carry its number; resolve those
         // directly (a fork PR's head never appears in the viewer-authored batch).
-        // Everything else uses the legacy viewer-batch branch-name matching,
-        // byte-identical to before.
+        // Everything else uses the viewer-batch branch-name matching, scoped to
+        // each worktree's own repo (see `matchUnnumbered`).
         let (numbered, unnumbered) = Self.partitionByPRNumber(worktrees) { $0.prNumber }
 
         // Do NOT clear entries for missing worktrees — the batch query is
@@ -142,21 +145,51 @@ public actor PRStatusManager {
             matches += await fetchNumberedMatches(numbered)
         }
 
-        // Legacy path: viewer-authored batch + branch-name matching. On a fetch
-        // or parse failure it contributes no matches, but the numbered path above
-        // has already resolved independently.
+        // Legacy path: viewer-authored batch + branch-name matching, scoped to
+        // each worktree's own repo (the batch spans every repo the viewer
+        // authored PRs in, and the same branch name can exist in several). On a
+        // fetch or parse failure it contributes no matches, but the numbered
+        // path above has already resolved independently.
         var batchSucceeded = false
         if !unnumbered.isEmpty {
+            // Resolve each unnumbered worktree's own repo once, mirroring the
+            // numbered path's `resolved` dictionary. TTL-cached, so the poll
+            // doesn't spawn a `gh repo view` subprocess per worktree per tick.
+            var unnumberedRepos: [String: (owner: String, name: String)] = [:]
+            for path in Set(unnumbered.map(\.worktreePath)) {
+                if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
+                    unnumberedRepos[path] = ownerRepo
+                } else {
+                    logger.debug("fetchAll: could not resolve owner/name for unnumbered worktree at \(path, privacy: .public)")
+                }
+            }
+
+            // Heal entries poisoned by the pre-repo-scoping branch match: a
+            // cached status whose PR URL belongs to a different repo than the
+            // worktree's own. This MUST run before `cachedNumberFallback` is
+            // computed below: a poisoned entry carries the OTHER repo's PR
+            // number, and the fallback would re-resolve that number scoped to
+            // the worktree's own repo, where it can land on an unrelated PR
+            // (worst case a MERGED one, firing auto-archive on the wrong
+            // worktree). Clearing the cache first makes that path unreachable.
+            // The clear is persisted (nil status) so `hydrate` can't resurrect
+            // it after a daemon restart. No `lastDirectUpdate` write: this runs
+            // inside fetchAll itself, and the worktree stays unmatched by
+            // construction, so no later apply() in this pass can touch it.
+            for entry in Self.poisonedCacheEntries(
+                unnumbered: unnumbered,
+                resolveRepo: { unnumberedRepos[$0] },
+                cachedStatus: { cache[$0] }) {
+                logger.debug("fetchAll: clearing cross-repo PR status for worktree \(entry.worktreeID, privacy: .public): cached PR is in \(entry.cachedRepo, privacy: .public) but worktree repo is \(entry.worktreeRepo, privacy: .public)")
+                cache.removeValue(forKey: entry.worktreeID)
+                await onStatusPersist?(entry.worktreeID, nil)
+            }
+
             if let jsonData = await runGHGraphQL(repoPath: repoPath) {
                 if let nodes = try? Self.parsePRNodes(from: jsonData) {
                     batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
-                    let byBranch = Self.bestNodeByBranch(nodes)
-                    for wt in unnumbered {
-                        let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
-                        if let node = candidates.compactMap({ byBranch[$0] }).first {
-                            matches.append((wt.id, node))
-                        }
-                    }
+                    matches += Self.matchUnnumbered(unnumbered, nodes: nodes,
+                                                    resolveRepo: { unnumberedRepos[$0] })
                 } else {
                     logger.warning("Failed to parse GraphQL response")
                 }
@@ -734,25 +767,96 @@ public actor PRStatusManager {
         }
     }
 
-    /// Build the branch → best-PR lookup used by the legacy (unnumbered) path.
-    /// When multiple PRs share a branch, pick the best: highest state priority
+    /// Lookup key scoping a branch name to one repo. Owner/name are lowercased
+    /// because GitHub treats them case-insensitively (URLs and `gh repo view`
+    /// may disagree on casing); the branch stays as-is (git refs are
+    /// case-sensitive). U+0001 cannot appear in a GitHub owner or repo name,
+    /// so keys can never collide across repos.
+    static func repoBranchKey(owner: String, name: String, branch: String) -> String {
+        "\(owner.lowercased())\u{1}\(name.lowercased())\u{1}\(branch)"
+    }
+
+    /// Build the (repo, branch) → best-PR lookup used by the legacy (unnumbered)
+    /// path. The viewer batch spans every repo the viewer authored PRs in, and
+    /// the same branch name can legitimately exist in several of them; keying on
+    /// branch alone handed one repo's PR to another repo's worktree (and
+    /// persisted it) — the cross-repo collision this fix removes. Nodes whose
+    /// URL doesn't parse to owner/name are dropped: they cannot be scoped, and
+    /// an unscoped match is exactly the bug. When multiple PRs share a
+    /// repo+branch, pick the best: highest state priority
     /// (OPEN > MERGED > CLOSED), then newest `createdAt` within the same state.
-    static func bestNodeByBranch(_ nodes: [PRNode]) -> [String: PRNode] {
-        var byBranch: [String: PRNode] = [:]
+    static func bestNodeByRepoBranch(_ nodes: [PRNode]) -> [String: PRNode] {
+        var byKey: [String: PRNode] = [:]
         for node in nodes {
-            if let existing = byBranch[node.headRefName] {
+            guard let repo = parseOwnerRepo(fromURL: node.url) else { continue }
+            let key = repoBranchKey(owner: repo.owner, name: repo.name, branch: node.headRefName)
+            if let existing = byKey[key] {
                 let nodePriority = prPriority(node.state)
                 let existingPriority = prPriority(existing.state)
                 if nodePriority > existingPriority {
-                    byBranch[node.headRefName] = node
+                    byKey[key] = node
                 } else if nodePriority == existingPriority && node.createdAt > existing.createdAt {
-                    byBranch[node.headRefName] = node
+                    byKey[key] = node
                 }
             } else {
-                byBranch[node.headRefName] = node
+                byKey[key] = node
             }
         }
-        return byBranch
+        return byKey
+    }
+
+    /// Match unnumbered worktrees against the viewer batch, scoped to each
+    /// worktree's own repo: a node only matches when its URL's owner/name
+    /// equals the worktree's resolved repo. Candidate order is preserved
+    /// (local branch first, then upstream — see `branchCandidates`). A worktree
+    /// whose repo can't be resolved gets NO match, so the caller keeps its
+    /// cached status — the same degrade behavior as the numbered path
+    /// (`groupNumberedByRepo`); matching it unscoped could apply another
+    /// repo's PR.
+    static func matchUnnumbered(
+        _ unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        nodes: [PRNode],
+        resolveRepo: (String) -> (owner: String, name: String)?
+    ) -> [(worktreeID: UUID, node: PRNode)] {
+        let byRepoBranch = bestNodeByRepoBranch(nodes)
+        return unnumbered.compactMap { wt in
+            guard let repo = resolveRepo(wt.worktreePath) else { return nil }
+            let candidates = branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
+            for candidate in candidates {
+                if let node = byRepoBranch[repoBranchKey(owner: repo.owner, name: repo.name, branch: candidate)] {
+                    return (wt.id, node)
+                }
+            }
+            return nil
+        }
+    }
+
+    /// Detect cache entries poisoned by the pre-repo-scoping branch match: an
+    /// unnumbered worktree whose cached PR URL belongs to a DIFFERENT repo than
+    /// the worktree's own. Without this heal a poisoned entry would display
+    /// forever (the repo-scoped match above never touches it again) and, worse,
+    /// feed its wrong-repo PR number into `cachedNumberFallback`.
+    ///
+    /// BOTH sides must resolve before an entry is judged: an unresolvable
+    /// worktree repo (gh offline/missing) or an unparseable cached URL is
+    /// absence of evidence, not proof of poisoning, so the entry is kept.
+    /// Owner/name compare case-insensitively (GitHub identifiers are).
+    /// Returns the poisoned entries with both repos rendered as
+    /// "owner/name" for the caller's log line.
+    static func poisonedCacheEntries(
+        unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        resolveRepo: (String) -> (owner: String, name: String)?,
+        cachedStatus: (UUID) -> PRStatus?
+    ) -> [(worktreeID: UUID, cachedRepo: String, worktreeRepo: String)] {
+        unnumbered.compactMap { wt in
+            guard let repo = resolveRepo(wt.worktreePath),
+                  let cached = cachedStatus(wt.id),
+                  let cachedRepo = parseOwnerRepo(fromURL: cached.url) else { return nil }
+            let sameRepo = cachedRepo.owner.lowercased() == repo.owner.lowercased()
+                && cachedRepo.name.lowercased() == repo.name.lowercased()
+            guard !sameRepo else { return nil }
+            return (wt.id, "\(cachedRepo.owner)/\(cachedRepo.name)", "\(repo.owner)/\(repo.name)")
+        }
     }
 
     /// The per-PR field selection shared by the viewer batch and the by-number
