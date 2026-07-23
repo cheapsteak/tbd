@@ -91,7 +91,11 @@ public actor PanelCoordinator {
     }
 
     /// Ungated read (§10.2: `panel.get` is ungated). `tabID` present narrows
-    /// to that one tab; absent returns every tab in the worktree.
+    /// to that one tab; absent returns every tab in the worktree plus the
+    /// worktree's active tab (the same `worktree.activeTabID` column that
+    /// `selectTab`/`importLegacy` write — no separate active-tab authority).
+    /// A tab-scoped get leaves `activeTabID` nil: it answers about one tab, and
+    /// active-tab is a worktree-level concept, not part of a single-tab query.
     public func get(worktreeID: UUID, tabID: UUID?) async throws -> PanelGetResult {
         if let tabID {
             guard let state = try await db.panelSurface.state(tabID: tabID),
@@ -101,7 +105,8 @@ public actor PanelCoordinator {
             return PanelGetResult(tabs: [state.surface], activeTabID: nil)
         }
         let surfaces = try await db.panelSurface.surfaces(worktreeID: worktreeID)
-        return PanelGetResult(tabs: surfaces, activeTabID: nil)
+        let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID)
+        return PanelGetResult(tabs: surfaces, activeTabID: activeTabID)
     }
 
     public func apply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {

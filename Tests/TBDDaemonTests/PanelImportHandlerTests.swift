@@ -283,6 +283,14 @@ struct PanelImportHandlerTests {
         let broadcasts = panelSurfaceDeltas(deltas)
         #expect(broadcasts.count == 1)
         #expect(broadcasts[0].activeTabID == tabBID)
+
+        // A subsequent whole-worktree panel.get must report the active tab too
+        // (regression: get() previously always returned activeTabID: nil,
+        // handing a reconnecting renderer no active tab).
+        let getResponse = await router.handle(
+            try RPCRequest(method: RPCMethod.panelGet, params: PanelGetParams(worktreeID: wtID)))
+        let getResult = try getResponse.decodeResult(PanelGetResult.self)
+        #expect(getResult.activeTabID == tabBID)
     }
 
     @Test("an activeTabID that matches no imported tab (its source was skipped) leaves active tab unset")
