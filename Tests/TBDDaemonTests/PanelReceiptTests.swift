@@ -143,6 +143,37 @@ struct PanelReceiptTests {
         }
     }
 
+    /// Exact-boundary: a receipt whose `appliedAt` is EXACTLY `now - 24h`
+    /// (`appliedAt == cutoff`) is KEPT — prune uses strict `appliedAt < cutoff`,
+    /// so "older than 24h" excludes exactly-24h-old. Pins the direction so a
+    /// future refactor to `<=` can't silently prune a receipt one tick early
+    /// (a retry would then re-apply it — idempotency break).
+    @Test func pruneKeepsReceiptExactlyAtAgeBoundary() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let tabID = UUID()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let operationID = UUID()
+        let result = PanelApplyResult(
+            tab: WorkspaceTabSurface(
+                id: tabID, worktreeID: wtID, primary: .terminal(terminalID: UUID()),
+                layout: .primary, revision: 0),
+            replayed: false)
+
+        try await db.writerForTests.write { dbc in
+            let data = try JSONEncoder().encode(result)
+            let record = PanelOperationReceiptRecord(
+                operationID: operationID.uuidString, worktreeID: wtID.uuidString, tabID: tabID.uuidString,
+                revision: 1, result: String(data: data, encoding: .utf8)!,
+                appliedAt: now.addingTimeInterval(-24 * 60 * 60))  // exactly the cutoff
+            try record.save(dbc)
+        }
+
+        try await db.panelSurface.pruneReceipts(worktreeID: wtID, now: now)
+
+        #expect(try await db.panelSurface.receipt(operationID: operationID) != nil)
+    }
+
     // MARK: - Atomic import commit
 
     private func makeConversion(worktreeID: UUID, tabID: UUID = UUID(), panelID: PanelID = UUID())
