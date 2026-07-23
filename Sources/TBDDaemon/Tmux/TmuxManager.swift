@@ -319,11 +319,14 @@ public struct TmuxManager: Sendable {
         ["-L", server, "capture-pane", "-p", "-e", "-J", "-t", paneID]
     }
 
-    /// Plain-text scrollback capture (no `-e` escapes) bounded to roughly the
-    /// last 10k lines, wrapped lines joined. Used for the archival
+    /// Scrollback capture with ANSI (`-e`) escapes preserved, bounded to
+    /// roughly the last 10k lines, wrapped lines joined. Used for the archival
     /// closed-terminal-history snapshot taken just before a window is killed.
+    /// The escapes are kept so the raw file is a faithful replay source (the
+    /// revive path `cat`s it back with colors intact); the read-only viewer
+    /// strips them for plain-text display.
     public static func capturePaneScrollbackCommand(server: String, paneID: String) -> [String] {
-        ["-L", server, "capture-pane", "-p", "-J", "-S", "-10000", "-t", paneID]
+        ["-L", server, "capture-pane", "-p", "-e", "-J", "-S", "-10000", "-t", paneID]
     }
 
     /// Keep a window's pane around (marked dead) after its process exits,

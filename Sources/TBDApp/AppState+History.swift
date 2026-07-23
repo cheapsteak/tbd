@@ -131,7 +131,10 @@ extension AppState {
         guard closedTerminalContents[entry.id] == nil else { return }
         let path = TBDConstants.terminalHistoryPath(worktreeID: worktreeID, terminalID: entry.id)
         let text = await Task.detached(priority: .userInitiated) {
-            (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            let raw = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            // The raw file keeps ANSI escapes (it's the replay source); the
+            // read-only viewer can't render them, so strip for display.
+            return ANSIEscape.strip(raw)
         }.value
         // One-entry cache: drop any previously loaded scrollback.
         closedTerminalContents = [entry.id: text]
