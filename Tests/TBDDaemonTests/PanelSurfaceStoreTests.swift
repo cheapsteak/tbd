@@ -225,4 +225,33 @@ struct PanelSurfaceStoreTests {
             #expect(surfaceCount == 0)
         }
     }
+
+    /// `panel_history.panelID` is a table-wide PK. Committing tab2 with a
+    /// panelID already owned by tab1 must throw (not silently steal tab1's
+    /// row via upsert), and tab1's row must survive untouched.
+    @Test func commitRejectsPanelIDOwnedByAnotherTab() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let sharedPanel = UUID()
+        let content = PanelContent.file(FileReference(path: "/a.txt"))
+
+        let tab1 = makeState(worktreeID: wtID, panelID: sharedPanel, panelContent: content)
+        try await db.panelSurface.commit(state: tab1, position: 0, receipt: nil, now: Date())
+
+        // Tab2 (different tab id) carrying the SAME panelID.
+        let tab2 = makeState(worktreeID: wtID, panelID: sharedPanel, panelContent: content)
+        await #expect(throws: PanelSurfaceStoreError.self) {
+            try await db.panelSurface.commit(state: tab2, position: 1, receipt: nil, now: Date())
+        }
+
+        // Tab1's history row is still owned by tab1 and its surface intact.
+        try await db.writerForTests.read { dbc in
+            let ownerTabID = try String.fetchOne(
+                dbc, sql: "SELECT tabID FROM panel_history WHERE panelID = ?",
+                arguments: [sharedPanel.uuidString])
+            #expect(ownerTabID == tab1.surface.id.uuidString)
+        }
+        // Tab2 never landed.
+        #expect(try await db.panelSurface.state(tabID: tab2.surface.id) == nil)
+    }
 }

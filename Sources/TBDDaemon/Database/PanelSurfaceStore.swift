@@ -129,6 +129,17 @@ public struct PanelOperationReceiptRecord: Codable, FetchableRecord, Persistable
     }
 }
 
+public enum PanelSurfaceStoreError: Error, Equatable, Sendable {
+    /// A commit tried to write a panelID whose `panel_history` row already
+    /// belongs to a different tab. `panel_history.panelID` is a table-wide
+    /// primary key, so a blind upsert would silently steal the row (flip its
+    /// tabID, overwrite its history) and lose the other tab's panel history.
+    /// The invariant "panelID is globally unique across tabs" holds today
+    /// (fresh UUIDs + importer cross-tab dedup), so this should never fire —
+    /// it exists to turn a silent data-loss path into a loud failure.
+    case panelHistoryOwnedByOtherTab(panelID: PanelID, existingTabID: WorkspaceTabID, incomingTabID: WorkspaceTabID)
+}
+
 /// Store for the panel-surface schema (workspace tab layouts, panel history,
 /// operation receipts). See spec C §8.
 public struct PanelSurfaceStore: Sendable {
@@ -193,16 +204,27 @@ public struct PanelSurfaceStore: Sendable {
         }
     }
 
-    /// Atomic §8 write: replace the tab's surface row + FULL history set for
-    /// that tab + record the receipt, in one transaction (all-or-nothing —
+    /// Atomic §8 write for ONE tab: upsert the tab's surface row + its FULL
+    /// history set + record the receipt, in one transaction (all-or-nothing —
     /// GRDB wraps a `write` closure in a SQLite transaction, so any thrown
     /// error rolls back everything written so far in this call, including
-    /// the surface row and any history rows already saved). `position: nil`
-    /// keeps the row's existing position (or defaults to 0 for a brand-new
-    /// row). History rows for panels no longer in `state.histories` are
-    /// deleted (full replace); a history row's `updatedAt` only advances to
-    /// `now` when its decoded content actually changed — unchanged panels
-    /// keep their prior `updatedAt`.
+    /// the surface row and any history rows already saved).
+    ///
+    /// This is a PER-TAB upsert, NOT a worktree-level replace: it never
+    /// removes surfaces for OTHER tabs of the worktree that aren't in this
+    /// write. A caller wanting to replace a worktree's whole tab set must
+    /// `deleteSurfaces(worktreeID:)` first (history then cascades), then
+    /// commit each surviving tab. (Task 8's coordinator honors this contract.)
+    ///
+    /// `position: nil` keeps the row's existing position (or defaults to 0
+    /// for a brand-new row). History rows for panels no longer in
+    /// `state.histories` are deleted (full replace WITHIN this tab); a history
+    /// row's `updatedAt` only advances to `now` when its decoded content
+    /// actually changed — unchanged panels keep their prior `updatedAt`.
+    ///
+    /// Throws `PanelSurfaceStoreError.panelHistoryOwnedByOtherTab` if a
+    /// panelID being written already has a `panel_history` row under a
+    /// different tab (guards a silent cross-tab clobber — see the error doc).
     public func commit(
         state: PanelSurfaceState, position: Int?, receipt: PanelOperationReceiptRecord?,
         now: Date = Date()
@@ -223,6 +245,21 @@ public struct PanelSurfaceStore: Sendable {
             let newPanelIDStrings = Set(state.histories.keys.map(\.uuidString))
             for row in existingHistoryRows where !newPanelIDStrings.contains(row.panelID) {
                 try PanelHistoryRecord.deleteOne(db, key: row.panelID)
+            }
+
+            // Loud-fail guard: `panel_history.panelID` is a table-wide PK, so a
+            // blind `save` would silently steal a row owned by another tab. Any
+            // panelID we're about to write that already exists under a DIFFERENT
+            // tab is a violation of the global-uniqueness invariant — throw
+            // instead of clobbering that tab's history.
+            for panelID in state.histories.keys {
+                if let owner = try PanelHistoryRecord.fetchOne(db, key: panelID.uuidString),
+                   owner.tabID != state.surface.id.uuidString {
+                    throw PanelSurfaceStoreError.panelHistoryOwnedByOtherTab(
+                        panelID: panelID,
+                        existingTabID: UUID(uuidString: owner.tabID) ?? UUID(),
+                        incomingTabID: state.surface.id)
+                }
             }
 
             for (panelID, history) in state.histories {
