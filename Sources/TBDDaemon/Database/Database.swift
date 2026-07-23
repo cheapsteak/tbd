@@ -963,7 +963,8 @@ public final class TBDDatabase: Sendable {
         // close semantics are unchanged; capture is best-effort. Rows are
         // pruned to the newest 50 per worktree on insert and removed (with
         // their files) on worktree hard-delete; archive keeps them.
-        migrator.registerMigration("v57_terminal_history") { db in
+        // (Renumbered v57→v58 on rebase: main's #482 took v56, shifting this branch's ids.)
+        migrator.registerMigration("v58_terminal_history") { db in
             try db.createTableIfNotExists("terminal_history") { t in
                 t.primaryKey("id", .text).notNull()
                 t.column("worktreeID", .text).notNull()
