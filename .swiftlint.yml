@@ -133,6 +133,12 @@ custom_rules:
       # Capture-for-replay: rebuilds a pane's display state verbatim for control-mode
       # attach/repair (replay bytes); never parses captured content for agent state.
       - "Sources/TBDDaemon/Tmux/ControlMode/PaneCaptureReplay\\.swift"
+      # Closed-terminal history: closeHookTerminal snapshots the dying pane's
+      # scrollback verbatim into ~/tbd/terminal-history for later READ-ONLY
+      # display (archival capture-for-display, the sanctioned use). The text is
+      # never parsed, matched, or used to infer agent/TUI state — exactly NOT
+      # the state-inference scraping the rule bans.
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"
       - "Sources/TBDShared/NightwatchSkillContent\\.swift"               # embedded Python babysitter (see rule above)
     regex: 'capturePane\w*\s*\(|capture-pane'
     match_kinds:

@@ -26,13 +26,16 @@ public final class TBDDatabase: Sendable {
     public let audit: AuditStore
     public let scheduledResumes: ScheduledResumeStore
     public let reapRecords: ReapRecordStore
+    public let terminalHistory: TerminalHistoryStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     /// `notesDir` overrides the note-content file directory (tests only; nil
     /// resolves `TBDConstants.noteContentDir`, which honors TBD_HOME).
-    public init(path: String, notesDir: String? = nil) throws {
+    /// `terminalHistoryDir` is the same seam for closed-terminal captures
+    /// (nil resolves `TBDConstants.terminalHistoryDir`).
+    public init(path: String, notesDir: String? = nil, terminalHistoryDir: String? = nil) throws {
         // Capture existence BEFORE DatabasePool opens the file — opening
         // creates an empty DB on the first launch, so we'd otherwise lose the
         // ability to distinguish "first launch" from "upgrade".
@@ -62,6 +65,7 @@ public final class TBDDatabase: Sendable {
         self.audit = AuditStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
         self.reapRecords = ReapRecordStore(writer: pool)
+        self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -78,8 +82,9 @@ public final class TBDDatabase: Sendable {
     /// Create an in-memory database for testing using DatabaseQueue.
     /// `notesDir` overrides the note-content file directory so tests never
     /// touch the real `~/tbd/notes` (injection seam, like
-    /// `ThemeStore(themesDirectory:)`).
-    public init(inMemory: Bool, notesDir: String? = nil) throws {
+    /// `ThemeStore(themesDirectory:)`). `terminalHistoryDir` is the same seam
+    /// for closed-terminal captures (`~/tbd/terminal-history`).
+    public init(inMemory: Bool, notesDir: String? = nil, terminalHistoryDir: String? = nil) throws {
         precondition(inMemory, "Use init(path:) for file-backed databases")
         let queue = try DatabaseQueue()
         self.writer = queue
@@ -99,6 +104,7 @@ public final class TBDDatabase: Sendable {
         self.audit = AuditStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
         self.reapRecords = ReapRecordStore(writer: queue)
+        self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -949,6 +955,26 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(
                 table: "config", column: "auto_close_setup_enabled",
                 type: .boolean, defaults: false)
+        }
+
+        // Read-only closed-terminal history: metadata for scrollback captured
+        // at terminal close (content is file-backed at
+        // ~/tbd/terminal-history/<worktreeID>/<terminalID>.txt). Additive —
+        // close semantics are unchanged; capture is best-effort. Rows are
+        // pruned to the newest 50 per worktree on insert and removed (with
+        // their files) on worktree hard-delete; archive keeps them.
+        migrator.registerMigration("v57_terminal_history") { db in
+            try db.createTableIfNotExists("terminal_history") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                t.column("label", .text)
+                t.column("kind", .text)
+                t.column("closedAt", .datetime).notNull()
+                t.column("claudeSessionID", .text)
+                t.column("lineCount", .integer).notNull().defaults(to: 0)
+            }
+            try db.addIndexIfMissing(
+                "idx_terminal_history_worktree", on: "terminal_history", columns: ["worktreeID"])
         }
 
         return migrator

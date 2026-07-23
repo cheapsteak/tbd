@@ -258,6 +258,8 @@ public final class RPCRouter: Sendable {
                 return try await handleNoteDelete(request.paramsData)
             case RPCMethod.noteList:
                 return try await handleNoteList(request.paramsData)
+            case RPCMethod.terminalHistoryList:
+                return try await handleTerminalHistoryList(request.paramsData)
             case RPCMethod.terminalOutput:
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:

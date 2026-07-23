@@ -319,6 +319,13 @@ public struct TmuxManager: Sendable {
         ["-L", server, "capture-pane", "-p", "-e", "-J", "-t", paneID]
     }
 
+    /// Plain-text scrollback capture (no `-e` escapes) bounded to roughly the
+    /// last 10k lines, wrapped lines joined. Used for the archival
+    /// closed-terminal-history snapshot taken just before a window is killed.
+    public static func capturePaneScrollbackCommand(server: String, paneID: String) -> [String] {
+        ["-L", server, "capture-pane", "-p", "-J", "-S", "-10000", "-t", paneID]
+    }
+
     public static func paneCurrentCommandQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_command}"]
     }
@@ -612,6 +619,16 @@ public struct TmuxManager: Sendable {
         // can exercise the park path's snapshot capture end-to-end.
         if dryRun { return dryRunCapturePane?(server, paneID) ?? "" }
         let args = Self.capturePaneWithAnsiCommand(server: server, paneID: paneID)
+        return try await runTmux(args)
+    }
+
+    /// Archival snapshot of a closing pane's scrollback (plain text, last
+    /// ~10k lines) for read-only closed-terminal history. Verbatim
+    /// pass-through for display — never parsed for agent/TUI state. dryRun
+    /// consults the shared `dryRunCapturePane` hook like the other captures.
+    public func capturePaneScrollback(server: String, paneID: String) async throws -> String {
+        if dryRun { return dryRunCapturePane?(server, paneID) ?? "" }
+        let args = Self.capturePaneScrollbackCommand(server: server, paneID: paneID)
         return try await runTmux(args)
     }
 

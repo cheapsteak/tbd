@@ -139,6 +139,7 @@ public enum RPCMethod {
     public static let noteUpdate = "note.update"
     public static let noteDelete = "note.delete"
     public static let noteList = "note.list"
+    public static let terminalHistoryList = "terminalHistory.list"
     public static let terminalOutput = "terminal.output"
     public static let terminalConversation = "terminal.conversation"
     public static let terminalTranscript = "terminal.transcript"
@@ -1153,6 +1154,15 @@ public struct TerminalSendParams: Codable, Sendable {
 public struct TerminalDeleteParams: Codable, Sendable {
     public let terminalID: UUID
     public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+/// Params for `terminalHistory.list` — closed-terminal capture metadata for a
+/// worktree, newest first. Result type: `[TerminalHistoryEntry]`. Content is
+/// NOT sent over RPC; the app reads the file at
+/// `TBDConstants.terminalHistoryPath` directly.
+public struct TerminalHistoryListParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
 }
 
 public struct TerminalSetPinParams: Codable, Sendable {

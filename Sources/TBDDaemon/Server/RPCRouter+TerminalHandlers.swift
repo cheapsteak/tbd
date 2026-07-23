@@ -454,8 +454,16 @@ extension RPCRouter {
             await limitResumeScheduler?.wake()
         }
 
-        // Kill the tmux window
+        // Capture the pane's scrollback just before the window dies so the
+        // user can view it read-only later (Session History → Closed
+        // Terminals). Strictly best-effort: any failure logs inside
+        // captureOnClose and the close proceeds unchanged.
         if let worktree = try await db.worktrees.get(id: terminal.worktreeID) {
+            await db.terminalHistory.captureOnClose(terminal: terminal) {
+                try await tmux.capturePaneScrollback(
+                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            }
+            // Kill the tmux window
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
         }
 
@@ -474,6 +482,15 @@ extension RPCRouter {
         )))
 
         return .ok()
+    }
+
+    /// Closed-terminal capture metadata for a worktree, newest first. Content
+    /// is not sent over RPC — the app reads the file at
+    /// `TBDConstants.terminalHistoryPath` directly.
+    func handleTerminalHistoryList(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalHistoryListParams.self, from: paramsData)
+        let entries = try await db.terminalHistory.list(worktreeID: params.worktreeID)
+        return try RPCResponse(result: entries)
     }
 
     func handleTerminalSetPin(_ paramsData: Data) async throws -> RPCResponse {

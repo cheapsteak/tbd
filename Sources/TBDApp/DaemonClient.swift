@@ -1241,6 +1241,17 @@ actor DaemonClient {
         )
     }
 
+    /// List closed-terminal capture metadata for a worktree (newest first).
+    /// Captured content is read directly from the file at
+    /// `TBDConstants.terminalHistoryPath` — not fetched over RPC.
+    func listTerminalHistory(worktreeID: UUID) async throws -> [TerminalHistoryEntry] {
+        return try await callAsync(
+            method: RPCMethod.terminalHistoryList,
+            params: TerminalHistoryListParams(worktreeID: worktreeID),
+            resultType: [TerminalHistoryEntry].self
+        )
+    }
+
     // MARK: - Model Profiles
     //
     // IMPORTANT: never log raw secret bytes. The `addModelProfile` wrapper is

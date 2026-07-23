@@ -54,6 +54,8 @@ extension WorktreeLifecycle {
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    // Hard delete: closed-terminal history (rows + files) goes too.
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: cleanup of missing-checkout worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -79,6 +81,8 @@ extension WorktreeLifecycle {
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    // Hard delete: closed-terminal history (rows + files) goes too.
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -91,6 +95,8 @@ extension WorktreeLifecycle {
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    // Hard delete: closed-terminal history (rows + files) goes too.
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: cleanup of repo-less worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")

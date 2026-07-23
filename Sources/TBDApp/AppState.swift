@@ -510,6 +510,12 @@ final class AppState: ObservableObject {
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
+    // Closed-terminal history (Session History → Closed Terminals).
+    @Published var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
+    @Published var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
+    /// Captured text of the currently selected closed terminal only —
+    /// deliberately a one-entry cache so large scrollbacks never accumulate.
+    @Published var closedTerminalContents: [UUID: String] = [:]                   // entry id → text
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency
     /// input to the keep-alive policy. Bounded by `touchVisitedWorktree`, which

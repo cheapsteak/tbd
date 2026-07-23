@@ -434,6 +434,16 @@ extension WorktreeLifecycle {
     /// an order without the hook tab) and keeps the stored order consistent
     /// on the paths that appended the tab (manual re-run, setup auto-close).
     func closeHookTerminal(worktree: Worktree, terminalID: UUID, windowID: String) async {
+        // Preserve the hook tab's output before the window dies so a user can
+        // read an auto-closed setup/pre-session run later (Session History →
+        // Closed Terminals). Best-effort: captureOnClose logs failures and
+        // the teardown proceeds unchanged.
+        if let terminal = try? await db.terminals.get(id: terminalID) {
+            await db.terminalHistory.captureOnClose(terminal: terminal) {
+                try await tmux.capturePaneScrollback(
+                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            }
+        }
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: windowID)
         do {
             try await db.terminals.delete(id: terminalID)

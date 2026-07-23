@@ -962,6 +962,35 @@ public struct Note: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+/// Metadata for a closed terminal whose scrollback was captured at close time.
+/// The captured text is file-backed at
+/// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
+/// (`TBDConstants.terminalHistoryPath`); the app reads the file directly and
+/// shows it read-only in Session History → Closed Terminals.
+public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
+    /// The closed terminal's UUID (also names the content file).
+    public let id: UUID
+    public var worktreeID: UUID
+    public var label: String?
+    public var kind: TerminalKind?
+    public var closedAt: Date
+    public var claudeSessionID: String?
+    /// Line count of the captured text (display metadata).
+    public var lineCount: Int
+
+    public init(id: UUID, worktreeID: UUID, label: String? = nil,
+                kind: TerminalKind? = nil, closedAt: Date = Date(),
+                claudeSessionID: String? = nil, lineCount: Int = 0) {
+        self.id = id
+        self.worktreeID = worktreeID
+        self.label = label
+        self.kind = kind
+        self.closedAt = closedAt
+        self.claudeSessionID = claudeSessionID
+        self.lineCount = lineCount
+    }
+}
+
 /// Kind of reaped directory a `ReapRecord` describes.
 public enum ReapKind: String, Codable, Sendable { case agentWorktree, scratchpad }
 
