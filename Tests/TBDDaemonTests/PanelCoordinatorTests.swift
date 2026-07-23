@@ -377,4 +377,116 @@ struct PanelCoordinatorTests {
             #expect(count == 0)
         }
     }
+
+    // MARK: - Actor-reentrancy lost update (production DatabasePool)
+
+    /// Regression for the reviewer's CRITICAL: actor isolation does NOT span
+    /// `await`, so a coordinator that loaded state, reduced, then awaited a
+    /// SEPARATE `commit` could have a concurrent same-tab apply read the stale
+    /// pre-commit revision (pool reads see a WAL snapshot) and silently clobber
+    /// the first. Only reproduces under a real `DatabasePool` (temp-file db) —
+    /// the in-memory `DatabaseQueue` used elsewhere serializes FIFO and hides
+    /// it. `applyReducing` closes the window by doing load→reduce→persist in
+    /// one write transaction; every concurrent apply then rebases on the last
+    /// committed tree, so all K increments and all K effects survive.
+    @Test func concurrentSameTabAppliesDoNotLoseUpdatesUnderPool() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pc-race-\(UUID()).sqlite")
+        let db = try TBDDatabase(path: tmp.path)
+        defer {
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: tmp.path + suffix)
+            }
+        }
+        try await db.config.setPanelSurfaceEnabled(true)
+        let wtID = try await makeWorktree(db)
+        let panelID = UUID()
+        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 0)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+
+        // K concurrent navigates on the SAME panel, each a distinct destination
+        // and distinct operationID. navigate always increments revision by one
+        // and pushes history — additive without touching split ratios, so no
+        // reducer rejection muddies the lost-update signal.
+        let k = 6
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for i in 0..<k {
+                group.addTask {
+                    let env = PanelOperationEnvelope(
+                        operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
+                        origin: .appUser,
+                        operation: .navigate(
+                            panelID: panelID,
+                            destination: .file(FileReference(path: "/f\(i).txt"))))
+                    _ = try await coordinator.apply(env)
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        let finalState = try await db.panelSurface.state(tabID: tab.id)
+        // No lost update: each of the K applies incremented the revision.
+        #expect(finalState?.surface.revision == UInt64(k))
+        // Every navigate's destination survives in the panel's durable history.
+        let paths = Set((finalState?.histories[panelID]?.entries ?? []).compactMap {
+            content -> String? in
+            if case .file(let ref) = content { return ref.path }
+            return nil
+        })
+        for i in 0..<k {
+            #expect(paths.contains("/f\(i).txt"), "navigate to /f\(i).txt was lost")
+        }
+        #expect(recorder.count == k)
+    }
+
+    // MARK: - Broadcast ordering against a FAILED commit
+
+    /// The disable-broadcast check proves a broadcast fires on success; this
+    /// proves none fires when the persist THROWS after a successful reduce.
+    /// Trips Task 6's cross-tab `panelHistoryOwnedByOtherTab` guard by forcing
+    /// the reducer to mint a new panel whose id already belongs to another
+    /// tab's history row — the write transaction rolls back, so no broadcast
+    /// and the target tab is unchanged.
+    @Test func failedCommitAfterReduceLeavesStateUnchangedAndDoesNotBroadcast() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPanelSurfaceEnabled(true)
+        let wtID = try await makeWorktree(db)
+
+        // Tab T2 owns a panel_history row for `collisionID`.
+        let collisionID = UUID()
+        _ = try await seedTab(db, worktreeID: wtID, panelID: collisionID)
+
+        // Tab T1: primary-only layout so `open .beside` mints a fresh panel.
+        let t1ID = UUID()
+        let t1 = WorkspaceTabSurface(
+            id: t1ID, worktreeID: wtID, label: "t1",
+            primary: .terminal(terminalID: UUID()), layout: .primary, revision: 0)
+        try await db.panelSurface.commit(
+            state: PanelSurfaceState(surface: t1, histories: [:]),
+            position: 1, receipt: nil, now: Date())
+
+        let recorder = BroadcastRecorder()
+        // makeID always returns the colliding id — the new panel slot's id will
+        // equal a panelID already owned by T2, tripping the store's guard.
+        let coordinator = makeCoordinator(db, recorder: recorder, makeID: { collisionID })
+
+        let envelope = PanelOperationEnvelope(
+            operationID: UUID(), worktreeID: wtID, tabID: t1ID, baseRevision: nil,
+            origin: .appUser,
+            operation: .open(
+                content: .file(FileReference(path: "/x.txt")),
+                placement: .beside(target: .primary, edge: .right, share: nil)))
+
+        await #expect(throws: (any Error).self) {
+            _ = try await coordinator.apply(envelope)
+        }
+        // No broadcast on a rolled-back commit.
+        #expect(recorder.count == 0)
+        // T1 is untouched: revision still 0, still primary-only, no phantom panel.
+        let reloaded = try await db.panelSurface.state(tabID: t1ID)
+        #expect(reloaded?.surface.revision == 0)
+        #expect(reloaded?.surface.layout == .primary)
+        #expect(reloaded?.histories.isEmpty == true)
+    }
 }

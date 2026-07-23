@@ -235,53 +235,131 @@ public struct PanelSurfaceStore: Sendable {
         now: Date = Date()
     ) async throws {
         _ = try await writer.write { db in
-            let existingPosition = try WorkspaceTabSurfaceRecord.fetchOne(db, key: state.surface.id.uuidString)?.position
-            let resolvedPosition = position ?? existingPosition ?? 0
-            let surfaceRecord = try WorkspaceTabSurfaceRecord(
-                from: state.surface, position: resolvedPosition, updatedAt: now)
-            try surfaceRecord.save(db)
-
-            let existingHistoryRows = try PanelHistoryRecord
-                .filter(Column("tabID") == state.surface.id.uuidString)
-                .fetchAll(db)
-            let existingByPanelID = Dictionary(uniqueKeysWithValues: existingHistoryRows.map { ($0.panelID, $0) })
-
-            // Full replace: drop rows for panels no longer present in the new state.
-            let newPanelIDStrings = Set(state.histories.keys.map(\.uuidString))
-            for row in existingHistoryRows where !newPanelIDStrings.contains(row.panelID) {
-                try PanelHistoryRecord.deleteOne(db, key: row.panelID)
-            }
-
-            // Loud-fail guard: `panel_history.panelID` is a table-wide PK, so a
-            // blind `save` would silently steal a row owned by another tab. Any
-            // panelID we're about to write that already exists under a DIFFERENT
-            // tab is a violation of the global-uniqueness invariant — throw
-            // instead of clobbering that tab's history.
-            for panelID in state.histories.keys {
-                if let owner = try PanelHistoryRecord.fetchOne(db, key: panelID.uuidString),
-                   owner.tabID != state.surface.id.uuidString {
-                    throw PanelSurfaceStoreError.panelHistoryOwnedByOtherTab(
-                        panelID: panelID,
-                        existingTabID: UUID(uuidString: owner.tabID) ?? UUID(),
-                        incomingTabID: state.surface.id)
-                }
-            }
-
-            for (panelID, history) in state.histories {
-                let existingRow = existingByPanelID[panelID.uuidString]
-                let unchanged = existingRow.flatMap { $0.toModel()?.history } == history
-                let updatedAt = unchanged ? (existingRow?.updatedAt ?? now) : now
-                let record = try PanelHistoryRecord(
-                    panelID: panelID, tabID: state.surface.id, history: history, updatedAt: updatedAt)
-                try record.save(db)
-            }
-
+            try Self.writeSurfaceAndHistory(state, position: position, db: db, now: now)
             if let receipt {
                 try receipt.save(db)
                 if let receiptWorktreeID = UUID(uuidString: receipt.worktreeID) {
-                    try pruneReceipts(db: db, worktreeID: receiptWorktreeID, now: now)
+                    try self.pruneReceipts(db: db, worktreeID: receiptWorktreeID, now: now)
                 }
             }
+        }
+    }
+
+    /// Writes ONE tab's surface row + its FULL history replace (drop-absent,
+    /// cross-tab clobber guard, changed-only `updatedAt`) against an
+    /// already-open write transaction. Shared by `commit` and the
+    /// transactional `applyReducing` so both honor the identical per-tab
+    /// contract (removed panels lose their row; no surface-row deletion needed
+    /// because a single op only ever mutates one tab, never removes it).
+    private static func writeSurfaceAndHistory(
+        _ state: PanelSurfaceState, position: Int?, db: GRDB.Database, now: Date
+    ) throws {
+        let existingPosition = try WorkspaceTabSurfaceRecord.fetchOne(db, key: state.surface.id.uuidString)?.position
+        let resolvedPosition = position ?? existingPosition ?? 0
+        let surfaceRecord = try WorkspaceTabSurfaceRecord(
+            from: state.surface, position: resolvedPosition, updatedAt: now)
+        try surfaceRecord.save(db)
+
+        let existingHistoryRows = try PanelHistoryRecord
+            .filter(Column("tabID") == state.surface.id.uuidString)
+            .fetchAll(db)
+        let existingByPanelID = Dictionary(uniqueKeysWithValues: existingHistoryRows.map { ($0.panelID, $0) })
+
+        // Full replace: drop rows for panels no longer present in the new state.
+        let newPanelIDStrings = Set(state.histories.keys.map(\.uuidString))
+        for row in existingHistoryRows where !newPanelIDStrings.contains(row.panelID) {
+            try PanelHistoryRecord.deleteOne(db, key: row.panelID)
+        }
+
+        // Loud-fail guard: `panel_history.panelID` is a table-wide PK, so a
+        // blind `save` would silently steal a row owned by another tab. Any
+        // panelID we're about to write that already exists under a DIFFERENT
+        // tab is a violation of the global-uniqueness invariant — throw
+        // instead of clobbering that tab's history.
+        for panelID in state.histories.keys {
+            if let owner = try PanelHistoryRecord.fetchOne(db, key: panelID.uuidString),
+               owner.tabID != state.surface.id.uuidString {
+                throw PanelSurfaceStoreError.panelHistoryOwnedByOtherTab(
+                    panelID: panelID,
+                    existingTabID: UUID(uuidString: owner.tabID) ?? UUID(),
+                    incomingTabID: state.surface.id)
+            }
+        }
+
+        for (panelID, history) in state.histories {
+            let existingRow = existingByPanelID[panelID.uuidString]
+            let unchanged = existingRow.flatMap { $0.toModel()?.history } == history
+            let updatedAt = unchanged ? (existingRow?.updatedAt ?? now) : now
+            let record = try PanelHistoryRecord(
+                panelID: panelID, tabID: state.surface.id, history: history, updatedAt: updatedAt)
+            try record.save(db)
+        }
+    }
+
+    /// Outcome of a transactional `applyReducing` call.
+    public enum ApplyOutcome: Sendable {
+        /// A fresh commit — the reducer ran and its result was persisted.
+        case applied(PanelApplyResult)
+        /// `operationID` already had a receipt — the stored result is replayed
+        /// (§7.4 idempotency), nothing was re-applied.
+        case replayed(PanelApplyResult)
+    }
+
+    /// Transactional §7.2 apply: idempotency check, state load, reducer run,
+    /// and persist ALL inside ONE write transaction, so concurrent same-tab
+    /// applies under a production `DatabasePool` cannot lose an update.
+    ///
+    /// Actor isolation does NOT span `await`, and a pool `read` sees a
+    /// pre-write WAL snapshot — so a coordinator that loaded state, reduced,
+    /// then `await`ed a separate `commit` could have a second apply load the
+    /// STALE pre-commit revision and clobber the first (silent lost update).
+    /// Doing the load inside the write transaction means the reducer runs
+    /// against the latest committed state — literally spec §7.4's "apply to
+    /// the current authoritative tree" — and the pool's single-writer lock
+    /// serializes the whole read-modify-write.
+    ///
+    /// `reduce` is the pure synchronous shared reducer (plus the caller's
+    /// baseRevision→staleTarget error mapping); it runs fine inside the
+    /// transaction. Returns `nil` when the tab has no surface row for
+    /// `worktreeID` (caller maps to its not-found error).
+    public func applyReducing(
+        operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
+        reduce: @Sendable (PanelSurfaceState) throws -> PanelSurfaceState
+    ) async throws -> ApplyOutcome? {
+        try await writer.write { db -> ApplyOutcome? in
+            // Idempotency, authoritative under concurrency: a receipt committed
+            // by a racing duplicate is visible here (same write lock), so the
+            // second caller replays instead of double-applying.
+            if let existing = try PanelOperationReceiptRecord.fetchOne(db, key: operationID.uuidString),
+               let prior = decodeJSON(PanelApplyResult.self, from: existing.result) {
+                return .replayed(prior)
+            }
+
+            // Load current committed state INSIDE the transaction.
+            guard let surfaceRecord = try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabID.uuidString),
+                  let surface = surfaceRecord.toModel(),
+                  surface.worktreeID == worktreeID else {
+                return nil
+            }
+            let histories = try PanelHistoryRecord
+                .filter(Column("tabID") == tabID.uuidString)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+            let current = PanelSurfaceState(
+                surface: surface, histories: Dictionary(uniqueKeysWithValues: histories))
+
+            let newState = try reduce(current)
+
+            try Self.writeSurfaceAndHistory(newState, position: surfaceRecord.position, db: db, now: now)
+
+            let result = PanelApplyResult(tab: newState.surface, replayed: false)
+            let receipt = PanelOperationReceiptRecord(
+                operationID: operationID.uuidString, worktreeID: worktreeID.uuidString,
+                tabID: tabID.uuidString, revision: Int64(newState.surface.revision),
+                result: try encodeJSONString(result), appliedAt: now)
+            try receipt.save(db)
+            try self.pruneReceipts(db: db, worktreeID: worktreeID, now: now)
+            return .applied(result)
         }
     }
 
