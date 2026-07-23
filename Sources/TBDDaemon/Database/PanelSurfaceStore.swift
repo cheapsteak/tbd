@@ -138,6 +138,11 @@ public enum PanelSurfaceStoreError: Error, Equatable, Sendable {
     /// (fresh UUIDs + importer cross-tab dedup), so this should never fire —
     /// it exists to turn a silent data-loss path into a loud failure.
     case panelHistoryOwnedByOtherTab(panelID: PanelID, existingTabID: WorkspaceTabID, incomingTabID: WorkspaceTabID)
+    /// `commitImport` is create-if-absent: a worktree that already has a
+    /// `panel_surface_imported_at` stamp OR any `workspace_tab_surface` row
+    /// has already been imported (or is mid-import from a concurrent call),
+    /// and must not be silently overwritten.
+    case alreadyImported
 }
 
 /// Store for the panel-surface schema (workspace tab layouts, panel history,
@@ -273,7 +278,108 @@ public struct PanelSurfaceStore: Sendable {
 
             if let receipt {
                 try receipt.save(db)
+                if let receiptWorktreeID = UUID(uuidString: receipt.worktreeID) {
+                    try pruneReceipts(db: db, worktreeID: receiptWorktreeID, now: now)
+                }
             }
+        }
+    }
+
+    /// Keep at most this many receipts per worktree (spec C §7.4).
+    private static let receiptRetentionLimit = 100
+    /// Drop receipts older than this, regardless of count (spec C §7.4).
+    private static let receiptMaxAge: TimeInterval = 24 * 60 * 60
+
+    /// Shared prune body: runs INSIDE an already-open write transaction (used
+    /// by `commit`) or wrapped in its own (the public `pruneReceipts` below,
+    /// used directly by tests). Age-bound first, then count-bound — order
+    /// doesn't affect the final surviving set, both are applied together.
+    private func pruneReceipts(db: Database, worktreeID: UUID, now: Date) throws {
+        let cutoff = now.addingTimeInterval(-Self.receiptMaxAge)
+        try PanelOperationReceiptRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .filter(Column("appliedAt") < cutoff)
+            .deleteAll(db)
+
+        let keepIDs = try PanelOperationReceiptRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .order(Column("appliedAt").desc)
+            .limit(Self.receiptRetentionLimit)
+            .fetchAll(db)
+            .map(\.operationID)
+        try PanelOperationReceiptRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .filter(!keepIDs.contains(Column("operationID")))
+            .deleteAll(db)
+    }
+
+    /// Public entry point for `pruneReceipts` — same bounds as the private
+    /// helper `commit` runs automatically, exposed standalone for tests that
+    /// want to drive pruning without going through a full commit.
+    public func pruneReceipts(worktreeID: UUID, now: Date) async throws {
+        _ = try await writer.write { db in
+            try self.pruneReceipts(db: db, worktreeID: worktreeID, now: now)
+        }
+    }
+
+    /// Idempotency lookup (spec C §7.4): the previously committed result for
+    /// `operationID`, or `nil` if this operation never committed (or its
+    /// receipt has since been pruned).
+    public func receipt(operationID: UUID) async throws -> PanelApplyResult? {
+        try await writer.read { db in
+            guard let record = try PanelOperationReceiptRecord.fetchOne(db, key: operationID.uuidString) else {
+                return nil
+            }
+            return decodeJSON(PanelApplyResult.self, from: record.result)
+        }
+    }
+
+    /// Atomic §11.2 import: writes every converted surface + its histories +
+    /// stamps `worktree.panel_surface_imported_at`, all in one transaction.
+    /// Create-if-absent — throws `.alreadyImported` when the worktree already
+    /// has a stamp OR any existing surface row (covers a prior successful
+    /// import and a prior partial write alike).
+    ///
+    /// `conversion.histories` is keyed by `PanelID` across ALL tabs; each
+    /// surface's own subset is recovered via `surface.layout.allPanelIDs` —
+    /// the importer's cross-tab dedup guarantees those IDs are globally
+    /// unique, so the same `panelHistoryOwnedByOtherTab` guard `commit` uses
+    /// composes cleanly across this multi-tab write.
+    public func commitImport(
+        worktreeID: UUID, conversion: LegacySurfaceImporter.Conversion, now: Date
+    ) async throws {
+        _ = try await writer.write { db in
+            let alreadyStamped = try WorktreeRecord
+                .fetchOne(db, key: worktreeID.uuidString)?.panel_surface_imported_at != nil
+            let hasExistingSurfaces = try WorkspaceTabSurfaceRecord
+                .filter(Column("worktreeID") == worktreeID.uuidString)
+                .fetchCount(db) > 0
+            guard !alreadyStamped, !hasExistingSurfaces else {
+                throw PanelSurfaceStoreError.alreadyImported
+            }
+
+            for (index, surface) in conversion.surfaces.enumerated() {
+                let surfaceRecord = try WorkspaceTabSurfaceRecord(from: surface, position: index, updatedAt: now)
+                try surfaceRecord.save(db)
+
+                for panelID in surface.layout.allPanelIDs {
+                    guard let history = conversion.histories[panelID] else { continue }
+                    if let owner = try PanelHistoryRecord.fetchOne(db, key: panelID.uuidString),
+                       owner.tabID != surface.id.uuidString {
+                        throw PanelSurfaceStoreError.panelHistoryOwnedByOtherTab(
+                            panelID: panelID,
+                            existingTabID: UUID(uuidString: owner.tabID) ?? UUID(),
+                            incomingTabID: surface.id)
+                    }
+                    let historyRecord = try PanelHistoryRecord(
+                        panelID: panelID, tabID: surface.id, history: history, updatedAt: now)
+                    try historyRecord.save(db)
+                }
+            }
+
+            try db.execute(
+                sql: "UPDATE worktree SET panel_surface_imported_at = ? WHERE id = ?",
+                arguments: [now, worktreeID.uuidString])
         }
     }
 
