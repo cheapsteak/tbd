@@ -343,6 +343,12 @@ extension WorktreeLifecycle {
                         modelOverride: modelOverride,
                         claudeSettingsOverlay: claudeSettingsOverlay
                     )
+                    // Fresh creates get an initial note tab, appended after the
+                    // primary spawn set the tab order. Create path only — a
+                    // revive's surviving note rows re-materialize via the app's
+                    // reconcile instead. Best-effort: if the worktree row
+                    // vanished mid-wait, the note insert FK-fails and is logged.
+                    await createInitialNoteTab(worktreeID: worktree.id)
                 }
                 return .preSessionPending(phase3: phase3)
             }
@@ -364,6 +370,10 @@ extension WorktreeLifecycle {
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
+            // 3c. Fresh repo-backed creates get an initial note tab (appended
+            // last; the primary terminal keeps focus).
+            await createInitialNoteTab(worktreeID: worktreeID)
+
             // 4. Update status to active
             let markActiveStart = clock.now
             try await db.worktrees.updateStatus(id: worktreeID, status: .active)
@@ -378,6 +388,24 @@ extension WorktreeLifecycle {
             // On failure, delete the DB row
             try? await db.worktrees.delete(id: worktreeID)
             throw error
+        }
+    }
+
+    /// Creates the initial "Notes" tab for a freshly created repo-backed
+    /// worktree: one empty note row appended to the tab order (last; the
+    /// primary terminal keeps focus). The app materializes the tab from the
+    /// note row via its `reconcileNoteTabs` poll — note tabs use the note
+    /// row's UUID as the tab ID. Best-effort: a failure (e.g. the worktree
+    /// row vanished mid-create, FK-failing the insert) must never fail the
+    /// create, whose checkout and terminals are already valid.
+    func createInitialNoteTab(worktreeID: UUID) async {
+        do {
+            let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
+            var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
+            order.append(note.id)
+            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
+        } catch {
+            logger.warning("failed to create initial note tab for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

@@ -678,6 +678,23 @@ final class AppState: ObservableObject {
     /// same reason as `controlModeSetter`.
     lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
+    /// Asks the user to confirm closing a note tab whose note has content —
+    /// closing a note tab hard-deletes the note row (`closeTab` →
+    /// `deleteNote`). Injectable so tests can exercise both branches without
+    /// a real modal NSAlert.
+    lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete note \u{201C}\(note.title)\u{201D}?"
+        alert.informativeText = "Closing this tab permanently deletes the note and its contents."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        // HIG: destructive action shouldn't be the Return-key default (same
+        // pattern as LegacyHooksCoordinator's migrate dialog).
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from

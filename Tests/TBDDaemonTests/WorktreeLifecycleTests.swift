@@ -71,7 +71,9 @@ import Testing
 
     #expect(primary.kind == .codex)
     #expect(primary.label == "Codex")
-    #expect(try await db.worktrees.getTabOrder(worktreeID: result.id) == terminals.map(\.id))
+    let noteIDs = try await db.notes.list(worktreeID: result.id).map(\.id)
+    #expect(try await db.worktrees.getTabOrder(worktreeID: result.id)
+            == terminals.map(\.id) + noteIDs)
     #expect(try await db.worktrees.getActiveTabID(worktreeID: result.id) == primary.id)
 }
 

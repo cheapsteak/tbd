@@ -147,6 +147,16 @@ extension AppState {
               arr.indices.contains(index) else { return }
 
         let tab = arr[index]
+
+        // Closing a note tab hard-deletes the note row. Confirm first when
+        // the note has content; an empty note closes silently as before.
+        if case .note(let noteID) = tab.content,
+           let note = notes[worktreeID]?.first(where: { $0.id == noteID }),
+           !note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !noteCloseConfirmer(note) {
+            return
+        }
+
         let layout = layouts[tab.id] ?? .pane(tab.content)
         let terminalIDsInTab = Set(layout.allTerminalIDs())
 

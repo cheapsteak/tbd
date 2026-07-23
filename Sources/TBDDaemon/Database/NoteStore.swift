@@ -55,8 +55,9 @@ public struct NoteStore: Sendable {
         self.writer = writer
     }
 
-    /// Create a new note with a monotonically increasing title ("Note 1", "Note 2", etc.).
-    public func create(worktreeID: UUID) async throws -> Note {
+    /// Create a new note. With no explicit `title`, uses a monotonically
+    /// increasing default ("Note 1", "Note 2", etc.).
+    public func create(worktreeID: UUID, title: String? = nil) async throws -> Note {
         try await writer.write { db in
             // Use MAX to avoid duplicate titles after deletions
             let maxNum = try Int.fetchOne(db, sql: """
@@ -66,7 +67,7 @@ public struct NoteStore: Sendable {
                 """, arguments: [worktreeID.uuidString]) ?? 0
             let note = Note(
                 worktreeID: worktreeID,
-                title: "Note \(maxNum + 1)"
+                title: title ?? "Note \(maxNum + 1)"
             )
             let record = NoteRecord(from: note)
             try record.insert(db)

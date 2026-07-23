@@ -145,8 +145,10 @@ struct AutoCloseSetupTests {
 
         #expect(try await db.terminals.get(id: setup.id) == nil,
                 "exit 0 must delete the setup terminal row")
-        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [primary.id],
+        let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)
+        #expect(!order.contains(setup.id),
                 "the closed setup tab must be pruned from the stored tab order")
+        #expect(order.first == primary.id)
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == primary.id)
         let markerPath = WorktreeLifecycle.setupMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath), "marker must be consumed")
