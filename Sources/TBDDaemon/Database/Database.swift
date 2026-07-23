@@ -924,6 +924,15 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        // Drag-and-drop reordering for model profiles (mirrors v11's worktree
+        // sortOrder). Initialize existing rows from rowid to preserve current
+        // insertion order.
+        migrator.registerMigration("v56_model_profiles_sort_order") { db in
+            try db.addColumnIfMissing(
+                table: "model_profiles", column: "sort_order", type: .integer, defaults: 0)
+            try db.execute(sql: "UPDATE model_profiles SET sort_order = rowid")
+        }
+
         return migrator
     }
 }

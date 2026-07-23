@@ -70,6 +70,9 @@ struct ModelProfilesSettingsView: View {
                 ModelProfileRow(entry: entry)
                     .environmentObject(appState)
             }
+            .onMove { source, destination in
+                appState.reorderModelProfiles(fromOffsets: source, toOffset: destination)
+            }
         }
         .listStyle(.inset)
         .frame(minHeight: 200)

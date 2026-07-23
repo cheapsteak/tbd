@@ -340,6 +340,15 @@ extension RPCRouter {
         return .ok()
     }
 
+    // MARK: - Reorder
+
+    func handleModelProfileReorder(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileReorderParams.self, from: paramsData)
+        try await db.modelProfiles.reorder(profileIDs: params.profileIDs)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     func handleModelProfileSetRepoOverride(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileSetRepoOverrideParams.self, from: paramsData)
         guard try await db.repos.get(id: params.repoID) != nil else {

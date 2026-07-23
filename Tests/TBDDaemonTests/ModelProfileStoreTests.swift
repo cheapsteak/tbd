@@ -158,4 +158,57 @@ struct ModelProfileStoreTests {
         let fetched = try await db.modelProfiles.get(id: p.id)
         #expect(fetched?.awsProfile == nil)
     }
+
+    // MARK: - Reorder (mirrors WorktreeStoreTests.reorderChangesListOrder)
+
+    @Test("create auto-assigns increasing sortOrder")
+    func createAssignsSortOrder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p1 = try await db.modelProfiles.create(name: "first", kind: .oauth)
+        let p2 = try await db.modelProfiles.create(name: "second", kind: .oauth)
+        let p3 = try await db.modelProfiles.create(name: "third", kind: .oauth)
+
+        #expect(p1.sortOrder < p2.sortOrder)
+        #expect(p2.sortOrder < p3.sortOrder)
+    }
+
+    @Test("list returns profiles ordered by sortOrder")
+    func listOrdersBySortOrder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p1 = try await db.modelProfiles.create(name: "first", kind: .oauth)
+        let p2 = try await db.modelProfiles.create(name: "second", kind: .oauth)
+        let p3 = try await db.modelProfiles.create(name: "third", kind: .oauth)
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.map(\.id) == [p1.id, p2.id, p3.id])
+    }
+
+    @Test("reorder changes list order and persists sortOrder")
+    func reorderChangesListOrder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p1 = try await db.modelProfiles.create(name: "first", kind: .oauth)
+        let p2 = try await db.modelProfiles.create(name: "second", kind: .oauth)
+        let p3 = try await db.modelProfiles.create(name: "third", kind: .oauth)
+
+        // Reorder: third, first, second
+        try await db.modelProfiles.reorder(profileIDs: [p3.id, p1.id, p2.id])
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.map(\.id) == [p3.id, p1.id, p2.id])
+        #expect(listed.map(\.sortOrder) == [0, 1, 2])
+    }
+
+    @Test("reorder pushes non-listed profiles after the reordered ones")
+    func reorderPushesUnlistedAfter() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p1 = try await db.modelProfiles.create(name: "first", kind: .oauth)
+        let p2 = try await db.modelProfiles.create(name: "second", kind: .oauth)
+        let p3 = try await db.modelProfiles.create(name: "third", kind: .oauth)
+
+        // Only reorder p2 and p1; p3 is not listed and should be pushed after.
+        try await db.modelProfiles.reorder(profileIDs: [p2.id, p1.id])
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.map(\.id) == [p2.id, p1.id, p3.id])
+    }
 }

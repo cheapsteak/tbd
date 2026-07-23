@@ -153,6 +153,7 @@ public enum RPCMethod {
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
     public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
+    public static let modelProfileReorder = "modelProfile.reorder"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileUsageRefresh = "modelProfile.usageRefresh"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
@@ -1050,6 +1051,15 @@ public struct WorktreeReorderParams: Codable, Sendable {
     public let worktreeIDs: [UUID]
     public init(repoID: UUID, worktreeIDs: [UUID]) {
         self.repoID = repoID; self.worktreeIDs = worktreeIDs
+    }
+}
+
+/// Params for `modelProfile.reorder`. Profiles are global — no repoID scoping
+/// (unlike `WorktreeReorderParams`).
+public struct ModelProfileReorderParams: Codable, Sendable {
+    public let profileIDs: [UUID]
+    public init(profileIDs: [UUID]) {
+        self.profileIDs = profileIDs
     }
 }
 
