@@ -1,11 +1,13 @@
 import Foundation
 import CoreGraphics
 
-/// Spec C §11.2 — pure, single-tab conversion from the legacy layout model
+/// Spec C §11.2 — pure conversion from the legacy layout model
 /// (`LayoutNode`/`PaneContent`/`Tab`) to the new panel-surface model
-/// (`WorkspaceTabSurface`/`PanelLayoutNode`). Multi-tab orchestration and
-/// terminal-leaf promotion to new tabs is Task 4; this only counts the
-/// terminals that need promoting.
+/// (`WorkspaceTabSurface`/`PanelLayoutNode`). Each legacy tab's primary
+/// content converts in place; every ADDITIONAL terminal leaf in its tree is
+/// promoted to its own new primary-terminal tab, spliced immediately after
+/// the source tab (spec §11.2 step 4 — a terminal is never dropped, even
+/// when the source tab itself fails validation and is skipped).
 public enum LegacySurfaceImporter {
     public struct Conversion: Sendable, Equatable {
         public var surfaces: [WorkspaceTabSurface]
