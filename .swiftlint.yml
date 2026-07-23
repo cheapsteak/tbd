@@ -139,6 +139,11 @@ custom_rules:
       # never parsed, matched, or used to infer agent/TUI state — exactly NOT
       # the state-inference scraping the rule bans.
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"
+      # Same sanctioned archival-capture use: captureThenKillWindow snapshots a
+      # live terminal's scrollback verbatim into terminal-history before the
+      # archive/reconcile-auto-archive paths kill its window (the archived row +
+      # history survive). Never parsed for agent/TUI state.
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"
       - "Sources/TBDShared/NightwatchSkillContent\\.swift"               # embedded Python babysitter (see rule above)
     regex: 'capturePane\w*\s*\(|capture-pane'
     match_kinds:

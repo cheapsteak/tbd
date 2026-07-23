@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -154,6 +155,70 @@ import Testing
         let path = fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: fx.terminal.id)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == "setup hook output\n")
+    }
+
+    // MARK: - Capture on archive
+
+    @Test func archiveCapturesLiveTerminalScrollbackAndKeepsArchivedRow() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        let captured = "agent output before archive\nsecond line\n"
+        let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in captured })
+        let lifecycle = WorktreeLifecycle(
+            db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+
+        _ = try await lifecycle.beginArchiveWorktree(worktreeID: fx.worktree.id)
+
+        // Terminal row torn down, but the worktree row survives as archived.
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+        #expect(try await fx.db.worktrees.get(id: fx.worktree.id)?.status == .archived)
+
+        // Scrollback captured into Closed Terminals history (row + file).
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(entries.count == 1)
+        #expect(entries.first?.id == fx.terminal.id)
+        let path = fx.db.terminalHistory.contentPath(
+            worktreeID: fx.worktree.id, terminalID: fx.terminal.id)
+        #expect(try String(contentsOfFile: path, encoding: .utf8) == captured)
+    }
+
+    // MARK: - Capture on reconcile auto-archive
+
+    /// A worktree whose git checkout has vanished is auto-archived by reconcile;
+    /// its live terminal's scrollback must land in Closed Terminals history.
+    @Test func reconcileAutoArchiveCapturesTerminalScrollback() async throws {
+        let historyDir = try Self.makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: historyDir) }
+        let db = try TBDDatabase(inMemory: true, terminalHistoryDir: historyDir)
+
+        // Real git repo with no extra worktrees, so a DB worktree row pointing
+        // at a non-git path is auto-archived by reconcile.
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let captured = "reconcile scrollback\n"
+        let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in captured })
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "gone", branch: "gone-branch",
+            path: tempDir.appendingPathComponent("vanished").path, tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%0",
+            label: "Claude Code", claudeSessionID: UUID().uuidString, kind: .claude)
+
+        try await lifecycle.reconcile(repoID: repo.id)
+
+        // Worktree archived, terminal torn down, scrollback captured.
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let entries = try await db.terminalHistory.list(worktreeID: wt.id)
+        #expect(entries.count == 1)
+        #expect(entries.first?.id == terminal.id)
+        let path = db.terminalHistory.contentPath(worktreeID: wt.id, terminalID: terminal.id)
+        #expect(try String(contentsOfFile: path, encoding: .utf8) == captured)
     }
 
     // MARK: - Retention

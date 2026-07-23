@@ -171,4 +171,24 @@ public struct WorktreeLifecycle: Sendable {
         // Escalate even if killWindow threw — the pane process may still be alive.
         if let panePID { await reaper.escalateAfterHangup(panePID) }
     }
+
+    /// Capture a live terminal's scrollback into Closed Terminals history
+    /// (best-effort), then kill its window and reap the pane. Used by the
+    /// archive paths (explicit archive + reconcile auto-archive), where the
+    /// worktree row and its `terminal_history` rows survive — unlike the
+    /// hard-delete paths (Forget/Recovery/scratch.delete) that wipe history
+    /// immediately after and so deliberately skip the capture. Capturing must
+    /// happen before the window dies; mirrors `closeHookTerminal`'s
+    /// never-throws capture (failures are logged inside `captureOnClose` and
+    /// never block the teardown).
+    func captureThenKillWindow(terminal: Terminal, server: String) async {
+        await db.terminalHistory.captureOnClose(terminal: terminal) {
+            try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
+        }
+        await killWindowAndReap(
+            server: server,
+            windowID: terminal.tmuxWindowID,
+            paneID: terminal.tmuxPaneID
+        )
+    }
 }

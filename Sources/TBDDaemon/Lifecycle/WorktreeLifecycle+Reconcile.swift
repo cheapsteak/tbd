@@ -167,15 +167,15 @@ extension WorktreeLifecycle {
         )
         let dbPaths = Set(dbWorktrees.map(\.path)).union(creatingPaths)
 
-        // Mark missing worktrees as archived — also kill their tmux windows
+        // Mark missing worktrees as archived — also capture each terminal's
+        // scrollback into Closed Terminals history, then kill its tmux window.
+        // The checkout is gone but the tmux server may still be live; capture
+        // is best-effort (a dead window/pane just logs and skips). The archived
+        // row and its history rows survive, so the output stays readable.
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             for terminal in terminals {
-                await killWindowAndReap(
-                    server: wt.tmuxServer,
-                    windowID: terminal.tmuxWindowID,
-                    paneID: terminal.tmuxPaneID
-                )
+                await captureThenKillWindow(terminal: terminal, server: wt.tmuxServer)
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
             try await db.tabs.deleteForWorktree(worktreeID: wt.id)
