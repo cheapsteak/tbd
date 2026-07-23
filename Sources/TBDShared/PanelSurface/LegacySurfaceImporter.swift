@@ -33,16 +33,45 @@ public enum LegacySurfaceImporter {
     ) -> Conversion {
         let byID = Dictionary(uniqueKeysWithValues: tabs.map { ($0.tabID, $0) })
         var result = Conversion()
-        for tabID in tabOrder {
+
+        // Final order (spec §11.2.7): tabOrder's sequence first (unknown IDs
+        // ignored), then any tabs missing from tabOrder appended in payload
+        // order — promoted tabs get spliced in below, after their source.
+        var orderedIDs: [UUID] = tabOrder.filter { byID[$0] != nil }
+        let known = Set(orderedIDs)
+        for tab in tabs where !known.contains(tab.tabID) {
+            orderedIDs.append(tab.tabID)
+        }
+
+        // Cross-tab dedup (corrupt-blob edge case): viewer-class leaves reuse
+        // their legacy pane ID as the new PanelID, but `result.histories` is
+        // keyed by PanelID across ALL tabs — a legacy pane ID reused across
+        // two different tabs would silently clobber the earlier tab's
+        // history entry. Track every PanelID handed out so a repeat mints a
+        // fresh one instead.
+        var usedPanelIDs = Set<PanelID>()
+
+        for tabID in orderedIDs {
             guard let payload = byID[tabID] else { continue }
-            switch convertTab(worktreeID: worktreeID, payload: payload,
-                               paneHistories: paneHistories, makeID: makeID) {
-            case .converted(let surface, let histories, let promoted):
+            let outcome = convertTab(
+                worktreeID: worktreeID, payload: payload, paneHistories: paneHistories,
+                makeID: makeID, usedPanelIDs: &usedPanelIDs)
+            switch outcome.result {
+            case .converted(let surface, let histories):
                 result.surfaces.append(surface)
                 for (id, history) in histories { result.histories[id] = history }
-                result.promotedTerminalTabs += promoted
             case .skipped(let reason):
                 result.skipped.append(reason)
+            }
+            // Terminal-leaf promotion (spec §11.2 step 4, "never kill or
+            // discard" a terminal): every additional terminal leaf becomes
+            // its own new primary-terminal tab, spliced immediately after
+            // its source in traversal order.
+            for terminalID in outcome.promotedTerminalIDs {
+                result.surfaces.append(WorkspaceTabSurface(
+                    id: makeID(), worktreeID: worktreeID, label: nil,
+                    primary: .terminal(terminalID: terminalID), layout: .primary, revision: 0))
+                result.promotedTerminalTabs += 1
             }
         }
         return result
@@ -109,8 +138,17 @@ public enum LegacySurfaceImporter {
     // MARK: - Per-tab conversion
 
     private enum TabOutcome {
-        case converted(WorkspaceTabSurface, [PanelID: PanelHistory], Int)
+        case converted(WorkspaceTabSurface, [PanelID: PanelHistory])
         case skipped(String)
+    }
+
+    /// `convertTab`'s full result: the single-tab outcome (converted or
+    /// skipped), plus every terminal ID from this tab that still needs its
+    /// own promoted tab. Populated in both branches — see the doc comment on
+    /// `convertTab` for why a skip must still promote.
+    private struct TabConversionOutcome {
+        var result: TabOutcome
+        var promotedTerminalIDs: [UUID]
     }
 
     /// A surviving panel slot, plus the legacy key under which its history
@@ -123,13 +161,24 @@ public enum LegacySurfaceImporter {
         var content: PanelContent
     }
 
+    /// Converts one legacy tab. Always reports every terminal ID that needs
+    /// promotion to its own new tab — not just when conversion succeeds.
+    /// Task 3 skipped a whole tab outright when its declared primary
+    /// (`payload.content.paneID`) matched no leaf in the tree (malformed
+    /// data): `primaryFound` never flips, the layout ends up with zero
+    /// `.primary` markers, and `PanelSurfaceValidator` rejects it. That skip
+    /// must not take the tab's terminals down with it (spec §11.2 step 4,
+    /// "never kill or discard" a terminal) — so on ANY validation failure we
+    /// fall back to promoting every terminal leaf found in the tree, plus the
+    /// declared primary itself if it's a terminal that was never matched.
     private static func convertTab(
         worktreeID: UUID, payload: LegacyTabPayload,
-        paneHistories: [UUID: MRUHistory<PaneContent>], makeID: () -> UUID
-    ) -> TabOutcome {
+        paneHistories: [UUID: MRUHistory<PaneContent>], makeID: () -> UUID,
+        usedPanelIDs: inout Set<PanelID>
+    ) -> TabConversionOutcome {
         let tree = payload.layout ?? .pane(payload.content)
         var primaryFound = false
-        var promotedCount = 0
+        var droppedTerminalIDs: [UUID] = []
         var panelSources: [PanelSource] = []
 
         func convertNode(_ node: LayoutNode) -> PanelLayoutNode? {
@@ -140,8 +189,8 @@ public enum LegacySurfaceImporter {
                     return .primary
                 }
                 switch leaf {
-                case .terminal:
-                    promotedCount += 1
+                case .terminal(let terminalID):
+                    droppedTerminalIDs.append(terminalID)
                     return nil
                 case .note(let noteID):
                     let newID = makeID()
@@ -150,8 +199,15 @@ public enum LegacySurfaceImporter {
                     return .panel(PanelSlot(id: newID, content: content))
                 case .webview, .codeViewer, .liveTranscript:
                     guard let content = panelContent(from: leaf) else { return nil }
-                    panelSources.append(PanelSource(newID: leaf.paneID, legacyHistoryKey: leaf.paneID, content: content))
-                    return .panel(PanelSlot(id: leaf.paneID, content: content))
+                    // Cross-tab dedup: a corrupt blob may reuse the same
+                    // legacy pane ID as a viewer leaf in two different tabs.
+                    // Reusing it here as the PanelID would collide in the
+                    // caller's global `histories` dict, clobbering whichever
+                    // tab converted first. Mint a fresh ID for any repeat.
+                    let panelID = usedPanelIDs.contains(leaf.paneID) ? makeID() : leaf.paneID
+                    usedPanelIDs.insert(panelID)
+                    panelSources.append(PanelSource(newID: panelID, legacyHistoryKey: leaf.paneID, content: content))
+                    return .panel(PanelSlot(id: panelID, content: content))
                 }
 
             case .split(let id, let direction, let children, let ratios):
@@ -190,9 +246,22 @@ public enum LegacySurfaceImporter {
         let state = PanelSurfaceState(surface: surface, histories: histories)
         let violations = PanelSurfaceValidator.violations(in: state)
         guard violations.isEmpty else {
-            return .skipped("tab \(payload.tabID): \(violations)")
+            // The tab's own surface never lands — but every terminal it
+            // references still must (spec §11.2 step 4). `droppedTerminalIDs`
+            // already holds every terminal leaf that wasn't the matched
+            // primary; if the declared primary itself is a terminal that was
+            // never found in the tree (why `primaryFound` is still false —
+            // the malformed case), it's not in that list yet, so add it.
+            var allTerminalIDs = droppedTerminalIDs
+            if case .terminal(let contentTerminalID) = payload.content,
+               !allTerminalIDs.contains(contentTerminalID) {
+                allTerminalIDs.insert(contentTerminalID, at: 0)
+            }
+            return TabConversionOutcome(
+                result: .skipped("tab \(payload.tabID): \(violations)"),
+                promotedTerminalIDs: allTerminalIDs)
         }
-        return .converted(surface, histories, promotedCount)
+        return TabConversionOutcome(result: .converted(surface, histories), promotedTerminalIDs: droppedTerminalIDs)
     }
 
     /// Re-keys a legacy `PaneContent` history onto the new `PanelContent`
