@@ -1327,10 +1327,12 @@ extension RPCRouter {
         }
     }
 
-    /// Schedule the post-resume session-id recapture. `claude --resume <id>`
-    /// forks the conversation into a NEW session file with a fresh UUID; mirror
-    /// the wake path's pattern — wait ~5s for Claude to settle, then capture the
-    /// new id from the pane and persist it against `terminalID`.
+    /// Schedule the post-resume session-id recapture. `claude --resume <id>
+    /// --fork-session` (the `.fork` swap path) forks the conversation into a NEW
+    /// session file with a fresh UUID; mirror the wake path's pattern — wait ~5s
+    /// for Claude to settle, then capture the new id from the pane and persist it
+    /// against `terminalID`. (On the `.inPlace` path there is no `--fork-session`,
+    /// so the id is unchanged and the recapture is a harmless no-op.)
     private func scheduleSessionRecapture(terminalID: UUID, paneID: String, server: String) {
         let tmuxRef = self.tmux
         let dbRef = self.db
