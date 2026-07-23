@@ -108,11 +108,18 @@ struct ModelProfileResolverTests {
 
         let before = Date()
         _ = try await resolver.resolve(repoID: nil)
+        let after = Date()
         let reloaded = try await db.modelProfiles.get(id: tok.id)
         #expect(reloaded?.lastUsedAt != nil)
         if let lu = reloaded?.lastUsedAt {
-            #expect(lu.timeIntervalSince(before) >= -1)
-            #expect(lu.timeIntervalSinceNow >= -5)
+            // lastUsedAt is stamped DURING resolve, so it must land inside the
+            // [before, after] wall-clock bracket — deterministic no matter how
+            // long a loaded CI runner then takes to reload and assert. The old
+            // `timeIntervalSinceNow >= -5` measured elapsed *test* time from the
+            // bump to the assertion and flaked when the runner stretched past
+            // 5 s (observed: got -5.111). ±1 s absorbs timestamp storage rounding.
+            #expect(lu >= before.addingTimeInterval(-1))
+            #expect(lu <= after.addingTimeInterval(1))
         }
     }
 

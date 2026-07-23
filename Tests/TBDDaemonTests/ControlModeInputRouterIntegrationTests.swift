@@ -82,15 +82,32 @@ struct ControlModeInputRouterIntegrationTests {
             chunkSize: chunkSize)
     }
 
-    /// Poll `path` until its bytes equal `expected`, or time out.
+    /// Poll `path` until its bytes equal `expected`, or time out. On timeout the
+    /// thrown error tells the TRUTH about why: an incomplete-but-correct prefix
+    /// (the pane hadn't finished writing → a load/timeout problem) vs a byte
+    /// that diverges (a real FIFO ordering bug). The old error re-read the file
+    /// AFTER the deadline and reported `expected.count` vs that count — which
+    /// were equal when the write completed in the final slice, hiding both.
     private func awaitFileBytes(path: String, expected: Data, timeout: Duration) async throws {
         let deadline = ContinuousClock.now + timeout
+        var lastObserved = Data()
         while ContinuousClock.now < deadline {
-            if let data = FileManager.default.contents(atPath: path), data == expected { return }
+            if let data = FileManager.default.contents(atPath: path) {
+                if data == expected { return }
+                lastObserved = data
+            }
             try await Task.sleep(for: .milliseconds(50))
         }
-        let actual = FileManager.default.contents(atPath: path)?.count ?? 0
-        throw InputIntegrationError.fileBytesMismatch(expected: expected.count, actual: actual)
+        // Final read: a completion that landed in the last sleep slice must not
+        // be misreported as a mismatch.
+        if let data = FileManager.default.contents(atPath: path) {
+            if data == expected { return }
+            lastObserved = data
+        }
+        throw InputIntegrationError.fileBytesUnmatched(
+            expected: expected.count,
+            observed: lastObserved.count,
+            correctPrefix: expected.starts(with: lastObserved))
     }
 
     /// Printable-ASCII payload of exactly `byteCount` bytes.
@@ -149,7 +166,12 @@ struct ControlModeInputRouterIntegrationTests {
         router.enqueuePaste(header: header, bytes: payload)
         router.enqueue(header: header, bytes: tag)
 
-        try await awaitFileBytes(path: outPath, expected: payload + tag, timeout: .seconds(15))
+        // 30 s (not 15): this real-tmux integration test's whole pipeline —
+        // bootstrap, -CC connect, pane-command settle, then the paste+keystroke
+        // round-trip — stretches well past 15 s under parallel-suite load (a CI
+        // run took 45.8 s total). A generous deadline for a genuinely slow I/O
+        // path, not a masked ordering bug: the error above distinguishes the two.
+        try await awaitFileBytes(path: outPath, expected: payload + tag, timeout: .seconds(30))
 
         router.shutdown()
         await supervisor.stopAll()
@@ -312,5 +334,5 @@ private enum InputIntegrationError: Error {
     case noPane
     case markerNeverAppeared(String)
     case paneCommandNeverSettled
-    case fileBytesMismatch(expected: Int, actual: Int)
+    case fileBytesUnmatched(expected: Int, observed: Int, correctPrefix: Bool)
 }
