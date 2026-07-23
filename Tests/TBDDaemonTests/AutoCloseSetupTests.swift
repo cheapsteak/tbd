@@ -95,6 +95,10 @@ struct AutoCloseSetupTests {
                 "flag off must keep the pre-existing shellWrapped command")
         #expect(setupBody.contains("exec "))
 
+        // Flag off never touches remain-on-exit — the pane stays a normal
+        // interactive shell window.
+        #expect(!recorder.snapshot().contains { $0.contains("remain-on-exit") })
+
         // No watcher was armed: a marker written by hand is never consumed
         // and the setup terminal stays.
         try writeSetupMarker(worktreeID: wt.id, exitCode: 0)
@@ -135,6 +139,14 @@ struct AutoCloseSetupTests {
         )
         #expect(setupBody.contains("runtime/setup"))
         #expect(setupBody.contains("if [ $__tbd_rc -ne 0 ]"))
+
+        // Armed spawn must keep the dead pane around: the wrapper lets the
+        // pane exit on success, and without remain-on-exit the window dies
+        // with it before the teardown can capture scrollback history.
+        let remainCalls = recorder.snapshot().filter { $0.contains("remain-on-exit") }
+        #expect(remainCalls.count == 1)
+        #expect(remainCalls.first?.contains(setup.tmuxWindowID) == true,
+                "remain-on-exit must target the setup window")
 
         // dryRun tmux never runs the hook — stand in for its clean exit.
         // (The spawn deleted any stale marker, so write AFTER create returns.)
@@ -202,6 +214,8 @@ struct AutoCloseSetupTests {
         // with the flag on; no marker machinery, no watcher.
         let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
         #expect(!windowCalls.contains { ($0.last ?? "").contains("runtime/setup") })
+        // Hook-less setup tab is a plain interactive shell: no remain-on-exit.
+        #expect(!recorder.snapshot().contains { $0.contains("remain-on-exit") })
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         #expect(terminals.contains { $0.label == TerminalLabel.setup })
     }

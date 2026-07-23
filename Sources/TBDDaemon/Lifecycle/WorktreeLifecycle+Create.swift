@@ -781,6 +781,17 @@ extension WorktreeLifecycle {
             )
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
             if let setupMarkerPath, let setupHookPath {
+                // The auto-close wrapper lets the pane EXIT on hook success,
+                // and tmux destroys the window the instant it does — before
+                // the watcher's teardown can capture the scrollback for
+                // closed-terminal history. Keep the dead pane around; the
+                // teardown's killWindow removes it after capturing.
+                // Best-effort: a failure only costs the captured history.
+                do {
+                    try await tmux.setRemainOnExit(server: tmuxServer, windowID: window2.windowID)
+                } catch {
+                    logger.warning("setup auto-close: remain-on-exit failed for window \(window2.windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
                 setupAutoCloseSpawn = PreSessionSpawn(
                     terminalID: plannedTerminalID2,
                     windowID: window2.windowID,

@@ -326,6 +326,13 @@ public struct TmuxManager: Sendable {
         ["-L", server, "capture-pane", "-p", "-J", "-S", "-10000", "-t", paneID]
     }
 
+    /// Keep a window's pane around (marked dead) after its process exits,
+    /// instead of destroying the window. Same option TmuxBridge sets
+    /// app-side when a viewer attaches.
+    public static func setRemainOnExitCommand(server: String, windowID: String) -> [String] {
+        ["-L", server, "set-option", "-wt", windowID, "remain-on-exit", "on"]
+    }
+
     public static func paneCurrentCommandQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_command}"]
     }
@@ -620,6 +627,19 @@ public struct TmuxManager: Sendable {
         if dryRun { return dryRunCapturePane?(server, paneID) ?? "" }
         let args = Self.capturePaneWithAnsiCommand(server: server, paneID: paneID)
         return try await runTmux(args)
+    }
+
+    /// Set `remain-on-exit on` for a window so its pane survives (dead) when
+    /// the process exits. The auto-close setup spawn needs this: its wrapper
+    /// lets the pane exit on hook success, and without remain-on-exit the
+    /// window is destroyed before the teardown can capture its scrollback.
+    public func setRemainOnExit(server: String, windowID: String) async throws {
+        let args = Self.setRemainOnExitCommand(server: server, windowID: windowID)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
+        try await runTmux(args)
     }
 
     /// Archival snapshot of a closing pane's scrollback (plain text, last
