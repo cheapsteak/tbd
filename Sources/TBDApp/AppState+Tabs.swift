@@ -44,6 +44,11 @@ extension AppState {
             logger.error("loadTabStates failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
             handleConnectionError(error)
         }
+        // Gated one-shot legacy panel import (spec C §11.2) — fires at most
+        // once per launch regardless of whether this particular listTabs
+        // call succeeded, since it imports from AppState's already-loaded
+        // in-memory state, not from this call's response.
+        triggerPanelImportIfNeeded()
     }
 
     // MARK: - Active tab persistence

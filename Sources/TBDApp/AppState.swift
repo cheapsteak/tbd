@@ -703,6 +703,16 @@ final class AppState: ObservableObject {
         alert.buttons[1].keyEquivalent = "\r"
         return alert.runModal() == .alertFirstButtonReturn
     }
+    /// How the one-shot legacy panel import fires its RPC — injectable for the
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so trigger tests can record calls without a real daemon.
+    lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
+        { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
+    /// Guards the one-shot legacy panel import to at most once per launch.
+    /// Deliberately NOT persisted — the daemon's create-if-absent import guard
+    /// (spec C §11.2) is the real idempotence boundary; this only avoids
+    /// redundant RPC fan-out as `loadTabStates` runs per worktree.
+    private var hasAttemptedPanelImport = false
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from
@@ -980,18 +990,84 @@ final class AppState: ObservableObject {
 
     /// Drops histories for slot panes no longer present in any tab layout or
     /// tab root — closed panes and panes dropped by reconciliation. Keyed off
-    /// the GLOBAL layouts dict, so a per-worktree reconcile never prunes
-    /// another worktree's slots.
+    /// live TAB IDs (mirrors the `visibleTerminalIDs` fix, #478) rather than
+    /// `layouts.values` — the persisted `layouts` blob can carry stale
+    /// worktree-keyed entries left over from pre-#478 installs, which are not
+    /// tabs and must not keep their slot histories alive forever (#477).
+    /// `gridLayouts` (presentation-only, never persisted) is scanned
+    /// separately since its entries are legitimately live but not tab-keyed.
     func prunePaneHistories() {
         guard !paneHistories.isEmpty else { return }
         var liveIDs = Set<UUID>()
-        for layout in layouts.values { liveIDs.formUnion(layout.allPaneIDs()) }
         for tabList in tabs.values {
-            for tab in tabList { liveIDs.insert(tab.content.paneID) }
+            for tab in tabList {
+                liveIDs.insert(tab.content.paneID)
+                if let layout = layouts[tab.id] {
+                    liveIDs.formUnion(layout.allPaneIDs())
+                }
+            }
         }
+        for layout in gridLayouts.values { liveIDs.formUnion(layout.allPaneIDs()) }
         let pruned = paneHistories.filter { liveIDs.contains($0.key) }
         if pruned.count != paneHistories.count {
             paneHistories = pruned
+        }
+    }
+
+    // MARK: - Legacy panel import (spec C §11.2)
+
+    /// Builds the legacy-import payload for one worktree from AppState's
+    /// current in-memory tab/layout/history state. Grid-layout entries — the
+    /// persisted `layouts` blob's stale worktree-keyed rows from pre-#478
+    /// installs — are excluded BY CONSTRUCTION: only `layouts[tab.id]` is
+    /// ever consulted, never `layouts.values` (spec §11.2.2, "grid state is
+    /// not imported"). `paneHistories` is filtered to pane IDs that actually
+    /// appear in the included tabs' layouts, absorbing the #477
+    /// over-retention concern at the import boundary rather than trusting
+    /// the caller.
+    func buildPanelImportParams(worktreeID: UUID) -> PanelImportParams {
+        let wtTabs = tabs[worktreeID] ?? []
+        var includedPaneIDs = Set<UUID>()
+        let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
+            let layout = layouts[tab.id]
+            includedPaneIDs.insert(tab.content.paneID)
+            if let layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
+            return LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layout)
+        }
+        let tabOrder = worktreeTabOrders[worktreeID] ?? wtTabs.map(\.id)
+        let activeTabID: UUID? = activeTabIndices[worktreeID].flatMap { idx in
+            wtTabs.indices.contains(idx) ? wtTabs[idx].id : nil
+        }
+        let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
+        return PanelImportParams(
+            worktreeID: worktreeID,
+            tabs: legacyTabs,
+            tabOrder: tabOrder,
+            activeTabID: activeTabID,
+            paneHistories: includedPaneHistories
+        )
+    }
+
+    /// Fires the one-shot legacy panel import once per launch, once the
+    /// daemon confirms panel-surface ownership is enabled (default OFF while
+    /// the feature soaks — this whole path is inert until then). Called from
+    /// the tail of `loadTabStates` for every worktree; imports every worktree
+    /// whose tabs are already loaded at that point. Failures are logged and
+    /// non-fatal — the daemon's create-if-absent guard means a skipped
+    /// worktree simply retries on the next launch.
+    func triggerPanelImportIfNeeded() {
+        guard !hasAttemptedPanelImport, daemonCapabilities?.panelSurfaceEnabled == true else { return }
+        hasAttemptedPanelImport = true
+        let worktreeIDs = Array(tabs.keys)
+        Task {
+            for worktreeID in worktreeIDs {
+                let params = buildPanelImportParams(worktreeID: worktreeID)
+                do {
+                    _ = try await panelImportTrigger(params)
+                } catch {
+                    logger.error("panelImportLegacy failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+                }
+            }
         }
     }
 
