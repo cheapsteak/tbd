@@ -32,6 +32,40 @@ private func isVanishedTarget(_ error: PanelOperationError) -> Bool {
     }
 }
 
+/// §6.1 rule 1 / Phase 1 decision record #3: rewrites `open(_, .automatic)`
+/// to `.replace(panelID:)`, targeting the most-recently-navigated viewer
+/// panel. `move`'s `.automatic` is deliberately left alone — the reducer
+/// itself rejects that combination with `.invalidPlacement`, and rewriting
+/// it here would silently paper over what should surface as a caller error.
+///
+/// `state` and `recency` MUST come from the same read — see
+/// `PanelSurfaceStore.applyReducing`, which derives both from one
+/// transaction-scoped fetch of `panel_history` so this rewrite can never
+/// disagree with the tree the reducer is about to apply it to.
+///
+/// Ties, and "no recency at all" (empty `recency` — panels seeded but never
+/// separately navigated), both fall back to the first panel in pre-order —
+/// the exact rule `PanelSurfaceReducer`'s own `.automatic` case uses for its
+/// no-rewrite default — so a present-vs-missing recency row never changes
+/// the outcome. Zero panels returns the operation untouched; the reducer's
+/// `.automatic` then splits right of the primary anchor.
+private func rewritingAutomaticPlacement(
+    _ operation: PanelOperation, in state: PanelSurfaceState, recency: [PanelID: Date]
+) -> PanelOperation {
+    guard case .open(let content, .automatic) = operation else { return operation }
+    let panelIDs = state.surface.layout.allPanelIDs
+    guard var winner = panelIDs.first else { return operation }
+    var winnerRecency = recency[winner]
+    for candidate in panelIDs.dropFirst() {
+        guard let candidateRecency = recency[candidate] else { continue }
+        if winnerRecency == nil || candidateRecency > winnerRecency! {
+            winner = candidate
+            winnerRecency = candidateRecency
+        }
+    }
+    return .open(content: content, placement: .replace(panelID: winner))
+}
+
 /// Daemon actor that owns committed panel-surface state. Serializes every
 /// `apply` call — one global actor for now (ponytail: global lock across all
 /// worktrees; shard per-worktree if cross-worktree apply throughput ever
@@ -91,9 +125,11 @@ public actor PanelCoordinator {
             return PanelApplyResult(tab: priorResult.tab, replayed: true)
         }
 
-        // 3. `.selectTab` is Task 9 — short-circuit until then.
-        if case .selectTab = envelope.operation {
-            throw PanelCoordinatorError.operation(.notTabScoped)
+        // 3. `.selectTab` is worktree-scoped, not tab-scoped (the reducer
+        // throws `.notTabScoped` for it) — the coordinator handles it
+        // directly: no surface mutation, no reducer call.
+        if case .selectTab(let selectedTabID) = envelope.operation {
+            return try await applySelectTab(selectedTabID: selectedTabID, envelope: envelope)
         }
 
         // 4. §5.5 resource-existence check for open/navigate destinations.
@@ -102,8 +138,12 @@ public actor PanelCoordinator {
         // not the surface-state lost-update the transaction closes.)
         try await validateResourceExists(in: envelope.operation, worktreeID: envelope.worktreeID)
 
-        // 5. Placement rewrite (`.automatic` recency resolution) is Task 9 —
-        // pass the operation through unchanged until then.
+        // 5. Placement rewrite (`.automatic` §6.1 recency resolution) happens
+        // INSIDE the `reduce` closure below, fed by the recency map
+        // `applyReducing` derives from the same transaction-scoped
+        // `panel_history` read it uses to build `current` — see
+        // `rewritingAutomaticPlacement`'s doc comment for why that's what
+        // keeps the rewrite coherent with the tree it's rewriting against.
 
         // 6. Transactional load → reduce → persist. Doing the load inside the
         // store's write transaction is what makes this safe under concurrent
@@ -116,9 +156,10 @@ public actor PanelCoordinator {
         let operation = envelope.operation
         let baseRevision = envelope.baseRevision
         let makeID = self.makeID
-        let reduce: @Sendable (PanelSurfaceState) throws -> PanelSurfaceState = { current in
+        let reduce: @Sendable (PanelSurfaceState, [PanelID: Date]) throws -> PanelSurfaceState = { current, recency in
             do {
-                return try PanelSurfaceReducer.apply(operation, to: current, makeID: makeID)
+                let resolvedOperation = rewritingAutomaticPlacement(operation, in: current, recency: recency)
+                return try PanelSurfaceReducer.apply(resolvedOperation, to: current, makeID: makeID)
             } catch let error as PanelOperationError {
                 let baseIsStale = baseRevision.map { $0 != current.surface.revision } ?? false
                 if baseIsStale, isVanishedTarget(error) {
@@ -153,6 +194,56 @@ public actor PanelCoordinator {
                 originOperationID: envelope.operationID)))
             return result
         }
+    }
+
+    /// `selectTab` is worktree-scoped: it updates which tab is active, not
+    /// any tab's panel layout. Reuses `worktree.activeTabID` via
+    /// `WorktreeStore` — the existing active-tab authority (already read by
+    /// non-panel-surface code) — rather than standing up a second one.
+    /// Validates the tab exists (has a persisted surface row) under the
+    /// claimed worktree, persists a stand-alone receipt (no surface/history
+    /// write) so the generic idempotency check in `apply` can replay a
+    /// duplicate without re-selecting/re-broadcasting, then broadcasts a
+    /// delta carrying only `activeTabID` — no `tabs`, no revision bump.
+    ///
+    /// ponytail: the idempotency check for `selectTab` is the early
+    /// `receipt(operationID:)` read in `apply` (step 2), not an
+    /// inside-one-transaction check like `applyReducing`'s — two concurrent
+    /// calls with the SAME `operationID` could both pass it and both write
+    /// (harmless: same `activeTabID` value, a redundant second broadcast).
+    /// Upgrade to a single cross-store transaction if that duplicate
+    /// broadcast ever matters; `selectTab` has no revision/lost-update risk
+    /// the way surface mutations do, so it wasn't worth one for this task.
+    private func applySelectTab(
+        selectedTabID: WorkspaceTabID, envelope: PanelOperationEnvelope
+    ) async throws -> PanelApplyResult {
+        guard let state = try await db.panelSurface.state(tabID: selectedTabID),
+              state.surface.worktreeID == envelope.worktreeID else {
+            throw PanelCoordinatorError.tabNotFound(selectedTabID)
+        }
+
+        try await db.worktrees.setActiveTabID(worktreeID: envelope.worktreeID, tabID: selectedTabID)
+
+        let result = PanelApplyResult(tab: state.surface, replayed: false)
+        let appliedAt = now()
+        let resultData = try JSONEncoder().encode(result)
+        guard let resultJSON = String(bytes: resultData, encoding: .utf8) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "JSON-encoded receipt result is not valid UTF-8"))
+        }
+        let receipt = PanelOperationReceiptRecord(
+            operationID: envelope.operationID.uuidString, worktreeID: envelope.worktreeID.uuidString,
+            tabID: selectedTabID.uuidString, revision: Int64(state.surface.revision),
+            result: resultJSON, appliedAt: appliedAt)
+        try await db.panelSurface.saveReceipt(receipt, now: appliedAt)
+
+        broadcast(.panelSurfaceChanged(PanelSurfaceDelta(
+            worktreeID: envelope.worktreeID,
+            tabs: [],
+            removedTabIDs: [],
+            activeTabID: selectedTabID,
+            originOperationID: envelope.operationID)))
+        return result
     }
 
     /// §5.5: referenced notes and transcripts must belong to this worktree.

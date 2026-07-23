@@ -319,12 +319,21 @@ public struct PanelSurfaceStore: Sendable {
     /// serializes the whole read-modify-write.
     ///
     /// `reduce` is the pure synchronous shared reducer (plus the caller's
-    /// baseRevision→staleTarget error mapping); it runs fine inside the
-    /// transaction. Returns `nil` when the tab has no surface row for
-    /// `worktreeID` (caller maps to its not-found error).
+    /// baseRevision→staleTarget error mapping and §6.1 `.automatic` recency
+    /// rewrite). It runs fine inside the transaction. Returns `nil` when the
+    /// tab has no surface row for `worktreeID` (caller maps to its
+    /// not-found error).
+    ///
+    /// `reduce` also receives a `[PanelID: Date]` recency map (`panel_history
+    /// .updatedAt`, keyed by panel) derived from the SAME `PanelHistoryRecord`
+    /// rows used to build `current.histories` — one fetch inside this
+    /// transaction feeds both. That is what keeps the coordinator's recency
+    /// rewrite coherent with the tree the reducer applies it to: there is no
+    /// separate pre-write recency query a concurrent commit could invalidate
+    /// between read and reduce.
     public func applyReducing(
         operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
-        reduce: @Sendable (PanelSurfaceState) throws -> PanelSurfaceState
+        reduce: @Sendable (PanelSurfaceState, [PanelID: Date]) throws -> PanelSurfaceState
     ) async throws -> ApplyOutcome? {
         try await writer.write { db -> ApplyOutcome? in
             // Idempotency, authoritative under concurrency: a receipt committed
@@ -341,14 +350,19 @@ public struct PanelSurfaceStore: Sendable {
                   surface.worktreeID == worktreeID else {
                 return nil
             }
-            let histories = try PanelHistoryRecord
+            let historyRows = try PanelHistoryRecord
                 .filter(Column("tabID") == tabID.uuidString)
                 .fetchAll(db)
-                .compactMap { $0.toModel() }
+            let histories = historyRows.compactMap { $0.toModel() }
+            var recency: [PanelID: Date] = [:]
+            for row in historyRows {
+                guard let panelID = UUID(uuidString: row.panelID) else { continue }
+                recency[panelID] = row.updatedAt
+            }
             let current = PanelSurfaceState(
                 surface: surface, histories: Dictionary(uniqueKeysWithValues: histories))
 
-            let newState = try reduce(current)
+            let newState = try reduce(current, recency)
 
             try Self.writeSurfaceAndHistory(newState, position: surfaceRecord.position, db: db, now: now)
 
@@ -397,6 +411,21 @@ public struct PanelSurfaceStore: Sendable {
     public func pruneReceipts(worktreeID: UUID, now: Date) async throws {
         _ = try await writer.write { db in
             try self.pruneReceipts(db: db, worktreeID: worktreeID, now: now)
+        }
+    }
+
+    /// Persists a stand-alone receipt with NO surface/history write — used by
+    /// `PanelCoordinator`'s `selectTab` handling, which is worktree-scoped and
+    /// never mutates a `workspace_tab_surface`/`panel_history` row. Recording
+    /// the receipt still lets the generic idempotency check in `apply` (which
+    /// reads `receipt(operationID:)` before dispatching) replay a duplicate
+    /// `selectTab` without re-touching `worktree.activeTabID` or re-broadcasting.
+    public func saveReceipt(_ receipt: PanelOperationReceiptRecord, now: Date) async throws {
+        _ = try await writer.write { db in
+            try receipt.save(db)
+            if let worktreeID = UUID(uuidString: receipt.worktreeID) {
+                try self.pruneReceipts(db: db, worktreeID: worktreeID, now: now)
+            }
         }
     }
 

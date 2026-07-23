@@ -330,25 +330,7 @@ struct PanelCoordinatorTests {
         #expect(recorder.count == 0)
     }
 
-    // MARK: - selectTab is Task 9 — short-circuit until then
-
-    @Test func selectTabShortCircuitsAsNotTabScopedUntilTask9() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        let wtID = try await makeWorktree(db)
-        let tab = try await seedTab(db, worktreeID: wtID)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
-
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser, operation: .selectTab(tabID: UUID()))
-
-        await #expect(throws: PanelCoordinatorError.operation(.notTabScoped)) {
-            _ = try await coordinator.apply(envelope)
-        }
-        #expect(recorder.count == 0)
-    }
+    // MARK: - selectTab coverage lives in PanelCoordinatorPlacementTests (Task 9)
 
     // MARK: - Carry-forward #1: a tab-removing op leaves no stale surface/history row
 
