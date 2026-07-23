@@ -124,7 +124,9 @@ struct HistoryPaneView: View {
                 if !closedTerminals.isEmpty {
                     Section("Closed Terminals") {
                         ForEach(closedTerminals) { entry in
-                            ClosedTerminalRowView(entry: entry)
+                            ClosedTerminalRowView(entry: entry) {
+                                Task { await appState.reviveClosedTerminal(entry, worktreeID: worktreeID) }
+                            }
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     Task { await appState.selectClosedTerminal(entry, worktreeID: worktreeID) }
@@ -524,6 +526,7 @@ struct SessionTranscriptView: View {
 /// List row for one captured closed terminal (label/kind + close time).
 private struct ClosedTerminalRowView: View {
     let entry: TerminalHistoryEntry
+    let onRevive: () -> Void
 
     private var title: String {
         if let label = entry.label, !label.isEmpty { return label }
@@ -534,24 +537,38 @@ private struct ClosedTerminalRowView: View {
         }
     }
 
+    private var reviveHelp: String {
+        entry.kind == .claude && entry.claudeSessionID != nil
+            ? "Resume this Claude session in a new tab"
+            : "Open a new shell with this scrollback above the prompt"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 5) {
-                Image(systemName: "terminal")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(title)
-                    .font(.callout)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Image(systemName: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(title)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+                HStack(spacing: 4) {
+                    Text("closed \(entry.closedAt.smartFormatted)")
+                    Text("·").foregroundStyle(.quaternary)
+                    Text("\(entry.lineCount.formatted()) lines")
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             }
-            HStack(spacing: 4) {
-                Text("closed \(entry.closedAt.smartFormatted)")
-                Text("·").foregroundStyle(.quaternary)
-                Text("\(entry.lineCount.formatted()) lines")
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Revive", action: onRevive)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(reviveHelp)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 3)

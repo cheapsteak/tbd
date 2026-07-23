@@ -1252,6 +1252,16 @@ actor DaemonClient {
         )
     }
 
+    /// Revive a closed terminal from its history entry into a new terminal in
+    /// the same worktree. Returns the created terminal.
+    func reviveTerminalHistory(worktreeID: UUID, id: UUID, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+        return try await callAsync(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: worktreeID, id: id, cols: cols, rows: rows),
+            resultType: Terminal.self
+        )
+    }
+
     // MARK: - Model Profiles
     //
     // IMPORTANT: never log raw secret bytes. The `addModelProfile` wrapper is

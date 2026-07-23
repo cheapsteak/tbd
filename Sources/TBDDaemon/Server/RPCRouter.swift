@@ -260,6 +260,8 @@ public final class RPCRouter: Sendable {
                 return try await handleNoteList(request.paramsData)
             case RPCMethod.terminalHistoryList:
                 return try await handleTerminalHistoryList(request.paramsData)
+            case RPCMethod.terminalHistoryRevive:
+                return try await handleTerminalHistoryRevive(request.paramsData)
             case RPCMethod.terminalOutput:
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:

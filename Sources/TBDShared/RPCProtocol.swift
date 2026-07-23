@@ -140,6 +140,7 @@ public enum RPCMethod {
     public static let noteDelete = "note.delete"
     public static let noteList = "note.list"
     public static let terminalHistoryList = "terminalHistory.list"
+    public static let terminalHistoryRevive = "terminalHistory.revive"
     public static let terminalOutput = "terminal.output"
     public static let terminalConversation = "terminal.conversation"
     public static let terminalTranscript = "terminal.transcript"
@@ -1163,6 +1164,20 @@ public struct TerminalDeleteParams: Codable, Sendable {
 public struct TerminalHistoryListParams: Codable, Sendable {
     public let worktreeID: UUID
     public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+/// Params for `terminalHistory.revive` — spawn a NEW terminal in `worktreeID`
+/// from the closed-terminal history entry `id`. Claude entries with a session
+/// id resume that session; every other kind opens a fresh shell with the raw
+/// capture (colors intact) printed above the prompt. Result type: `Terminal`.
+public struct TerminalHistoryReviveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let id: UUID
+    public let cols: Int?
+    public let rows: Int?
+    public init(worktreeID: UUID, id: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.worktreeID = worktreeID; self.id = id; self.cols = cols; self.rows = rows
+    }
 }
 
 public struct TerminalSetPinParams: Codable, Sendable {

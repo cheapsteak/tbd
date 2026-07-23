@@ -220,6 +220,187 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: dir))
     }
 
+    // MARK: - Revive
+
+    /// Create the worktree's on-disk directory (revive requires a live dir)
+    /// and register cleanup.
+    private func makeLiveDir(_ path: String) throws {
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+    }
+
+    /// The `new-window` shell command recorded by a dryRun tmux (the last
+    /// element of the recorded args is the full command string).
+    private func newWindowCommand(_ recorded: [[String]]) -> String? {
+        recorded.first(where: { $0.contains("new-window") })?.last
+    }
+
+    @Test func shellReviveOpensFreshShellWithCapture() async throws {
+        let fx = try await makeFixture(label: "sh", kind: .shell, claudeSessionID: nil)
+        defer { fx.cleanup() }
+        try makeLiveDir(fx.worktree.path)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+
+        // A closed shell terminal with captured scrollback (file + row).
+        let shellTerm = Terminal(
+            worktreeID: fx.worktree.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+            label: nil, kind: .shell)
+        await fx.db.terminalHistory.store(
+            terminal: shellTerm, text: "prior shell output\n", closedAt: Date())
+        let capturePath = fx.db.terminalHistory.contentPath(
+            worktreeID: fx.worktree.id, terminalID: shellTerm.id)
+        #expect(FileManager.default.fileExists(atPath: capturePath))
+
+        let recorder = PreSessionRecordedCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunCapturePane: { _, _ in "" })
+        let router = makeRouter(db: fx.db, tmux: tmux)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: fx.worktree.id, id: shellTerm.id)))
+        #expect(resp.success)
+        let revived = try resp.decodeResult(Terminal.self)
+
+        // New terminal row, kind shell, in this worktree.
+        #expect(revived.kind == .shell)
+        #expect(revived.worktreeID == fx.worktree.id)
+        #expect(try await fx.db.terminals.get(id: revived.id) != nil)
+
+        // Tab order appended + active set to the new terminal.
+        #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id) == [revived.id])
+        #expect(try await fx.db.worktrees.getActiveTabID(worktreeID: fx.worktree.id) == revived.id)
+
+        // Spawn command: banner + cat of the capture file + exec shell.
+        let command = try #require(newWindowCommand(recorder.snapshot()))
+        #expect(command.contains("restored from close on"))
+        #expect(command.contains("/bin/cat"))
+        #expect(command.contains(capturePath))
+        #expect(command.contains("exec "))
+
+        // History row survives revive.
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(entries.contains { $0.id == shellTerm.id })
+    }
+
+    @Test func claudeReviveResumesSession() async throws {
+        let fx = try await makeFixture(label: TerminalLabel.claudeCode, kind: .claude, claudeSessionID: "sess-xyz")
+        defer { fx.cleanup() }
+        try makeLiveDir(fx.worktree.path)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+
+        await fx.db.terminalHistory.store(
+            terminal: fx.terminal, text: "claude scrollback\n", closedAt: Date())
+
+        let recorder = PreSessionRecordedCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunCapturePane: { _, _ in "" })
+        let router = makeRouter(db: fx.db, tmux: tmux)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: fx.worktree.id, id: fx.terminal.id)))
+        #expect(resp.success)
+        let revived = try resp.decodeResult(Terminal.self)
+
+        #expect(revived.kind == .claude)
+        #expect(revived.claudeSessionID == "sess-xyz")
+
+        // Spawn command resumes the session (no scrollback cat).
+        let command = try #require(newWindowCommand(recorder.snapshot()))
+        #expect(command.contains("claude --resume sess-xyz"))
+        #expect(!command.contains("/bin/cat"))
+    }
+
+    @Test func reviveWithMissingCaptureFileSkipsCat() async throws {
+        let fx = try await makeFixture(label: "sh", kind: .shell, claudeSessionID: nil)
+        defer { fx.cleanup() }
+        try makeLiveDir(fx.worktree.path)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+
+        // History row present, but the capture file is deleted underneath it.
+        let shellTerm = Terminal(
+            worktreeID: fx.worktree.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+            label: nil, kind: .shell)
+        await fx.db.terminalHistory.store(
+            terminal: shellTerm, text: "gone soon\n", closedAt: Date())
+        let capturePath = fx.db.terminalHistory.contentPath(
+            worktreeID: fx.worktree.id, terminalID: shellTerm.id)
+        try FileManager.default.removeItem(atPath: capturePath)
+
+        let recorder = PreSessionRecordedCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunCapturePane: { _, _ in "" })
+        let router = makeRouter(db: fx.db, tmux: tmux)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: fx.worktree.id, id: shellTerm.id)))
+        #expect(resp.success)
+
+        // Banner + shell, but no cat (file missing).
+        let command = try #require(newWindowCommand(recorder.snapshot()))
+        #expect(command.contains("restored from close on"))
+        #expect(!command.contains("/bin/cat"))
+        #expect(command.contains("exec "))
+    }
+
+    @Test func reviveUnknownWorktreeErrorsWithoutTerminal() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        let tmux = TmuxManager(dryRun: true)
+        let router = makeRouter(db: fx.db, tmux: tmux)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: UUID(), id: fx.terminal.id)))
+        #expect(!resp.success)
+    }
+
+    @Test func reviveUnknownEntryErrorsWithoutTerminal() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        try makeLiveDir(fx.worktree.path)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+        let tmux = TmuxManager(dryRun: true)
+        let router = makeRouter(db: fx.db, tmux: tmux)
+
+        let before = try await fx.db.terminals.list(worktreeID: fx.worktree.id).count
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: fx.worktree.id, id: UUID())))
+        #expect(!resp.success)
+        // No terminal created.
+        #expect(try await fx.db.terminals.list(worktreeID: fx.worktree.id).count == before)
+    }
+
+    @Test func reviveShellCommandQuotesSingleQuotePath() {
+        // Path with a single quote must be POSIX-escaped ('\'') for the cat.
+        let path = "/tmp/wei'rd/cap.txt"
+        let cmd = RPCRouter.reviveShellCommand(
+            capturePath: path,
+            closedAt: Date(timeIntervalSince1970: 0),
+            shell: "/bin/zsh")
+        #expect(cmd.contains("/bin/cat '/tmp/wei'\\''rd/cap.txt'"))
+        #expect(cmd.contains("restored from close on"))
+        #expect(cmd.hasSuffix("exec /bin/zsh"))
+    }
+
+    @Test func reviveShellCommandOmitsCatWhenNoCapture() {
+        let cmd = RPCRouter.reviveShellCommand(
+            capturePath: nil,
+            closedAt: Date(timeIntervalSince1970: 0),
+            shell: "/bin/zsh")
+        #expect(!cmd.contains("cat"))
+        #expect(cmd.contains("printf"))
+        #expect(cmd.hasSuffix("exec /bin/zsh"))
+    }
+
     // MARK: - Migration
 
     @Test func migrationCreatesTerminalHistoryTable() async throws {
