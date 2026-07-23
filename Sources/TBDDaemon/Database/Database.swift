@@ -933,6 +933,19 @@ public final class TBDDatabase: Sendable {
             try db.execute(sql: "UPDATE model_profiles SET sort_order = rowid")
         }
 
+        // Soak flag for auto-closing the setup-hook tab after a clean run
+        // (default OFF per the default-off-flag rule: it kills a pane and
+        // deletes terminal/tab rows without a user gesture). When on, a
+        // resolved setup hook's exit code is written to a marker file and a
+        // clean exit tears the tab down; nonzero keeps the tab open (execs
+        // the interactive shell) for debugging.
+        // (Renumbered v56→v57 on rebase: main's #482 took v56.)
+        migrator.registerMigration("v57_config_auto_close_setup") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_close_setup_enabled",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }

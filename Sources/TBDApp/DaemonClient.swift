@@ -872,6 +872,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the auto-close-setup-tab soak flag (default OFF). Applies to
+    /// the next worktree creation.
+    func setAutoCloseSetup(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoCloseSetup,
+            params: ConfigSetAutoCloseSetupParams(enabled: enabled)
+        )
+    }
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(

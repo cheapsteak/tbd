@@ -235,6 +235,7 @@ struct GeneralSettingsTab: View {
                     """)
                 controlModeToggle
                 hibernateInputVetoToggle
+                autoCloseSetupToggle
             }
         }
         .formStyle(.grouped)
@@ -277,6 +278,19 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setHibernateInputVetoEnabled(newValue) } }
         ))
         .help("Guard that prevents hibernation of sessions with typed-but-unsent input (machine-interface input detector). Off by default (soaking). Independent of the auto-hibernate idle sweep, which is also off by default.")
+    }
+
+    /// Auto-close the setup-hook tab after a clean run. Reads the persisted
+    /// flag from `daemon.capabilities` and writes via
+    /// `config.setAutoCloseSetup`. Off by default (soaking).
+    @ViewBuilder
+    private var autoCloseSetupToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Auto-close the setup tab on success", isOn: Binding(
+            get: { capabilities?.autoCloseSetupEnabled ?? false },
+            set: { newValue in Task { await appState.setAutoCloseSetupEnabled(newValue) } }
+        ))
+        .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. Off by default (soaking). Applies to newly created worktrees.")
     }
 
     private var primaryAgentPreferenceBinding: Binding<PrimaryAgentPreference> {

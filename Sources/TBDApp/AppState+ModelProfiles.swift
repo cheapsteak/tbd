@@ -291,6 +291,19 @@ extension AppState {
         }
     }
 
+    /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
+    /// so the Settings toggle reflects the daemon's persisted state. Applies
+    /// to the next worktree creation.
+    func setAutoCloseSetupEnabled(_ enabled: Bool) async {
+        do {
+            try await autoCloseSetupSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set auto-close setup: \(error, privacy: .public)")
+            showAlert("Failed to set auto-close setup: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a per-repo model profile override.
     func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async {
         do {

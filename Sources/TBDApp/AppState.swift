@@ -674,6 +674,10 @@ final class AppState: ObservableObject {
     /// the same reason as `controlModeSetter`.
     lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHibernateInputVeto(enabled: enabled) }
+    /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from

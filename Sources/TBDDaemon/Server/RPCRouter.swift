@@ -367,6 +367,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetHibernateInputVeto:
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
+            case RPCMethod.configSetAutoCloseSetup:
+                return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
             case RPCMethod.gcList:
@@ -404,7 +406,8 @@ public final class RPCRouter: Sendable {
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
-            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled))
+            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
+            autoCloseSetupEnabled: config.autoCloseSetupEnabled))
     }
 
     // MARK: - PR Status

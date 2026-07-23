@@ -420,17 +420,34 @@ extension WorktreeLifecycle {
     /// Best-effort: a failure here must never take down the worktree, whose
     /// checkout and agent terminals are already valid.
     func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
-        try? await tmux.killWindow(
-            server: worktree.tmuxServer, windowID: preSession.windowID
+        await closeHookTerminal(
+            worktree: worktree,
+            terminalID: preSession.terminalID,
+            windowID: preSession.windowID
         )
+    }
+
+    /// Shared hook-tab teardown (pre-session and auto-closed setup tabs):
+    /// kill the tmux window, delete the terminal + tab rows, prune the tab
+    /// from the persisted tab order, broadcast `.terminalRemoved`. The prune
+    /// is a no-op on the create-success path (the primary spawn already set
+    /// an order without the hook tab) and keeps the stored order consistent
+    /// on the paths that appended the tab (manual re-run, setup auto-close).
+    func closeHookTerminal(worktree: Worktree, terminalID: UUID, windowID: String) async {
+        try? await tmux.killWindow(server: worktree.tmuxServer, windowID: windowID)
         do {
-            try await db.terminals.delete(id: preSession.terminalID)
-            try await db.tabs.delete(tabID: preSession.terminalID)
+            try await db.terminals.delete(id: terminalID)
+            try await db.tabs.delete(tabID: terminalID)
+            var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+            if order.contains(terminalID) {
+                order.removeAll { $0 == terminalID }
+                try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: order)
+            }
             subscriptions?.broadcast(delta: .terminalRemoved(TerminalIDDelta(
-                terminalID: preSession.terminalID
+                terminalID: terminalID
             )))
         } catch {
-            logger.warning("failed to close pre-session terminal \(preSession.terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("failed to close hook terminal \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

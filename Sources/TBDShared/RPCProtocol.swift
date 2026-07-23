@@ -207,6 +207,7 @@ public enum RPCMethod {
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
+    public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let gcList = "gc.list"
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
@@ -1362,6 +1363,14 @@ public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setAutoCloseSetup` — the auto-close-setup-tab soak
+/// flag (default OFF). Read fresh at spawn time; applies to the next
+/// worktree creation, no daemon restart required.
+public struct ConfigSetAutoCloseSetupParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCEnabled` — the orphan-GC master switch.
 public struct ConfigSetGCEnabledParams: Codable, Sendable {
     public var enabled: Bool
@@ -1503,15 +1512,20 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// against hibernating sessions with typed-but-unsent input. Re-evaluated
     /// by the daemon on every call.
     public let hibernateInputVetoEnabled: Bool
+    /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
+    /// default OFF). Re-evaluated by the daemon on every call.
+    public let autoCloseSetupEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
-                hibernateInputVetoEnabled: Bool = false) {
+                hibernateInputVetoEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
+        self.autoCloseSetupEnabled = autoCloseSetupEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1523,6 +1537,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
         // New field for pending-input veto; absent from older daemons defaults to false (soaking).
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
+        // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
+        autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
     }
 }
 

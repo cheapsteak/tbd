@@ -686,6 +686,7 @@ extension WorktreeLifecycle {
         // Create terminal 2: setup hook. Repo-backed worktrees only — scratch
         // spaces (repo == nil) have no repo path/setup hook and get just the
         // primary terminal, so the tab order stays `[primary]`.
+        var setupAutoCloseSpawn: PreSessionSpawn?
         if let repo {
             let plannedTerminalID2 = UUID()
             createdTerminalIDs.append(plannedTerminalID2)
@@ -696,7 +697,26 @@ extension WorktreeLifecycle {
                     TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
                 }
             )
-            let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+            let setupCommand: String
+            var setupMarkerPath: String?
+            if config.autoCloseSetupEnabled, let setupHookPath {
+                // Auto-close soak flag ON with a resolved hook: wrap so the
+                // exit code lands in a marker (the watcher spawned below tears
+                // the tab down on exit 0). Delete any stale marker from a
+                // previous run of this worktree ID before the pane spawns.
+                let markerPath = Self.setupMarkerPath(worktreeID: worktreeID)
+                try? FileManager.default.removeItem(atPath: markerPath)
+                setupMarkerPath = markerPath
+                setupCommand = Self.setupAutoCloseCommand(
+                    hookPath: setupHookPath,
+                    runtimeDir: Self.setupRuntimeDir,
+                    markerPath: markerPath,
+                    shell: defaultShell
+                )
+            } else {
+                // Flag off (default) or no hook: today's behavior unchanged.
+                setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+            }
             // Suppress the omz update prompt only when a setup hook actually
             // resolves — a hook-less "Setup" tab is just a regular shell and must
             // keep oh-my-zsh update checks (see `hookPaneEnv`).
@@ -732,6 +752,15 @@ extension WorktreeLifecycle {
                 kind: .shell
             )
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
+            if let setupMarkerPath, let setupHookPath {
+                setupAutoCloseSpawn = PreSessionSpawn(
+                    terminalID: plannedTerminalID2,
+                    windowID: window2.windowID,
+                    paneID: window2.paneID,
+                    markerPath: setupMarkerPath,
+                    hookPath: setupHookPath
+                )
+            }
         }
 
         // Restore any archived Claude sessions that were not consumed by the
@@ -828,6 +857,18 @@ extension WorktreeLifecycle {
         // Kill the untracked initial window that new-session created
         if let windowID = initialWindowID {
             try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
+        }
+
+        // Flag-on setup spawn: arm the detached auto-close watcher. Started
+        // only AFTER the tab order above is persisted, so its teardown can
+        // never race the setTabOrder write and resurrect the closed tab.
+        if let setupAutoCloseSpawn {
+            let lifecycle = self
+            Task.detached {
+                await lifecycle.finishAutoCloseSetup(
+                    worktree: worktree, setup: setupAutoCloseSpawn
+                )
+            }
         }
 
         return createdTerminals

@@ -109,6 +109,17 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
+    /// so it applies to the next worktree creation immediately — already-open
+    /// setup tabs are unaffected.
+    func handleConfigSetAutoCloseSetup(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoCloseSetupParams.self, from: paramsData)
+        try await db.config.setAutoCloseSetup(enabled: params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphan-GC master switch. Turning it off does not cancel or
     /// undo any in-progress sweep — `OrphanGC.sweep` re-reads the flag itself
     /// on its next pass — this just flips the persisted gate.
