@@ -29,6 +29,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
     var hibernate_input_veto_enabled: Bool?
+    var auto_close_setup_enabled: Bool?
     var gc_enabled: Bool?
     var gc_grace_seconds: Int?
     var gc_snapshot_retention_days: Int?
@@ -53,6 +54,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
             hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
+            autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
             gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays
@@ -258,6 +260,18 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET hibernate_input_veto_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the auto-close-setup-tab opt-in (default OFF, soaking). Read
+    /// fresh at spawn time, so no daemon restart is required — applies to the
+    /// next worktree creation.
+    public func setAutoCloseSetup(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_close_setup_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

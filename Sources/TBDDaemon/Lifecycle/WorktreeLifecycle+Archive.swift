@@ -113,14 +113,12 @@ extension WorktreeLifecycle {
             archivedHeadSHA: capturedSHA
         )
 
-        // Kill all tmux windows for this worktree, reaping any wedged agent
-        // that survives kill-window's SIGHUP.
+        // Capture each terminal's scrollback into Closed Terminals history,
+        // then kill its tmux window, reaping any wedged agent that survives
+        // kill-window's SIGHUP. The archived worktree row and its history rows
+        // survive, so the captured output stays readable later.
         for terminal in terminals {
-            await killWindowAndReap(
-                server: worktree.tmuxServer,
-                windowID: terminal.tmuxWindowID,
-                paneID: terminal.tmuxPaneID
-            )
+            await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
         }
 
         // Delete terminals from db

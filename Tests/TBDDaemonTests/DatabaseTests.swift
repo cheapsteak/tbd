@@ -409,7 +409,12 @@ struct DatabaseTests {
     }
 
     @Test func updateNoteContent() async throws {
-        let db = try TBDDatabase(inMemory: true)
+        // Content writes are file-backed — inject a temp notes dir so the
+        // test never touches the real ~/tbd/notes.
+        let notesDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-notes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: notesDir) }
+        let db = try TBDDatabase(inMemory: true, notesDir: notesDir.path)
         let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",

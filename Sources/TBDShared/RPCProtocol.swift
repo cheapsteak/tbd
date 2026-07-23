@@ -139,6 +139,8 @@ public enum RPCMethod {
     public static let noteUpdate = "note.update"
     public static let noteDelete = "note.delete"
     public static let noteList = "note.list"
+    public static let terminalHistoryList = "terminalHistory.list"
+    public static let terminalHistoryRevive = "terminalHistory.revive"
     public static let terminalOutput = "terminal.output"
     public static let terminalConversation = "terminal.conversation"
     public static let terminalTranscript = "terminal.transcript"
@@ -207,6 +209,7 @@ public enum RPCMethod {
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
+    public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let gcList = "gc.list"
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
@@ -1154,6 +1157,29 @@ public struct TerminalDeleteParams: Codable, Sendable {
     public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
+/// Params for `terminalHistory.list` — closed-terminal capture metadata for a
+/// worktree, newest first. Result type: `[TerminalHistoryEntry]`. Content is
+/// NOT sent over RPC; the app reads the file at
+/// `TBDConstants.terminalHistoryPath` directly.
+public struct TerminalHistoryListParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+/// Params for `terminalHistory.revive` — spawn a NEW terminal in `worktreeID`
+/// from the closed-terminal history entry `id`. Claude entries with a session
+/// id resume that session; every other kind opens a fresh shell with the raw
+/// capture (colors intact) printed above the prompt. Result type: `Terminal`.
+public struct TerminalHistoryReviveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let id: UUID
+    public let cols: Int?
+    public let rows: Int?
+    public init(worktreeID: UUID, id: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.worktreeID = worktreeID; self.id = id; self.cols = cols; self.rows = rows
+    }
+}
+
 public struct TerminalSetPinParams: Codable, Sendable {
     public let terminalID: UUID
     public let pinned: Bool
@@ -1362,6 +1388,14 @@ public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setAutoCloseSetup` — the auto-close-setup-tab soak
+/// flag (default OFF). Read fresh at spawn time; applies to the next
+/// worktree creation, no daemon restart required.
+public struct ConfigSetAutoCloseSetupParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCEnabled` — the orphan-GC master switch.
 public struct ConfigSetGCEnabledParams: Codable, Sendable {
     public var enabled: Bool
@@ -1503,15 +1537,20 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// against hibernating sessions with typed-but-unsent input. Re-evaluated
     /// by the daemon on every call.
     public let hibernateInputVetoEnabled: Bool
+    /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
+    /// default OFF). Re-evaluated by the daemon on every call.
+    public let autoCloseSetupEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
-                hibernateInputVetoEnabled: Bool = false) {
+                hibernateInputVetoEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
+        self.autoCloseSetupEnabled = autoCloseSetupEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1523,6 +1562,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
         // New field for pending-input veto; absent from older daemons defaults to false (soaking).
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
+        // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
+        autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
     }
 }
 

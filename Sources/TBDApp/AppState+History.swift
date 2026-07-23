@@ -95,6 +95,10 @@ extension AppState {
         let current = historyLoadStates[worktreeID]?.currentSessions ?? []
         historyLoadStates[worktreeID] = current.isEmpty ? .loading : .loadingStale(current)
 
+        // Refresh closed-terminal history alongside sessions (metadata only —
+        // failures keep whatever was shown before).
+        await fetchClosedTerminals(worktreeID: worktreeID)
+
         do {
             let fresh = try await daemonClient.listSessions(worktreeID: worktreeID)
             historyLoadStates[worktreeID] = .loaded(fresh)
@@ -108,9 +112,38 @@ extension AppState {
         }
     }
 
+    /// Fetch closed-terminal capture metadata for the Closed Terminals
+    /// section. Best-effort: a failure keeps stale data visible.
+    func fetchClosedTerminals(worktreeID: UUID) async {
+        do {
+            closedTerminalHistories[worktreeID] =
+                try await daemonClient.listTerminalHistory(worktreeID: worktreeID)
+        } catch {
+            logger.warning("fetchClosedTerminals failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+        }
+    }
+
+    /// Select a closed terminal and load its captured text off the main
+    /// thread (the content file can be ~10k lines). The right-hand pane shows
+    /// it read-only while this selection is set; selecting a session clears it.
+    func selectClosedTerminal(_ entry: TerminalHistoryEntry, worktreeID: UUID) async {
+        selectedClosedTerminalIDs[worktreeID] = entry.id
+        guard closedTerminalContents[entry.id] == nil else { return }
+        let path = TBDConstants.terminalHistoryPath(worktreeID: worktreeID, terminalID: entry.id)
+        let text = await Task.detached(priority: .userInitiated) {
+            let raw = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            // The raw file keeps ANSI escapes (it's the replay source); the
+            // read-only viewer can't render them, so strip for display.
+            return ANSIEscape.strip(raw)
+        }.value
+        // One-entry cache: drop any previously loaded scrollback.
+        closedTerminalContents = [entry.id: text]
+    }
+
     /// Select a session and load its transcript (stale-while-revalidate: skip if already loaded).
     func selectSession(_ summary: SessionSummary, worktreeID: UUID) async {
         selectedSessionIDs[worktreeID] = summary.sessionId
+        selectedClosedTerminalIDs.removeValue(forKey: worktreeID)
         guard sessionTranscripts[summary.sessionId] == nil else { return }
         sessionTranscriptLoading.insert(summary.sessionId)
         defer { sessionTranscriptLoading.remove(summary.sessionId) }
@@ -134,6 +167,25 @@ extension AppState {
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            tabs[worktreeID, default: []].append(tab)
+            let index = (tabs[worktreeID]?.count ?? 1) - 1
+            setActiveTab(worktreeID: worktreeID, tabIndex: index)
+            historyActiveWorktrees.remove(worktreeID)
+        } catch {
+            handleConnectionError(error)
+        }
+    }
+
+    /// Revive a closed terminal from its history entry into a new terminal tab
+    /// and switch focus to it. Claude entries resume their session; other kinds
+    /// open a fresh shell with the captured scrollback above the prompt.
+    func reviveClosedTerminal(_ entry: TerminalHistoryEntry, worktreeID: UUID) async {
+        do {
+            let size = mainAreaTerminalSize()
+            let terminal = try await daemonClient.reviveTerminalHistory(
+                worktreeID: worktreeID, id: entry.id, cols: size.cols, rows: size.rows)
+            terminals[worktreeID, default: []].append(terminal)
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
             let index = (tabs[worktreeID]?.count ?? 1) - 1
             setActiveTab(worktreeID: worktreeID, tabIndex: index)

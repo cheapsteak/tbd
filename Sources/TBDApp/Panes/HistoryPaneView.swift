@@ -33,6 +33,15 @@ struct HistoryPaneView: View {
         return loadState.currentSessions.first { $0.sessionId == sid }
     }
 
+    private var closedTerminals: [TerminalHistoryEntry] {
+        appState.closedTerminalHistories[worktreeID] ?? []
+    }
+
+    private var selectedClosedTerminal: TerminalHistoryEntry? {
+        guard let id = appState.selectedClosedTerminalIDs[worktreeID] else { return nil }
+        return closedTerminals.first { $0.id == id }
+    }
+
     @State private var listWidth: CGFloat = 290
     @State private var dragStartWidth: CGFloat? = nil
 
@@ -62,8 +71,10 @@ struct HistoryPaneView: View {
                         .onEnded { _ in dragStartWidth = nil }
                 )
 
-            // Right panel: transcript or empty state
-            if let summary = selectedSummary {
+            // Right panel: closed-terminal capture, transcript, or empty state
+            if let entry = selectedClosedTerminal {
+                ClosedTerminalDetailView(entry: entry, worktreeID: worktreeID)
+            } else if let summary = selectedSummary {
                 SessionTranscriptView(
                     sessionId: summary.sessionId,
                     worktreeID: worktreeID,
@@ -79,7 +90,7 @@ struct HistoryPaneView: View {
     @ViewBuilder
     private var sessionList: some View {
         let sessions = loadState.currentSessions
-        if sessions.isEmpty && !loadState.isLoading {
+        if sessions.isEmpty && closedTerminals.isEmpty && !loadState.isLoading {
             VStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 32))
@@ -90,24 +101,43 @@ struct HistoryPaneView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(sessions) { summary in
-                SessionRowView(summary: summary, isSelected: selectedSessionID == summary.sessionId)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        Task { await appState.selectSession(summary, worktreeID: worktreeID) }
-                    }
-                    .contextMenu {
-                        Button("Copy Conversation Path") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(summary.filePath, forType: .string)
+            List {
+                ForEach(sessions) { summary in
+                    SessionRowView(summary: summary, isSelected: selectedSessionID == summary.sessionId)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Task { await appState.selectSession(summary, worktreeID: worktreeID) }
+                        }
+                        .contextMenu {
+                            Button("Copy Conversation Path") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(summary.filePath, forType: .string)
+                            }
+                        }
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                        .listRowBackground(
+                            selectedSessionID == summary.sessionId
+                                ? Color.accentColor.opacity(0.15)
+                                : Color.clear
+                        )
+                }
+                if !closedTerminals.isEmpty {
+                    Section("Closed Terminals") {
+                        ForEach(closedTerminals) { entry in
+                            ClosedTerminalRowView(entry: entry)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    Task { await appState.selectClosedTerminal(entry, worktreeID: worktreeID) }
+                                }
+                                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                                .listRowBackground(
+                                    selectedClosedTerminal?.id == entry.id
+                                        ? Color.accentColor.opacity(0.15)
+                                        : Color.clear
+                                )
                         }
                     }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-                    .listRowBackground(
-                        selectedSessionID == summary.sessionId
-                            ? Color.accentColor.opacity(0.15)
-                            : Color.clear
-                    )
+                }
             }
             .listStyle(.plain)
         }
@@ -486,6 +516,139 @@ struct SessionTranscriptView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Closed Terminals
+
+/// List row for one captured closed terminal (label/kind + close time).
+private struct ClosedTerminalRowView: View {
+    let entry: TerminalHistoryEntry
+
+    private var title: String {
+        if let label = entry.label, !label.isEmpty { return label }
+        switch entry.kind {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .shell, .none: return "Terminal"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Image(systemName: "terminal")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            HStack(spacing: 4) {
+                Text("closed \(entry.closedAt.smartFormatted)")
+                Text("·").foregroundStyle(.quaternary)
+                Text("\(entry.lineCount.formatted()) lines")
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Right-hand pane for a selected closed terminal: the captured scrollback,
+/// read-only, in a single monospaced NSTextView (no highlighting, no per-line
+/// rows — the capture can be ~10k lines and must stay cheap to display).
+private struct ClosedTerminalDetailView: View {
+    let entry: TerminalHistoryEntry
+    let worktreeID: UUID
+    @EnvironmentObject var appState: AppState
+
+    private var content: String? {
+        appState.closedTerminalContents[entry.id]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(entry.label ?? "Terminal")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("closed \(entry.closedAt.smartFormatted)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Text("· Read-only")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Revive") {
+                    Task { await appState.reviveClosedTerminal(entry, worktreeID: worktreeID) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if let content {
+                if content.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "terminal")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.tertiary)
+                        Text("No captured output")
+                            .foregroundStyle(.secondary)
+                            .font(.callout)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ReadOnlyMonospacedTextView(text: content)
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Minimal scrollable read-only monospaced text view. One NSTextView for the
+/// whole capture — deliberately NOT a SwiftUI per-line list and NOT
+/// syntax-highlighted (both are proven main-thread hangs on large text in
+/// this app, see #129).
+private struct ReadOnlyMonospacedTextView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        if let textView = scrollView.documentView as? NSTextView {
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.isRichText = false
+            textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            textView.textColor = .textColor
+            textView.drawsBackground = false
+            textView.textContainerInset = NSSize(width: 8, height: 8)
+        }
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = false
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView,
+              textView.string != text else { return }
+        textView.string = text
     }
 }
 

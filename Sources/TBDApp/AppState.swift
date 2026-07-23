@@ -510,6 +510,12 @@ final class AppState: ObservableObject {
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
+    // Closed-terminal history (Session History → Closed Terminals).
+    @Published var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
+    @Published var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
+    /// Captured text of the currently selected closed terminal only —
+    /// deliberately a one-entry cache so large scrollbacks never accumulate.
+    @Published var closedTerminalContents: [UUID: String] = [:]                   // entry id → text
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency
     /// input to the keep-alive policy. Bounded by `touchVisitedWorktree`, which
@@ -674,6 +680,29 @@ final class AppState: ObservableObject {
     /// the same reason as `controlModeSetter`.
     lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHibernateInputVeto(enabled: enabled) }
+    /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
+    /// Asks the user to confirm closing a note tab whose note has content —
+    /// closing a note tab hard-deletes the note row (`closeTab` →
+    /// `deleteNote`). Injectable so tests can exercise both branches without
+    /// a real modal NSAlert.
+    lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
+        let filePath = TBDConstants.noteContentPath(worktreeID: note.worktreeID, noteID: note.id)
+            .replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Close note \u{201C}\(note.title)\u{201D}?"
+        alert.informativeText = "Closing this tab removes the note from TBD. Its contents are kept on disk at \(filePath)."
+        alert.addButton(withTitle: "Close Note")
+        alert.addButton(withTitle: "Cancel")
+        // HIG: destructive action shouldn't be the Return-key default (same
+        // pattern as LegacyHooksCoordinator's migrate dialog).
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from

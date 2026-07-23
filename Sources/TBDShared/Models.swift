@@ -777,6 +777,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// applies. The input veto is opt-in until it soaks and the v50 master
     /// default is reverted.
     public var hibernateInputVetoEnabled: Bool
+    /// Soak flag for auto-closing the setup-hook tab after a clean run.
+    /// When true AND a setup hook resolves, the hook's exit code is written
+    /// to a marker file; exit 0 closes the tab (kills the pane, deletes the
+    /// terminal/tab rows), nonzero leaves the tab open with an interactive
+    /// shell for debugging. Default OFF: this kills a pane and deletes rows
+    /// without a user gesture, so it is opt-in until it soaks.
+    public var autoCloseSetupEnabled: Bool
     /// Master switch for the daemon-owned orphan GC sweep. Default ON.
     public var gcEnabled: Bool
     /// Minimum age (seconds) an orphaned worktree/scratchpad must reach
@@ -809,6 +816,7 @@ public struct Config: Codable, Sendable, Equatable {
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = false,
                 gcEnabled: Bool = true,
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
                 gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays) {
@@ -828,6 +836,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
+        self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.gcEnabled = gcEnabled
         self.gcGraceSeconds = gcGraceSeconds
         self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
@@ -864,6 +873,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         hibernateInputVetoEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
+        autoCloseSetupEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
         gcGraceSeconds = try c.decodeIfPresent(Int.self, forKey: .gcGraceSeconds)
             ?? Config.defaultGCGraceSeconds
@@ -948,6 +959,35 @@ public struct Note: Codable, Sendable, Identifiable, Equatable {
         self.content = content
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// Metadata for a closed terminal whose scrollback was captured at close time.
+/// The captured text is file-backed at
+/// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
+/// (`TBDConstants.terminalHistoryPath`); the app reads the file directly and
+/// shows it read-only in Session History → Closed Terminals.
+public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
+    /// The closed terminal's UUID (also names the content file).
+    public let id: UUID
+    public var worktreeID: UUID
+    public var label: String?
+    public var kind: TerminalKind?
+    public var closedAt: Date
+    public var claudeSessionID: String?
+    /// Line count of the captured text (display metadata).
+    public var lineCount: Int
+
+    public init(id: UUID, worktreeID: UUID, label: String? = nil,
+                kind: TerminalKind? = nil, closedAt: Date = Date(),
+                claudeSessionID: String? = nil, lineCount: Int = 0) {
+        self.id = id
+        self.worktreeID = worktreeID
+        self.label = label
+        self.kind = kind
+        self.closedAt = closedAt
+        self.claudeSessionID = claudeSessionID
+        self.lineCount = lineCount
     }
 }
 

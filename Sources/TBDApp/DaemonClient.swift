@@ -872,6 +872,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the auto-close-setup-tab soak flag (default OFF). Applies to
+    /// the next worktree creation.
+    func setAutoCloseSetup(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoCloseSetup,
+            params: ConfigSetAutoCloseSetupParams(enabled: enabled)
+        )
+    }
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(
@@ -1229,6 +1238,27 @@ actor DaemonClient {
             method: RPCMethod.noteList,
             params: NoteListParams(worktreeID: worktreeID),
             resultType: [Note].self
+        )
+    }
+
+    /// List closed-terminal capture metadata for a worktree (newest first).
+    /// Captured content is read directly from the file at
+    /// `TBDConstants.terminalHistoryPath` — not fetched over RPC.
+    func listTerminalHistory(worktreeID: UUID) async throws -> [TerminalHistoryEntry] {
+        return try await callAsync(
+            method: RPCMethod.terminalHistoryList,
+            params: TerminalHistoryListParams(worktreeID: worktreeID),
+            resultType: [TerminalHistoryEntry].self
+        )
+    }
+
+    /// Revive a closed terminal from its history entry into a new terminal in
+    /// the same worktree. Returns the created terminal.
+    func reviveTerminalHistory(worktreeID: UUID, id: UUID, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+        return try await callAsync(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: worktreeID, id: id, cols: cols, rows: rows),
+            resultType: Terminal.self
         )
     }
 

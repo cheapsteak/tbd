@@ -258,6 +258,10 @@ public final class RPCRouter: Sendable {
                 return try await handleNoteDelete(request.paramsData)
             case RPCMethod.noteList:
                 return try await handleNoteList(request.paramsData)
+            case RPCMethod.terminalHistoryList:
+                return try await handleTerminalHistoryList(request.paramsData)
+            case RPCMethod.terminalHistoryRevive:
+                return try await handleTerminalHistoryRevive(request.paramsData)
             case RPCMethod.terminalOutput:
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:
@@ -367,6 +371,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetHibernateInputVeto:
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
+            case RPCMethod.configSetAutoCloseSetup:
+                return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
             case RPCMethod.gcList:
@@ -404,7 +410,8 @@ public final class RPCRouter: Sendable {
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
-            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled))
+            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
+            autoCloseSetupEnabled: config.autoCloseSetupEnabled))
     }
 
     // MARK: - PR Status
