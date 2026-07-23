@@ -308,6 +308,48 @@ struct PanelCoordinatorTests {
         #expect(recorder.count == 0)
     }
 
+    @Test func tabBelongingToAnotherWorktreeIsTreatedAsNotFound() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPanelSurfaceEnabled(true)
+        let wtID = try await makeWorktree(db)
+        let otherWtID = try await makeWorktree(db, name: "other")
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+
+        // Envelope claims the tab lives in `otherWtID`, but it actually
+        // belongs to `wtID` — must not mutate/broadcast under the wrong id.
+        let envelope = PanelOperationEnvelope(
+            operationID: UUID(), worktreeID: otherWtID, tabID: tab.id, baseRevision: nil,
+            origin: .appUser,
+            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
+
+        await #expect(throws: PanelCoordinatorError.tabNotFound(tab.id)) {
+            _ = try await coordinator.apply(envelope)
+        }
+        #expect(recorder.count == 0)
+    }
+
+    // MARK: - selectTab is Task 9 — short-circuit until then
+
+    @Test func selectTabShortCircuitsAsNotTabScopedUntilTask9() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPanelSurfaceEnabled(true)
+        let wtID = try await makeWorktree(db)
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+
+        let envelope = PanelOperationEnvelope(
+            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
+            origin: .appUser, operation: .selectTab(tabID: UUID()))
+
+        await #expect(throws: PanelCoordinatorError.operation(.notTabScoped)) {
+            _ = try await coordinator.apply(envelope)
+        }
+        #expect(recorder.count == 0)
+    }
+
     // MARK: - Carry-forward #1: a tab-removing op leaves no stale surface/history row
 
     @Test func closeOperationLeavesNoStalePanelHistoryRow() async throws {

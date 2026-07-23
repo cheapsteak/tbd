@@ -104,8 +104,11 @@ public actor PanelCoordinator {
             throw PanelCoordinatorError.operation(.notTabScoped)
         }
 
-        // 4. Load current state.
-        guard let state = try await db.panelSurface.state(tabID: envelope.tabID) else {
+        // 4. Load current state. The tab must actually belong to the claimed
+        // worktree — otherwise a mismatched envelope would mutate one
+        // worktree's tab while broadcasting/receipting under another's id.
+        guard let state = try await db.panelSurface.state(tabID: envelope.tabID),
+              state.surface.worktreeID == envelope.worktreeID else {
             throw PanelCoordinatorError.tabNotFound(envelope.tabID)
         }
 
