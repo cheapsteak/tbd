@@ -355,8 +355,8 @@ public enum PanelSurfaceReducer {
                         reason: "expected \(split.children.count) ratios, got \(ratios.count)")
                 }
                 let total = ratios.reduce(0, +)
-                guard total > 0 else {
-                    throw PanelOperationError.invalidRatios(reason: "ratios sum to zero")
+                guard total > 0, total.isFinite else {
+                    throw PanelOperationError.invalidRatios(reason: "ratios sum is non-positive or non-finite")
                 }
                 // Validate min-share on NORMALIZED ratios: raw values that pass
                 // the floor can still normalize below it (e.g. [0.1, 1.0]),

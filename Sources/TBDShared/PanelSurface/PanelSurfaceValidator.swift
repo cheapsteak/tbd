@@ -64,11 +64,15 @@ public enum PanelSurfaceValidator {
         if split.ratios.count != split.children.count {
             found.append(.ratioCountMismatch(split.id))
         } else if split.children.count >= 2 {
-            if split.ratios.contains(where: { $0 < minShare - ratioSumTolerance }) {
-                found.append(.ratioBelowMinimum(split.id))
-            }
-            if abs(split.ratios.reduce(0, +) - 1.0) > ratioSumTolerance {
+            if split.ratios.contains(where: { !$0.isFinite }) {
                 found.append(.ratioSumInvalid(split.id))
+            } else {
+                if split.ratios.contains(where: { $0 < minShare - ratioSumTolerance }) {
+                    found.append(.ratioBelowMinimum(split.id))
+                }
+                if abs(split.ratios.reduce(0, +) - 1.0) > ratioSumTolerance {
+                    found.append(.ratioSumInvalid(split.id))
+                }
             }
         }
         for child in split.children {
