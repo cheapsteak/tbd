@@ -19,6 +19,28 @@ struct ShadowCompareTests {
         WorkspaceTabSurface(id: id, worktreeID: worktreeID, label: label, primary: primary, layout: layout, revision: revision)
     }
 
+    /// A tab exercising BOTH of `LegacySurfaceImporter`'s `makeID()` mint
+    /// sites at once: an extra terminal leaf (promotion mints a new surface
+    /// id) and a note leaf (mints a new panel slot id). Plus a codeViewer
+    /// leaf whose id is caller-supplied and stable — the one piece of real
+    /// content this helper can vary to prove genuine divergence still shows.
+    private func mixedPayload(
+        tabID: UUID, primaryTerminalID: UUID, extraTerminalID: UUID, noteID: UUID,
+        viewerLegacyID: UUID, viewerPath: String
+    ) -> LegacyTabPayload {
+        let layout = LayoutNode.split(
+            id: UUID(), direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: primaryTerminalID)),
+                .pane(.terminal(terminalID: extraTerminalID)),
+                .pane(.note(noteID: noteID)),
+                .pane(.codeViewer(id: viewerLegacyID, path: viewerPath)),
+            ],
+            ratios: [0.25, 0.25, 0.25, 0.25])
+        return LegacyTabPayload(
+            tabID: tabID, label: "Mixed", content: .terminal(terminalID: primaryTerminalID), layout: layout)
+    }
+
     @Test func identicalConversionAndGetProduceNoMismatches() {
         let tabID = UUID()
         let terminalID = UUID()
@@ -57,7 +79,9 @@ struct ShadowCompareTests {
         let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
 
         #expect(mismatches.count == 1)
-        #expect(mismatches.first?.contains(tabID.uuidString) == true)
+        // Matching key for a terminal-primary tab is the stable terminalID,
+        // not the (possibly minted) surface id.
+        #expect(mismatches.first?.contains(terminalID.uuidString) == true)
     }
 
     @Test func daemonExtraTabIsReported() {
@@ -65,70 +89,31 @@ struct ShadowCompareTests {
         // launch that the current live legacy state no longer has (e.g. the
         // app closed it locally since); create-if-absent import means the
         // daemon surface is never retroactively pruned.
-        let sharedTabID = UUID()
-        let terminalID = UUID()
-        let extraTabID = UUID()
-        let sharedTab = surface(id: sharedTabID, primary: .terminal(terminalID: terminalID))
-        let extraDaemonTab = surface(id: extraTabID, primary: .terminal(terminalID: UUID()))
+        let sharedTerminalID = UUID()
+        let extraTerminalID = UUID()
+        let sharedTab = surface(id: UUID(), primary: .terminal(terminalID: sharedTerminalID))
+        let extraDaemonTab = surface(id: UUID(), primary: .terminal(terminalID: extraTerminalID))
         let local = LegacySurfaceImporter.Conversion(surfaces: [sharedTab])
         let daemon = PanelGetResult(tabs: [sharedTab, extraDaemonTab], activeTabID: nil)
 
         let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
 
         #expect(mismatches.count == 1)
-        #expect(mismatches.first?.contains(extraTabID.uuidString) == true)
+        #expect(mismatches.first?.contains(extraTerminalID.uuidString) == true)
     }
 
     @Test func localExtraTabIsReported() {
-        let sharedTabID = UUID()
-        let terminalID = UUID()
-        let extraLocalTabID = UUID()
-        let sharedTab = surface(id: sharedTabID, primary: .terminal(terminalID: terminalID))
-        let extraLocalTab = surface(id: extraLocalTabID, primary: .terminal(terminalID: UUID()))
+        let sharedTerminalID = UUID()
+        let extraTerminalID = UUID()
+        let sharedTab = surface(id: UUID(), primary: .terminal(terminalID: sharedTerminalID))
+        let extraLocalTab = surface(id: UUID(), primary: .terminal(terminalID: extraTerminalID))
         let local = LegacySurfaceImporter.Conversion(surfaces: [sharedTab, extraLocalTab])
         let daemon = PanelGetResult(tabs: [sharedTab], activeTabID: nil)
 
         let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
 
         #expect(mismatches.count == 1)
-        #expect(mismatches.first?.contains(extraLocalTabID.uuidString) == true)
-    }
-
-    @Test func importerTransformsAreNotFlagged_terminalPromotionRatioRepairViewerToPanel() {
-        // The trigger builds `local` by running the SAME `LegacySurfaceImporter.convert`
-        // the daemon's import used — so terminal-leaf promotion, ratio repair, and
-        // viewer-leaf-to-panel conversion are already baked into `local`, not raw legacy
-        // state. Simulate the daemon side as exactly what that conversion produced
-        // (what a correct import would return) and confirm none of those legitimate
-        // transforms register as a mismatch.
-        let tabID = UUID()
-        let primaryTerminalID = UUID()
-        let extraTerminalID = UUID()
-        let viewerID = UUID()
-        let malformedRatioLayout = LayoutNode.split(
-            id: UUID(), direction: .horizontal,
-            children: [
-                .pane(.terminal(terminalID: primaryTerminalID)),
-                .pane(.terminal(terminalID: extraTerminalID)),
-                .pane(.codeViewer(id: viewerID, path: "/a")),
-            ],
-            ratios: [-1, 0, 999] // deliberately malformed — importer repairs to equal shares
-        )
-        let payload = LegacyTabPayload(
-            tabID: tabID, label: "Mixed", content: .terminal(terminalID: primaryTerminalID),
-            layout: malformedRatioLayout)
-
-        let conversion = LegacySurfaceImporter.convert(
-            worktreeID: worktreeID, tabs: [payload], tabOrder: [tabID], paneHistories: [:])
-
-        // Sanity: the importer really did promote the extra terminal and repair ratios.
-        #expect(conversion.promotedTerminalTabs == 1)
-        #expect(conversion.surfaces.count == 2)
-
-        let daemon = PanelGetResult(tabs: conversion.surfaces, activeTabID: nil)
-
-        #expect(PanelShadowCompare.mismatches(local: conversion, daemon: daemon).isEmpty,
-                "importer's own transforms (promotion, ratio repair, viewer→panel) must never be flagged")
+        #expect(mismatches.first?.contains(extraTerminalID.uuidString) == true)
     }
 
     @Test func labelMismatchIsReported() {
@@ -142,7 +127,76 @@ struct ShadowCompareTests {
         let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
 
         #expect(mismatches.count == 1)
-        #expect(mismatches.first?.contains(tabID.uuidString) == true)
+        #expect(mismatches.first?.contains(terminalID.uuidString) == true)
+    }
+
+    // MARK: - Independent-conversion mutation killers (the real trigger shape)
+
+    /// THE core regression test: `local` and `daemon` here are NOT the same
+    /// value reused twice — they come from two SEPARATE, independent
+    /// `LegacySurfaceImporter.convert` calls on identical legacy input,
+    /// exactly like production (the daemon converted once at import; this
+    /// diagnostic converts again later). Each call mints its OWN random IDs
+    /// at both `makeID()` sites (promoted-tab surface id, note panel slot
+    /// id) — a comparator that matches/compares by minted id instead of
+    /// stable content would report spurious mismatches here on virtually
+    /// every real launch that has a note panel or a multi-terminal tab.
+    @Test func independentConvertsOfIdenticalLegacyState_noSpuriousMismatches() {
+        let tabID = UUID()
+        let primaryTerminalID = UUID()
+        let extraTerminalID = UUID()
+        let noteID = UUID()
+        let viewerLegacyID = UUID()
+        let payload = mixedPayload(
+            tabID: tabID, primaryTerminalID: primaryTerminalID, extraTerminalID: extraTerminalID,
+            noteID: noteID, viewerLegacyID: viewerLegacyID, viewerPath: "/a")
+
+        let local = LegacySurfaceImporter.convert(
+            worktreeID: worktreeID, tabs: [payload], tabOrder: [tabID], paneHistories: [:])
+        let daemonConversion = LegacySurfaceImporter.convert(
+            worktreeID: worktreeID, tabs: [payload], tabOrder: [tabID], paneHistories: [:])
+
+        // Sanity: this really does exercise two independent random draws —
+        // otherwise the test proves nothing.
+        #expect(local.promotedTerminalTabs == 1)
+        #expect(daemonConversion.promotedTerminalTabs == 1)
+        #expect(local.surfaces[1].id != daemonConversion.surfaces[1].id,
+                "test setup must produce two genuinely independent minted promoted-tab ids")
+
+        let daemon = PanelGetResult(tabs: daemonConversion.surfaces, activeTabID: nil)
+        let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
+
+        #expect(mismatches.isEmpty,
+                "two independent conversions of identical legacy state must never diverge on minted ids alone")
+    }
+
+    /// Companion to the above: ID-normalization must not swallow REAL
+    /// divergence. Two independent conversions of legacy input that differs
+    /// in one meaningful way (a codeViewer's path) must still be reported.
+    @Test func independentConvertsWithRealContentDivergence_stillFlagged() {
+        let tabID = UUID()
+        let primaryTerminalID = UUID()
+        let extraTerminalID = UUID()
+        let noteID = UUID()
+        let viewerLegacyID = UUID()
+        let localPayload = mixedPayload(
+            tabID: tabID, primaryTerminalID: primaryTerminalID, extraTerminalID: extraTerminalID,
+            noteID: noteID, viewerLegacyID: viewerLegacyID, viewerPath: "/a")
+        let daemonPayload = mixedPayload(
+            tabID: tabID, primaryTerminalID: primaryTerminalID, extraTerminalID: extraTerminalID,
+            noteID: noteID, viewerLegacyID: viewerLegacyID, viewerPath: "/b")
+
+        let local = LegacySurfaceImporter.convert(
+            worktreeID: worktreeID, tabs: [localPayload], tabOrder: [tabID], paneHistories: [:])
+        let daemonConversion = LegacySurfaceImporter.convert(
+            worktreeID: worktreeID, tabs: [daemonPayload], tabOrder: [tabID], paneHistories: [:])
+        let daemon = PanelGetResult(tabs: daemonConversion.surfaces, activeTabID: nil)
+
+        let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
+
+        #expect(mismatches.count == 1)
+        #expect(mismatches.first?.contains(primaryTerminalID.uuidString) == true,
+                "the tab is keyed by its stable terminalID, not a minted id")
     }
 }
 
