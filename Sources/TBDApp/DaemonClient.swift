@@ -1326,6 +1326,14 @@ actor DaemonClient {
         )
     }
 
+    /// Reorder model profiles.
+    func reorderModelProfiles(profileIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileReorder,
+            params: ModelProfileReorderParams(profileIDs: profileIDs)
+        )
+    }
+
     /// Set or clear the global model-profile override applied to scratch terminal spawns.
     func setScratchProfileOverride(_ id: UUID?) async throws {
         try await callVoidAsync(

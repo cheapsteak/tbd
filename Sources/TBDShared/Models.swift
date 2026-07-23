@@ -472,13 +472,17 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     public var envOverrides: [String: String]
     public var createdAt: Date
     public var lastUsedAt: Date?
+    /// Drag-and-drop display order (mirrors `Worktree.sortOrder`). Defaults to
+    /// 0 so existing JSON/rows without this field still decode.
+    public var sortOrder: Int
 
     public init(id: UUID = UUID(), name: String, kind: CredentialKind,
                 baseURL: String? = nil, model: String? = nil,
                 awsRegion: String? = nil, awsProfile: String? = nil,
                 fallbackModels: [String]? = nil,
                 envOverrides: [String: String] = [:],
-                createdAt: Date = Date(), lastUsedAt: Date? = nil) {
+                createdAt: Date = Date(), lastUsedAt: Date? = nil,
+                sortOrder: Int = 0) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -490,11 +494,12 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.envOverrides = envOverrides
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
+        self.sortOrder = sortOrder
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels
-        case envOverrides, createdAt, lastUsedAt
+        case envOverrides, createdAt, lastUsedAt, sortOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -511,6 +516,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
             [String: String].self, forKey: .envOverrides) ?? [:]
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+        sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
     }
 }
 

@@ -24,6 +24,7 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
     var env_overrides: String?
     var created_at: Date
     var last_used_at: Date?
+    var sort_order: Int = 0
 
     init(from profile: ModelProfile) {
         self.id = profile.id.uuidString
@@ -38,6 +39,7 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.env_overrides = EnvOverridesCoding.encode(profile.envOverrides)
         self.created_at = profile.createdAt
         self.last_used_at = profile.lastUsedAt
+        self.sort_order = profile.sortOrder
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -59,7 +61,8 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
             fallbackModels: Self.decodeFallbackModels(fallback_models),
             envOverrides: EnvOverridesCoding.decode(env_overrides),
             createdAt: created_at,
-            lastUsedAt: last_used_at
+            lastUsedAt: last_used_at,
+            sortOrder: sort_order
         )
     }
 
@@ -87,23 +90,56 @@ public struct ModelProfileStore: Sendable {
         self.writer = writer
     }
 
+    /// Create a new model profile. Automatically assigns
+    /// sortOrder = max(sortOrder) + 1 (profiles are global — no repoID scoping).
     public func create(name: String, kind: CredentialKind,
                        baseURL: String? = nil, model: String? = nil,
                        awsRegion: String? = nil, awsProfile: String? = nil,
                        fallbackModels: [String]? = nil) async throws -> ModelProfile {
-        let profile = ModelProfile(name: name, kind: kind, baseURL: baseURL, model: model,
-                                   awsRegion: awsRegion, awsProfile: awsProfile,
-                                   fallbackModels: fallbackModels)
-        let record = ModelProfileRecord(from: profile)
         try await writer.write { db in
+            let maxOrder = try Int.fetchOne(
+                db, sql: "SELECT MAX(sort_order) FROM model_profiles"
+            ) ?? 0
+            let profile = ModelProfile(name: name, kind: kind, baseURL: baseURL, model: model,
+                                       awsRegion: awsRegion, awsProfile: awsProfile,
+                                       fallbackModels: fallbackModels, sortOrder: maxOrder + 1)
+            let record = ModelProfileRecord(from: profile)
             try record.insert(db)
+            return profile
         }
-        return profile
     }
 
     public func list() async throws -> [ModelProfile] {
         try await writer.read { db in
-            try ModelProfileRecord.fetchAll(db).compactMap { $0.toModel() }
+            try ModelProfileRecord
+                .order(Column("sort_order"))
+                .fetchAll(db).compactMap { $0.toModel() }
+        }
+    }
+
+    /// Reorder model profiles. Only affects the profiles in the provided list;
+    /// any other profile not in the list is pushed to sortOrder values after
+    /// the reordered ones. Mirrors `WorktreeStore.reorder` — profiles are
+    /// global, so there's no repo scoping.
+    public func reorder(profileIDs: [UUID]) async throws {
+        try await writer.write { db in
+            for (index, profileID) in profileIDs.enumerated() {
+                try db.execute(
+                    sql: "UPDATE model_profiles SET sort_order = ? WHERE id = ?",
+                    arguments: [index, profileID.uuidString]
+                )
+            }
+            // Push any profiles not in the provided list to after the reordered ones.
+            let idStrings = profileIDs.map(\.uuidString)
+            let placeholders = idStrings.map { _ in "?" }.joined(separator: ",")
+            let args: [any DatabaseValueConvertible] = [profileIDs.count] + idStrings
+            try db.execute(
+                sql: """
+                    UPDATE model_profiles SET sort_order = ? + rowid
+                    WHERE id NOT IN (\(placeholders))
+                    """,
+                arguments: StatementArguments(args)
+            )
         }
     }
 
