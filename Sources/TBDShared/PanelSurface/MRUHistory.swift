@@ -16,11 +16,16 @@ public struct MRUHistory<Element: Codable & Equatable & Sendable>: Codable, Equa
 
     public init() {}
 
-    /// Reconstructs a history from already-known entries/cursor — e.g.
-    /// re-keying a legacy history during import (`LegacySurfaceImporter`).
-    /// No validation performed; callers are responsible for consistency
-    /// (typically checked via `isWellFormed` / `PanelSurfaceValidator`).
-    public init(entries: [Element], cursor: Int) {
+    /// Internal re-key seam for `LegacySurfaceImporter` (same module) and
+    /// `@testable` tests: rebuilds a history from already-known
+    /// entries/cursor to preserve order during import. Deliberately skips the
+    /// dedup/`maxEntries` cap and cursor-range guarantees that
+    /// `recordReplacement`/`seeded(with:)` enforce — callers own consistency
+    /// (checked via `isWellFormed` / `PanelSurfaceValidator`). `internal`, not
+    /// `public`, so this unvalidated constructor stays inside the module and
+    /// the `public private(set)` intent on `entries`/`cursor` holds for
+    /// external callers.
+    init(entries: [Element], cursor: Int) {
         self.entries = entries
         self.cursor = cursor
     }
