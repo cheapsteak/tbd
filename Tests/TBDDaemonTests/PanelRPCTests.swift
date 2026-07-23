@@ -162,10 +162,10 @@ struct PanelRPCTests {
         #expect(!response.success)
     }
 
-    // MARK: - panel.importLegacy dispatch (Task 11 implements the real behavior)
+    // MARK: - panel.importLegacy dispatch (Task 11 implements the real behavior; see PanelImportHandlerTests)
 
-    @Test("panel.importLegacy route dispatches to a not-implemented error, not Unknown method")
-    func importLegacyDispatchesToStub() async throws {
+    @Test("panel.importLegacy route dispatches to the real handler (gate error with flag off), not Unknown method")
+    func importLegacyDispatchesToHandler() async throws {
         let (router, _) = try makeRouterAndDB()
         let params = PanelImportParams(
             worktreeID: UUID(), tabs: [], tabOrder: [], activeTabID: nil, paneHistories: [:])
