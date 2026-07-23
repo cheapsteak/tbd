@@ -522,6 +522,13 @@ public final class Daemon: Sendable {
         // spawn landing before the sweep would miss a legacy column value.
         await database.repos.sweepClaudeSettingsOverlayColumnToFiles()
 
+        // 8c. One-time export of legacy DB note content to its file-backed
+        // home (`~/tbd/notes/<worktreeID>/<noteID>.md`). Unlike 8b the DB
+        // column is NOT cleared — it stays as a dormant fallback/backup; the
+        // file wins once it exists. Idempotent (file-exists guard), so no
+        // migration or marker is needed. Best-effort, never blocks startup.
+        await database.notes.exportContentColumnToFiles()
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock

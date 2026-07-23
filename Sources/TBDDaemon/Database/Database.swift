@@ -30,7 +30,9 @@ public final class TBDDatabase: Sendable {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
-    public init(path: String) throws {
+    /// `notesDir` overrides the note-content file directory (tests only; nil
+    /// resolves `TBDConstants.noteContentDir`, which honors TBD_HOME).
+    public init(path: String, notesDir: String? = nil) throws {
         // Capture existence BEFORE DatabasePool opens the file — opening
         // creates an empty DB on the first launch, so we'd otherwise lose the
         // ability to distinguish "first launch" from "upgrade".
@@ -48,7 +50,7 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: pool)
         self.terminals = TerminalStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
-        self.notes = NoteStore(writer: pool)
+        self.notes = NoteStore(writer: pool, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: pool)
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: pool)
@@ -74,7 +76,10 @@ public final class TBDDatabase: Sendable {
     }
 
     /// Create an in-memory database for testing using DatabaseQueue.
-    public init(inMemory: Bool) throws {
+    /// `notesDir` overrides the note-content file directory so tests never
+    /// touch the real `~/tbd/notes` (injection seam, like
+    /// `ThemeStore(themesDirectory:)`).
+    public init(inMemory: Bool, notesDir: String? = nil) throws {
         precondition(inMemory, "Use init(path:) for file-backed databases")
         let queue = try DatabaseQueue()
         self.writer = queue
@@ -82,7 +87,7 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: queue)
         self.terminals = TerminalStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
-        self.notes = NoteStore(writer: queue)
+        self.notes = NoteStore(writer: queue, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: queue)
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: queue)

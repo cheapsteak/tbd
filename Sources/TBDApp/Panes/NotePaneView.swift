@@ -14,12 +14,50 @@ struct NotePaneView: View {
         appState.notes[worktreeID]?.first { $0.id == noteID }
     }
 
+    /// Where this note's content lives on disk (daemon-written; the file
+    /// exists only once the note has non-empty content, but the would-be
+    /// path is shown regardless — file-backed settings convention, see
+    /// `RepoHooksSettingsView`).
+    private var contentFilePath: String {
+        TBDConstants.noteContentPath(worktreeID: worktreeID, noteID: noteID)
+    }
+
     var body: some View {
+        VStack(spacing: 0) {
+            editor
+            footer
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var footer: some View {
+        HStack(spacing: 4) {
+            Text(contentFilePath.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                .font(.caption.monospaced())
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(contentFilePath, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Copy full path")
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
+    private var editor: some View {
         TextEditor(text: $text)
             .font(.system(.body, design: .monospaced))
             .padding(12)
             .scrollContentBackground(.hidden)
-            .background(Color(nsColor: .textBackgroundColor))
             .onChange(of: text) { _, newValue in
                 guard loaded else { return }
                 debounceSave(content: newValue)

@@ -133,6 +133,26 @@ public enum TBDConstants {
         claudeSettingsOverlayPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Base directory for per-note (tab) content files. Honors TBD_HOME.
+    public static func noteContentDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("notes")
+    }
+    public static var noteContentDir: URL { noteContentDir(environment: ProcessInfo.processInfo.environment) }
+
+    /// Path to one note tab's content file:
+    /// `~/tbd/notes/<worktreeID>/<noteID>.md`. Note content is file-backed
+    /// (the DB `content` column is a dormant legacy fallback); the DB note
+    /// row keeps tab identity + title. Honors TBD_HOME.
+    public static func noteContentPath(worktreeID: UUID, noteID: UUID, environment: [String: String]) -> String {
+        noteContentDir(environment: environment)
+            .appendingPathComponent(worktreeID.uuidString)
+            .appendingPathComponent("\(noteID.uuidString).md")
+            .path
+    }
+    public static func noteContentPath(worktreeID: UUID, noteID: UUID) -> String {
+        noteContentPath(worktreeID: worktreeID, noteID: noteID, environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Path to a scratch worktree's notepad file:
     /// `~/tbd/worktrees/<worktreeID>/notes.md`. Honors TBD_HOME.
     public static func notesPath(worktreeID: UUID, environment: [String: String]) -> String {

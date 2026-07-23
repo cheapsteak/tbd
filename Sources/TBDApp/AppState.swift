@@ -683,11 +683,13 @@ final class AppState: ObservableObject {
     /// `deleteNote`). Injectable so tests can exercise both branches without
     /// a real modal NSAlert.
     lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
+        let filePath = TBDConstants.noteContentPath(worktreeID: note.worktreeID, noteID: note.id)
+            .replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Delete note \u{201C}\(note.title)\u{201D}?"
-        alert.informativeText = "Closing this tab permanently deletes the note and its contents."
-        alert.addButton(withTitle: "Delete")
+        alert.messageText = "Close note \u{201C}\(note.title)\u{201D}?"
+        alert.informativeText = "Closing this tab removes the note from TBD. Its contents are kept on disk at \(filePath)."
+        alert.addButton(withTitle: "Close Note")
         alert.addButton(withTitle: "Cancel")
         // HIG: destructive action shouldn't be the Return-key default (same
         // pattern as LegacyHooksCoordinator's migrate dialog).

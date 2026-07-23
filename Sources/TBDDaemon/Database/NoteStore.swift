@@ -48,11 +48,63 @@ struct NoteRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 }
 
 /// Provides CRUD operations for notes.
+///
+/// Note CONTENT is file-backed at `~/tbd/notes/<worktreeID>/<noteID>.md`
+/// (`TBDConstants.noteContentPath`); the DB row keeps tab identity + title.
+/// The DB `content` column is a dormant legacy fallback: reads prefer the
+/// file when it exists, writes go to the file only. Empty/whitespace-only
+/// content deletes the file (mirrors the app's `NotesFileStore` semantics),
+/// so a freshly auto-created empty note produces no file.
 public struct NoteStore: Sendable {
     let writer: any DatabaseWriter
+    /// Injection seam for tests (like `ThemeStore(themesDirectory:)`): nil
+    /// resolves `TBDConstants.noteContentDir` (which honors TBD_HOME) at
+    /// call time.
+    let notesDirOverride: String?
 
-    init(writer: any DatabaseWriter) {
+    init(writer: any DatabaseWriter, notesDir: String? = nil) {
         self.writer = writer
+        self.notesDirOverride = notesDir
+    }
+
+    // MARK: - Content files
+
+    func contentPath(worktreeID: UUID, noteID: UUID) -> String {
+        if let notesDirOverride {
+            return ((notesDirOverride as NSString)
+                .appendingPathComponent(worktreeID.uuidString) as NSString)
+                .appendingPathComponent("\(noteID.uuidString).md")
+        }
+        return TBDConstants.noteContentPath(worktreeID: worktreeID, noteID: noteID)
+    }
+
+    /// File content wins when the file exists; DB column is the fallback for
+    /// legacy rows that were never exported.
+    private func overlayContent(_ note: Note) -> Note {
+        let path = contentPath(worktreeID: note.worktreeID, noteID: note.id)
+        guard let fileContent = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return note
+        }
+        var overlaid = note
+        overlaid.content = fileContent
+        return overlaid
+    }
+
+    /// Writes `content` to the note's file (atomically, creating intermediate
+    /// directories). Empty/whitespace-only content deletes the file instead.
+    private func writeContentFile(_ content: String, worktreeID: UUID, noteID: UUID) throws {
+        let path = contentPath(worktreeID: worktreeID, noteID: noteID)
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if FileManager.default.fileExists(atPath: path) {
+                try FileManager.default.removeItem(atPath: path)
+            }
+            return
+        }
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     /// Create a new note. With no explicit `title`, uses a monotonically
@@ -75,32 +127,40 @@ public struct NoteStore: Sendable {
         }
     }
 
-    /// Get a note by ID.
+    /// Get a note by ID (content overlaid from its file when one exists).
     public func get(id: UUID) async throws -> Note? {
-        try await writer.read { db in
+        let note = try await writer.read { db in
             try NoteRecord.fetchOne(db, key: id.uuidString)?.toModel()
         }
+        return note.map(overlayContent)
     }
 
-    /// List notes, optionally filtered by worktree.
+    /// List notes, optionally filtered by worktree (content overlaid from
+    /// each note's file when one exists).
     public func list(worktreeID: UUID? = nil) async throws -> [Note] {
-        try await writer.read { db in
+        let notes = try await writer.read { db in
             var request = NoteRecord.all()
             if let worktreeID {
                 request = request.filter(Column("worktreeID") == worktreeID.uuidString)
             }
             return try request.fetchAll(db).compactMap { $0.toModel() }
         }
+        return notes.map(overlayContent)
     }
 
-    /// Update a note's title and/or content.
+    /// Update a note's title and/or content. Title goes to the DB row;
+    /// content goes to the file only. Exception: an explicit empty-content
+    /// update also clears the DB column — the file is deleted, and a stale
+    /// legacy column value would otherwise resurrect through the fallback.
     public func update(id: UUID, title: String? = nil, content: String? = nil) async throws -> Note {
-        try await writer.write { db in
+        let updated = try await writer.write { db -> Note in
             guard var record = try NoteRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Note not found")
             }
             if let title { record.title = title }
-            if let content { record.content = content }
+            if let content, content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                record.content = ""
+            }
             record.updatedAt = Date()
             try record.update(db)
             guard let model = record.toModel() else {
@@ -110,21 +170,59 @@ public struct NoteStore: Sendable {
             }
             return model
         }
+        if let content {
+            try writeContentFile(content, worktreeID: updated.worktreeID, noteID: updated.id)
+        }
+        return overlayContent(updated)
     }
 
-    /// Delete a note by ID.
+    /// Delete a note by ID. Deliberately does NOT delete the note's content
+    /// file — closing a note tab removes the row, the `.md` survives on disk.
+    /// (Orphan-file GC is out of scope; files are intentionally retained.)
     public func delete(id: UUID) async throws {
         _ = try await writer.write { db in
             try NoteRecord.deleteOne(db, key: id.uuidString)
         }
     }
 
-    /// Delete all notes for a worktree.
+    /// Delete all notes for a worktree. Content files are intentionally
+    /// retained (see `delete(id:)`).
     public func deleteForWorktree(worktreeID: UUID) async throws {
         _ = try await writer.write { db in
             try NoteRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .deleteAll(db)
+        }
+    }
+
+    /// One-time best-effort export of legacy DB note content to files, run at
+    /// daemon startup (sibling of `sweepClaudeSettingsOverlayColumnToFiles`).
+    /// For every row with non-empty content and no file yet, write the file.
+    /// The DB column is NOT cleared — it stays as a dormant fallback/backup;
+    /// the file simply wins once it exists. Idempotent by construction (the
+    /// file-exists guard also protects newer file edits from being clobbered
+    /// on later startups). Failures are logged and never block startup.
+    public func exportContentColumnToFiles() async {
+        let logger = Logger(subsystem: "com.tbd.daemon", category: "startup")
+        let rows: [Note]
+        do {
+            rows = try await writer.read { db in
+                try NoteRecord.fetchAll(db).compactMap { $0.toModel() }
+            }
+        } catch {
+            logger.error("note content export: read failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        for note in rows
+        where !note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let path = contentPath(worktreeID: note.worktreeID, noteID: note.id)
+            guard !FileManager.default.fileExists(atPath: path) else { continue }
+            do {
+                try writeContentFile(note.content, worktreeID: note.worktreeID, noteID: note.id)
+                logger.info("Exported note \(note.id, privacy: .public) content to \(path, privacy: .public)")
+            } catch {
+                logger.error("note content export failed for \(note.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 }
