@@ -214,6 +214,9 @@ public enum RPCMethod {
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
+    public static let panelGet = "panel.get"
+    public static let panelApply = "panel.apply"
+    public static let panelImportLegacy = "panel.importLegacy"
 }
 
 // MARK: - Branch Listing

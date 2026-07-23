@@ -31,6 +31,10 @@ public enum StateDelta: Codable, Sendable {
     /// payload (mirrors `.modelProfilesChanged`) — subscribers refetch via
     /// `gc.list`.
     case reapRecordsChanged
+    /// Committed panel-surface change for a worktree (Spec C §10.1). Carries
+    /// full affected-tab snapshots + the originating operation ID so the app
+    /// can dedupe its own RPC response against the subscription echo.
+    case panelSurfaceChanged(PanelSurfaceDelta)
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)
