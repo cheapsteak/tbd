@@ -167,7 +167,7 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         /// `scrollToTrueBottom(attempts:)` did, letting AppKit/TextKit2 perform a
         /// layout pass between attempts.
         ///
-        /// Each turn drives STTextView's own Apple-blessed cheap path
+        /// Each turn drives STTextView's own Apple-supported cheap path
         /// (`scrollToEndOfDocument` = `relocateViewport(to:endLocation)` →
         /// `layoutViewport` → `updateContentSizeIfNeeded` → scroll, all O(visible))
         /// then asks the viewport-relative question that actually matters: is the

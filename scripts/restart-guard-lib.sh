@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
 # WIP-guard helpers for restart.sh — pure functions, no side effects, safe to
-# source. restart.sh sources this to decide whether a build is "blessed" (safe
+# source. restart.sh sources this to decide whether a build is "install-ready" (safe
 # to install to /Applications + restart the shared daemon); scripts/restart-guard-lib.test.sh
 # sources it to unit-test the helpers. All functions read the global REPO_ROOT.
 #
-# A blessed build must have:
-#  (a) A clean working tree — NO tracked changes AND no new untracked files
+# An install-ready build must have:
+#  (a) A working tree with no install-affecting changes — NO tracked changes AND
+#      no new untracked files within INSTALL_PATHSPECS
 #  (b) HEAD as an ancestor of main (upstream/main, origin/main, or main)
+
+# The set of paths that can affect the installed product: swift build compiles
+# Sources/ per Package.swift/Package.resolved; restart.sh copies
+# Resources/TBDApp.Info.plist and Resources/AppIcon.icns into the bundle; and
+# the two restart scripts themselves determine what lands in /Applications.
+# Nothing else (Tests/, docs/, other scripts, stray root files) can change the
+# installed product.
+INSTALL_PATHSPECS=(
+    Sources
+    Resources
+    Package.swift
+    Package.resolved
+    scripts/restart.sh
+    scripts/restart-guard-lib.sh
+)
 
 # Determine the main-branch ref to use for the ancestry check.
 resolve_main_ref() {
@@ -21,15 +37,18 @@ resolve_main_ref() {
     fi
 }
 
-# Check if the working tree is clean. Untracked files are INTENTIONALLY counted
-# as dirty: SwiftPM globs Sources/ by filesystem contents, so a brand-new,
-# not-yet-`git add`ed .swift file IS compiled into the build while being
-# invisible to a tracked-only check — exactly the WIP state this guard exists to
-# catch. Ignored paths (.build/, .DS_Store, …) never appear in --porcelain, so
-# the default untracked mode adds no build-artifact noise.
+# Check if the working tree is clean within the install-affecting paths.
+# Untracked files are INTENTIONALLY counted as dirty: SwiftPM globs Sources/ by
+# filesystem contents, so a brand-new, not-yet-`git add`ed .swift file IS
+# compiled into the build while being invisible to a tracked-only check —
+# exactly the WIP state this guard exists to catch. Dirt outside
+# INSTALL_PATHSPECS (e.g. a stray output.txt at the repo root) cannot change
+# the installed product and does not gate the install. Ignored paths (.build/,
+# .DS_Store, …) never appear in --porcelain, so the default untracked mode adds
+# no build-artifact noise.
 is_working_tree_clean() {
     local output
-    output=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || echo "error")
+    output=$(git -C "$REPO_ROOT" status --porcelain -- "${INSTALL_PATHSPECS[@]}" 2>/dev/null || echo "error")
     if [ "$output" = "error" ]; then
         return 1  # not a git repo or error
     fi
@@ -45,8 +64,9 @@ is_head_ancestor_of() {
     git -C "$REPO_ROOT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
 }
 
-# Determine if the build is blessed (clean tree + HEAD on/before main).
-is_build_blessed() {
+# Determine if the build is install-ready (clean install-affecting paths + HEAD
+# on/before main).
+is_build_install_ready() {
     if ! is_working_tree_clean; then
         return 1
     fi
@@ -67,14 +87,16 @@ get_installed_worktree_path() {
     fi
 }
 
-# Print a loud warning when the build is not blessed.
+# Print a loud warning when the build is not install-ready.
 warn_wip_build() {
     local current_branch
     current_branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
     local dirty_count=0
     if ! is_working_tree_clean; then
-        dirty_count=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+        # Count only install-affecting dirty files — same pathspec scope as the
+        # clean check above.
+        dirty_count=$(git -C "$REPO_ROOT" status --porcelain -- "${INSTALL_PATHSPECS[@]}" 2>/dev/null | wc -l | tr -d ' ')
     fi
 
     local installed_path
@@ -83,7 +105,7 @@ warn_wip_build() {
     cat >&2 << 'EOF'
 
 ===============================================================================
-WARNING: NOT BLESSED — WIP WORKTREE GUARD ACTIVE
+WARNING: NOT INSTALL-READY — WIP WORKTREE GUARD ACTIVE
 ===============================================================================
 
 This worktree is on a feature branch or has uncommitted/untracked changes. To
@@ -112,7 +134,7 @@ TO OVERRIDE (force full install):
   or
   TBD_INSTALL_WIP=1 scripts/restart.sh
 
-TO FIX (make it blessed):
+TO FIX (make it install-ready):
   • Commit your changes: git add -A && git commit -m "..."
   • Rebase onto upstream/main: git rebase upstream/main
   • Or push to a tracking branch

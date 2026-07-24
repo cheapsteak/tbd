@@ -9,7 +9,7 @@ set -e
 #   scripts/restart.sh --app    # restart app only (no rebuild, no daemon restart)
 #   scripts/restart.sh --daemon # restart daemon only (no rebuild, no app restart)
 #   scripts/restart.sh --quick  # skip rebuild, restart everything
-#   scripts/restart.sh --dry-run # print blessed/not-blessed decision, touch nothing
+#   scripts/restart.sh --dry-run # print install-ready/not-install-ready decision, touch nothing
 #   scripts/restart.sh --wip    # force install even if on a WIP branch
 #   TBD_INSTALL_WIP=1 scripts/restart.sh # same as --wip
 
@@ -39,31 +39,32 @@ fi
 
 # MARK: - WIP Guard
 #
-# Blessed builds (clean tree + HEAD on/before main) install to /Applications
-# and restart the shared daemon. WIP builds warn and launch from .build only.
-# Escape hatch: --wip / TBD_INSTALL_WIP=1. Helpers live in a sourceable lib so
-# they can be unit-tested (scripts/restart-guard-lib.test.sh).
+# Install-ready builds (clean install-affecting paths + HEAD on/before main)
+# install to /Applications and restart the shared daemon. WIP builds warn and
+# launch from .build only. Escape hatch: --wip / TBD_INSTALL_WIP=1. Helpers
+# live in a sourceable lib so they can be unit-tested
+# (scripts/restart-guard-lib.test.sh).
 source "$REPO_ROOT/scripts/restart-guard-lib.sh"
 
 # Determine install strategy and possibly print dry-run summary.
-build_is_blessed=false
+build_is_install_ready=false
 install_to_applications=true
 
-if ! is_build_blessed; then
-    build_is_blessed=false
+if ! is_build_install_ready; then
+    build_is_install_ready=false
     if [ "$force_wip" = false ]; then
         install_to_applications=false
     fi
 else
-    build_is_blessed=true
+    build_is_install_ready=true
 fi
 
 if [ "$dry_run" = true ]; then
-    if [ "$build_is_blessed" = true ]; then
-        echo "BLESSED: Working tree is clean and HEAD is on/before main."
+    if [ "$build_is_install_ready" = true ]; then
+        echo "INSTALL-READY: Install-affecting paths are clean and HEAD is on/before main."
         echo "Would install to /Applications and restart daemon."
     else
-        echo "NOT BLESSED: WIP branch or dirty working tree."
+        echo "NOT INSTALL-READY: WIP branch or dirty install-affecting paths."
         if [ "$force_wip" = true ]; then
             echo "Would install to /Applications and restart daemon (--wip override)."
         else
@@ -74,8 +75,8 @@ if [ "$dry_run" = true ]; then
     exit 0
 fi
 
-# Print warning if not blessed (unless --wip forces it).
-if [ "$build_is_blessed" = false ] && [ "$force_wip" = false ]; then
+# Print warning if not install-ready (unless --wip forces it).
+if [ "$build_is_install_ready" = false ] && [ "$force_wip" = false ]; then
     warn_wip_build
 fi
 
@@ -211,8 +212,8 @@ fi
 # exec path now that it runs from /Applications instead of .build/.
 printf '%s' "$REPO_ROOT" > "$BUNDLE_DIR/Contents/SourceWorktreePath.txt"
 
-# Conditionally sign + install to /Applications (only if blessed or --wip).
-# For WIP builds not blessed, we'll skip this and launch from .build/debug instead.
+# Conditionally sign + install to /Applications (only if install-ready or --wip).
+# For WIP builds not install-ready, we'll skip this and launch from .build/debug instead.
 INSTALLED_BUNDLE="/Applications/TBD.app"
 BUNDLED_EXEC_PATH="$INSTALLED_BUNDLE/Contents/MacOS/TBDApp"
 APP_EXEC_PATTERN=""
@@ -335,7 +336,7 @@ if [ "$daemon_only" = false ]; then
 
     echo "Starting app..."
     if [ "$install_to_applications" = true ]; then
-        # Launch from /Applications (blessed or --wip override)
+        # Launch from /Applications (install-ready or --wip override)
         open "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
     else
         # Launch from .build/debug (WIP worktree, no install to /Applications)
