@@ -27,6 +27,7 @@ public final class TBDDatabase: Sendable {
     public let scheduledResumes: ScheduledResumeStore
     public let reapRecords: ReapRecordStore
     public let terminalHistory: TerminalHistoryStore
+    public let panelSurface: PanelSurfaceStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -66,6 +67,7 @@ public final class TBDDatabase: Sendable {
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
         self.reapRecords = ReapRecordStore(writer: pool)
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
+        self.panelSurface = PanelSurfaceStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -105,6 +107,7 @@ public final class TBDDatabase: Sendable {
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
         self.reapRecords = ReapRecordStore(writer: queue)
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
+        self.panelSurface = PanelSurfaceStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -976,6 +979,59 @@ public final class TBDDatabase: Sendable {
             }
             try db.addIndexIfMissing(
                 "idx_terminal_history_worktree", on: "terminal_history", columns: ["worktreeID"])
+        }
+
+        // (Renumbered v57→v59 on rebase: main's #485 took v57 and v58.)
+        // Spec C Phase 2 (§8): daemon-owned panel-surface rows — one row per
+        // workspace tab (layout tree + primary + revision), per-panel MRU
+        // history, and bounded operation receipts for §7.4 idempotency. Both
+        // feature flags land default-OFF per the repo flag policy: the store
+        // is inert until `daemon_panel_surface_enabled` is turned on, and
+        // agent-originated mutations additionally require
+        // `agent_panel_control_enabled`. `worktree.panel_surface_imported_at`
+        // distinguishes "imported an empty layout" from "never imported".
+        migrator.registerMigration("v59_panel_surface") { db in
+            try db.createTableIfNotExists("workspace_tab_surface") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("primaryContent", .text).notNull()   // PrimaryContent JSON
+                t.column("label", .text)
+                t.column("position", .integer).notNull()
+                t.column("layout", .text).notNull()           // PanelLayoutNode JSON
+                t.column("revision", .integer).notNull().defaults(to: 0)
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing("idx_workspace_tab_surface_worktree",
+                                     on: "workspace_tab_surface", columns: ["worktreeID", "position"])
+            // history rows cascade via tabID → workspace_tab_surface, which
+            // itself cascades to worktree — so deleting a worktree reaps its
+            // surfaces and their history rows in one chain.
+            try db.createTableIfNotExists("panel_history") { t in
+                t.primaryKey("panelID", .text).notNull()
+                t.column("tabID", .text).notNull()
+                    .references("workspace_tab_surface", onDelete: .cascade)
+                t.column("history", .text).notNull()          // PanelHistory JSON
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing("idx_panel_history_tab", on: "panel_history", columns: ["tabID"])
+            try db.createTableIfNotExists("panel_operation_receipt") { t in
+                t.primaryKey("operationID", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("tabID", .text).notNull()
+                t.column("revision", .integer).notNull()
+                t.column("result", .text).notNull()           // PanelApplyResult JSON
+                t.column("appliedAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing("idx_panel_receipt_worktree",
+                                     on: "panel_operation_receipt", columns: ["worktreeID", "appliedAt"])
+            try db.addColumnIfMissing(table: "config", column: "daemon_panel_surface_enabled",
+                                      type: .boolean, defaults: false)
+            try db.addColumnIfMissing(table: "config", column: "agent_panel_control_enabled",
+                                      type: .boolean, defaults: false)
+            try db.addColumnIfMissing(table: "worktree", column: "panel_surface_imported_at",
+                                      type: .datetime)
         }
 
         return migrator

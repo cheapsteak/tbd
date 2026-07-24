@@ -145,6 +145,7 @@ struct PaneHistoryAppStateTests {
     @Test func prunePaneHistoriesDropsOrphansKeepsLiveSlots() {
         withIsolatedDefaults { defaults in
             let state = AppState(userDefaults: defaults)
+            let worktreeID = UUID()
             let tabID = UUID()
             let liveSlotID = UUID()
             let orphanID = UUID()
@@ -156,6 +157,9 @@ struct PaneHistoryAppStateTests {
                 ],
                 ratios: [0.5, 0.5]
             )
+            // #477 fix: retention is keyed off live TAB ids, so the layout
+            // above only counts as live because `tabID` is a real tab root.
+            state.tabs[worktreeID] = [TBDShared.Tab(id: tabID, content: .terminal(terminalID: tabID), label: nil)]
             var history = PaneHistory()
             history.recordReplacement(
                 outgoing: .codeViewer(id: liveSlotID, path: "/old"),
@@ -167,6 +171,52 @@ struct PaneHistoryAppStateTests {
 
             #expect(state.paneHistories[liveSlotID] == history)
             #expect(state.paneHistories[orphanID] == nil, "orphaned histories must not accumulate")
+        }
+    }
+
+    /// Grid-layout slots (worktree-keyed, presentation-only, never persisted)
+    /// are legitimately live even though they aren't tab-keyed — pruning must
+    /// consult `gridLayouts` alongside the tab-keyed scan.
+    @Test func prunePaneHistoriesKeepsGridLayoutSlotHistories() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let worktreeID = UUID()
+            let gridSlotID = UUID()
+            state.gridLayouts[worktreeID] = .pane(.codeViewer(id: gridSlotID, path: "/grid"))
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: gridSlotID, path: "/old"),
+                incoming: .codeViewer(id: gridSlotID, path: "/grid")
+            )
+            state.paneHistories = [gridSlotID: history]
+
+            state.prunePaneHistories()
+
+            #expect(state.paneHistories[gridSlotID] == history,
+                    "grid-layout slot histories must survive pruning")
+        }
+    }
+
+    /// #477 regression: a stale worktree-keyed entry left in the tab-keyed
+    /// `layouts` dict (pre-#478 pollution — not a real tab) must not keep its
+    /// history alive just because `layouts.values` used to include it.
+    @Test func prunePaneHistoriesDropsHistoryForStaleWorktreeKeyedLayoutsEntry() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let worktreeID = UUID()
+            let staleSlotID = UUID()
+            state.layouts[worktreeID] = .pane(.codeViewer(id: staleSlotID, path: "/stale"))
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: staleSlotID, path: "/old"),
+                incoming: .codeViewer(id: staleSlotID, path: "/stale")
+            )
+            state.paneHistories = [staleSlotID: history]
+
+            state.prunePaneHistories()
+
+            #expect(state.paneHistories[staleSlotID] == nil,
+                    "a stale worktree-keyed layouts entry must not over-retain its history")
         }
     }
 }

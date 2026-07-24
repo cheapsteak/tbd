@@ -792,6 +792,15 @@ public struct Config: Codable, Sendable, Equatable {
     /// Days a reap snapshot (`refs/tbd/snapshots/...`) is retained before
     /// being pruned.
     public var gcSnapshotRetentionDays: Int
+    /// Master switch for the daemon-owned panel-surface store (spec C Phase
+    /// 2 §8). Default OFF: the store is inert (no reads/writes) until this
+    /// flips on. See `Database/CLAUDE.md` three-place migration rule for the
+    /// `v59_panel_surface` migration that backs this column.
+    public var panelSurfaceEnabled: Bool
+    /// Gate for agent-originated panel-surface mutations. Default OFF, and
+    /// independent of `panelSurfaceEnabled` — an agent may only mutate panel
+    /// layout once both flags are true.
+    public var agentPanelControlEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -819,7 +828,9 @@ public struct Config: Codable, Sendable, Equatable {
                 autoCloseSetupEnabled: Bool = false,
                 gcEnabled: Bool = true,
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
-                gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays) {
+                gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays,
+                panelSurfaceEnabled: Bool = false,
+                agentPanelControlEnabled: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -840,6 +851,8 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcEnabled = gcEnabled
         self.gcGraceSeconds = gcGraceSeconds
         self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
+        self.panelSurfaceEnabled = panelSurfaceEnabled
+        self.agentPanelControlEnabled = agentPanelControlEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -880,6 +893,9 @@ public struct Config: Codable, Sendable, Equatable {
             ?? Config.defaultGCGraceSeconds
         gcSnapshotRetentionDays = try c.decodeIfPresent(Int.self, forKey: .gcSnapshotRetentionDays)
             ?? Config.defaultGCSnapshotRetentionDays
+        panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
+        agentPanelControlEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .agentPanelControlEnabled) ?? false
     }
 }
 

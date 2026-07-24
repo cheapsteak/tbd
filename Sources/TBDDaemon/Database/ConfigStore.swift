@@ -33,6 +33,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var gc_enabled: Bool?
     var gc_grace_seconds: Int?
     var gc_snapshot_retention_days: Int?
+    var daemon_panel_surface_enabled: Bool?
+    var agent_panel_control_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -57,7 +59,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
-            gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays
+            gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
+            panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
+            agentPanelControlEnabled: agent_panel_control_enabled ?? false
         )
     }
 }
@@ -282,6 +286,29 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the daemon panel-surface store master switch (spec C Phase 2
+    /// §8). Default OFF; the store stays inert until this flips on.
+    public func setPanelSurfaceEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET daemon_panel_surface_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the agent-originated panel-control gate. Default OFF and
+    /// independent of `daemon_panel_surface_enabled` — both must be true for
+    /// an agent to mutate panel layout.
+    public func setAgentPanelControlEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET agent_panel_control_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

@@ -31,6 +31,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
     var promotedToRepoID: String?  // set only on promoted scratch rows
     var pr_number: Int?  // number of the PR this worktree was created from, nil otherwise
+    var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -58,6 +59,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
         self.pr_number = wt.prNumber
+        self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -716,6 +718,25 @@ public struct WorktreeStore: Sendable {
             try db.execute(
                 sql: "UPDATE worktree SET activeTabID = ? WHERE id = ?",
                 arguments: [tabID?.uuidString, worktreeID.uuidString]
+            )
+        }
+    }
+
+    /// Read the `panel_surface_imported_at` column for a worktree. `nil`
+    /// distinguishes "never imported" from "imported an empty layout"
+    /// (spec C Phase 2 §8). Returns nil for missing worktrees too.
+    public func panelSurfaceImportedAt(worktreeID: UUID) async throws -> Date? {
+        try await writer.read { db in
+            try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString)?.panel_surface_imported_at
+        }
+    }
+
+    /// Stamp the legacy-layout-import timestamp for a worktree.
+    public func stampPanelSurfaceImported(worktreeID: UUID, at date: Date) async throws {
+        _ = try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET panel_surface_imported_at = ? WHERE id = ?",
+                arguments: [date, worktreeID.uuidString]
             )
         }
     }

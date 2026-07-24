@@ -59,6 +59,11 @@ public final class RPCRouter: Sendable {
     /// Auto-`/login` typing + login-completion watching for profile login
     /// sessions. Injected so tests can zero out the trigger delays.
     public let loginSessions: LoginSessionCoordinator
+    /// Daemon-owned panel surface actor (spec C Phase 2). Gating lives inside
+    /// the coordinator (§7.2) — `panel.*` handlers route to it and must not
+    /// re-implement gating. Broadcasts through the same `subscriptions`
+    /// channel every other mutating handler uses.
+    public let panelCoordinator: PanelCoordinator
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -119,6 +124,8 @@ public final class RPCRouter: Sendable {
         self.controlMode = nil
         self.claudeCredentialsKeychain = claudeCredentialsKeychain
         self.loginSessions = loginSessions
+        self.panelCoordinator = PanelCoordinator(
+            db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -381,6 +388,12 @@ public final class RPCRouter: Sendable {
                 return try await handleGCRestore(request.paramsData)
             case RPCMethod.gcSweepNow:
                 return try await handleGCSweepNow(request.paramsData)
+            case RPCMethod.panelGet:
+                return try await handlePanelGet(request.paramsData)
+            case RPCMethod.panelApply:
+                return try await handlePanelApply(request.paramsData)
+            case RPCMethod.panelImportLegacy:
+                return try await handlePanelImportLegacy(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -411,7 +424,8 @@ public final class RPCRouter: Sendable {
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
-            autoCloseSetupEnabled: config.autoCloseSetupEnabled))
+            autoCloseSetupEnabled: config.autoCloseSetupEnabled,
+            panelSurfaceEnabled: config.panelSurfaceEnabled))
     }
 
     // MARK: - PR Status

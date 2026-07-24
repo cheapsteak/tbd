@@ -214,6 +214,9 @@ public enum RPCMethod {
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
+    public static let panelGet = "panel.get"
+    public static let panelApply = "panel.apply"
+    public static let panelImportLegacy = "panel.importLegacy"
 }
 
 // MARK: - Branch Listing
@@ -1540,17 +1543,24 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
+    /// Whether the daemon owns panel-surface state (`daemon_panel_surface_enabled`,
+    /// spec C Phase 2 §8/§10). Default OFF while the feature soaks — the app
+    /// uses this to decide whether `panel.get`/`panel.apply` are live or the
+    /// legacy client-owned layout path should still be used.
+    public let panelSurfaceEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
-                autoCloseSetupEnabled: Bool = false) {
+                autoCloseSetupEnabled: Bool = false,
+                panelSurfaceEnabled: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.panelSurfaceEnabled = panelSurfaceEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1564,6 +1574,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
+        panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
     }
 }
 

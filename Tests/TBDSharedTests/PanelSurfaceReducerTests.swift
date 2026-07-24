@@ -116,7 +116,10 @@ struct PanelSurfaceReducerOpenTests {
         #expect(split.children == [
             .primary, .panel(panelA), .panel(PanelSlot(id: newID, content: file("/n")))])
         // Exact arithmetic: siblings scaled by (1 - share), new panel gets share.
-        #expect(split.ratios == [0.6 * (1 - 0.3), 0.4 * (1 - 0.3), 0.3])
+        // Hoisted + explicitly typed — literal arithmetic inside an array
+        // literal inside #expect's expansion blows the type-checker's budget.
+        let scale: Double = 1 - 0.3
+        #expect(split.ratios == [0.6 * scale, 0.4 * scale, 0.3])
         #expect(out.histories[newID]?.entries == [file("/n")], "history seeded")
         #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
     }

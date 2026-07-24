@@ -1002,6 +1002,38 @@ actor DaemonClient {
         )
     }
 
+    /// Read daemon-owned panel-surface state for a worktree (ungated —
+    /// spec C §10.2). `tabID` narrows to one tab; nil returns every tab.
+    func panelGet(worktreeID: UUID, tabID: UUID? = nil) async throws -> PanelGetResult {
+        try await callAsync(
+            method: RPCMethod.panelGet,
+            params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
+            resultType: PanelGetResult.self
+        )
+    }
+
+    /// Apply one panel-surface operation. Gated daemon-side
+    /// (`daemon_panel_surface_enabled` / `agent_panel_control_enabled`,
+    /// spec C §7.2) — a gated rejection surfaces as `DaemonClientError.rpcError`
+    /// naming the flag.
+    func panelApply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
+        try await callAsync(
+            method: RPCMethod.panelApply,
+            params: PanelApplyParams(envelope: envelope),
+            resultType: PanelApplyResult.self
+        )
+    }
+
+    /// One-time legacy-tab import into the daemon-owned panel surface.
+    /// The daemon returns a "not implemented" error until Task 11 lands.
+    func panelImportLegacy(_ params: PanelImportParams) async throws -> PanelImportResult {
+        try await callAsync(
+            method: RPCMethod.panelImportLegacy,
+            params: params,
+            resultType: PanelImportResult.self
+        )
+    }
+
     /// Manually suspend a single Claude terminal.
     func terminalSuspend(terminalID: UUID) async throws {
         try await callVoidAsync(
