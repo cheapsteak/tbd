@@ -5,12 +5,16 @@ import Foundation
 
 // Tier 2: spawns short-lived local stub scripts it fully controls.
 @Suite("ProviderRunner")
-struct ProviderRunnerTests {
+struct ProviderRunnerTests: ~Copyable {
     let dir: URL
     init() throws {
         dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("provider-runner-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: dir)
     }
 
     private func stub(_ body: String) throws -> RemoteProviderConfig {

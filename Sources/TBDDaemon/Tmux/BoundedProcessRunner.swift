@@ -104,8 +104,22 @@ enum BoundedProcessOutcome {
 /// Runs an external command with a hard timeout, draining stdout/stderr, and
 /// resolves to `.completed(status, stdout, stderr)` or `.timedOut` — or throws
 /// the spawn error if `Process.run()` fails. Shared by
-/// `TmuxManager.runExternalCommand` and `GitManager.run`, which map the outcome
-/// to their own error types (`TmuxError` / `GitError` / `GitTimeoutError`).
+/// `TmuxManager.runExternalCommand`, `GitManager.run`, and `ProviderRunner.run`,
+/// which map the outcome to their own error types (`TmuxError` / `GitError` /
+/// `GitTimeoutError` / `ProviderRunError`).
+///
+/// `environment` and `stdin` are optional and default to `nil`, which
+/// preserves the exact behavior existing callers (`GitManager`, `TmuxManager`)
+/// already depend on: an unset `environment` leaves `Process.environment`
+/// untouched (inherits the parent's), and no `stdin` leaves
+/// `Process.standardInput` untouched (inherits the parent's), rather than
+/// wiring up a pipe.
+///
+/// `stdin`, when provided, is written synchronously right after `run()`
+/// succeeds. That's fine for this codebase's payloads — provider contract
+/// params and keystrokes are at most a few KB, well under the ~64KB pipe
+/// buffer — but a hypothetically large `stdin` could block the parent the
+/// same way an undrained large stdout would.
 ///
 /// The deadline is immune to GCD-pool starvation via two independent guarantees:
 ///
@@ -139,6 +153,8 @@ func runBoundedProcess(
     executable: String,
     arguments: [String],
     currentDirectory: String?,
+    environment: [String: String]? = nil,
+    stdin: Data? = nil,
     timeout: Duration
 ) async throws -> BoundedProcessOutcome {
     // Single-resume guard shared by the watchdog fire path, the termination
@@ -160,8 +176,18 @@ func runBoundedProcess(
         if let currentDirectory {
             process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
         }
+        if let environment {
+            process.environment = environment
+        }
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // Only wire up a stdin pipe when the caller actually has bytes to
+        // send — otherwise leave `standardInput` unset so the child inherits
+        // the parent's stdin, exactly as it did before this parameter existed.
+        let stdinPipe = stdin.map { _ in Pipe() }
+        if let stdinPipe {
+            process.standardInput = stdinPipe
+        }
 
         // Drain both pipes incrementally as chunks arrive: no thread parks for
         // the subprocess's lifetime, and a child emitting more than the 64KB
@@ -237,6 +263,12 @@ func runBoundedProcess(
             guard state.claim() else { return }
             SubprocessWatchdog.shared.cancel(deadlineToken)
             continuation.resume(throwing: error)
+            return
+        }
+
+        if let stdin, let stdinPipe {
+            stdinPipe.fileHandleForWriting.write(stdin)
+            stdinPipe.fileHandleForWriting.closeFile()
         }
     }
 }
