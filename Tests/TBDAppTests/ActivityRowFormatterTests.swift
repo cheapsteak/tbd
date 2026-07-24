@@ -126,7 +126,8 @@ struct ActivityRowFormatterTests {
         let p = try #require(ActivityRowFormatter.presentation(for: node))
         #expect(p.badges == [ActivityRowBadge(text: "file", kind: .neutral)])
         #expect(p.titleSegments.map(\.text).first == ".github/CLAUDE.md")
-        #expect(titleText(p).contains("KB"), "expected a human-readable size, got \(titleText(p))")
+        // Magnitude, not just "has a suffix": 39,673 chars → "39.7K chars".
+        #expect(titleText(p).contains("39.7K chars"), "got \(titleText(p))")
         #expect(!titleText(p).contains("\(("# acme rules (truncated)").count)"),
                 "size must come from truncatedTo, not the capped text length")
         #expect(p.openTargetID == "m1")
@@ -141,7 +142,19 @@ struct ActivityRowFormatterTests {
         #expect(p.badges == [ActivityRowBadge(text: "hook", kind: .neutral)])
         #expect(p.titleSegments.map(\.text).first == "PostToolUse:Read")
         // Untruncated: size falls back to the text length.
-        #expect(titleText(p).contains("300"))
+        #expect(titleText(p).contains("300 chars"), "got \(titleText(p))")
+    }
+
+    @Test("Injected size counts CHARACTERS, not bytes")
+    func injectedSizeIsCharactersNotBytes() {
+        // `truncatedTo` / `String.count` are grapheme clusters. Em-dashes are
+        // 3 UTF-8 bytes each, so a byte formatter would have reported ~3x —
+        // the unit label must match the number actually being counted.
+        let emDashes = String(repeating: "—", count: 1500)
+        #expect(emDashes.utf8.count == 4500)
+        #expect(ActivityRowFormatter.injectedSize(text: emDashes, truncatedTo: nil) == "1.5K chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "abc", truncatedTo: nil) == "3 chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "short", truncatedTo: 44_312) == "44.3K chars")
     }
 
     @Test("Task notification → clock icon, 'Background · <summary>' title, status badge")

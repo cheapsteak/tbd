@@ -431,8 +431,20 @@ enum ActivityRowFormatter {
 
     /// Human-readable size of an injected-context payload. `truncatedTo` holds
     /// the ORIGINAL length when `text` was capped, so it wins when present.
+    ///
+    /// Both numbers are `String.count` — grapheme clusters, not bytes — so the
+    /// unit is spelled "chars". Feeding them to `ByteCountFormatter` understated
+    /// smart-quote / box-drawing / emoji-heavy CLAUDE.md bodies by up to 4x,
+    /// which defeats the badge's whole purpose.
     static func injectedSize(text: String, truncatedTo: Int?) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(truncatedTo ?? text.count), countStyle: .file)
+        let count = truncatedTo ?? text.count
+        if count >= 1_000_000 {
+            return String(format: "%.1fM chars", Double(count) / 1_000_000)
+        }
+        if count >= 1000 {
+            return String(format: "%.1fK chars", Double(count) / 1000)
+        }
+        return "\(count) chars"
     }
 
     // MARK: Task notification (background-task activity row)

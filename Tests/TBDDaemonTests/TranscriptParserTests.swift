@@ -641,42 +641,73 @@ struct TranscriptParserTests {
         #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "att-hac#1") == "second injected block")
     }
 
-    @Test func attachment_hookSuccess_extracts_additionalContext_from_stdout_json() throws {
-        let stdout = #"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"acme ADR applies here"}}"#
-        let line = try attachmentLine(uuid: "att-hs", [
-            "type": "hook_success",
-            "hookName": "PostToolUse:Read",
-            "content": "",
-            "stdout": stdout
-        ])
-        let tmp = try writeTempJSONL(line)
+    @Test func attachment_hookSuccess_ignores_additionalContext_in_stdout() throws {
+        // A hook's stdout is what it EMITTED; `hook_additional_context` is what
+        // was actually INJECTED. Measured across 120+ real sessions, the latter
+        // covers 100% of the former — so the stdout path is pure redundancy and
+        // emits nothing. The hac twin is the row that renders.
+        let injected = "acme ADR applies here"
+        let stdout = #"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"\#(injected)"}}"#
+        let lines = [
+            try attachmentLine(uuid: "att-hs", [
+                "type": "hook_success",
+                "hookName": "PostToolUse:Read",
+                "content": "",
+                "stdout": stdout
+            ]),
+            try attachmentLine(uuid: "att-hac", [
+                "type": "hook_additional_context",
+                "hookName": "PostToolUse:Read",
+                "content": [injected]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
-        let row = try #require(reminders(TranscriptParser.parse(filePath: tmp)).first)
-        #expect(row.id == "att-hs")
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.count == 1, "hook_success stdout must contribute nothing")
+        let row = try #require(found.first)
+        #expect(row.id == "att-hac")
         #expect(row.kind == .hookOutput)
         #expect(row.source == "PostToolUse:Read")
-        #expect(row.text == "acme ADR applies here")
+        #expect(row.text == injected)
     }
 
-    @Test func attachment_hookSuccess_accepts_array_additionalContext() throws {
-        let stdout = #"{"hookSpecificOutput":{"additionalContext":["one","two"]}}"#
-        let line = try attachmentLine(uuid: "att-arr", [
+    @Test func attachment_buildItems_is_window_independent_for_hookSuccess_pair() throws {
+        // `parseTail` hands `buildItems` only the lines inside its byte window.
+        // Any cross-row state (a dedup set, say) would make the same row parse
+        // differently depending on what preceded it — breaking parseTail's
+        // identical-bottom guarantee. Parse the pair, then parse the second row
+        // alone, and require the item to be identical.
+        let injected = "acme ADR applies here"
+        let stdout = #"{"hookSpecificOutput":{"additionalContext":"\#(injected)"}}"#
+        let hsLine = try attachmentLine(uuid: "att-hs", [
             "type": "hook_success", "hookName": "SessionStart", "content": "", "stdout": stdout
         ])
-        let tmp = try writeTempJSONL(line)
-        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        let hacLine = try attachmentLine(uuid: "att-hac", [
+            "type": "hook_additional_context", "hookName": "SessionStart", "content": [injected]
+        ])
 
-        #expect(reminders(TranscriptParser.parse(filePath: tmp)).map(\.text) == ["one", "two"])
+        let both = try writeTempJSONL([hsLine, hacLine].joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: both) }
+        let windowOnly = try writeTempJSONL(hacLine)
+        defer { try? FileManager.default.removeItem(atPath: windowOnly) }
+
+        let fullTail = try #require(TranscriptParser.parse(filePath: both).last)
+        let windowed = try #require(TranscriptParser.parse(filePath: windowOnly).last)
+        #expect(fullTail == windowed)
     }
 
     @Test func attachment_hookSuccess_plain_content_emits_once() throws {
-        // Non-JSON stdout is the same text `content` already carries — one item.
+        // The plain-text branch survives — `hook_success.content` is never
+        // mirrored in a hook_additional_context row (221/221 unique across the
+        // corpus), so dropping it would lose the text entirely. `stdout` never
+        // contributes, JSON or not, so exactly one item comes out.
         let line = try attachmentLine(uuid: "att-plain", [
             "type": "hook_success",
             "hookName": "SessionStart:startup",
             "content": "Cleared: /tmp/acme-work-claimed",
-            "stdout": "Cleared: /tmp/acme-work-claimed\n"
+            "stdout": #"{"hookSpecificOutput":{"additionalContext":"something else entirely"}}"#
         ])
         let tmp = try writeTempJSONL(line)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
@@ -698,11 +729,12 @@ struct TranscriptParserTests {
         #expect(TranscriptParser.parse(filePath: tmp).isEmpty)
     }
 
-    @Test func attachment_hookSuccess_payload_deduped_against_later_additionalContext() throws {
-        // The hook EMITS a payload (hook_success), then the same string is
-        // INJECTED (hook_additional_context) — one row, not two. A payload the
-        // injector REPLACED (an oversize `<persisted-output>` notice) is
-        // distinct and must survive.
+    @Test func attachment_injected_context_comes_only_from_additionalContext_row() throws {
+        // The hook EMITS a payload (hook_success stdout), and what actually
+        // entered the context window lands in the hook_additional_context row —
+        // sometimes verbatim, sometimes as the `<persisted-output>` notice that
+        // REPLACED an oversized payload. Only the hac row renders; every item
+        // stays addressable by `lookupFullBody`.
         let emitted = "acme skill rules apply"
         let stdout = try String(
             decoding: JSONSerialization.data(
@@ -723,9 +755,7 @@ struct TranscriptParserTests {
 
         let found = reminders(TranscriptParser.parse(filePath: tmp))
         #expect(found.map(\.text) == [emitted, "<persisted-output>\nOutput too large (22.2KB).\n</persisted-output>"])
-        // The surviving hac payload keeps the id it would have had regardless
-        // of dedup, so `lookupFullBody` can still find it.
-        #expect(found.map(\.id) == ["hs-1", "hac-1#1"])
+        #expect(found.map(\.id) == ["hac-1#0", "hac-1#1"])
         #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "hac-1#1")?.hasPrefix("<persisted-output>") == true)
     }
 

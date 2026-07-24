@@ -6,6 +6,11 @@ struct SystemReminderRow: View {
     let kind: SystemKind
     let text: String
     let timestamp: Date?
+    /// Where the injected context came from (CLAUDE.md path, hook name).
+    /// Nil for reminder kinds that carry no source.
+    var source: String? = nil
+    /// Original character count when `text` was capped by the parser.
+    var truncatedTo: Int? = nil
 
     @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
 
@@ -34,6 +39,16 @@ struct SystemReminderRow: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Color(nsColor: .quaternaryLabelColor).opacity(0.5))
                     .clipShape(Capsule())
+                // Same "<source> · <size>" readout the table renderer shows —
+                // injected-context rows are otherwise indistinguishable from
+                // one another, and the size is the point.
+                if let source, !source.isEmpty {
+                    Text(source)
+                        .truncationMode(.middle)
+                        .lineLimit(1)
+                    Text("· \(ActivityRowFormatter.injectedSize(text: text, truncatedTo: truncatedTo))")
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
     }

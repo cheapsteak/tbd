@@ -201,19 +201,19 @@ enum TranscriptParser {
     /// tool_use_id→result index) into `[TranscriptItem]`. Both the full `parse`
     /// and the tail `parseTail` call this, guaranteeing the tail's items are
     /// byte-identical to the bottom of the full parse for the same lines.
+    ///
+    /// That guarantee holds only while this stays a pure function of the lines
+    /// it is handed: every item must be derivable from its own row. Do not add
+    /// cross-row state (a "have I already emitted this text?" set, say) — the
+    /// tail path passes only the lines inside its byte window, so any such
+    /// state starts empty there and the tail would emit rows the full parse
+    /// suppresses.
     private static func buildItems(
         rawLines: [[String: Any]],
         stableIDs: [String],
         toolResultsByID: [String: ToolResult]
     ) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
-        // Payload strings already emitted from a `hook_success` row. A hook's
-        // stdout (`hook_success`) and what was actually injected
-        // (`hook_additional_context`) are frequently the identical string, and
-        // hook_success always precedes its twin — so a forward-only set drops
-        // the duplicate. When the injected form DIFFERS (an oversized payload
-        // replaced by a `<persisted-output>` notice) both are kept.
-        var emittedHookPayloads: Set<String> = []
 
         for (i, json) in rawLines.enumerated() {
             // Subagent (sidechain) lines belong to a nested agent's own
@@ -230,13 +230,6 @@ enum TranscriptParser {
             if typeStr == "attachment" {
                 let payloads = attachmentPayloads(from: json)
                 for (index, payload) in payloads.enumerated() {
-                    if payload.rawType == "hook_additional_context",
-                       emittedHookPayloads.contains(payload.text) {
-                        continue
-                    }
-                    if payload.rawType == "hook_success" {
-                        emittedHookPayloads.insert(payload.text)
-                    }
                     let (truncated, originalCount) = truncate(payload.text)
                     items.append(.systemReminder(
                         id: payloads.count > 1 ? "\(lineUUID)#\(index)" : lineUUID,
@@ -363,8 +356,6 @@ enum TranscriptParser {
 
     /// One renderable payload extracted from a `type: "attachment"` JSONL row.
     struct AttachmentPayload: Equatable {
-        /// The raw `attachment.type` — the dedup rule keys off it.
-        let rawType: String
         let kind: SystemKind
         /// Where the context came from: a CLAUDE.md display path, a hook name.
         let source: String
@@ -383,6 +374,10 @@ enum TranscriptParser {
     ///
     /// Shared by `buildItems` and `lookupFullBody` so the collapsed row and the
     /// click-to-open overlay can never disagree about what a row contains.
+    ///
+    /// Extraction is per-row and stateless — no cross-row dedup — which is what
+    /// keeps `buildItems` a pure function of the lines it is handed and
+    /// preserves `parseTail`'s identical-bottom guarantee.
     static func attachmentPayloads(from json: [String: Any]) -> [AttachmentPayload] {
         guard json["type"] as? String == "attachment",
               let att = json["attachment"] as? [String: Any],
@@ -401,7 +396,7 @@ enum TranscriptParser {
             let source = (att["displayPath"] as? String)
                 ?? (att["path"] as? String)
                 ?? "CLAUDE.md"
-            return [AttachmentPayload(rawType: rawType, kind: .nestedMemory, source: source, text: body)]
+            return [AttachmentPayload(kind: .nestedMemory, source: source, text: body)]
 
         case "file":
             // An @-mentioned file's body, injected verbatim into the context
@@ -419,52 +414,39 @@ enum TranscriptParser {
                 ?? (att["filename"] as? String)
                 ?? (file["filePath"] as? String)
                 ?? "file"
-            return [AttachmentPayload(rawType: rawType, kind: .nestedMemory, source: source, text: body)]
+            return [AttachmentPayload(kind: .nestedMemory, source: source, text: body)]
 
         case "hook_additional_context":
             // `content` is an array of strings — one entry per injected block.
             let strings = (att["content"] as? [Any])?.compactMap { $0 as? String } ?? []
             return strings.filter { !$0.isEmpty }.map {
-                AttachmentPayload(rawType: rawType, kind: .hookOutput, source: hookName(), text: $0)
+                AttachmentPayload(kind: .hookOutput, source: hookName(), text: $0)
             }
 
         case "hook_success":
-            // Two payload sources: `content` (plain-text hook stdout, usually
-            // empty) and a JSON `stdout` whose real text sits at
-            // `hookSpecificOutput.additionalContext`. A non-JSON `stdout` is
-            // the same text `content` already carries, so it is ignored.
-            var out: [AttachmentPayload] = []
-            if let s = att["content"] as? String, !s.isEmpty {
-                out.append(AttachmentPayload(rawType: rawType, kind: .hookOutput, source: hookName(), text: s))
-            }
-            for s in additionalContext(fromStdout: att["stdout"] as? String) {
-                out.append(AttachmentPayload(rawType: rawType, kind: .hookOutput, source: hookName(), text: s))
-            }
-            return out
+            // ONLY the plain-text `content` branch. `stdout`'s
+            // `hookSpecificOutput.additionalContext` is deliberately NOT read:
+            // measured across 120+ real sessions, every such payload is also
+            // present in a `hook_additional_context` row — either verbatim (130
+            // cases) or as the `<persisted-output>` notice that REPLACED an
+            // oversized payload (all 11 apparent orphans). `hook_additional_context`
+            // is what actually entered the context window; a hook's stdout is
+            // merely what it emitted. Rendering only the former is therefore
+            // both non-redundant and more truthful — and, because the rule is
+            // per-row rather than a cross-row dedup set, it keeps `buildItems`
+            // a pure function of its window (see `parseTail`'s identical-bottom
+            // guarantee). `content` itself is never mirrored in hac (221/221
+            // unique) so it stays.
+            guard let s = att["content"] as? String, !s.isEmpty else { return [] }
+            return [AttachmentPayload(kind: .hookOutput, source: hookName(), text: s)]
 
         case "skill_listing":
             guard let s = att["content"] as? String, !s.isEmpty else { return [] }
-            return [AttachmentPayload(rawType: rawType, kind: .hookOutput, source: "skills", text: s)]
+            return [AttachmentPayload(kind: .hookOutput, source: "skills", text: s)]
 
         default:
             return []
         }
-    }
-
-    /// Pulls `hookSpecificOutput.additionalContext` out of a hook's stdout.
-    /// Most rows carry the literal `"{}\n"` and yield nothing. The field is
-    /// usually a String but may be an array of strings.
-    private static func additionalContext(fromStdout stdout: String?) -> [String] {
-        guard let stdout,
-              let data = stdout.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hookSpecific = obj["hookSpecificOutput"] as? [String: Any],
-              let raw = hookSpecific["additionalContext"] else {
-            return []
-        }
-        if let s = raw as? String { return s.isEmpty ? [] : [s] }
-        if let arr = raw as? [Any] { return arr.compactMap { $0 as? String }.filter { !$0.isEmpty } }
-        return []
     }
 
     // MARK: - helpers
