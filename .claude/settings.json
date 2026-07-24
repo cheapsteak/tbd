@@ -1,4 +1,8 @@
 {
+  "statusLine": {
+    "type": "command",
+    "command": "jq -r '\"[\\(.model.display_name)] \\((.context_window.total_input_tokens // 0) + (.context_window.total_output_tokens // 0) | . / 1000 | floor)k/\\((.context_window.context_window_size // 200000) / 1000 | floor)k (\\(.context_window.used_percentage // 0 | floor)%)\"'"
+  },
   "hooks": {
     "PreToolUse": [
       {
