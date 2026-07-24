@@ -141,7 +141,11 @@ struct LegacySurfaceImporterTests {
         guard case .split(let split) = result.surfaces[0].layout else {
             Issue.record("expected split"); return
         }
-        #expect(split.ratios == [1.0 / 3, 1.0 / 3, 1.0 / 3])
+        // Hoisted + explicitly typed: an array literal of unresolved literal
+        // divisions inside #expect's macro expansion blows the type-checker's
+        // budget under CI's -j2 ("unable to type-check in reasonable time").
+        let third: Double = 1.0 / 3
+        #expect(split.ratios == [third, third, third])
     }
 
     @Test func malformedRatios_nonFiniteValue_fallsBackToEqualShares() {
@@ -166,8 +170,9 @@ struct LegacySurfaceImporterTests {
     }
 
     @Test func normalizedRatios_directUnit() {
+        let third: Double = 1.0 / 3  // see the hoist note above
         #expect(LegacySurfaceImporter.normalizedRatios([0.6, 0.4], count: 2) == [0.6, 0.4])
-        #expect(LegacySurfaceImporter.normalizedRatios([0.9, 0.9, 0.9], count: 3) == [1.0 / 3, 1.0 / 3, 1.0 / 3])
+        #expect(LegacySurfaceImporter.normalizedRatios([0.9, 0.9, 0.9], count: 3) == [third, third, third])
         #expect(LegacySurfaceImporter.normalizedRatios([.nan, 1], count: 2) == [0.5, 0.5])
         #expect(LegacySurfaceImporter.normalizedRatios([0.6], count: 2) == [0.5, 0.5], "count mismatch")
         #expect(LegacySurfaceImporter.normalizedRatios([0.05, 0.95], count: 2) == [0.5, 0.5], "sub-minShare")

@@ -175,7 +175,8 @@ struct PanelCoordinatorPlacementTests {
         }
         #expect(split.children.count == 2)
         #expect(split.children.first == .primary)
-        #expect(split.ratios == [1 - PanelSurfaceReducer.defaultSideShare, PanelSurfaceReducer.defaultSideShare])
+        let side: Double = PanelSurfaceReducer.defaultSideShare
+        #expect(split.ratios == [1 - side, side])
         #expect(result.tab.layout.allPanelIDs.count == 1)
         #expect(result.tab.layout.panelSlot(id: result.tab.layout.allPanelIDs[0])?.content == newContent)
     }
