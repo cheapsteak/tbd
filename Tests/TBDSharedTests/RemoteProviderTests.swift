@@ -77,6 +77,43 @@ struct RemoteProviderTests {
         #expect(throws: (any Error).self) { try RemoteProviderRegistry.load(from: file) }
     }
 
+    @Test func registryRejectsEmptyExec() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("remote-provider-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "example", "exec": ""}]"#
+            .write(to: file, atomically: true, encoding: .utf8)
+        #expect(throws: RemoteProviderRegistry.RegistryError.invalidEntry("example")) {
+            try RemoteProviderRegistry.load(from: file)
+        }
+    }
+
+    @Test func registryRejectsEmptyName() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("remote-provider-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "", "exec": "/usr/local/bin/example"}]"#
+            .write(to: file, atomically: true, encoding: .utf8)
+        #expect(throws: RemoteProviderRegistry.RegistryError.invalidEntry("")) {
+            try RemoteProviderRegistry.load(from: file)
+        }
+    }
+
+    @Test func registryRejectsNonArrayJSON() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("remote-provider-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("agent-providers.json")
+        try #"{"name": "x"}"#
+            .write(to: file, atomically: true, encoding: .utf8)
+        #expect(throws: (any Error).self) { try RemoteProviderRegistry.load(from: file) }
+    }
+
     @Test func agentProvidersPathHonorsTBDHome() {
         let path = TBDConstants.agentProvidersPath(environment: ["TBD_HOME": "/tmp/tbd-test-home"])
         #expect(path == "/tmp/tbd-test-home/agent-providers.json")

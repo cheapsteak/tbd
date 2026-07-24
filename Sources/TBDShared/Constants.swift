@@ -190,7 +190,7 @@ public enum TBDConstants {
     public static func agentProvidersPath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("agent-providers.json").path
     }
-    public static func agentProvidersPath() -> String {
+    public static var agentProvidersPath: String {
         agentProvidersPath(environment: ProcessInfo.processInfo.environment)
     }
 }
