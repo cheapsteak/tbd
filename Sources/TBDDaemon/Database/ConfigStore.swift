@@ -35,6 +35,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var gc_snapshot_retention_days: Int?
     var daemon_panel_surface_enabled: Bool?
     var agent_panel_control_enabled: Bool?
+    var remote_backends_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -61,7 +62,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
             gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
             panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
-            agentPanelControlEnabled: agent_panel_control_enabled ?? false
+            agentPanelControlEnabled: agent_panel_control_enabled ?? false,
+            remoteBackendsEnabled: remote_backends_enabled ?? false
         )
     }
 }
@@ -309,6 +311,18 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET agent_panel_control_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the remote-agent-backends master switch (spec 2026-07-24).
+    /// Default OFF: the feature polls provider executables in the background
+    /// and can stop remote sessions, so it is opt-in until it soaks.
+    public func setRemoteBackendsEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_backends_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

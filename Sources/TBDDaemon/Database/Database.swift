@@ -28,6 +28,7 @@ public final class TBDDatabase: Sendable {
     public let reapRecords: ReapRecordStore
     public let terminalHistory: TerminalHistoryStore
     public let panelSurface: PanelSurfaceStore
+    public let remoteSessions: RemoteSessionStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -68,6 +69,7 @@ public final class TBDDatabase: Sendable {
         self.reapRecords = ReapRecordStore(writer: pool)
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: pool)
+        self.remoteSessions = RemoteSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -108,6 +110,7 @@ public final class TBDDatabase: Sendable {
         self.reapRecords = ReapRecordStore(writer: queue)
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: queue)
+        self.remoteSessions = RemoteSessionStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1032,6 +1035,31 @@ public final class TBDDatabase: Sendable {
                                       type: .boolean, defaults: false)
             try db.addColumnIfMissing(table: "worktree", column: "panel_surface_imported_at",
                                       type: .datetime)
+        }
+
+        // Remote agent backends (spec 2026-07-24). Flag lands default-OFF per
+        // the repo flag policy: the feature polls in the background, spawns
+        // provider subprocesses, and can stop remote sessions. `remote_session`
+        // mirrors provider-owned sessions keyed (provider, sessionID); the
+        // provider is the source of truth — rows here are a cache with drift
+        // bookkeeping (missingCount/gone per the two-absence rule).
+        migrator.registerMigration("v60_remote_backends") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "remote_backends_enabled",
+                type: .boolean, defaults: false)
+            try db.createTableIfNotExists("remote_session") { t in
+                t.column("provider", .text).notNull()
+                t.column("sessionID", .text).notNull()
+                t.column("payload", .text).notNull()      // raw contract Session JSON
+                t.column("state", .text).notNull()
+                t.column("agentState", .text)
+                t.column("firstSeen", .datetime).notNull()
+                t.column("lastSeen", .datetime).notNull()
+                t.column("missingCount", .integer).notNull().defaults(to: 0)
+                t.column("gone", .boolean).notNull().defaults(to: false)
+                t.column("dismissed", .boolean).notNull().defaults(to: false)
+                t.primaryKey(["provider", "sessionID"])
+            }
         }
 
         return migrator

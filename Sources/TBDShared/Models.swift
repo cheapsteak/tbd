@@ -801,6 +801,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// independent of `panelSurfaceEnabled` — an agent may only mutate panel
     /// layout once both flags are true.
     public var agentPanelControlEnabled: Bool
+    /// Master switch for remote agent backends (spec 2026-07-24). Default OFF:
+    /// the daemon polls provider executables in the background and can stop
+    /// remote sessions, so it is opt-in until it soaks.
+    public var remoteBackendsEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -830,7 +834,8 @@ public struct Config: Codable, Sendable, Equatable {
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
                 gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays,
                 panelSurfaceEnabled: Bool = false,
-                agentPanelControlEnabled: Bool = false) {
+                agentPanelControlEnabled: Bool = false,
+                remoteBackendsEnabled: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -853,6 +858,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
         self.panelSurfaceEnabled = panelSurfaceEnabled
         self.agentPanelControlEnabled = agentPanelControlEnabled
+        self.remoteBackendsEnabled = remoteBackendsEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -896,6 +902,8 @@ public struct Config: Codable, Sendable, Equatable {
         panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
         agentPanelControlEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .agentPanelControlEnabled) ?? false
+        remoteBackendsEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteBackendsEnabled) ?? false
     }
 }
 
