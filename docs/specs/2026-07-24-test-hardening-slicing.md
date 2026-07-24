@@ -45,7 +45,7 @@ Wave 3:  F │ G                              (2-wide)
 Wave 4:  H  →  I                            (sequential)
 ```
 
-**Waves 0 and 1 are deliberately solo.** Both touch `Package.swift`, and B rewrites one line in 39 files across both modules — any concurrent slice would spend more time rebasing than working.
+**Waves 0 and 1 are deliberately solo.** Both touch `Package.swift`, and B rewrites one line in 35 files across both modules — any concurrent slice would spend more time rebasing than working.
 
 **Wave 2 is the parallelization payoff.** Six slices, mutually file-disjoint: C1/C4 are `TBDApp`, C2/C3/D are `TBDDaemon`, E is test-infrastructure only. Each removes only the suppressions inside files it already owns.
 
