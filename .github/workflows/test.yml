@@ -50,8 +50,8 @@ jobs:
         uses: chetan/git-restore-mtime-action@d186aca54f8760da4dec55313195e51ed3ebb0b3 # v2
 
       - name: Install tmux
-        # macos-26 runners don't ship tmux. The reconcile reboot-recovery
-        # regression test (WorktreeLifecycleTests.testRecreateAfterRebootBootstrapKillOrdering)
+        # macos-26 runners don't ship tmux. The whole TBDDaemonLiveTests target
+        # (e.g. WorktreeLifecycleLiveTests.testReconcileRebootParksClaudeAndDeletesShell)
         # drives TmuxManager against a real tmux server on a unique socket.
         run: brew install tmux
 
@@ -111,8 +111,43 @@ jobs:
       # Swift 6.3 the two big modules build WMO in debug (~1.35 GB peak
       # frontend RSS each, measured), so the cap is likely over-conservative
       # now — kept as safety margin; candidate for re-validation.
-      - name: Test
-        run: swift test --parallel -j 2
+      #
+      # Two sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
+      # §4): the tier-3 live suites live in their own target so they can run
+      # serially on an otherwise idle machine instead of contending with the
+      # parallel pass. A second *job* would draw from the 5-concurrent-macOS-job
+      # cap and re-pay the build, so both passes share this one.
+      #
+      # Floors: the fast pass runs ~3859 tests and the quiet pass ~54 today.
+      # The floors sit well below those so ordinary test additions/removals never
+      # trip them — they only fire when a pass collapses to near-nothing.
+      - name: Test (fast parallel pass — tiers 1 and 2)
+        run: |
+          set -o pipefail
+          swift test --parallel -j 2 --skip '^TBDDaemonLiveTests\.' 2>&1 | tee /tmp/fast-pass.log
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass.log | grep -oE '[0-9]+' | head -1)
+          # `swift test --filter/--skip` exits GREEN on zero matches, so a bad
+          # regex or a renamed target would silently run nothing and pass.
+          if [ -z "$count" ] || [ "$count" -lt 3000 ]; then
+            echo "::error::Fast pass ran ${count:-no} tests (floor 3000) — the --skip regex likely over-matched."
+            exit 1
+          fi
+          echo "Fast pass executed $count tests."
+
+      - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
+        # No `--parallel`: serial execution on an idle machine is the entire
+        # point of this step. timeout-minutes so a wedged tmux test can't eat
+        # the job's 6 h default.
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          swift test --filter '^TBDDaemonLiveTests\.' 2>&1 | tee /tmp/quiet-pass.log
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1)
+          if [ -z "$count" ] || [ "$count" -lt 35 ]; then
+            echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
+            exit 1
+          fi
+          echo "Quiet pass executed $count tests."
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j 2

@@ -133,6 +133,16 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
+        // Tier 3 (docs/specs/2026-07-24-test-hardening-design.md §3): suites whose
+        // runtime depends on an external process they do not fully control — a real
+        // tmux server, a spawned child racing a deadline, the replay firehose. They
+        // live in their own target so CI can run them serially on an otherwise idle
+        // machine instead of contending with the parallel pass. Adding a suite here
+        // slows every PR; the bar is the §3 criterion, not "it feels slow".
+        .testTarget(
+            name: "TBDDaemonLiveTests",
+            dependencies: ["TBDDaemonLib", "TBDShared", "TestSupport"]
+        ),
         .testTarget(
             name: "TBDAppTests",
             dependencies: [
