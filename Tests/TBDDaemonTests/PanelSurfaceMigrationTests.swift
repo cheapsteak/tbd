@@ -7,7 +7,7 @@ import TBDShared
 @Suite("PanelSurfaceMigrationTests")
 struct PanelSurfaceMigrationTests {
 
-    @Test func v56CreatesTablesAndFlags() async throws {
+    @Test func v59CreatesTablesAndFlags() async throws {
         let db = try TBDDatabase(inMemory: true)
         let config = try await db.config.get()
         #expect(config.panelSurfaceEnabled == false)
@@ -100,11 +100,11 @@ struct PanelSurfaceMigrationTests {
         }
     }
 
-    /// Seeds a pre-v56 DB (migrated only through v55) with a real repo/worktree
-    /// row, then applies v56 and confirms the existing row survives untouched
+    /// Seeds a pre-v59 DB (migrated only through v55) with a real repo/worktree
+    /// row, then applies the rest (including v59) and confirms the existing row survives untouched
     /// and the new columns/tables show up alongside it — no data loss on
     /// forward migration.
-    @Test func forwardMigrationFromPreV56DBPreservesExistingData() throws {
+    @Test func forwardMigrationFromPreV59DBPreservesExistingData() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
         try migrator.migrate(queue, upTo: "v55_oauth_usage_snapshot_cache")
@@ -127,7 +127,7 @@ struct PanelSurfaceMigrationTests {
         try queue.read { db in
             let count = try Int.fetchOne(
                 db, sql: "SELECT COUNT(*) FROM worktree WHERE id = ?", arguments: [wtID]) ?? -1
-            #expect(count == 1, "pre-existing worktree row must survive v56")
+            #expect(count == 1, "pre-existing worktree row must survive v59")
             let row = try Row.fetchOne(db, sql: "SELECT * FROM worktree WHERE id = ?", arguments: [wtID])
             #expect(row?["panel_surface_imported_at"] == nil)
             #expect(try db.tableExists("workspace_tab_surface"))
