@@ -7,7 +7,7 @@ private let remoteLogger = Logger(subsystem: "com.tbd.daemon", category: "remote
 public struct RemoteProviderStatus: Codable, Sendable {
     public let config: RemoteProviderConfig
     public let describe: ProviderDescribe?
-    public let health: String          // "ok" | "stale" | "needs_auth" | "error"
+    public let health: ProviderHealth
     public let errorMessage: String?
     public let remediationLabel: String?
     public let remediationCommand: String?
@@ -26,7 +26,7 @@ actor RemoteProviderManager {
 
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
-    private var health: [String: (state: String, message: String?, remediation: ProviderRemediation?)] = [:]
+    private var health: [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
     private var loops: [String: Task<Void, Never>] = [:]
 
     init(db: TBDDatabase, subscriptions: StateSubscriptionManager,
@@ -37,7 +37,21 @@ actor RemoteProviderManager {
         self.registryURL = registryURL
     }
 
+    /// Full boot path: load the registry, describe every provider, then
+    /// spawn poll loops for the ones that negotiated a usable contract.
+    /// Composition of the two steps below — callers that only need
+    /// registry/describe state (e.g. verb-routing tests) should call
+    /// `loadRegistryAndDescribe()` alone so no background timer is armed.
     func start() async {
+        await loadRegistryAndDescribe()
+        spawnPollLoops()
+    }
+
+    /// Loads the provider registry and runs `describe` against every entry,
+    /// populating `providers`/`describes`/`health`. Spawns no poll loops —
+    /// safe to call from tests that only want to exercise describe/invoke
+    /// routing without racing a real 60s timer.
+    func loadRegistryAndDescribe() async {
         let configs: [RemoteProviderConfig]
         do {
             configs = try RemoteProviderRegistry.load(from: registryURL)
@@ -46,25 +60,54 @@ actor RemoteProviderManager {
             return
         }
         for config in configs {
-            providers[config.name] = config
-            health[config.name] = ("ok", nil, nil)
-            // describe is offline-by-contract; a failure is a provider bug.
-            if let result = try? await runner.run(config, verb: ["describe"], stdin: nil, timeout: 10),
-               result.exitCode == 0,
-               let describe = try? result.decoded(ProviderDescribe.self) {
-                if describe.contractVersions.contains(1) {
-                    describes[config.name] = describe
-                } else {
-                    health[config.name] = ("error", "no common contract version", nil)
-                    continue
-                }
-            } else {
-                health[config.name] = ("error", "describe failed", nil)
-                continue
-            }
-            startLoop(for: config)
+            registerIfNeeded(config)
+            await describeProvider(config)
         }
         subscriptions.broadcast(delta: .remoteSessionsChanged)
+    }
+
+    /// Runs `describe` for one provider and records the outcome in
+    /// `describes`/`health`. Auth failures (exit 4) and other classified
+    /// failures route through the same `recordFailure` path `pollOnce` and
+    /// `invoke` use, so a provider that rejects credentials on its very
+    /// first contact still surfaces `needs_auth` with remediation instead of
+    /// a generic error. Only spawn/parse problems — which no failure class
+    /// can describe — fall back to a generic message, distinguished by text
+    /// from "it ran and rejected us".
+    private func describeProvider(_ config: RemoteProviderConfig) async {
+        let result: ProviderResult
+        do {
+            result = try await runner.run(config, verb: ["describe"], stdin: nil, timeout: 10)
+        } catch {
+            remoteLogger.error("describe \(config.name, privacy: .public) couldn't run: \(String(describing: error), privacy: .public)")
+            setHealth(provider: config.name, to: (.error, "couldn't run describe: \(error)", nil))
+            return
+        }
+        if let failure = result.failureClass {
+            recordFailure(provider: config.name, class: failure, result: result)
+            return
+        }
+        guard let describe = try? result.decoded(ProviderDescribe.self) else {
+            setHealth(provider: config.name, to: (.error, "describe returned an unparseable response", nil))
+            return
+        }
+        guard describe.contractVersions.contains(1) else {
+            setHealth(provider: config.name, to: (.error, "no common contract version", nil))
+            return
+        }
+        describes[config.name] = describe
+    }
+
+    /// Spawns/re-spawns the 60s poll loop for every provider with a valid
+    /// `describe` on file. Cancels any existing loops first so a second call
+    /// can't orphan a running loop that `stopAll()` would no longer be able
+    /// to reach (the stored task handle would just get overwritten).
+    private func spawnPollLoops() {
+        stopAll()
+        for name in describes.keys {
+            guard let config = providers[name] else { continue }
+            startLoop(for: config)
+        }
     }
 
     func stopAll() {
@@ -88,8 +131,7 @@ actor RemoteProviderManager {
         // the provider first (mirror tests + Task 7's ad-hoc RPC lookups
         // both call it directly) — register on first use so providerStatuses()
         // reflects it.
-        if providers[provider.name] == nil { providers[provider.name] = provider }
-        if health[provider.name] == nil { health[provider.name] = ("ok", nil, nil) }
+        registerIfNeeded(provider)
         do {
             let result = try await runner.run(provider, verb: ["list"], stdin: nil, timeout: 30)
             if let failure = result.failureClass {
@@ -101,7 +143,7 @@ actor RemoteProviderManager {
             markHealthy(provider: provider.name)
         } catch {
             remoteLogger.debug("poll \(provider.name, privacy: .public) failed: \(String(describing: error), privacy: .public)")
-            setHealth(provider: provider.name, to: ("stale", String(describing: error), nil))
+            setHealth(provider: provider.name, to: (.stale, String(describing: error), nil))
         }
     }
 
@@ -138,14 +180,22 @@ actor RemoteProviderManager {
     private func loadAdHoc(named name: String) -> RemoteProviderConfig? {
         guard let configs = try? RemoteProviderRegistry.load(from: registryURL),
               let config = configs.first(where: { $0.name == name }) else { return nil }
-        providers[name] = config
-        if health[name] == nil { health[name] = ("ok", nil, nil) }
+        registerIfNeeded(config)
         return config
+    }
+
+    /// Registers a provider config (if not already known) and seeds a
+    /// default `ok` health entry (if not already present). Shared by every
+    /// entry point that can be a provider's first contact with this actor
+    /// (`loadRegistryAndDescribe`, `pollOnce`, `loadAdHoc`).
+    private func registerIfNeeded(_ config: RemoteProviderConfig) {
+        if providers[config.name] == nil { providers[config.name] = config }
+        if health[config.name] == nil { health[config.name] = (.ok, nil, nil) }
     }
 
     func providerStatuses() -> [RemoteProviderStatus] {
         providers.values.sorted { $0.name < $1.name }.map { config in
-            let h = health[config.name] ?? ("ok", nil, nil)
+            let h = health[config.name] ?? (.ok, nil, nil)
             return RemoteProviderStatus(
                 config: config, describe: describes[config.name],
                 health: h.state, errorMessage: h.message,
@@ -159,20 +209,20 @@ actor RemoteProviderManager {
         let error = result.decodedError
         switch failureClass {
         case .authNeeded:
-            setHealth(provider: provider, to: ("needs_auth", error?.message, error?.remediation))
+            setHealth(provider: provider, to: (.needsAuth, error?.message, error?.remediation))
         case .transient:
-            setHealth(provider: provider, to: ("stale", error?.message ?? result.stderr, nil))
+            setHealth(provider: provider, to: (.stale, error?.message ?? result.stderr, nil))
         case .permanent, .contractBug:
-            setHealth(provider: provider, to: ("error", error?.message ?? result.stderr, nil))
+            setHealth(provider: provider, to: (.error, error?.message ?? result.stderr, nil))
         }
     }
 
     private func markHealthy(provider: String) {
-        setHealth(provider: provider, to: ("ok", nil, nil))
+        setHealth(provider: provider, to: (.ok, nil, nil))
     }
 
     private func setHealth(provider: String,
-                           to new: (String, String?, ProviderRemediation?)) {
+                           to new: (ProviderHealth, String?, ProviderRemediation?)) {
         let old = health[provider]
         health[provider] = new
         if old?.state != new.0 {

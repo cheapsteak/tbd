@@ -34,6 +34,17 @@ public enum RemoteAgentState: String, Codable, Sendable {
     }
 }
 
+/// Provider health as tracked by `RemoteProviderManager` and surfaced to the
+/// app over the wire (`RemoteProviderStatus.health`, later tasks' RPC
+/// results, and UI code). Raw values are deliberately explicit snake_case —
+/// they're a wire contract other code matches on, not derived Swift casing.
+public enum ProviderHealth: String, Codable, Sendable {
+    case ok
+    case stale
+    case needsAuth = "needs_auth"
+    case error
+}
+
 /// The contract's Session object. Timestamps stay ISO-8601 strings — TBD
 /// displays them and compares equality; it never does date math on them.
 public struct RemoteSessionPayload: Codable, Sendable, Equatable {
