@@ -14,14 +14,14 @@ Four verbs are **required**. The rest are optional and declared as **capabilitie
 
 | Verb | Required? | Invocation | stdin | stdout | Timeout |
 |---|---|---|---|---|---|
-| `describe` | required | `p describe` | — | JSON | 10s |
-| `create` | required | `p create` | JSON | JSON session | 60s |
-| `list` | required | `p list` | — | JSON `{sessions:[...]}` | 30s |
-| `stop` | required | `p stop <id>` | — | JSON session | 30s |
-| `log` | capability `log` | `p log <id> [--lines N]` | — | raw bytes | 30s |
-| `send` | capability `send` | `p send <id>` | raw bytes | JSON `{}` | 30s |
-| `attach` | capability `attach` | `p attach <id>` | TTY | TTY | unbounded |
-| `events` | capability `events` | `p events` | — | NDJSON stream | unbounded |
+| `describe` | required | `<exec> describe` | — | JSON | 10s |
+| `create` | required | `<exec> create` | JSON | JSON session | 60s |
+| `list` | required | `<exec> list` | — | JSON `{sessions:[...]}` | 30s |
+| `stop` | required | `<exec> stop <id>` | — | JSON session | 30s |
+| `log` | capability `log` | `<exec> log <id> [--lines N]` | — | raw bytes | 30s |
+| `send` | capability `send` | `<exec> send <id>` | raw bytes | JSON `{}` | 30s |
+| `attach` | capability `attach` | `<exec> attach <id>` | TTY | TTY | unbounded |
+| `events` | capability `events` | `<exec> events` | — | NDJSON stream | unbounded |
 
 ## Session object
 
@@ -131,7 +131,7 @@ A long-running NDJSON stream: one JSON object per line, connection held open ind
 ```json
 {"event": "hello", "contract_version": 1}
 {"event": "snapshot", "sessions": [Session, ...]}
-{"event": "session", "session": {Session}}
+{"event": "session", "session": { ...Session object... }}
 {"event": "removed", "id": "fix-flaky-ci"}
 {"event": "ping"}
 ```
@@ -161,9 +161,9 @@ On a nonzero exit, the provider SHOULD emit one JSON error object on stdout:
 {
   "error": {
     "code": "auth_expired",
-    "message": "SSO token expired for profile acme-mgmt",
+    "message": "credentials expired for profile acme-mgmt",
     "retryable": false,
-    "remediation": {"label": "Run aws sso login", "command": "aws sso login --profile acme-mgmt"}
+    "remediation": {"label": "Run example-provider login", "command": "example-provider login --profile acme-mgmt"}
   }
 }
 ```
