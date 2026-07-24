@@ -251,6 +251,7 @@ private struct ClaudeSettingsOverlayEditor: View {
         }
         withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
         Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .seconds(2))
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = false }
         }

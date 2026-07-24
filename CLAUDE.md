@@ -95,6 +95,18 @@ Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.a
 
 This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in the dedicated `lint` CI job and the pre-push git hook, both invoking a Homebrew-installed `swiftlint --strict` directly. To lint manually: `swiftlint --strict`. Prerequisite: `brew install swiftlint`. See `.swiftlint.yml`.
 
+### New delays and timers take an injected clock
+
+Anything that sleeps, debounces, polls, or times out takes the clock as its last initializer parameter, defaulted so no call site changes:
+
+```swift
+init(..., clock: any Clock<Duration> = ContinuousClock())
+```
+
+Existential, not generic — a generic parameter would infect the actor types these subsystems already carry `Sendable` conformances on. Timestamps that get *persisted or compared* use the separate date seam instead (`date: Date = Date()` on the method, or `now: @Sendable () -> Date` on the type): **`Duration` is behavior, `Date` is data.**
+
+Enforced mechanically by the SwiftLint rule `no_raw_task_sleep` (same `lint` job and pre-push hook as `no_print_in_sources`). Pre-existing sites carry a visible `// swiftlint:disable:next no_raw_task_sleep - legacy sleep, …` suppression and are being burned down; adding a new one draws review scrutiny. `PollerClock` is a sanctioned exception for suspend-aware *wall*-deadline sleeping and is not a template. Seam details, test helpers, and the existential's `Instant` limitation: [`Tests/CLAUDE.md`](Tests/CLAUDE.md) "Clock and date seams".
+
 ### No TUI screen-scraping
 
 Never infer an agent's state by parsing its rendered terminal screen — tmux `capture-pane` text, composer glyphs like `❯`, placeholder or status strings. Screen text is a display surface, not an API: scraping breaks *silently* when the TUI changes copy or rendering, couples TBD to one agent version, and sits at the wrong layer. Get agent state from machine interfaces instead: Claude Code hooks, transcript JSONL, tmux control-mode events, process exit codes, or TBD's own DB/RPC state. (Cautionary tale: PR #398 verified submits by scanning the composer line for `[Pasted text` — it defended an unreachable state and was removed as dead code.)

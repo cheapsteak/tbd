@@ -31,6 +31,7 @@ extension AppState {
         let toastID = activeToast?.id
         let delay = toastTickDuration * 4
         toastDismissTask = Task { @MainActor [weak self] in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled,
                   let self, self.activeToast?.id == toastID else { return }

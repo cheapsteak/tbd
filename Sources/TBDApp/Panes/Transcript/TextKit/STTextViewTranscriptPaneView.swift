@@ -306,6 +306,7 @@ struct STTextViewTranscriptPaneView: View {
 
         for i in 0..<cfg.injectCount {
             if Task.isCancelled { break }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: UInt64(cfg.injectIntervalMs) * 1_000_000)
             if Task.isCancelled { break }
             let startIndex = cfg.preseed + i * batch
@@ -327,6 +328,7 @@ struct STTextViewTranscriptPaneView: View {
                 loadError = "Lost connection to the daemon."
                 return
             }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
     }

@@ -1750,6 +1750,7 @@ final class AppState: ObservableObject {
 
         // Wait for socket
         for _ in 0..<20 {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(200))
             if FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
                 break
@@ -2353,6 +2354,7 @@ final class AppState: ObservableObject {
         // Skip noop broadcasts: same cell dims as the previous send.
         guard cols != lastBroadcastCols || rows != lastBroadcastRows else { return }
         mainAreaSizeBroadcastTask = Task { [weak self] in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
             guard !Task.isCancelled, let self else { return }
             do {

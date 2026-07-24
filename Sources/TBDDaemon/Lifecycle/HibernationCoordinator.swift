@@ -610,6 +610,7 @@ public actor HibernationCoordinator {
         // fresh id so subsequent hibernate/wake reference the live session.
         let termID = terminal.id
         Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .seconds(5))
             if let newID = await self.detector.captureSessionID(server: server, paneID: livePaneID) {
                 try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
@@ -894,6 +895,7 @@ public actor HibernationCoordinator {
             return false
         }
         for _ in 0..<Self.exitPollAttempts {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: Self.exitPollInterval)
             if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: paneID),
                !ClaudeStateDetector.isClaudeProcess(cmd) {
@@ -908,9 +910,11 @@ public actor HibernationCoordinator {
     /// swap path so hibernate and account-switch interrupt identically.
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
            let pid = Int32(pidStr), pid > 0 {

@@ -85,6 +85,7 @@ final class HoverMenuModel: ObservableObject {
             openTaskGeneration += 1
             let generation = openTaskGeneration
             openTask = Task { [weak self] in
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: self?.openDelay ?? .zero)
                 guard let self else { return }
                 if self.openTaskGeneration == generation { self.openTask = nil }
@@ -97,6 +98,7 @@ final class HoverMenuModel: ObservableObject {
             closeTaskGeneration += 1
             let generation = closeTaskGeneration
             closeTask = Task { [weak self] in
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: self?.closeGrace ?? .zero)
                 guard let self else { return }
                 if self.closeTaskGeneration == generation { self.closeTask = nil }

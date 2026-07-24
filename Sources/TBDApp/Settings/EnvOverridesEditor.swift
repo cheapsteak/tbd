@@ -114,6 +114,7 @@ struct EnvOverridesEditor: View {
             rows = overrides.sorted { $0.key < $1.key }.map { Row(key: $0.key, value: $0.value) }
             isSaving = false
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .seconds(2))
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = false }
         }

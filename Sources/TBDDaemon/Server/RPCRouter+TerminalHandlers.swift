@@ -1544,10 +1544,12 @@ extension RPCRouter {
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         // C-c C-c: interrupt / exit the TUI.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         // SIGTERM the pane pid as a backstop (respawn -k is the real guarantee).
         if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
@@ -1566,6 +1568,7 @@ extension RPCRouter {
         let tmuxRef = self.tmux
         let dbRef = self.db
         Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .seconds(5))
             let detector = ClaudeStateDetector(tmux: tmuxRef)
             if let recaptured = await detector.captureSessionID(server: server, paneID: paneID) {

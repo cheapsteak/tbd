@@ -89,6 +89,7 @@ struct NotePaneView: View {
     private func debounceSave(content: String) {
         saveTask?.cancel()
         saveTask = Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             await appState.updateNote(noteID: noteID, worktreeID: worktreeID, content: content)

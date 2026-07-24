@@ -109,6 +109,7 @@ actor DaemonClient {
 
             // Wait for daemon to start (up to 4 seconds, polling every 0.5s)
             for attempt in 1...8 {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
                 if tryConnect() {
                     daemonClientLogger.info("Connected to daemon after \(attempt) attempts")
