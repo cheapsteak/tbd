@@ -35,6 +35,14 @@ public enum StateDelta: Codable, Sendable {
     /// full affected-tab snapshots + the originating operation ID so the app
     /// can dedupe its own RPC response against the subscription echo.
     case panelSurfaceChanged(PanelSurfaceDelta)
+    /// Remote-backend mirror changed (sessions upserted/gone, or provider
+    /// health changed). No payload (mirrors `.reapRecordsChanged`) —
+    /// subscribers refetch via `remote.sessions` / `remote.providers`.
+    case remoteSessionsChanged
+    /// A remote session crossed a notify-worthy agent-state edge
+    /// (→ waiting_input or → exited). Banner-only: remote sessions have no
+    /// worktree, so this does not ride `NotificationDelta`.
+    case remoteSessionAttention(RemoteSessionAttentionDelta)
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)
@@ -317,5 +325,19 @@ public struct WorktreeMovedDelta: Codable, Sendable {
         self.worktreeID = worktreeID
         self.newParentID = newParentID
         self.newSortOrder = newSortOrder
+    }
+}
+
+/// Banner payload for a remote session needing attention. `kind` is the new
+/// agent state's raw value ("waiting_input" | "exited").
+public struct RemoteSessionAttentionDelta: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let title: String?
+    public let kind: String
+    public let reason: String?
+    public init(provider: String, sessionID: String, title: String?, kind: String, reason: String?) {
+        self.provider = provider; self.sessionID = sessionID
+        self.title = title; self.kind = kind; self.reason = reason
     }
 }
