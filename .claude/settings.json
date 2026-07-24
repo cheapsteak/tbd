@@ -1,7 +1,7 @@
 {
   "statusLine": {
     "type": "command",
-    "command": "jq -r 'def osc(u; t): \"\u001b]8;;\\(u)\u001b\\\\\\(t)\u001b]8;;\u001b\\\\\"; [ \"[\\(.model.display_name)\\(if .effort.level? then \" · \\(.effort.level)\" else \"\" end)]\", \"\\((.context_window.total_input_tokens // 0) + (.context_window.total_output_tokens // 0) | . / 1000 | floor)k/\\((.context_window.context_window_size // 200000) / 1000 | floor)k (\\(.context_window.used_percentage // 0 | floor)%)\", (if .rate_limits.five_hour? then \"5h \\(.rate_limits.five_hour.used_percentage | floor)%\" else empty end), (if .rate_limits.seven_day? then \"7d \\(.rate_limits.seven_day.used_percentage | floor)%\" else empty end), (if .pr? then osc(.pr.url; \"PR #\\(.pr.number) \\(.pr.review_state // \"open\")\") else empty end), (if .transcript_path? then osc(\"file://\\(.transcript_path)\"; \"transcript\") else empty end) ] | join(\"  \")'"
+    "command": "jq -r 'def osc(u; t): \"]8;;\\(u)\\\\\\(t)]8;;\\\\\"; def rl(w; tag; fmt): if w then \"\\(tag)(\\(w.used_percentage | floor)%\\(if w.resets_at? then \" →\\(w.resets_at | strflocaltime(fmt))\" else \"\" end))\" else empty end; [ \"\\(.model.display_name)\\(if .effort.level? then \"(\\(.effort.level))\" else \"\" end)\", \"\\((.context_window.total_input_tokens // 0) + (.context_window.total_output_tokens // 0) | . / 1000 | floor)k/\\((.context_window.context_window_size // 200000) / 1000 | floor)k\", rl(.rate_limits.five_hour?; \"5h\"; \"%H:%M\"), rl(.rate_limits.seven_day?; \"7d\"; \"%a\"), (if .pr? then osc(.pr.url; \"PR#\\(.pr.number)(\\(.pr.review_state // \"open\"))\") else empty end), (if .transcript_path? then osc(\"file://\\(.transcript_path)\"; \"transcript\") else empty end) ] | join(\"  \")'"
   },
   "hooks": {
     "PreToolUse": [
