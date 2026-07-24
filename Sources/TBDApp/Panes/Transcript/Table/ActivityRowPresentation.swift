@@ -438,13 +438,23 @@ enum ActivityRowFormatter {
     /// which defeats the badge's whole purpose.
     static func injectedSize(text: String, truncatedTo: Int?) -> String {
         let count = truncatedTo ?? text.count
-        if count >= 1_000_000 {
-            return String(format: "%.1fM chars", Double(count) / 1_000_000)
+        if count < 1000 {
+            return "\(count) chars"
         }
-        if count >= 1000 {
-            return String(format: "%.1fK chars", Double(count) / 1000)
+        // Cascade smallest → largest, picking the first unit whose ROUNDED
+        // mantissa stays under 1000 — checking the raw count against a fixed
+        // threshold (the old `count >= 1_000_000` shape) lets values like
+        // 999_950 round up to "1000.0K" instead of bumping to "1.0M".
+        let units: [(divisor: Double, suffix: String)] = [
+            (1_000, "K"), (1_000_000, "M"), (1_000_000_000, "G"),
+        ]
+        for (index, unit) in units.enumerated() {
+            let mantissa = (Double(count) / unit.divisor * 10).rounded() / 10
+            if mantissa < 1000 || index == units.count - 1 {
+                return String(format: "%.1f\(unit.suffix) chars", mantissa)
+            }
         }
-        return "\(count) chars"
+        return "\(count) chars" // unreachable: loop always returns on its last iteration
     }
 
     // MARK: Task notification (background-task activity row)

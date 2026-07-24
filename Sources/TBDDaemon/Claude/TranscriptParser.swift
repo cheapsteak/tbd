@@ -363,9 +363,11 @@ enum TranscriptParser {
     }
 
     /// Extracts every injected-context payload from one JSONL row, in emission
-    /// order. Returns `[]` for non-attachment rows and for the payload-less
-    /// flavors (`task_reminder`, `command_permissions`, `queued_command`,
-    /// `*_delta`), which carry no content field at all.
+    /// order. Returns `[]` for non-attachment rows and for flavors that carry
+    /// no injected *prose* context: `*_delta`, `command_permissions`,
+    /// `queued_command`, `diagnostics`, and `edited_text_file` have no
+    /// `content` field at all, while `task_reminder`'s `content` is a
+    /// structured array of todo objects, not renderable text.
     ///
     /// `attachment.content` has a DIFFERENT native JSON type per flavor —
     /// object for `nested_memory`, array for `hook_additional_context`, string

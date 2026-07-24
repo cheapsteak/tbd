@@ -157,6 +157,22 @@ struct ActivityRowFormatterTests {
         #expect(ActivityRowFormatter.injectedSize(text: "short", truncatedTo: 44_312) == "44.3K chars")
     }
 
+    @Test("Injected size rounding never rolls a mantissa past its own unit")
+    func injectedSizeRoundingDoesNotRollPastItsUnit() {
+        // K boundary: 999_950...999_999 round to a K-mantissa of 1000.0 and
+        // must bump to M instead of printing "1000.0K chars".
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_949) == "999.9K chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_950) == "1.0M chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_999) == "1.0M chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 1_000_000) == "1.0M chars")
+        // M boundary equivalent (same shape, x1000): must bump to G instead
+        // of printing "1000.0M chars".
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_949_000) == "999.9M chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_950_000) == "1.0G chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_999_950) == "1.0G chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 1_000_000_000) == "1.0G chars")
+    }
+
     @Test("Task notification → clock icon, 'Background · <summary>' title, status badge")
     func taskNotification() throws {
         let node = TranscriptRenderNode.makeSystemReminder(
