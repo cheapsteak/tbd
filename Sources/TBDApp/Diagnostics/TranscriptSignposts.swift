@@ -56,14 +56,14 @@ enum TranscriptSignposts {
                  .assistantText(_, let t, _, _),
                  .thinking(_, let t, _):
                 return t.count
-            case .systemReminder(_, _, let t, _):
+            case .systemReminder(_, _, let t, _, _, _):
                 return t.count
             case .toolCall(_, _, let inputJSON, _, let result, _, _, _):
                 return inputJSON.count + (result?.text.count ?? 0)
             case .slashCommand(_, let name, let args, _):
                 return name.count + (args?.count ?? 0)
             }
-        case .systemReminder(_, _, let text, _),
+        case .systemReminder(_, _, let text, _, _, _),
              .skillBody(_, let text, _):
             return text.count
         case .toolCall(_, _, let inputJSON, _, let result, _):

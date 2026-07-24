@@ -97,8 +97,9 @@ enum ActivityRowFormatter {
         switch node.kind {
         case .chatBubble:
             return nil
-        case let .systemReminder(id, kind, text, ts):
-            return systemReminder(id: id, kind: kind, text: text, timestamp: ts)
+        case let .systemReminder(id, kind, text, ts, source, truncatedTo):
+            return systemReminder(id: id, kind: kind, text: text, timestamp: ts,
+                                  source: source, truncatedTo: truncatedTo)
         case let .skillBody(id, text, ts):
             return skillBody(id: id, text: text, timestamp: ts)
         case let .toolCall(id, name, inputJSON, inputTruncatedTo, result, ts):
@@ -381,7 +382,8 @@ enum ActivityRowFormatter {
     // MARK: System reminder (SystemReminderRow)
 
     private static func systemReminder(
-        id: String, kind: SystemKind, text: String, timestamp: Date?
+        id: String, kind: SystemKind, text: String, timestamp: Date?,
+        source: String?, truncatedTo: Int?
     ) -> ActivityRowPresentation {
         // Background-task notifications get a richer presentation: a
         // "Background · <summary>" title with the status surfaced as a badge.
@@ -397,17 +399,40 @@ enum ActivityRowFormatter {
             case .slashEnvelope: return "command"
             case .skillBody: return "skill"
             case .taskNotification: return "background"
+            // Covers both an injected CLAUDE.md and an @-mentioned file body;
+            // the source segment below carries the path that tells them apart.
+            case .nestedMemory: return "file"
             case .other: return "info"
             }
         }()
+
+        // Injected-context rows (hooks, CLAUDE.md) are otherwise near-identical
+        // re-injections of the same rule: the source name disambiguates them
+        // and the size is the whole point — one 15-line Read can pull 88 KB.
+        var segments: [ActivityRowSegment] = []
+        if let source, !source.isEmpty {
+            segments = [
+                ActivityRowSegment(text: source, style: .secondary),
+                ActivityRowSegment(text: "·", style: .tertiary),
+                ActivityRowSegment(text: injectedSize(text: text, truncatedTo: truncatedTo), style: .tertiary)
+            ]
+        }
+
         return ActivityRowPresentation(
             iconSystemName: "info.circle",
-            titleSegments: [],
+            titleSegments: segments,
             timestamp: timestamp,
             isError: false,
             badges: [ActivityRowBadge(text: label, kind: .neutral)],
-            openTargetID: id
+            openTargetID: id,
+            titleTruncation: .byTruncatingMiddle
         )
+    }
+
+    /// Human-readable size of an injected-context payload. `truncatedTo` holds
+    /// the ORIGINAL length when `text` was capped, so it wins when present.
+    static func injectedSize(text: String, truncatedTo: Int?) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(truncatedTo ?? text.count), countStyle: .file)
     }
 
     // MARK: Task notification (background-task activity row)

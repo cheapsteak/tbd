@@ -140,8 +140,12 @@ struct TranscriptOverlayView: View {
             }
         case .thinking:
             return "brain"
-        case .systemReminder(_, let kind, _, _):
-            return kind == .skillBody ? "sparkles" : "info.circle"
+        case .systemReminder(_, let kind, _, _, _, _):
+            switch kind {
+            case .skillBody:    return "sparkles"
+            case .nestedMemory: return "doc.text"
+            default:            return "info.circle"
+            }
         case .userPrompt, .assistantText, .slashCommand:
             return "doc.text"
         }
@@ -154,16 +158,20 @@ struct TranscriptOverlayView: View {
             return toolCallLabel(name: name, inputJSON: inputJSON)
         case .thinking:
             return "Thinking"
-        case .systemReminder(_, let kind, _, _):
+        case .systemReminder(_, let kind, _, _, let source, _):
+            let label: String
             switch kind {
-            case .skillBody:          return "Skill"
-            case .toolReminder:       return "system-reminder"
-            case .hookOutput:         return "hook"
-            case .environmentDetails: return "env"
-            case .slashEnvelope:      return "command"
-            case .taskNotification:   return "Background"
-            case .other:              return "info"
+            case .skillBody:          label = "Skill"
+            case .toolReminder:       label = "system-reminder"
+            case .hookOutput:         label = "hook"
+            case .environmentDetails: label = "env"
+            case .slashEnvelope:      label = "command"
+            case .taskNotification:   label = "Background"
+            case .nestedMemory:       label = "file"
+            case .other:              label = "info"
             }
+            guard let source, !source.isEmpty else { return label }
+            return "\(label) · \(source)"
         case .userPrompt:   return "User"
         case .assistantText: return "Assistant"
         case .slashCommand(_, let name, _, _): return "/\(name)"
@@ -265,11 +273,11 @@ struct TranscriptOverlayView: View {
                         result: toolResult,
                         terminalID: f?.terminalID
                     )
-                case .systemReminder(_, let kind, let text, _) where kind == .skillBody:
+                case .systemReminder(_, let kind, let text, _, _, _) where kind == .skillBody:
                     SkillBodyRowBody(text: text)
                 case .thinking(_, let text, _):
                     ThinkingRowBody(text: text)
-                case .systemReminder(_, _, let text, _):
+                case .systemReminder(_, _, let text, _, _, _):
                     SystemReminderRowBody(text: text)
                 default:
                     Text(String(describing: item))

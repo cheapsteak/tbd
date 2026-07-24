@@ -17,6 +17,7 @@ struct SystemReminderRow: View {
         case .slashEnvelope: return "command"
         case .skillBody: return "skill"
         case .taskNotification: return "background"
+        case .nestedMemory: return "file"
         case .other: return "info"
         }
     }

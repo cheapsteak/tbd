@@ -79,7 +79,8 @@ struct TranscriptRenderNode: Identifiable, Equatable {
 
     enum Kind: Hashable {
         case chatBubble(TranscriptItem)
-        case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
+        case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?,
+                            source: String? = nil, truncatedTo: Int? = nil)
         case skillBody(id: String, text: String, timestamp: Date?)
         case toolCall(id: String, name: String, inputJSON: String,
                       inputTruncatedTo: Int?, result: ToolResult?, timestamp: Date?)
@@ -95,9 +96,9 @@ struct TranscriptRenderNode: Identifiable, Equatable {
             switch (lhs, rhs) {
             case (.chatBubble(let l), .chatBubble(let r)):
                 return l == r
-            case (.systemReminder(let li, let lk, let lt, let lts),
-                  .systemReminder(let ri, let rk, let rt, let rts)):
-                return li == ri && lk == rk && lt == rt && lts == rts
+            case (.systemReminder(let li, let lk, let lt, let lts, let lsrc, let ltr),
+                  .systemReminder(let ri, let rk, let rt, let rts, let rsrc, let rtr)):
+                return li == ri && lk == rk && lt == rt && lts == rts && lsrc == rsrc && ltr == rtr
             case (.skillBody(let li, let lt, let lts),
                   .skillBody(let ri, let rt, let rts)):
                 return li == ri && lt == rt && lts == rts
@@ -143,7 +144,7 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
         case .userPrompt, .assistantText:
             out.append(TranscriptRenderNode(id: item.id, kind: .chatBubble(item), badgeUsage: badge))
 
-        case .systemReminder(let id, let kind, let text, let ts):
+        case .systemReminder(let id, let kind, let text, let ts, let source, let truncatedTo):
             if kind == .skillBody {
                 out.append(TranscriptRenderNode(
                     id: id,
@@ -153,7 +154,8 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
             } else {
                 out.append(TranscriptRenderNode(
                     id: id,
-                    kind: .systemReminder(id: id, kind: kind, text: text, timestamp: ts),
+                    kind: .systemReminder(id: id, kind: kind, text: text, timestamp: ts,
+                                          source: source, truncatedTo: truncatedTo),
                     badgeUsage: badge
                 ))
             }

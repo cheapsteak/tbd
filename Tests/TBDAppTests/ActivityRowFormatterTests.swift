@@ -115,6 +115,35 @@ struct ActivityRowFormatterTests {
         #expect(p.openTargetID == "s1")
     }
 
+    @Test("Injected file body → 'file' badge + '<displayPath> · <original size>' title")
+    func nestedMemoryTitleCarriesSourceAndSize() throws {
+        // The size readout is the point: a collapsed row must show at a glance
+        // how much context a 15-line Read actually pulled in. `truncatedTo`
+        // holds the ORIGINAL length, so it wins over the capped `text`.
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "m1", kind: .nestedMemory, text: "# acme rules (truncated)",
+            source: ".github/CLAUDE.md", truncatedTo: 39_673)
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.badges == [ActivityRowBadge(text: "file", kind: .neutral)])
+        #expect(p.titleSegments.map(\.text).first == ".github/CLAUDE.md")
+        #expect(titleText(p).contains("KB"), "expected a human-readable size, got \(titleText(p))")
+        #expect(!titleText(p).contains("\(("# acme rules (truncated)").count)"),
+                "size must come from truncatedTo, not the capped text length")
+        #expect(p.openTargetID == "m1")
+    }
+
+    @Test("Injected hook context → 'hook' badge + '<hookName> · <size>' title")
+    func hookAdditionalContextTitleCarriesHookName() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "h1", kind: .hookOutput, text: String(repeating: "x", count: 300),
+            source: "PostToolUse:Read")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.badges == [ActivityRowBadge(text: "hook", kind: .neutral)])
+        #expect(p.titleSegments.map(\.text).first == "PostToolUse:Read")
+        // Untruncated: size falls back to the text length.
+        #expect(titleText(p).contains("300"))
+    }
+
     @Test("Task notification → clock icon, 'Background · <summary>' title, status badge")
     func taskNotification() throws {
         let node = TranscriptRenderNode.makeSystemReminder(

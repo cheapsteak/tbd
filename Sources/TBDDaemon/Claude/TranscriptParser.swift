@@ -207,6 +207,13 @@ enum TranscriptParser {
         toolResultsByID: [String: ToolResult]
     ) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
+        // Payload strings already emitted from a `hook_success` row. A hook's
+        // stdout (`hook_success`) and what was actually injected
+        // (`hook_additional_context`) are frequently the identical string, and
+        // hook_success always precedes its twin — so a forward-only set drops
+        // the duplicate. When the injected form DIFFERS (an oversized payload
+        // replaced by a `<persisted-output>` notice) both are kept.
+        var emittedHookPayloads: Set<String> = []
 
         for (i, json) in rawLines.enumerated() {
             // Subagent (sidechain) lines belong to a nested agent's own
@@ -216,6 +223,32 @@ enum TranscriptParser {
             let lineUUID = stableIDs[i]
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
             let typeStr = json["type"] as? String
+
+            // Hook- and CLAUDE.md-injected context arrives as `type:"attachment"`
+            // rows, which carry no `message` and so match none of the branches
+            // below. Always `continue` — an attachment never falls through.
+            if typeStr == "attachment" {
+                let payloads = attachmentPayloads(from: json)
+                for (index, payload) in payloads.enumerated() {
+                    if payload.rawType == "hook_additional_context",
+                       emittedHookPayloads.contains(payload.text) {
+                        continue
+                    }
+                    if payload.rawType == "hook_success" {
+                        emittedHookPayloads.insert(payload.text)
+                    }
+                    let (truncated, originalCount) = truncate(payload.text)
+                    items.append(.systemReminder(
+                        id: payloads.count > 1 ? "\(lineUUID)#\(index)" : lineUUID,
+                        kind: payload.kind,
+                        text: truncated,
+                        timestamp: timestamp,
+                        source: payload.source,
+                        truncatedTo: originalCount == truncated.count ? nil : originalCount
+                    ))
+                }
+                continue
+            }
 
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
                 let text = extractUserText(from: json) ?? ""
@@ -326,6 +359,114 @@ enum TranscriptParser {
         )
     }
 
+    // MARK: - attachments
+
+    /// One renderable payload extracted from a `type: "attachment"` JSONL row.
+    struct AttachmentPayload: Equatable {
+        /// The raw `attachment.type` — the dedup rule keys off it.
+        let rawType: String
+        let kind: SystemKind
+        /// Where the context came from: a CLAUDE.md display path, a hook name.
+        let source: String
+        let text: String
+    }
+
+    /// Extracts every injected-context payload from one JSONL row, in emission
+    /// order. Returns `[]` for non-attachment rows and for the payload-less
+    /// flavors (`task_reminder`, `command_permissions`, `queued_command`,
+    /// `*_delta`), which carry no content field at all.
+    ///
+    /// `attachment.content` has a DIFFERENT native JSON type per flavor —
+    /// object for `nested_memory`, array for `hook_additional_context`, string
+    /// for the rest — so a single `as? String` silently drops the two largest
+    /// sources of injected context.
+    ///
+    /// Shared by `buildItems` and `lookupFullBody` so the collapsed row and the
+    /// click-to-open overlay can never disagree about what a row contains.
+    static func attachmentPayloads(from json: [String: Any]) -> [AttachmentPayload] {
+        guard json["type"] as? String == "attachment",
+              let att = json["attachment"] as? [String: Any],
+              let rawType = att["type"] as? String else {
+            return []
+        }
+
+        func hookName() -> String { (att["hookName"] as? String) ?? "hook" }
+
+        switch rawType {
+        case "nested_memory":
+            // `content` is an object `{path, type, content}`; the CLAUDE.md
+            // body is one level deeper.
+            guard let inner = att["content"] as? [String: Any],
+                  let body = inner["content"] as? String, !body.isEmpty else { return [] }
+            let source = (att["displayPath"] as? String)
+                ?? (att["path"] as? String)
+                ?? "CLAUDE.md"
+            return [AttachmentPayload(rawType: rawType, kind: .nestedMemory, source: source, text: body)]
+
+        case "file":
+            // An @-mentioned file's body, injected verbatim into the context
+            // window. Same shape as `nested_memory` — `content` is an object,
+            // the body one level deeper at `content.file.content` — and the
+            // same *thing*: a file's text pasted into the prompt. Reusing
+            // `.nestedMemory` (not `.hookOutput`, which would badge a file
+            // body as hook stdout) rather than adding a case; the badge is now
+            // "file" for both, and the source segment carries the actual path,
+            // which is what distinguished a CLAUDE.md row anyway.
+            guard let inner = att["content"] as? [String: Any],
+                  let file = inner["file"] as? [String: Any],
+                  let body = file["content"] as? String, !body.isEmpty else { return [] }
+            let source = (att["displayPath"] as? String)
+                ?? (att["filename"] as? String)
+                ?? (file["filePath"] as? String)
+                ?? "file"
+            return [AttachmentPayload(rawType: rawType, kind: .nestedMemory, source: source, text: body)]
+
+        case "hook_additional_context":
+            // `content` is an array of strings — one entry per injected block.
+            let strings = (att["content"] as? [Any])?.compactMap { $0 as? String } ?? []
+            return strings.filter { !$0.isEmpty }.map {
+                AttachmentPayload(rawType: rawType, kind: .hookOutput, source: hookName(), text: $0)
+            }
+
+        case "hook_success":
+            // Two payload sources: `content` (plain-text hook stdout, usually
+            // empty) and a JSON `stdout` whose real text sits at
+            // `hookSpecificOutput.additionalContext`. A non-JSON `stdout` is
+            // the same text `content` already carries, so it is ignored.
+            var out: [AttachmentPayload] = []
+            if let s = att["content"] as? String, !s.isEmpty {
+                out.append(AttachmentPayload(rawType: rawType, kind: .hookOutput, source: hookName(), text: s))
+            }
+            for s in additionalContext(fromStdout: att["stdout"] as? String) {
+                out.append(AttachmentPayload(rawType: rawType, kind: .hookOutput, source: hookName(), text: s))
+            }
+            return out
+
+        case "skill_listing":
+            guard let s = att["content"] as? String, !s.isEmpty else { return [] }
+            return [AttachmentPayload(rawType: rawType, kind: .hookOutput, source: "skills", text: s)]
+
+        default:
+            return []
+        }
+    }
+
+    /// Pulls `hookSpecificOutput.additionalContext` out of a hook's stdout.
+    /// Most rows carry the literal `"{}\n"` and yield nothing. The field is
+    /// usually a String but may be an array of strings.
+    private static func additionalContext(fromStdout stdout: String?) -> [String] {
+        guard let stdout,
+              let data = stdout.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hookSpecific = obj["hookSpecificOutput"] as? [String: Any],
+              let raw = hookSpecific["additionalContext"] else {
+            return []
+        }
+        if let s = raw as? String { return s.isEmpty ? [] : [s] }
+        if let arr = raw as? [Any] { return arr.compactMap { $0 as? String }.filter { !$0.isEmpty } }
+        return []
+    }
+
     // MARK: - helpers
 
     static let bodyCharCap = 2000
@@ -409,8 +550,10 @@ enum TranscriptParser {
     /// itemID forms:
     ///  - `tool_use_id` (e.g. "toolu_abc") → returns the matching tool_result content
     ///  - `<tool_use_id>#input` → returns the un-truncated `tool_use.input` JSON
-    ///  - `<lineUUID>#<blockIndex>` → returns the assistant block's text/thinking
-    ///  - bare `lineUUID` → returns the user message content
+    ///  - `<lineUUID>#<blockIndex>` → returns the assistant block's text/thinking,
+    ///    or the Nth injected payload of a multi-payload attachment row
+    ///  - bare `lineUUID` → returns the user message content, or the sole
+    ///    injected payload of an attachment row
     static func lookupFullBody(filePath: String, itemID: String) -> String? {
         guard let data = FileManager.default.contents(atPath: filePath),
               let content = String(data: data, encoding: .utf8) else {
@@ -476,6 +619,16 @@ enum TranscriptParser {
 
             // line UUID match.
             if (json["uuid"] as? String) == lineUUID {
+                // Attachment rows carry no `message`, so the branches below
+                // can never recover their (truncated) body. Re-run the same
+                // extraction `buildItems` used and return it whole.
+                let payloads = attachmentPayloads(from: json)
+                if payloads.count > 1 {
+                    guard let blockIndex, blockIndex < payloads.count else { return nil }
+                    return payloads[blockIndex].text
+                }
+                if let only = payloads.first { return only.text }
+
                 if let blockIndex,
                    let message = json["message"] as? [String: Any],
                    let blocks = message["content"] as? [[String: Any]],

@@ -1128,7 +1128,7 @@ struct TableTranscriptHarness {
         switch node.kind {
         case .chatBubble(let item):
             return TranscriptCompareRealSessions.itemText(item)
-        case .systemReminder(_, _, let text, _), .skillBody(_, let text, _):
+        case .systemReminder(_, _, let text, _, _, _), .skillBody(_, let text, _):
             return text
         case .toolCall(_, let name, let inputJSON, _, let result, _):
             return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"

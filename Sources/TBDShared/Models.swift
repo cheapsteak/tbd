@@ -1242,7 +1242,17 @@ public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case slashEnvelope
     case skillBody
     case taskNotification
+    case nestedMemory
     case other
+
+    /// Lenient decode: an unrecognized raw value degrades to `.other` rather
+    /// than throwing. Adding a case would otherwise make an OLD app binary
+    /// fail to decode a NEW daemon's payload — the schema-skew failure class
+    /// documented in CLAUDE.md. The encoder stays synthesized.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SystemKind(rawValue: raw) ?? .other
+    }
 }
 
 public struct ToolResult: Codable, Sendable, Equatable, Hashable {
@@ -1296,7 +1306,13 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
                   result: ToolResult?, subagent: Subagent?, timestamp: Date?,
                   usage: TokenUsage? = nil)
     case thinking(id: String, text: String, timestamp: Date?)
-    case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
+    /// `source` names where injected context came from (a `displayPath` like
+    /// `.github/CLAUDE.md`, or a hook name like `PostToolUse:Read`) and
+    /// `truncatedTo` carries the ORIGINAL character count when `text` was
+    /// capped — same semantics as `toolCall.inputTruncatedTo`. Both default to
+    /// nil; only attachment-derived reminders populate them.
+    case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?,
+                        source: String? = nil, truncatedTo: Int? = nil)
     case slashCommand(id: String, name: String, args: String?, timestamp: Date?)
 
     public var id: String {
@@ -1305,7 +1321,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
         case .assistantText(let id, _, _, _): return id
         case .toolCall(let id, _, _, _, _, _, _, _): return id
         case .thinking(let id, _, _): return id
-        case .systemReminder(let id, _, _, _): return id
+        case .systemReminder(let id, _, _, _, _, _): return id
         case .slashCommand(let id, _, _, _): return id
         }
     }
@@ -1316,7 +1332,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
              .assistantText(_, _, let t, _),
              .toolCall(_, _, _, _, _, _, let t, _),
              .thinking(_, _, let t),
-             .systemReminder(_, _, _, let t),
+             .systemReminder(_, _, _, let t, _, _),
              .slashCommand(_, _, _, let t):
             return t
         }
