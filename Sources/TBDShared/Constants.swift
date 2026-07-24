@@ -184,4 +184,13 @@ public enum TBDConstants {
     public static func notesPath(worktreeID: UUID) -> String {
         notesPath(worktreeID: worktreeID, environment: ProcessInfo.processInfo.environment)
     }
+
+    /// Path to the remote-provider registry file: `~/tbd/agent-providers.json`.
+    /// User-authored JSON array of `{name, exec, args?}`. Honors TBD_HOME.
+    public static func agentProvidersPath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("agent-providers.json").path
+    }
+    public static func agentProvidersPath() -> String {
+        agentProvidersPath(environment: ProcessInfo.processInfo.environment)
+    }
 }
