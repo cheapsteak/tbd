@@ -77,6 +77,35 @@ struct RemoteSessionStoreTests {
         #expect(rows[0].dismissed == true)
     }
 
+    @Test func upsertOneAppliesEdgeDetectionWithoutTouchingOtherRows() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [payload("a"), payload("b")], now: Date())
+        // Absent from this single-session upsert; a snapshot would have
+        // bumped its missingCount, but upsertOne must leave it alone.
+        let outcome = try await db.remoteSessions.upsertOne(
+            provider: "p", session: payload("a", agent: .waitingInput), now: Date())
+        #expect(outcome.changed)
+        #expect(outcome.attention.map(\.id) == ["a"])
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first(where: { $0.sessionID == "b" })?.missingCount == 0)
+        #expect(rows.first(where: { $0.sessionID == "b" })?.gone == false)
+        // Same state again → no re-notification, matching applySnapshot.
+        let again = try await db.remoteSessions.upsertOne(
+            provider: "p", session: payload("a", agent: .waitingInput), now: Date())
+        #expect(again.attention.isEmpty)
+    }
+
+    @Test func markGoneSetsGoneImmediatelySkippingTwoAbsenceRule() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        var rows = try await db.remoteSessions.list()
+        #expect(rows[0].gone == false)
+        // A single explicit removal is enough — unlike a single snapshot
+        // absence, which only bumps missingCount to 1.
+        try await db.remoteSessions.markGone(provider: "p", sessionID: "a")
+        rows = try await db.remoteSessions.list()
+        #expect(rows[0].gone == true)
+    }
+
     @Test func configFlagDefaultsOffAndPersists() async throws {
         let config = try await db.config.get()
         #expect(config.remoteBackendsEnabled == false)

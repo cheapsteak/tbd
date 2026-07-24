@@ -28,6 +28,7 @@ actor RemoteProviderManager {
     private var describes: [String: ProviderDescribe] = [:]
     private var health: [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
     private var loops: [String: Task<Void, Never>] = [:]
+    private var supervisors: [String: ProviderEventsSupervisor] = [:]
 
     init(db: TBDDatabase, subscriptions: StateSubscriptionManager,
          runner: any RemoteProviderInvoking, registryURL: URL) {
@@ -44,7 +45,7 @@ actor RemoteProviderManager {
     /// `loadRegistryAndDescribe()` alone so no background timer is armed.
     func start() async {
         await loadRegistryAndDescribe()
-        spawnPollLoops()
+        await spawnPollLoops()
     }
 
     /// Loads the provider registry and runs `describe` against every entry,
@@ -99,25 +100,37 @@ actor RemoteProviderManager {
     }
 
     /// Spawns/re-spawns the 60s poll loop for every provider with a valid
-    /// `describe` on file. Cancels any existing loops first so a second call
-    /// can't orphan a running loop that `stopAll()` would no longer be able
-    /// to reach (the stored task handle would just get overwritten).
-    private func spawnPollLoops() {
-        stopAll()
+    /// `describe` on file. Cancels any existing loops (and stops any running
+    /// events supervisors) first so a second call can't orphan one that
+    /// `stopAll()` would no longer be able to reach (the stored handle would
+    /// just get overwritten).
+    private func spawnPollLoops() async {
+        await stopAll()
         for name in describes.keys {
             guard let config = providers[name] else { continue }
             startLoop(for: config)
         }
     }
 
-    func stopAll() {
+    func stopAll() async {
         for task in loops.values { task.cancel() }
         loops.removeAll()
+        for supervisor in supervisors.values { await supervisor.stop() }
+        supervisors.removeAll()
     }
 
+    /// The 60s `list` poll is the universal floor for every provider,
+    /// events-capable or not — it keeps running even when a stream is up,
+    /// since snapshot application is idempotent and this is what covers a
+    /// stream that's down or restarting. Providers that declared the
+    /// `events` capability in their cached `describe` additionally get a
+    /// supervised low-latency NDJSON stream.
     private func startLoop(for config: RemoteProviderConfig) {
-        // Events supervision replaces this in Task 6 when the capability is
-        // declared; the 60s list poll is the universal floor.
+        if describes[config.name]?.capabilities.contains("events") == true {
+            let supervisor = ProviderEventsSupervisor(config: config, manager: self)
+            supervisors[config.name] = supervisor
+            Task { await supervisor.start() }
+        }
         loops[config.name] = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce(provider: config)
@@ -159,6 +172,31 @@ actor RemoteProviderManager {
                 provider: provider, sessionID: session.id, title: session.title,
                 kind: session.agentState.rawValue, reason: session.agentStateReason)))
         }
+    }
+
+    /// Single-session upsert from an events `session` line. No absence
+    /// bookkeeping happens here — only `apply(snapshot:)` drives the
+    /// two-absence rule, since only a full snapshot can tell what's missing.
+    func applyUpsert(_ session: RemoteSessionPayload, provider: String) async {
+        let outcome = try? await db.remoteSessions.upsertOne(
+            provider: provider, session: session, now: Date())
+        guard let outcome else { return }
+        if outcome.changed {
+            subscriptions.broadcast(delta: .remoteSessionsChanged)
+        }
+        for session in outcome.attention {
+            subscriptions.broadcast(delta: .remoteSessionAttention(RemoteSessionAttentionDelta(
+                provider: provider, sessionID: session.id, title: session.title,
+                kind: session.agentState.rawValue, reason: session.agentStateReason)))
+        }
+    }
+
+    /// Explicit removal from an events `removed` line. The provider is
+    /// authoritative about this — skip the two-absence rule entirely and
+    /// mark the row gone immediately.
+    func applyRemoval(sessionID: String, provider: String) async {
+        try? await db.remoteSessions.markGone(provider: provider, sessionID: sessionID)
+        subscriptions.broadcast(delta: .remoteSessionsChanged)
     }
 
     func invoke(providerName: String, verb: [String], stdin: Data?,

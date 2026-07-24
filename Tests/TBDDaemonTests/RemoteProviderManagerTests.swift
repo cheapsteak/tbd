@@ -161,6 +161,27 @@ struct RemoteProviderManagerTests {
                 "four identical failures must broadcast exactly once (ok→stale), not on every poll")
     }
 
+    @Test func describeExitFourRoutesThroughFailurePathWithRemediation() async throws {
+        // A provider that rejects credentials on its very first contact
+        // (describe itself, before any poll ever runs) must still surface
+        // needs_auth with remediation — describeProvider routes exit-4
+        // through the same recordFailure path pollOnce/invoke use, not a
+        // generic "couldn't parse describe" error.
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "fake login"}}}"#.utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        await m.loadRegistryAndDescribe()
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.remediationLabel == "login")
+        #expect(statuses.first?.remediationCommand == "fake login")
+        #expect(invoker.calls == [["describe"]])
+    }
+
     @Test func versionMismatchNeverPolls() async throws {
         // describe negotiates no common contract version (provider only
         // speaks v2) — start() must surface a health error and must never

@@ -42,6 +42,48 @@ public struct RemoteSessionStore: Sendable {
         self.writer = writer
     }
 
+    /// Insert-or-update one row given its (already-fetched) existing row, if
+    /// any. Shared by `applySnapshot` (bulk, rows pre-fetched per provider)
+    /// and `upsertOne` (single row, its own fetch) so the change-detection
+    /// and attention-edge rules exist in exactly one place. Absence
+    /// bookkeeping (missingCount/gone) is NOT this helper's job — only
+    /// `applySnapshot` performs that, over whatever it did *not* see in a
+    /// full snapshot.
+    private func upsert(
+        _ session: RemoteSessionPayload, provider: String, existing: RemoteSessionRow?,
+        now: Date, encoder: JSONEncoder, db: Database
+    ) throws -> (changed: Bool, attention: RemoteSessionPayload?) {
+        let payloadString = String(data: try encoder.encode(session), encoding: .utf8) ?? "{}"
+        if var row = existing {
+            let previousAgentState = row.agentState
+            let changed = row.payload != payloadString || row.missingCount != 0 || row.gone
+            var attention: RemoteSessionPayload?
+            if previousAgentState != session.agentState.rawValue,
+               session.agentState == .waitingInput || session.agentState == .exited {
+                attention = session
+            }
+            row.payload = payloadString
+            row.state = session.state.rawValue
+            row.agentState = session.agentState.rawValue
+            row.lastSeen = now
+            row.missingCount = 0
+            row.gone = false
+            try row.update(db)
+            return (changed, attention)
+        } else {
+            // First sighting never notifies — otherwise the daemon would
+            // fire a banner storm for every pre-existing session on startup.
+            try RemoteSessionRow(
+                provider: provider, sessionID: session.id,
+                payload: payloadString, state: session.state.rawValue,
+                agentState: session.agentState.rawValue,
+                firstSeen: now, lastSeen: now,
+                missingCount: 0, gone: false, dismissed: false
+            ).insert(db)
+            return (true, nil)
+        }
+    }
+
     /// Reconcile one provider's full session list against the mirror table.
     /// Rows for OTHER providers are never touched — snapshots are
     /// provider-scoped, so an empty snapshot from provider B must not affect
@@ -60,37 +102,12 @@ public struct RemoteSessionStore: Sendable {
             encoder.outputFormatting = [.sortedKeys]   // stable payload string for change detection
 
             for session in sessions {
-                let payloadString = String(
-                    data: try encoder.encode(session), encoding: .utf8) ?? "{}"
-                if var row = byID.removeValue(forKey: session.id) {
-                    let previousAgentState = row.agentState
-                    if row.payload != payloadString || row.missingCount != 0 || row.gone {
-                        changed = true
-                    }
-                    if previousAgentState != session.agentState.rawValue,
-                       session.agentState == .waitingInput || session.agentState == .exited {
-                        attention.append(session)
-                    }
-                    row.payload = payloadString
-                    row.state = session.state.rawValue
-                    row.agentState = session.agentState.rawValue
-                    row.lastSeen = now
-                    row.missingCount = 0
-                    row.gone = false
-                    try row.update(db)
-                } else {
-                    changed = true
-                    // First sighting never notifies — attention is left empty
-                    // here — otherwise the daemon would fire a banner storm
-                    // for every pre-existing session on startup.
-                    try RemoteSessionRow(
-                        provider: provider, sessionID: session.id,
-                        payload: payloadString, state: session.state.rawValue,
-                        agentState: session.agentState.rawValue,
-                        firstSeen: now, lastSeen: now,
-                        missingCount: 0, gone: false, dismissed: false
-                    ).insert(db)
-                }
+                let existingRow = byID.removeValue(forKey: session.id)
+                let outcome = try self.upsert(
+                    session, provider: provider, existing: existingRow,
+                    now: now, encoder: encoder, db: db)
+                if outcome.changed { changed = true }
+                if let attentionSession = outcome.attention { attention.append(attentionSession) }
             }
 
             // Everything left in byID was absent from this snapshot. Two
@@ -103,6 +120,41 @@ public struct RemoteSessionStore: Sendable {
                 try row.update(db)
             }
             return SnapshotOutcome(changed: changed, attention: attention)
+        }
+    }
+
+    /// Upsert a single session from an `events` `session` line. Same
+    /// change-detection and attention-edge rules as `applySnapshot`, applied
+    /// to just this one row — it never touches any other row's absence
+    /// bookkeeping (only full snapshots drive the two-absence rule).
+    public func upsertOne(
+        provider: String, session: RemoteSessionPayload, now: Date
+    ) async throws -> SnapshotOutcome {
+        try await writer.write { db in
+            let existing = try RemoteSessionRow
+                .filter(Column("provider") == provider)
+                .filter(Column("sessionID") == session.id)
+                .fetchOne(db)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let outcome = try self.upsert(
+                session, provider: provider, existing: existing,
+                now: now, encoder: encoder, db: db)
+            return SnapshotOutcome(
+                changed: outcome.changed,
+                attention: outcome.attention.map { [$0] } ?? [])
+        }
+    }
+
+    /// Explicit removal from an `events` `removed` line. The provider is
+    /// authoritative about this, so it marks the row gone immediately —
+    /// unlike inferred absence from a snapshot, this skips the two-absence
+    /// rule entirely.
+    public func markGone(provider: String, sessionID: String) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE remote_session SET gone = 1 WHERE provider = ? AND sessionID = ?",
+                arguments: [provider, sessionID])
         }
     }
 
