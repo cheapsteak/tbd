@@ -109,17 +109,23 @@ enum BoundedProcessOutcome {
 /// `GitTimeoutError` / `ProviderRunError`).
 ///
 /// `environment` and `stdin` are optional and default to `nil`, which
-/// preserves the exact behavior existing callers (`GitManager`, `TmuxManager`)
-/// already depend on: an unset `environment` leaves `Process.environment`
-/// untouched (inherits the parent's), and no `stdin` leaves
-/// `Process.standardInput` untouched (inherits the parent's), rather than
-/// wiring up a pipe.
+/// preserves the exact behavior existing callers (`GitManager`, `TmuxManager`,
+/// `GCDiskUsage`, `OrphanGC`) already depend on: an unset `environment` leaves
+/// `Process.environment` untouched (inherits the parent's), and no `stdin`
+/// leaves `Process.standardInput` untouched (inherits the parent's), rather
+/// than wiring up a pipe. When `environment` IS provided, it REPLACES the
+/// parent's environment wholesale (`Process.environment = environment`) —
+/// it is not merged, so a caller passing a partial dict gets a child missing
+/// everything it didn't list (e.g. no `PATH`).
 ///
 /// `stdin`, when provided, is written synchronously right after `run()`
-/// succeeds. That's fine for this codebase's payloads — provider contract
-/// params and keystrokes are at most a few KB, well under the ~64KB pipe
-/// buffer — but a hypothetically large `stdin` could block the parent the
-/// same way an undrained large stdout would.
+/// succeeds, blocking the calling executor thread until the write completes.
+/// That's fine for this codebase's payloads — provider contract params and
+/// keystrokes are at most a few KB, well under the ~64KB pipe buffer — but a
+/// hypothetically large `stdin` (bigger than the pipe buffer, with a child
+/// that doesn't drain concurrently) would block the CALLING thread until the
+/// child reads enough to make room, the same way an undrained large stdout
+/// would block the child.
 ///
 /// The deadline is immune to GCD-pool starvation via two independent guarantees:
 ///
