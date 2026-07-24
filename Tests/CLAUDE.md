@@ -32,6 +32,12 @@ racing a deadline, or drives the replay firehose. CI runs that target
 serially on an otherwise-idle machine, in a separate step from the fast
 parallel pass.
 
+That step passes `--no-parallel` explicitly. Omitting `--parallel` is **not**
+equivalent: SwiftPM's `--parallel` governs XCTest's process-level sharding,
+while Swift Testing parallelizes suites in-process regardless. Measured here,
+the difference is all 17 live suites starting simultaneously versus running
+one at a time.
+
 The failure asymmetry is the thing reviewers get wrong: leaving a heavy suite
 in the parallel pass is merely the status quo, but moving a fast
 deterministic suite into the serial pass taxes every PR forever. When in

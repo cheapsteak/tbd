@@ -135,13 +135,20 @@ jobs:
           echo "Fast pass executed $count tests."
 
       - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
-        # No `--parallel`: serial execution on an idle machine is the entire
-        # point of this step. timeout-minutes so a wedged tmux test can't eat
-        # the job's 6 h default.
+        # `--no-parallel` is REQUIRED and is not the same as omitting
+        # `--parallel`. SwiftPM's `--parallel` governs XCTest's process-level
+        # sharding; Swift Testing parallelizes suites in-process on its own and
+        # ignores the absence of the flag. Measured on this target: without
+        # `--no-parallel` all 17 suites start simultaneously and the pass
+        # finishes in 10 s — i.e. the live suites contend with each other and
+        # the step is not quiet at all, defeating its entire purpose. With the
+        # flag they run strictly one at a time (24 s). Serial execution on an
+        # idle machine IS this step; do not "optimize" the flag away.
+        # timeout-minutes so a wedged tmux test can't eat the job's 6 h default.
         timeout-minutes: 15
         run: |
           set -o pipefail
-          swift test --filter '^TBDDaemonLiveTests\.' 2>&1 | tee /tmp/quiet-pass.log
+          swift test --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
           count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1)
           if [ -z "$count" ] || [ "$count" -lt 35 ]; then
             echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
