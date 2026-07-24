@@ -583,6 +583,7 @@ struct PanePlaceholder: View {
         pasteboard.setString(urlString, forType: .string)
         didCopyURL = true
         Task { @MainActor in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             didCopyURL = false
         }

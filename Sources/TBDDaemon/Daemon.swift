@@ -291,6 +291,7 @@ public final class Daemon: Sendable {
         // 4c. Start periodic SSH agent refresh (every 60s)
         self.sshRefreshTask = Task {
             while !Task.isCancelled {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: .seconds(60))
                 if !(await sshResolver.isValid()) {
                     if await sshResolver.resolve() {
@@ -585,6 +586,7 @@ public final class Daemon: Sendable {
                 // Sweep once immediately (cold recovery), then every 60s.
                 await reaper.sweep(servers: await ownedServers())
                 while !Task.isCancelled {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
                     await reaper.sweep(servers: await ownedServers())
@@ -602,6 +604,7 @@ public final class Daemon: Sendable {
                     // Sweep once immediately (cold recovery), then every hour.
                     _ = await orphanGC.sweep()
                     while !Task.isCancelled {
+                        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
                         _ = await orphanGC.sweep()
@@ -697,6 +700,7 @@ public final class Daemon: Sendable {
                 tmux: tmux,
                 inspector: ProductionPaneProcessInspector(),
                 readTranscript: { path in FileManager.default.contents(atPath: path) },
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 waiter: { duration in _ = try? await Task.sleep(for: duration) }
             )
             let resumeScheduler = LimitResumeScheduler(
@@ -791,6 +795,7 @@ public final class Daemon: Sendable {
             let hibernationCoordinator = rpcRouter.hibernationCoordinator
             self.hibernationSweepTask = Task {
                 while !Task.isCancelled {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(30))
                     guard !Task.isCancelled else { break }
                     await hibernationCoordinator.sweep()
@@ -813,6 +818,7 @@ public final class Daemon: Sendable {
     static func sleepThroughGatedInterval(_ interval: @Sendable () async -> Duration) async {
         var waited = Duration.zero
         while !Task.isCancelled {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: GitPollCadence.pollTick)
             waited += GitPollCadence.pollTick
             let due = await interval()

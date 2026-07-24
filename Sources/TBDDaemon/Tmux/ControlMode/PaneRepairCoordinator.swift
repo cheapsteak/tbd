@@ -226,6 +226,7 @@ actor PaneRepairCoordinator {
                 // superseded `nil` case above: send nothing — the sink stays
                 // `repairing`, and a later overflow signal or attach heals it.
                 do {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try await Task.sleep(for: interval)
                 } catch {
                     return

@@ -118,6 +118,7 @@ extension RPCRouter {
             // kill the fresh attach that replaced it.
             let timeout = bridge.readyTimeout
             Task { [supervisor = bridge.supervisor] in
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: timeout)
                 await supervisor.detachIfNotReady(server: server, paneID: paneID, generation: generation)
             }

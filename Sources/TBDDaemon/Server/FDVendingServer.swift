@@ -222,6 +222,7 @@ actor FDVendingServer {
                 try FDChannel.sendFD(fd, over: clientFD, frame: frame)
                 return
             }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             if attempt < 9 { try? await Task.sleep(for: .milliseconds(50)) }
         }
         throw FDVendingServerError.notConnected

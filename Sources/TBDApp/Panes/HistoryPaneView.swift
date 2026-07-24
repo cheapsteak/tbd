@@ -238,6 +238,7 @@ private struct HistoryHeaderRow: View {
         }
         statusClearTask?.cancel()
         statusClearTask = Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             withAnimation { statusMessage = nil }

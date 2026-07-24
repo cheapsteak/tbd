@@ -75,6 +75,7 @@ public struct AgentReaper: Sendable {
         signaller.terminate(pid)
         for _ in 0..<graceAttempts {
             if !signaller.isAlive(pid) { return }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: pollInterval)
         }
         if signaller.isAlive(pid) {
@@ -89,6 +90,7 @@ public struct AgentReaper: Sendable {
     func escalateAfterHangup(_ pid: Int32) async {
         for _ in 0..<graceAttempts {
             if !signaller.isAlive(pid) { return }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: pollInterval)
         }
         guard signaller.isAlive(pid) else { return }

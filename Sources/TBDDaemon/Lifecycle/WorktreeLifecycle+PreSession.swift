@@ -252,6 +252,7 @@ extension WorktreeLifecycle {
                 }
                 return .paneKilled
             }
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: pollNanos)
         }
         // Deadline race: the marker may have landed during the final poll

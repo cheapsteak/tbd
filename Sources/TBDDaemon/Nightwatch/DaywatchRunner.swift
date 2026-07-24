@@ -64,6 +64,7 @@ public struct ProcessDaywatchExecutor: DaywatchExecuting {
             // Set up a 5-minute deadline. The timeout Task's check-and-set is also protected
             // by the lock, so only one of {termination, timeout} will successfully resume.
             Task {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try await Task.sleep(for: .seconds(5 * 60))
                 state.lock.withLock { s in
                     if !s.finished {
@@ -273,6 +274,7 @@ public actor DaywatchRunner {
         // Then sleep and loop
         while !Task.isCancelled {
             do {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try await Task.sleep(for: .seconds(interval))
             } catch {
                 // Cancelled during sleep

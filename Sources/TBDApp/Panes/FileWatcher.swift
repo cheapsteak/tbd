@@ -202,6 +202,7 @@ private final class StreamState: @unchecked Sendable {
 
     private func scheduleDebouncedNotify() {
         let task = Task { [weak self] in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled, let self else { return }
             self.yieldIfActive()
@@ -218,6 +219,7 @@ private final class StreamState: @unchecked Sendable {
 
     private func scheduleReopen() {
         let task = Task { [weak self] in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled, let self else { return }
             self.performReopen()

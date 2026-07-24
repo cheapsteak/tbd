@@ -1,5 +1,5 @@
 {
-  "originHash" : "2ac9f485880de6d74c504ea3a96b5b88b9829a2a8cc12c3a9da738ae8b99f55c",
+  "originHash" : "32946c529570441a44b2c80a923efd0ef5add54a256cbf6e72c5a1a8036b07b5",
   "pins" : [
     {
       "identity" : "coretextswift",
@@ -74,6 +74,15 @@
       }
     },
     {
+      "identity" : "swift-clocks",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-clocks",
+      "state" : {
+        "revision" : "72d749bf341b78851203066ab421869b783ec42a",
+        "version" : "1.1.0"
+      }
+    },
+    {
       "identity" : "swift-cmark",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swiftlang/swift-cmark",
@@ -88,6 +97,15 @@
       "location" : "https://github.com/apple/swift-collections.git",
       "state" : {
         "revision" : "6675bc0ff86e61436e615df6fc5174e043e57924",
+        "version" : "1.4.1"
+      }
+    },
+    {
+      "identity" : "swift-concurrency-extras",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-concurrency-extras",
+      "state" : {
+        "revision" : "5fa253428866f2360c3754e88537f700ed2656b5",
         "version" : "1.4.1"
       }
     },
@@ -151,6 +169,15 @@
       "state" : {
         "revision" : "ec6198d37d495efc6acd4dffbd262cdca7ff9b3f",
         "version" : "0.6.0"
+      }
+    },
+    {
+      "identity" : "xctest-dynamic-overlay",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/xctest-dynamic-overlay",
+      "state" : {
+        "revision" : "8f6abcf4c8950e2679d5b2fee4ca284fd7c34886",
+        "version" : "1.11.0"
       }
     }
   ],

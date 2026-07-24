@@ -141,6 +141,7 @@ struct RepoHooksSettingsView: View {
                     writeHook(content: draft.wrappedValue, to: filePath)
                     withAnimation(.easeInOut(duration: 0.3)) { showSaved.wrappedValue = true }
                     Task {
+                        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(2))
                         withAnimation(.easeInOut(duration: 0.3)) { showSaved.wrappedValue = false }
                     }
