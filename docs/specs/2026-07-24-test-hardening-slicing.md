@@ -95,7 +95,7 @@ These exist so six agents produce one coherent codebase instead of six dialects.
 
 The tier-3 inventory is the one genuine judgment call in stage 0, and a coarse grep over `Tests/TBDDaemonTests/` matches ~71–89 files (`Process()` is used far too broadly to be a signal). Slice A's owner produces a **curated** list rather than a grep dump.
 
-**Criterion:** a suite is tier 3 if it spawns a real tmux server, shells out to `ps`, or drives the replay firehose — i.e. its runtime depends on an external process it does not fully control.
+**Criterion (design §3, authoritative):** a suite is tier 3 if it spawns a real tmux server, shells out to `ps`, spawns a child process racing a deadline, drives the replay firehose, or is itself a contention source rather than merely a victim of one — i.e. its runtime depends on an external process it does not fully control, or it actively degrades every sibling suite sharing the runner. (The last clause exists because of `SubprocessTimeoutStarvationTests`, which deliberately saturates the shared default-QoS GCD pool — the single worst offender a narrower reading would have left in the parallel pass.)
 
 **Seed list** (verify each before moving): `ReplayLiveIntegrationMatrixTests`, `LimitResumeSendSequenceLiveTests`, `TerminalSendBracketedPasteLiveTests`, `HistoryLimitIntegrationTests`, `WorktreeLifecycleTests`, `HibernationOrphanDetectionTests`, `GitManagerTimeoutTests`, `SubprocessTimeoutTests`, `SubprocessTimeoutStarvationTests`, `TmuxControlConnectionIntegrationTests`, `TmuxControlCommandClientIntegrationTests`, `ControlModeInputRouterIntegrationTests`.
 
