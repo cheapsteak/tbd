@@ -1,5 +1,7 @@
+import Clocks
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 
 @testable import TBDDaemonLib
@@ -17,9 +19,15 @@ import Testing
 /// with recorded stream writes, reply blocks fed by hand, and a real
 /// supervisor + fanout so the gate/generation/fence/repair semantics under
 /// test are the production ones.
-@Suite("PaneRepairCoordinator")
+@Suite("PaneRepairCoordinator", .clockDriven)
 struct PaneRepairCoordinatorTests {
     private let server = "tbd-repair-unit"
+
+    /// The reader-catch-up pacing the coordinator actually ships with. Under
+    /// virtual time there is nothing to gain from shrinking them, so these
+    /// tests run the PRODUCTION constants and advance the `TestClock` by them.
+    private let checkInterval: Duration = .milliseconds(50)
+    private let slowInterval: Duration = .milliseconds(500)
 
     /// Thread-safe overflow-signal counter.
     private final class SignalCounter: @unchecked Sendable {
@@ -29,26 +37,24 @@ struct PaneRepairCoordinatorTests {
         var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
     }
 
-    private func makeHarness(
-        writableCheckInterval: Duration = .milliseconds(10),
-        writableSlowInterval: Duration = .milliseconds(25),
-        writableEscalationThreshold: Duration = .milliseconds(50)
-    ) -> (TmuxControlSupervisor, PaneRepairCoordinator, LineRecorder, TmuxControlCommandClient, SignalCounter) {
+    private func makeHarness() -> (
+        TmuxControlSupervisor, PaneRepairCoordinator, LineRecorder,
+        TmuxControlCommandClient, SignalCounter, TestClock<Duration>
+    ) {
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
+        let clock = TestClock()
         let coordinator = PaneRepairCoordinator(
             supervisor: supervisor,
             commandProvider: { [server] in $0 == server ? client : nil },
-            writableCheckInterval: writableCheckInterval,
-            writableSlowInterval: writableSlowInterval,
-            writableEscalationThreshold: writableEscalationThreshold)
+            clock: clock)
         // Wire the signal exactly as the bridge does, plus a call counter.
         let signals = SignalCounter()
         supervisor.fanout.onOverflowRepair = { key, generation in
             signals.increment()
             Task { await coordinator.repairIfNeeded(key: key, generation: generation) }
         }
-        return (supervisor, coordinator, recorder, client, signals)
+        return (supervisor, coordinator, recorder, client, signals, clock)
     }
 
     /// A 22-field primary-screen state line for `paneID` at 80x24 with the
@@ -125,7 +131,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("full repair: pause alone → wait for reader → captures+continue atomically → replay → fence flush → streaming resumes")
     func fullRepairHappyPath() async throws {
-        let (supervisor, coordinator, recorder, client, signals) = makeHarness()
+        let (supervisor, coordinator, recorder, client, signals, clock) = makeHarness()
         _ = coordinator
         let paneID = "%1"
         let key = PaneKey(server: server, paneID: paneID)
@@ -146,12 +152,15 @@ struct PaneRepairCoordinatorTests {
         await succeed(client, [[]])  // pause reply — the pane is now silent
 
         // The reader has NOT caught up (pipe still full): batch 2 must wait.
-        try await Task.sleep(for: .milliseconds(200))  // bounded negative check
+        // Parking on the reader-wait sleep PROVES the loop is waiting —
+        // strictly stronger than inferring it from elapsed wall time.
+        await clock.waitForSuspension()
         #expect(recorder.writes.count == 1,
                 "captures+continue must not be sent while the reader is behind")
 
         // The app catches up — the pipe becomes writable.
         drainPipe(readFD)
+        await clock.advanceWhenSuspended(by: checkInterval)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
         try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1] == """
@@ -201,7 +210,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("superseded between batch 1 and batch 2: nothing more sent, no unpause, successor untouched")
     func supersededMidRepairAbortsSilently() async throws {
-        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let (supervisor, coordinator, recorder, client, _, _) = makeHarness()
         _ = coordinator
         let paneID = "%2"
         let key = PaneKey(server: server, paneID: paneID)
@@ -222,10 +231,12 @@ struct PaneRepairCoordinatorTests {
         defer { Darwin.close(read2) }
         await succeed(client, [[]])  // pause reply → post-pause re-check fires
 
+        // The repair task has provably EXITED (nothing is parked on the
+        // clock — the supersession is decided before the reader-wait), so the
+        // exit itself is the bound: no later write can appear.
         try await waitFor("repair exit") {
             await coordinator.isInFlight(key) == false
         }
-        try await Task.sleep(for: .milliseconds(200))  // bounded negative check
         #expect(recorder.writes.count == 1, "a superseded repair must send NOTHING after the pause")
         #expect(!recorder.writes.contains { $0.contains("capture-pane") })
         #expect(!recorder.writes.contains { $0.contains(":continue'") })
@@ -247,7 +258,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("capture %error: unpause sent, repair aborted, pane not frozen")
     func captureFailureUnpausesAndAborts() async throws {
-        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let (supervisor, coordinator, recorder, client, _, _) = makeHarness()
         _ = coordinator
         let paneID = "%3"
         let key = PaneKey(server: server, paneID: paneID)
@@ -258,8 +269,8 @@ struct PaneRepairCoordinatorTests {
 
         overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
         try await waitFor("pause write") { recorder.writes.count >= 1 }
-        await succeed(client, [[]])  // pause reply
-        drainPipe(readFD)            // reader catches up
+        drainPipe(readFD)            // reader catches up before the wait starts
+        await succeed(client, [[]])  // pause reply → writable on the first check
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
 
         // Scrollback capture %errors (tolerated at the correlator level);
@@ -289,9 +300,35 @@ struct PaneRepairCoordinatorTests {
 
     @Test("wedged reader: NO deadline — no continue, pane stays paused+repairing, and the SAME repair completes when the reader drains")
     func wedgedReaderWaitsOutTheStallThenHeals() async throws {
-        // Tiny injected intervals: escalation to slow polling happens within
-        // ~50 ms, so the wedged window below spans many slow intervals.
-        let (supervisor, coordinator, recorder, client, signals) = makeHarness()
+        // Injected pacing, for the same reason as
+        // `readerWaitEscalatesToTheSlowInterval` — but sized to span BOTH
+        // thresholds rather than just the escalation one. "NO deadline" is a
+        // claim about surviving an arbitrarily long stall, and the production
+        // 50 ms / 5 s / 30 s constants cannot express that in a short advance
+        // chain: 3 advances of 50 ms reach 150 ms and never leave the fast
+        // band, which proves far less than this test's name claims. With
+        // 2 s / 4 s / 15 s, FOUR advances reach 34 s of virtual wait — past
+        // the escalation threshold AND past the fixed 30 s
+        // `readerStallLogThreshold`, so the loop exercises the escalated
+        // pacing and the one-shot stall-log branch (nothing else covers the
+        // latter). Same short chain, strictly stronger claim.
+        let (client, recorder) = makeFakeClient()
+        let supervisor = TmuxControlSupervisor()
+        let clock = TestClock<Duration>()
+        let fast: Duration = .seconds(2)
+        let slow: Duration = .seconds(15)
+        let coordinator = PaneRepairCoordinator(
+            supervisor: supervisor,
+            commandProvider: { [server] in $0 == server ? client : nil },
+            writableCheckInterval: fast,
+            writableSlowInterval: slow,
+            writableEscalationThreshold: .seconds(4),
+            clock: clock)
+        let signals = SignalCounter()
+        supervisor.fanout.onOverflowRepair = { key, generation in
+            signals.increment()
+            Task { await coordinator.repairIfNeeded(key: key, generation: generation) }
+        }
         let paneID = "%4"
         let key = PaneKey(server: server, paneID: paneID)
         let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
@@ -304,12 +341,23 @@ struct PaneRepairCoordinatorTests {
         await succeed(client, [[]])  // pause reply — reader stays wedged
 
         // A TRANSIENTLY wedged reader (e.g. a long app main-thread hitch)
-        // must not kill the repair: with the pipe still full well past the
-        // escalation threshold (many slow poll intervals), the repair must
-        // NOT abort and must NOT send a continue — a continue would just
-        // re-overflow. It stays in flight; the pane stays paused (tmux
-        // buffers it server-side) and the sink stays `repairing`.
-        try await Task.sleep(for: .milliseconds(400))
+        // must not kill the repair: across many poll intervals with the pipe
+        // still full, the repair must NOT abort and must NOT send a continue
+        // — a continue would just re-overflow. It stays in flight; the pane
+        // stays paused (tmux buffers it server-side) and the sink stays
+        // `repairing`. Each advance drives exactly one more wait iteration:
+        // two fast (2 s + 2 s = the 4 s escalation threshold, so the loop
+        // switches to the slow interval) then two slow (+30 s = 34 s), which
+        // carries the wait past the fixed 30 s `readerStallLogThreshold` — so
+        // the stall-log branch runs exactly once and the loop keeps waiting
+        // rather than giving up. Four advances, 34 s of virtual stall. Do NOT
+        // lengthen this chain to "prove" more: a long chain of advances is
+        // itself a load-sensitivity hazard (see
+        // `readerWaitEscalatesToTheSlowInterval`) — reach further thresholds
+        // by injecting larger pacing, never by advancing more times.
+        for _ in 0..<2 { await clock.advanceWhenSuspended(by: fast) }
+        for _ in 0..<2 { await clock.advanceWhenSuspended(by: slow) }
+        await clock.waitForSuspension()  // re-armed on the slow interval, pipe still full
         #expect(recorder.writes.count == 1, "no captures and NO continue while the reader is wedged")
         #expect(await coordinator.isInFlight(key) == true, "the repair must keep waiting, not give up")
         let stats = try #require(supervisor.fanout.flowStats(key: key))
@@ -332,6 +380,7 @@ struct PaneRepairCoordinatorTests {
         // proceeds — batch 2 (captures + continue), replay behind the fence,
         // endRepair, streaming resumed. No new attach needed.
         drainPipe(readFD)
+        await clock.advanceWhenSuspended(by: slow)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
         try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1].hasSuffix("refresh-client -A '%4:continue'"),
@@ -351,11 +400,79 @@ struct PaneRepairCoordinatorTests {
         #expect(live.hasSuffix("LIVE-AFTER-WEDGE"), "streaming must resume after the recovered repair")
     }
 
+    // MARK: - Pacing escalation
+
+    @Test("escalation: past the threshold the reader-wait paces on the SLOW interval, not the fast one")
+    func readerWaitEscalatesToTheSlowInterval() async throws {
+        // The `waited >= writableEscalationThreshold` branch was untestable on
+        // the real clock (5 s of wall time per run). Under virtual time it is
+        // free, and the root CLAUDE.md gated-branch rule applies.
+        //
+        // This is the ONE test that injects pacing values instead of running
+        // the production 50 ms / 5 s pair (every other test here keeps the
+        // production constants). Reason: that ratio needs 100 advances to
+        // accumulate the threshold, and a long chain of advances is itself a
+        // load-sensitivity hazard — `advanceWhenSuspended` gives the code
+        // under test 20 yields to re-park, and is non-throwing, so under load
+        // one missed re-park advances a sleeper-less clock and the test hangs
+        // forever (the failure mode ClockTestSupport's doc comment names).
+        // 100 draws makes that near-certain. A 1 s / 2 s / 10 s pacing proves
+        // exactly the same branch in THREE advances. Do not reintroduce a
+        // long advance chain here.
+        let (client, recorder) = makeFakeClient()
+        let supervisor = TmuxControlSupervisor()
+        let clock = TestClock<Duration>()
+        let fast: Duration = .seconds(1)
+        let slow: Duration = .seconds(10)
+        let coordinator = PaneRepairCoordinator(
+            supervisor: supervisor,
+            commandProvider: { [server] in $0 == server ? client : nil },
+            writableCheckInterval: fast,
+            writableSlowInterval: slow,
+            writableEscalationThreshold: .seconds(2),
+            clock: clock)
+        supervisor.fanout.onOverflowRepair = { key, generation in
+            Task { await coordinator.repairIfNeeded(key: key, generation: generation) }
+        }
+        let paneID = "%13"
+        let key = PaneKey(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        supervisor.fanout.markReady(key: key, generation: generation)
+
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("pause write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // pause reply — the reader stays wedged
+
+        // Two fast intervals accumulate exactly the escalation threshold, so
+        // the interval the loop picks NEXT is the slow one.
+        await clock.advanceWhenSuspended(by: fast)
+        await clock.advanceWhenSuspended(by: fast)
+        await clock.waitForSuspension()  // re-armed — on the slow interval now
+        #expect(await coordinator.isInFlight(key) == true, "the wait must still be running")
+
+        // The reader catches up, but the loop is parked on the SLOW interval:
+        // a fast-interval advance is not enough to wake it, so batch 2 stays
+        // unsent. (Before escalation, this same advance would have sent it —
+        // that is `fullRepairHappyPath`.)
+        drainPipe(readFD)
+        await clock.advanceWhenSuspended(by: fast)
+        #expect(recorder.writes.count == 1,
+                "past the escalation threshold the wait must sleep the SLOW interval")
+
+        // The rest of the slow interval does wake it, and the repair proceeds.
+        await clock.advanceWhenSuspended(by: slow - fast)
+        try await waitFor("captures+continue write after escalation") { recorder.writes.count >= 2 }
+        try #require(recorder.writes.count >= 2, "the escalated wait never sent batch 2")
+        #expect(recorder.writes[1].hasSuffix("refresh-client -A '%13:continue'"))
+    }
+
     // MARK: - Broken pipe
 
     @Test("broken pipe mid-wait: read end closed → continue sent, abortRepair, repairing cleared")
     func brokenPipeMidWaitUnpausesAndAborts() async throws {
-        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let (supervisor, coordinator, recorder, client, _, clock) = makeHarness()
         _ = coordinator
         let paneID = "%5"
         let key = PaneKey(server: server, paneID: paneID)
@@ -369,8 +486,8 @@ struct PaneRepairCoordinatorTests {
         try await waitFor("pause write") { recorder.writes.count >= 1 }
         await succeed(client, [[]])  // pause reply — the reader wait begins
 
-        // A merely-full pipe keeps the repair waiting…
-        try await Task.sleep(for: .milliseconds(100))
+        // A merely-full pipe keeps the repair parked in the reader-wait…
+        await clock.waitForSuspension()
         #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
 
         // …then the viewer dies: the READ end closes mid-wait. The pipe can
@@ -381,6 +498,7 @@ struct PaneRepairCoordinatorTests {
         Darwin.close(readFD)
         readClosed = true
 
+        await clock.advanceWhenSuspended(by: checkInterval)
         try await waitFor("trailing continue write") { recorder.writes.count >= 2 }
         #expect(recorder.writes.last == "refresh-client -A '%5:continue'",
                 "a broken pipe must unpause the pane")
@@ -406,10 +524,7 @@ struct PaneRepairCoordinatorTests {
         let supervisor = TmuxControlSupervisor()
         let coordinator = PaneRepairCoordinator(
             supervisor: supervisor,
-            commandProvider: { _ in nil },
-            writableCheckInterval: .milliseconds(10),
-            writableSlowInterval: .milliseconds(25),
-            writableEscalationThreshold: .milliseconds(50))
+            commandProvider: { _ in nil })
         supervisor.fanout.onOverflowRepair = { key, generation in
             Task { await coordinator.repairIfNeeded(key: key, generation: generation) }
         }
@@ -442,7 +557,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("superseded before the repair starts: nothing sent — not even the pause — successor untouched")
     func supersededBeforeRepairStartSendsNothing() async throws {
-        let (supervisor, coordinator, recorder, _, _) = makeHarness()
+        let (supervisor, coordinator, recorder, _, _, _) = makeHarness()
         let paneID = "%9"
         let key = PaneKey(server: server, paneID: paneID)
         // Capture-only wiring: the test dispatches the stale signal BY HAND
@@ -500,10 +615,7 @@ struct PaneRepairCoordinatorTests {
                     successorRead.set(fd)
                 }
                 return client
-            },
-            writableCheckInterval: .milliseconds(10),
-            writableSlowInterval: .milliseconds(25),
-            writableEscalationThreshold: .milliseconds(50))
+            })
         supervisor.fanout.onOverflowRepair = { _, _ in }
         defer { if successorRead.fd >= 0 { Darwin.close(successorRead.fd) } }
 
@@ -526,7 +638,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("superseded mid reader-wait: sink replaced while the pipe is full → silent exit, no continue, successor untouched")
     func supersededMidReaderWaitExitsSilently() async throws {
-        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let (supervisor, coordinator, recorder, client, _, clock) = makeHarness()
         let paneID = "%11"
         let key = PaneKey(server: server, paneID: paneID)
         let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
@@ -540,7 +652,7 @@ struct PaneRepairCoordinatorTests {
         // The pause reply lands while gen-1 still owns the pane: the repair
         // enters the reader-wait (the pipe is full — read1 is never drained).
         await succeed(client, [[]])
-        try await Task.sleep(for: .milliseconds(100))
+        await clock.waitForSuspension()
         #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
         #expect(await coordinator.isInFlight(key) == true, "the repair must be parked in the reader-wait")
 
@@ -550,10 +662,14 @@ struct PaneRepairCoordinatorTests {
         // the successor.
         let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(read2) }
+        // Wake the parked wait loop so it re-checks writability and observes
+        // the supersession (`nil`). The exit itself then bounds the negative
+        // assertions below — the repair task is gone, so no later write can
+        // appear.
+        await clock.advanceWhenSuspended(by: checkInterval)
         try await waitFor("repair exit") {
             await coordinator.isInFlight(key) == false
         }
-        try await Task.sleep(for: .milliseconds(200))  // bounded negative check
         #expect(recorder.writes.count == 1, "a mid-wait supersession must send NOTHING after the pause")
         #expect(!recorder.writes.contains { $0.contains("capture-pane") })
         #expect(!recorder.writes.contains { $0.contains(":continue'") })
@@ -575,12 +691,14 @@ struct PaneRepairCoordinatorTests {
         // `onOverflowRepair` closure installed in the bridge's init.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
+        let clock = TestClock<Duration>()
         let bridge = TmuxControlModeBridge(
             supervisor: supervisor,
             tmuxVersion: TmuxVersion(major: 3, minor: 6),
             environment: [:],
             fdVending: FDVendingServer(),
-            commandProvider: { [server] in $0 == server ? client : nil })
+            commandProvider: { [server] in $0 == server ? client : nil },
+            clock: clock)
         let paneID = "%12"
         let key = PaneKey(server: server, paneID: paneID)
         let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
@@ -597,7 +715,11 @@ struct PaneRepairCoordinatorTests {
 
         // Complete the cycle so the repair task doesn't outlive the test.
         await succeed(client, [[]])
+        // The default coordinator parks on the BRIDGE's clock — proof the
+        // bridge threaded its clock into the coordinator it constructed.
+        await clock.waitForSuspension()
         drainPipe(readFD)
+        await clock.advanceWhenSuspended(by: checkInterval)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
         await succeed(client, captureAndContinueReplies(paneID: paneID))
         try await waitFor("repair completion") {
@@ -610,7 +732,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("swallowed successor overflow: gen-2's signal deduped while gen-1 is parked → exit re-dispatch heals gen-2")
     func swallowedSuccessorOverflowIsReDispatched() async throws {
-        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let (supervisor, coordinator, recorder, client, _, _) = makeHarness()
         let paneID = "%6"
         let key = PaneKey(server: server, paneID: paneID)
 
@@ -663,8 +785,8 @@ struct PaneRepairCoordinatorTests {
         try await waitFor("gen-2 pause write (re-dispatch)") { recorder.writes.count >= 2 }
         try #require(recorder.writes.count >= 2, "the swallowed gen-2 repair was never re-dispatched")
         #expect(recorder.writes[1] == "refresh-client -A '%6:pause'")
-        await succeed(client, [[]])  // gen-2 pause reply
-        drainPipe(read2)             // the reader catches up
+        drainPipe(read2)             // the reader catches up before the wait starts
+        await succeed(client, [[]])  // gen-2 pause reply → writable on the first check
         try await waitFor("gen-2 captures+continue write") { recorder.writes.count >= 3 }
         try #require(recorder.writes.count >= 3, "gen-2's captures+continue were never sent")
         #expect(recorder.writes[2].hasSuffix("refresh-client -A '%6:continue'"))
@@ -689,7 +811,7 @@ struct PaneRepairCoordinatorTests {
 
     @Test("%error'd batched continue: the repair completes AND retries one tolerate-errors continue")
     func erroredBatchedContinueRetriesAfterEndRepair() async throws {
-        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let (supervisor, coordinator, recorder, client, _, _) = makeHarness()
         _ = coordinator
         let paneID = "%7"
         let key = PaneKey(server: server, paneID: paneID)
@@ -700,8 +822,8 @@ struct PaneRepairCoordinatorTests {
 
         overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
         try await waitFor("pause write") { recorder.writes.count >= 1 }
-        await succeed(client, [[]])  // pause reply
-        drainPipe(readFD)            // reader catches up
+        drainPipe(readFD)            // reader catches up before the wait starts
+        await succeed(client, [[]])  // pause reply → writable on the first check
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
 
         // All six captures succeed; the batched continue %errors (tolerated

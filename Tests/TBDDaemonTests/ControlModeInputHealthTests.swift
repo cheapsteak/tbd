@@ -34,7 +34,6 @@ struct ControlModeInputHealthTests {
     /// Poll until `recorder` has at least `count` health events (shared
     /// `waitFor`, which keeps the post-deadline re-check this suite needed
     /// under parallel-suite load).
-    @discardableResult
     private func waitForEvents(_ recorder: HealthRecorder, count: Int,
                                sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
         try await waitFor("\(count) health events", sourceLocation: sourceLocation) {
@@ -42,7 +41,6 @@ struct ControlModeInputHealthTests {
         }
     }
 
-    @discardableResult
     private func waitForWrites(_ recorder: LineRecorder, count: Int,
                                sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
         try await waitFor("\(count) stream writes", sourceLocation: sourceLocation) {
@@ -125,7 +123,7 @@ struct ControlModeInputHealthTests {
         router.enqueue(header: header, bytes: Data([0xff]))   // succeeds
         router.enqueue(header: header, bytes: Data([0xff]))   // steady healthy: no event
 
-        try await waitForEvents(health, count: 2)
+        try #require(await waitForEvents(health, count: 2))
         // Give the third completion time to land, then confirm no third event.
         try await Task.sleep(for: .milliseconds(50))
         #expect(health.events.map(\.healthy) == [false, true])
@@ -141,7 +139,7 @@ struct ControlModeInputHealthTests {
 
         for i in 0..<5 { router.enqueue(header: header, bytes: Data([UInt8(i)])) }
 
-        try await waitForWrites(recorder, count: 5)
+        try #require(await waitForWrites(recorder, count: 5))
         try await Task.sleep(for: .milliseconds(50))   // let completions drain
         #expect(health.events.isEmpty)
         router.shutdown()
@@ -160,7 +158,7 @@ struct ControlModeInputHealthTests {
         router.enqueue(header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%0"),
                        bytes: Data([0x42]))
 
-        try await waitForWrites(recorder, count: 1)
+        try #require(await waitForWrites(recorder, count: 1))
         try await Task.sleep(for: .milliseconds(50))
         #expect(health.events.isEmpty)
         router.shutdown()
@@ -181,7 +179,7 @@ struct ControlModeInputHealthTests {
         router.enqueue(header: header, bytes: Data([0x41]))
         router.enqueue(header: header, bytes: Data([0x42]))   // steady failing: no 2nd event
 
-        try await waitForEvents(health, count: 1)
+        try #require(await waitForEvents(health, count: 1))
         try await Task.sleep(for: .milliseconds(50))
         #expect(health.events.map(\.healthy) == [false])
         router.shutdown()
@@ -200,7 +198,7 @@ struct ControlModeInputHealthTests {
         router.enqueuePaste(header: header, bytes: Data(repeating: 0x50, count: 1024))
         router.enqueue(header: header, bytes: Data([0x5a]))
 
-        try await waitForEvents(health, count: 2)
+        try #require(await waitForEvents(health, count: 2))
         #expect(health.events.map(\.healthy) == [false, true])
         router.shutdown()
     }
@@ -213,14 +211,14 @@ struct ControlModeInputHealthTests {
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
 
         router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 1
-        try await waitForEvents(health, count: 1)
+        try #require(await waitForEvents(health, count: 1))
 
         // Detach then re-attach: state must reset WITHOUT a recovery event.
         router.unregister(worktreeID: worktreeID, paneID: "%0")
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
 
         router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 2
-        try await waitForEvents(health, count: 2)
+        try #require(await waitForEvents(health, count: 2))
         #expect(health.events.map(\.healthy) == [false, false])
         router.shutdown()
     }
@@ -235,7 +233,7 @@ struct ControlModeInputHealthTests {
         router.enqueue(header: header, bytes: Data([0x41]))   // fails → failing event
         router.enqueue(header: header, bytes: Data([0xff]))   // succeeds → recovery event
 
-        try await waitForEvents(health, count: 2)
+        try #require(await waitForEvents(health, count: 2))
         // Both edges are stamped with the registered attach generation, so
         // the app can refuse a stale attach's failure against a fresh attach.
         #expect(health.events.map(\.generation) == [42, 42])
@@ -244,7 +242,7 @@ struct ControlModeInputHealthTests {
         // events carry it — never the stale one.
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv", generation: 43)
         router.enqueue(header: header, bytes: Data([0x41]))   // fails again → event 3
-        try await waitForEvents(health, count: 3)
+        try #require(await waitForEvents(health, count: 3))
         #expect(health.events.last?.generation == 43)
         router.shutdown()
     }
@@ -257,7 +255,7 @@ struct ControlModeInputHealthTests {
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
 
         router.enqueue(header: header, bytes: Data([0x41]))
-        try await waitForEvents(health, count: 1)
+        try #require(await waitForEvents(health, count: 1))
         #expect(health.events.map(\.generation) == [nil])
         router.shutdown()
     }
@@ -270,7 +268,7 @@ struct ControlModeInputHealthTests {
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
 
         router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 1
-        try await waitForEvents(health, count: 1)
+        try #require(await waitForEvents(health, count: 1))
 
         // Re-attach WITHOUT the detach's unregister (the pane.detach RPC was
         // lost): the fresh attach must still start from a healthy baseline —
@@ -278,7 +276,7 @@ struct ControlModeInputHealthTests {
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
 
         router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 2
-        try await waitForEvents(health, count: 2)
+        try #require(await waitForEvents(health, count: 2))
         #expect(health.events.map(\.healthy) == [false, false])
         router.shutdown()
     }
