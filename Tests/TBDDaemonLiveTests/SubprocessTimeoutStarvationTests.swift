@@ -1,5 +1,7 @@
+import Clocks
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 
 /// Regression coverage for the dispatch-pool-starvation flake behind three CI
@@ -27,7 +29,42 @@ import Testing
 /// `.serialized`, keeps the saturation window as short as possible, and ALWAYS
 /// releases every parked work item in a path that runs regardless of the
 /// call's outcome. Never leave the pool parked past the end of a test.
-@Suite("Subprocess timeout under dispatch-pool starvation", .serialized)
+///
+/// WHY THESE TESTS PASS A `TestClock` THEY NEVER ADVANCE — and it is the
+/// opposite of virtualizing the deadline. `runBoundedProcess` arms its deadline
+/// twice: on the `SubprocessWatchdog` thread and on the injected clock. The
+/// clock armer sleeps on the *cooperative* executor, a different pool from the
+/// libdispatch global queue this suite floods, so with a real clock it could
+/// fire first and satisfy these assertions without the watchdog participating.
+/// A never-advanced `TestClock` disables that armer, leaving the deadline REAL
+/// and the satisfier set exactly as it was before the clock seam existed.
+///
+/// HOW THIS SUITE DISCRIMINATES THE WATCHDOG — `sleep 90` + `.clockDriven`, and
+/// both halves are load-bearing. A THIRD mechanism can also report `.timedOut`:
+/// the completion path's AUTHORITY check
+/// (`ContinuousClock.now - start >= timeout`). With the watchdog deleted, the
+/// child runs to natural completion and the authority check then reports
+/// `.timedOut` on its own — so the assertion is satisfied without the watchdog
+/// participating at all. Measured, against the previous `sleep 3`: deleting the
+/// watchdog armer left both tests PASSING, in 8.03s instead of 5.15s (the extra
+/// ~2.9s being the child running out).
+///
+/// That was true from the moment the authority check landed — it shipped in the
+/// same fix as the watchdog, so this suite never discriminated between them, and
+/// the "on the pre-fix code they fail" claim above held only against code that
+/// had neither.
+///
+/// The fix is to make the authority path TOO SLOW to satisfy the test: a 90s
+/// child outlives `.clockDriven`'s 60s limit, so a broken watchdog surfaces as a
+/// time-limit failure, while a working one still SIGKILLs at ~100ms and the
+/// suite costs exactly what it did before. A hang-catcher, not a wall-clock
+/// tolerance — the distinction that keeps this out of hygiene rule 2.
+///
+/// **Both parts are required.** `sleep 90` alone changes nothing without the
+/// time limit (the authority path would simply take 90s and pass), and the time
+/// limit alone changes nothing with a 3s child. Verified by mutation: deleting
+/// the watchdog armer turns both tests RED.
+@Suite("Subprocess timeout under dispatch-pool starvation", .serialized, .clockDriven)
 struct SubprocessTimeoutStarvationTests {
 
     /// Number of blocking work items to flood the default-QoS pool with. The
@@ -98,9 +135,10 @@ struct SubprocessTimeoutStarvationTests {
             do {
                 _ = try await TmuxManager.runExternalCommand(
                     executable: "/bin/sleep",
-                    arguments: ["3"],
+                    arguments: ["90"],
                     label: "starvation-test",
-                    timeout: .milliseconds(100)
+                    timeout: .milliseconds(100),
+                    clock: TestClock()  // never advanced — isolates the watchdog; see suite doc
                 )
                 Issue.record("expected runExternalCommand to time out under pool saturation, but it returned")
             } catch let error as TmuxError {
@@ -115,12 +153,13 @@ struct SubprocessTimeoutStarvationTests {
     }
 
     @Test func gitRunTimesOutEvenWhenPoolSaturated() async {
-        let git = GitManager(subprocessTimeout: .milliseconds(100))
+        // TestClock never advanced — disables the clock armer; see suite doc.
+        let git = GitManager(subprocessTimeout: .milliseconds(100), clock: TestClock())
         await withSaturatedGlobalPool {
             do {
                 _ = try await git.runForTimeoutTesting(
                     executable: "/bin/sleep",
-                    arguments: ["3"],
+                    arguments: ["90"],
                     at: FileManager.default.temporaryDirectory.path
                 )
                 Issue.record("expected runForTimeoutTesting to time out under pool saturation, but it returned")

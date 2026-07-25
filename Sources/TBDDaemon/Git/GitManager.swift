@@ -79,8 +79,15 @@ public struct GitManager: Sendable {
     /// Per-instance timeout; tests inject a tiny value to exercise the kill path.
     let subprocessTimeout: Duration
 
-    public init(subprocessTimeout: Duration = GitManager.commandTimeout) {
+    /// Behavior seam for the subprocess deadline (`Tests/CLAUDE.md`, "Clock and
+    /// date seams"). Tests pass a `TestClock` to fire — or never fire — the
+    /// timeout in virtual time instead of racing a real one on a loaded runner.
+    let clock: any Clock<Duration>
+
+    public init(subprocessTimeout: Duration = GitManager.commandTimeout,
+                clock: any Clock<Duration> = ContinuousClock()) {
         self.subprocessTimeout = subprocessTimeout
+        self.clock = clock
     }
 
     // MARK: - Public API
@@ -657,7 +664,8 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
-            timeout: resolvedTimeout
+            timeout: resolvedTimeout,
+            clock: clock
         ) {
         case .timedOut:
             logger.warning("git subprocess timed out after \(resolvedTimeout, privacy: .public): \(commandDescription, privacy: .public)")
