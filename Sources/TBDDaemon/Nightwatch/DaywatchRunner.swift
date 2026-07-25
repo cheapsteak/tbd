@@ -104,6 +104,7 @@ public actor DaywatchRunner {
     private let executor: DaywatchExecuting
     private let deskSessionManager: (any DeskSessionManaging)?
     private let interval: TimeInterval
+    private let clock: any Clock<Duration>
 
     // MARK: - State
 
@@ -142,11 +143,13 @@ public actor DaywatchRunner {
     public init(
         executor: DaywatchExecuting,
         deskSessionManager: (any DeskSessionManaging)? = nil,
-        interval: TimeInterval = DaywatchRunner.defaultInterval
+        interval: TimeInterval = DaywatchRunner.defaultInterval,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.executor = executor
         self.deskSessionManager = deskSessionManager
         self.interval = interval
+        self.clock = clock
     }
 
     // MARK: - Public API
@@ -274,13 +277,15 @@ public actor DaywatchRunner {
         // Then sleep and loop
         while !Task.isCancelled {
             do {
-                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-                try await Task.sleep(for: .seconds(interval))
+                try await clock.sleep(for: .seconds(interval))
             } catch {
-                // Cancelled during sleep
+                // Any error from the clock ends the loop; for the clocks in use
+                // (ContinuousClock, TestClock) the only throw is cancellation.
                 return
             }
 
+            // A sleep that resumed *before* cancellation landed must not fall
+            // through to a tick — this re-check is what stops it.
             if Task.isCancelled { return }
 
             await runOnce()
