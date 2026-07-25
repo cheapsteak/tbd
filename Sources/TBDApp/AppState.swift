@@ -76,6 +76,13 @@ final class AppState: ObservableObject {
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
     @Published var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    /// Unread notification summaries for remote sessions, keyed by
+    /// `RemoteSessionSelection` (provider + provider-minted session id —
+    /// remote sessions have no UUID). Mirrors `unreadByWorktree`: written by
+    /// `handleRemoteSessionAttentionDelta` when an attention delta arrives,
+    /// cleared by `selectRemoteSession`. App-local and in-memory only, same
+    /// as `unreadByWorktree` — not persisted across restarts.
+    @Published var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
     /// Terminal IDs that fired a `.responseComplete` notification while their
     /// tab was NOT the active tab of a focused worktree. Drives the bold tab
     /// label in `TabBar`, mirroring the worktree-row bold. App-local and
@@ -112,6 +119,7 @@ final class AppState: ObservableObject {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 selectedScratchSection = false
+                selectedRemoteSession = nil
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
@@ -165,6 +173,13 @@ final class AppState: ObservableObject {
     /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`
     /// integration for v1 (documented scope cut — see `selectScratchSection()`).
     @Published var selectedScratchSection: Bool = false
+    /// Selected — set when a `RemoteSectionView` session row is clicked, shows
+    /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
+    /// `selectedScratchSection` but keyed by the provider/session composite id
+    /// rather than a UUID (see `RemoteSessionSelection` in
+    /// `AppState+Navigation.swift`); same documented scope cut — no
+    /// `NavigationEntry` integration for v1.
+    @Published var selectedRemoteSession: RemoteSessionSelection? = nil
 
     // MARK: - Navigation history (back/forward)
 
@@ -218,6 +233,25 @@ final class AppState: ObservableObject {
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     @Published var remoteSessions: [RemoteSessionInfo] = []
+    /// TBD-owned display-name overrides for remote sessions, keyed by
+    /// `AppState.remoteSessionKey(provider:sessionID:)`. Mirrors the
+    /// worktree pattern (`Worktree.displayName` living in TBD's own DB
+    /// rather than being derived from git) — except a remote session has no
+    /// TBD-owned DB row of its own (the daemon's `remote_session` table is
+    /// explicitly a drift-tracking mirror of provider-owned state, never
+    /// authoritative — see `docs/remote-provider-contract.md` § Identity &
+    /// drift), so this lives client-side in UserDefaults instead of a new
+    /// daemon column. Emoji has no separate field, same as `Worktree` — the
+    /// user types `:emoji:` inline via `RenameableLabel` and it ends up as
+    /// plain leading characters in the stored string. Pushing a rename to a
+    /// provider that declares the `rename` capability (contract v1
+    /// amendment) is future work; this map is the seam that work will read
+    /// from — renames already funnel through `renameRemoteSession(provider:
+    /// sessionID:displayName:)` alone, so adding a push there later doesn't
+    /// require touching call sites.
+    @Published var remoteSessionDisplayNames: [String: String] = [:] {
+        didSet { persistRemoteSessionDisplayNames() }
+    }
 
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
@@ -769,6 +803,7 @@ final class AppState: ObservableObject {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+    private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
@@ -782,6 +817,7 @@ final class AppState: ObservableObject {
         self.userDefaults = userDefaults
         restoreLayouts()
         restorePaneHistories()
+        restoreRemoteSessionDisplayNames()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
@@ -980,6 +1016,42 @@ final class AppState: ObservableObject {
         // Corrupt/skewed persisted data with an out-of-range cursor would
         // crash entries[cursor] lookups in the pane header's view body.
         paneHistories = restored.filter { $0.value.isWellFormed }
+    }
+
+    private func persistRemoteSessionDisplayNames() {
+        guard let data = try? JSONEncoder().encode(remoteSessionDisplayNames) else { return }
+        userDefaults.set(data, forKey: Self.remoteSessionDisplayNamesKey)
+    }
+
+    private func restoreRemoteSessionDisplayNames() {
+        guard let data = userDefaults.data(forKey: Self.remoteSessionDisplayNamesKey),
+              let restored = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        remoteSessionDisplayNames = restored
+    }
+
+    /// Composite key into `remoteSessionDisplayNames`. `\u{0}` separates the
+    /// two components so a provider name/session id containing `::` (or any
+    /// other printable separator) can't collide two distinct sessions onto
+    /// the same key.
+    nonisolated static func remoteSessionKey(provider: String, sessionID: String) -> String {
+        "\(provider)\u{0}\(sessionID)"
+    }
+
+    /// The name a remote-session row should render: the local TBD-owned
+    /// override when the user has renamed it, else the provider's reported
+    /// `title`, else the raw session id. Mirrors `Worktree.displayName`
+    /// falling back to git-derived `name` — a TBD-owned name always wins
+    /// over an externally-sourced one.
+    func remoteSessionDisplayName(provider: String, sessionID: String, providerTitle: String?) -> String {
+        remoteSessionDisplayNames[Self.remoteSessionKey(provider: provider, sessionID: sessionID)]
+            ?? providerTitle ?? sessionID
+    }
+
+    /// Rename a remote session. TBD-owned and local-only for now — pushing
+    /// this to a provider that declares the `rename` capability is future
+    /// work (see `remoteSessionDisplayNames` doc comment).
+    func renameRemoteSession(provider: String, sessionID: String, displayName: String) {
+        remoteSessionDisplayNames[Self.remoteSessionKey(provider: provider, sessionID: sessionID)] = displayName
     }
 
     /// Pushes the outgoing content of an in-place slot replacement onto that
@@ -2128,6 +2200,15 @@ final class AppState: ObservableObject {
     /// in the signature for API stability with the existing call site.
     nonisolated static func scratchSectionVisible(setting: Bool, spaces: [Worktree]) -> Bool {
         setting
+    }
+
+    /// Pure, testable mirror of the sidebar's Remote-section gate: shown only
+    /// when at least one provider is registered. Unlike Scratch, there's no
+    /// user-facing "create the first one" affordance to keep reachable — a
+    /// provider is registered out-of-band (config), not created from this
+    /// section — so an empty roster simply hides the section entirely.
+    nonisolated static func remoteSectionVisible(providers: [RemoteProviderStatus]) -> Bool {
+        !providers.isEmpty
     }
 
     /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:

@@ -8,6 +8,17 @@ enum NavigationEntry: Equatable {
     case repo(UUID)
 }
 
+/// Identity of a selected remote-session sidebar row: the provider's
+/// registry name plus the provider-minted session id (see
+/// `docs/remote-provider-contract.md` § Identity & drift — sessions have no
+/// UUID, the provider mints an opaque string id). Parallel to
+/// `selectedScratchSection`/`selectedRepoID` but not folded into
+/// `NavigationEntry` — same documented back/forward scope cut as scratch.
+struct RemoteSessionSelection: Equatable, Hashable {
+    let provider: String
+    let sessionID: String
+}
+
 // MARK: - Sidebar reveal
 
 extension AppState {
@@ -202,6 +213,7 @@ extension AppState {
             if let leavingRepoID { clearRevivingArchived(repoID: leavingRepoID) }
             selectedRepoID = nil
             selectedScratchSection = false
+            selectedRemoteSession = nil
             selectedWorktreeIDs = Set(ids)
             selectionOrder = ids // must come after; didSet above rebuilds from unordered Set
         case .repo(let id):
@@ -211,6 +223,7 @@ extension AppState {
             selectedWorktreeIDs = []
             selectedRepoID = id
             selectedScratchSection = false
+            selectedRemoteSession = nil
             Task { await refreshArchivedWorktrees(repoID: id) }
             Task { await refreshReapRecords(repoID: id) }
         }
@@ -225,4 +238,23 @@ extension AppState {
         }
     }
 
+}
+
+extension AppState {
+    /// Select a remote-session sidebar row: shows `RemoteSessionDetailView`
+    /// (Task 10) in the content pane. Mirrors `selectScratchSection()`/
+    /// `selectRepo(id:)` — clears the other three mutually-exclusive sidebar
+    /// selections. Also clears this session's unread entry, mirroring
+    /// `markSelectedWorktreesAsRead`'s optimistic local clear-on-select — the
+    /// daemon has no per-remote-session read-state to round-trip, so this is
+    /// purely a local bookkeeping clear.
+    func selectRemoteSession(provider: String, sessionID: String) {
+        highlightedArchivedWorktreeID = nil
+        selectedWorktreeIDs = []
+        selectedRepoID = nil
+        selectedScratchSection = false
+        let selection = RemoteSessionSelection(provider: provider, sessionID: sessionID)
+        selectedRemoteSession = selection
+        unreadByRemoteSession[selection] = nil
+    }
 }

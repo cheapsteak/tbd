@@ -72,16 +72,64 @@ extension AppState {
         delta.reason ?? delta.provider
     }
 
+    /// Maps a `RemoteSessionAttentionDelta.kind` (the agent state's raw
+    /// value that triggered the delta — `"waiting_input"` or `"exited"`) to
+    /// the same `NotificationType` vocabulary local unread bookkeeping uses,
+    /// so `RowStatusIndicator.shouldBoldName` and severity-merge logic work
+    /// unmodified for remote rows. `exitCode` disambiguates `"exited"`:
+    /// nonzero is an error, zero or unknown is a clean completion. Returns
+    /// nil for any other kind (shouldn't occur per the contract — only
+    /// these two agent-state transitions are attention-worthy).
+    nonisolated static func remoteUnreadType(kind: String, exitCode: Int?) -> NotificationType? {
+        switch kind {
+        case RemoteAgentState.waitingInput.rawValue:
+            return .attentionNeeded
+        case RemoteAgentState.exited.rawValue:
+            return (exitCode ?? 0) != 0 ? .error : .responseComplete
+        default:
+            return nil
+        }
+    }
+
     /// Post a user-facing banner for a remote session crossing a
-    /// notify-worthy agent-state edge. Remote sessions have no worktree, so
+    /// notify-worthy agent-state edge, and record it in `unreadByRemoteSession`
+    /// so the sidebar row's name bolds (`RowStatusIndicator.shouldBoldName`,
+    /// same as local worktree rows). Remote sessions have no worktree, so
     /// this does NOT go through `handleNotificationDelta`'s worktree-routing
-    /// / unread bookkeeping — it posts directly via the dedicated,
-    /// worktree-free `MacNotificationManager.postRemoteAttention`.
+    /// — it posts directly via the dedicated, worktree-free
+    /// `MacNotificationManager.postRemoteAttention`, and writes the unread
+    /// map itself rather than reusing that function's bookkeeping.
+    ///
+    /// Note this bookkeeping is edge-triggered (fires once per delta,
+    /// cleared on `selectRemoteSession`) — separate from the STEADY-state
+    /// `waiting_input` suffix glyph the row renders directly from
+    /// `agentState` on every poll (see `RemoteSessionRowView`). The bold
+    /// name says "you haven't looked since this happened"; the suffix glyph
+    /// says "this is still true right now". They can disagree (bold clears
+    /// on select even though the session may still be waiting for input),
+    /// and that's intentional.
     func handleRemoteSessionAttentionDelta(_ delta: RemoteSessionAttentionDelta) {
         macNotificationManager.postRemoteAttention(
             identifier: "remote:\(delta.provider):\(delta.sessionID)",
             title: AppState.remoteAttentionTitle(delta),
             body: AppState.remoteAttentionBody(delta)
         )
+
+        let selection = RemoteSessionSelection(provider: delta.provider, sessionID: delta.sessionID)
+        // Currently viewing this session — no unread to record, mirrors the
+        // `visible` guard in `handleNotificationDelta`.
+        guard selectedRemoteSession != selection else { return }
+        let exitCode = remoteSessions.first {
+            $0.provider == delta.provider && $0.payload.id == delta.sessionID
+        }?.payload.exitCode
+        guard let type = AppState.remoteUnreadType(kind: delta.kind, exitCode: exitCode) else { return }
+
+        let incoming = UnreadSummary(type: type, mostRecentAt: Date())
+        if let existing = unreadByRemoteSession[selection] {
+            let winnerType = incoming.type.severity > existing.type.severity ? incoming.type : existing.type
+            unreadByRemoteSession[selection] = UnreadSummary(type: winnerType, mostRecentAt: incoming.mostRecentAt)
+        } else {
+            unreadByRemoteSession[selection] = incoming
+        }
     }
 }
