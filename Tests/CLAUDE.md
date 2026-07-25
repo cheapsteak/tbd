@@ -43,7 +43,10 @@ in the parallel pass is merely the status quo, but moving a fast
 deterministic suite into the serial pass taxes every PR forever. When in
 doubt, leave it in the parallel pass.
 
-New tests should state their tier. Tier-1 tests contain no real sleeps.
+New tests should state their tier. Tier-1 tests put no real sleep in the
+*behaviour under test* — the code under test is driven entirely by virtual
+time. The scheduling handshake that observes it may still sleep; see "Clock and
+date seams" below for why that is not a tier violation.
 
 ## Assertion hygiene
 
@@ -89,9 +92,28 @@ and the migration is behavior-preserving by construction. **Existential, not
 generic**, and not named `scheduler`: these subsystems are actors carrying
 `Sendable` conformances, and a generic parameter would infect their types.
 
-Tests pass `TestClock` and drive time with `advanceWhenSuspended(by:)` — no
-sleeping, no load sensitivity, and exact virtual timings instead of tolerance
-windows.
+Tests pass `TestClock` and drive time with `advanceWhenSuspended(by:)`, which
+buys exact virtual timings instead of tolerance windows.
+
+**Where the real sleeps went — the distinction to keep straight.** "No real
+sleeps" applies to the *behaviour under test*: it never waits on wall time, so
+its assertions are exact and load-independent. It does **not** mean the process
+never sleeps. `advanceWhenSuspended` has to observe that the code under test
+has actually reached its `sleep`, and that is real task scheduling, not virtual
+time — so it polls with a real `Task.sleep` against a deadline (bounded
+polling, rule 3 above). Spinning `Task.yield()` there instead does not
+converge: it keeps the waiter runnable and re-queues it behind the very task it
+is waiting for, and raising the budget makes it worse, not better.
+
+Consequence to design around: clock-driven suites are load-**tolerant**, not
+load-**independent**. `TestClock.advance(to:)` calls `Task.megaYield()` twice
+per advance inside swift-clocks — 20 background-QoS tasks each — so a large
+population of clock-driven tests running in parallel floods the pool with
+exactly the low-priority work each one is waiting on, and they starve each
+other. If a clock-driven suite fails on the arming handshake, reach for
+`@Suite(.serialized)` before reaching for a longer timeout: it narrows that one
+suite rather than the target, and measured on the appearance suite it was both
+reliable *and* faster.
 
 **The existential pins `Duration`, not `Instant`** — so it can express delays
 but not deadlines:
