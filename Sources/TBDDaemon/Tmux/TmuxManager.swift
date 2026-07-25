@@ -788,19 +788,26 @@ public struct TmuxManager: Sendable {
     ///
     /// Package-internal (not `private`) so timeout tests can drive it directly
     /// against a real slow binary (`/bin/sleep`) without a tmux server.
+    ///
+    /// `clock` is contract 1's shape applied to a static function rather than an
+    /// initializer (last parameter, named `clock`, defaulted, existential): it
+    /// arms the deadline a second time so tests can drive it in virtual time.
+    /// See `runBoundedProcess` for why the watchdog stays alongside it.
     @discardableResult
     static func runExternalCommand(
         executable: String,
         arguments: [String],
         label: String,
-        timeout: Duration
+        timeout: Duration,
+        clock: any Clock<Duration> = ContinuousClock()
     ) async throws -> String {
         let commandDescription = "\(label) " + arguments.joined(separator: " ")
         switch try await runBoundedProcess(
             executable: executable,
             arguments: arguments,
             currentDirectory: nil,
-            timeout: timeout
+            timeout: timeout,
+            clock: clock
         ) {
         case .timedOut:
             logger.warning("subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")

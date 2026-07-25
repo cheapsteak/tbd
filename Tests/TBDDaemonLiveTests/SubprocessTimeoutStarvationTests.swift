@@ -1,3 +1,4 @@
+import Clocks
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -27,6 +28,33 @@ import Testing
 /// `.serialized`, keeps the saturation window as short as possible, and ALWAYS
 /// releases every parked work item in a path that runs regardless of the
 /// call's outcome. Never leave the pool parked past the end of a test.
+///
+/// WHY THESE TESTS PASS A `TestClock` THEY NEVER ADVANCE — and it is the
+/// opposite of virtualizing the deadline. `runBoundedProcess` arms its deadline
+/// twice: on the `SubprocessWatchdog` thread and on the injected clock. The
+/// clock armer sleeps on the *cooperative* executor, a different pool from the
+/// libdispatch global queue this suite floods, so with a real clock it could
+/// fire first and satisfy these assertions without the watchdog participating.
+/// A never-advanced `TestClock` disables that armer, leaving the deadline REAL
+/// and the satisfier set exactly as it was before the clock seam existed.
+///
+/// **This does NOT isolate the watchdog, and do not read it as doing so.**
+/// Measured, by deleting the watchdog armer and re-running: both tests still
+/// PASS, in 8.03s instead of 5.15s. The extra ~2.9s is `sleep 3` running to
+/// natural completion, after which the completion path's AUTHORITY check
+/// (`ContinuousClock.now - start >= timeout`) reports `.timedOut` on its own.
+/// The authority check is a third satisfier, and it landed in the same fix as
+/// the watchdog — so this suite has never discriminated between them, and the
+/// doc claim that "on the pre-fix code they fail" held only against code that
+/// had neither.
+///
+/// Consequence, stated plainly because it is easy to assume otherwise: NOTHING
+/// IN THIS SUITE WOULD CATCH THE WATCHDOG BEING DELETED. Making it discriminate
+/// needs a child that outlives the `.clockDriven` limit (e.g. `sleep 90`, so the
+/// authority path blows the 60s hang limit while a working watchdog still kills
+/// at ~100ms and costs nothing) — a hang-catcher rather than a wall-clock
+/// tolerance. Deliberately not done here; it is a change to what this suite
+/// claims, not to the clock seam C3 is landing.
 @Suite("Subprocess timeout under dispatch-pool starvation", .serialized)
 struct SubprocessTimeoutStarvationTests {
 
@@ -100,7 +128,8 @@ struct SubprocessTimeoutStarvationTests {
                     executable: "/bin/sleep",
                     arguments: ["3"],
                     label: "starvation-test",
-                    timeout: .milliseconds(100)
+                    timeout: .milliseconds(100),
+                    clock: TestClock()  // never advanced — isolates the watchdog; see suite doc
                 )
                 Issue.record("expected runExternalCommand to time out under pool saturation, but it returned")
             } catch let error as TmuxError {
@@ -115,7 +144,8 @@ struct SubprocessTimeoutStarvationTests {
     }
 
     @Test func gitRunTimesOutEvenWhenPoolSaturated() async {
-        let git = GitManager(subprocessTimeout: .milliseconds(100))
+        // TestClock never advanced — isolates the watchdog; see suite doc.
+        let git = GitManager(subprocessTimeout: .milliseconds(100), clock: TestClock())
         await withSaturatedGlobalPool {
             do {
                 _ = try await git.runForTimeoutTesting(
