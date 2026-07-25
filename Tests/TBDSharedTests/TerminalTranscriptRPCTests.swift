@@ -45,6 +45,26 @@ struct TerminalTranscriptRPCTests {
         let decoded = try JSONDecoder().decode(TerminalTranscriptItemFullBodyParams.self, from: data)
         #expect(decoded.terminalID == original.terminalID)
         #expect(decoded.itemID == "toolu_abc")
+        #expect(decoded.includeBody, "the body is included unless a caller opts out")
+    }
+
+    @Test func fullBody_params_roundtrip_metadata_only() throws {
+        let original = TerminalTranscriptItemFullBodyParams(
+            terminalID: UUID(), itemID: "att-acme", includeBody: false)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TerminalTranscriptItemFullBodyParams.self, from: data)
+        #expect(!decoded.includeBody)
+    }
+
+    /// A client predating the field omits it entirely — the daemon must decode
+    /// it as the body-carrying request it used to be.
+    @Test func fullBody_params_decode_without_includeBody_key_defaults_to_true() throws {
+        let id = UUID()
+        let json = Data(#"{"terminalID":"\#(id.uuidString)","itemID":"toolu_legacy"}"#.utf8)
+        let decoded = try JSONDecoder().decode(TerminalTranscriptItemFullBodyParams.self, from: json)
+        #expect(decoded.terminalID == id)
+        #expect(decoded.itemID == "toolu_legacy")
+        #expect(decoded.includeBody)
     }
 
     @Test func fullBody_result_codable_roundtrip() throws {

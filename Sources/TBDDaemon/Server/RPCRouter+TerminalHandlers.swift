@@ -2122,8 +2122,12 @@ extension RPCRouter {
         }
         let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
 
+        // `includeBody: false` only keeps the body off the wire: the body string
+        // falls out of the very same single JSONL pass that produces the
+        // metadata (an attachment row's payloads must be extracted just to
+        // recognize it as one), so there is no parser work to skip.
         return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(
-            text: detail.text ?? "Output no longer available.",
+            text: params.includeBody ? (detail.text ?? "Output no longer available.") : "",
             attachment: detail.attachment))
     }
 }

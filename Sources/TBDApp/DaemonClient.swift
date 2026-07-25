@@ -1515,11 +1515,15 @@ actor DaemonClient {
     }
 
     /// Fetch the un-truncated body for a single transcript item (for
-    /// "Show full output" expansion).
-    func terminalTranscriptItemFullBody(terminalID: UUID, itemID: String) async throws -> TerminalTranscriptItemFullBodyResult {
+    /// "Show full output" expansion). Pass `includeBody: false` to fetch only
+    /// the injection metadata, leaving a potentially huge body off the wire.
+    func terminalTranscriptItemFullBody(
+        terminalID: UUID, itemID: String, includeBody: Bool = true
+    ) async throws -> TerminalTranscriptItemFullBodyResult {
         return try await callAsync(
             method: RPCMethod.terminalTranscriptItemFullBody,
-            params: TerminalTranscriptItemFullBodyParams(terminalID: terminalID, itemID: itemID),
+            params: TerminalTranscriptItemFullBodyParams(
+                terminalID: terminalID, itemID: itemID, includeBody: includeBody),
             resultType: TerminalTranscriptItemFullBodyResult.self
         )
     }

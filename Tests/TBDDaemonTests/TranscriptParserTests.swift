@@ -848,6 +848,30 @@ struct TranscriptParserTests {
         #expect(reminders(TranscriptParser.parse(filePath: tmp)).first?.source == "notes.md")
     }
 
+    // The `~` abbreviation must match whole path components. A substring
+    // replace of `NSHomeDirectory()` mangled sibling and nested paths.
+    @Test func injectedPath_tilde_abbreviation_is_component_boundary_aware() {
+        let home = NSHomeDirectory()
+        let leaf = (home as NSString).lastPathComponent
+        let parent = (home as NSString).deletingLastPathComponent
+
+        // A genuine home-prefixed path abbreviates.
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: "\(home)/acme-prod/CLAUDE.md", filename: nil)
+            == "~/acme-prod/CLAUDE.md")
+
+        // A *sibling* directory whose name merely starts with the home leaf is
+        // a different directory and must be left alone.
+        let sibling = "\(parent)/\(leaf)log-archive/CLAUDE.md"
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: sibling, filename: nil) == sibling)
+
+        // Home appearing mid-path (an external volume) must not be spliced.
+        let onVolume = "/Volumes/T7\(home)/notes.md"
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: onVolume, filename: nil) == onVolume)
+    }
+
     @Test func injectedPath_last_resort_is_the_display_paths_last_component() {
         // Neither an absolute path nor a filename: strip the escape prefix
         // rather than rendering `../../..`.

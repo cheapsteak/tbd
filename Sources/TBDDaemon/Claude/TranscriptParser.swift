@@ -466,12 +466,17 @@ enum TranscriptParser {
     ///
     /// Never returns a `../` prefix. The daemon runs as the same user as the
     /// app, so `NSHomeDirectory()` abbreviates identically on either side.
+    ///
+    /// The abbreviation goes through `abbreviatingWithTildeInPath`, which only
+    /// matches on path-component boundaries. A substring replace would turn
+    /// `/Users/changelog-archive/x` into `~elog-archive/x` and
+    /// `/Volumes/T7/Users/me/x` into `/Volumes/T7~/x`.
     static func injectedPathSource(
         displayPath: String?, absolutePath: String?, filename: String?
     ) -> String? {
         if let displayPath, !displayPath.isEmpty, !displayPath.hasPrefix("../") { return displayPath }
         if let absolutePath, !absolutePath.isEmpty {
-            return absolutePath.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            return (absolutePath as NSString).abbreviatingWithTildeInPath
         }
         if let filename, !filename.isEmpty { return filename }
         if let displayPath, !displayPath.isEmpty { return (displayPath as NSString).lastPathComponent }
