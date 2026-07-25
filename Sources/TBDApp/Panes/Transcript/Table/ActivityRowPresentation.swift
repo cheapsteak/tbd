@@ -61,6 +61,10 @@ struct ActivityRowPresentation: Equatable {
     let openTargetID: String?
     /// Title truncation: `.byTruncatingMiddle` for Read (file path), else tail.
     let titleTruncation: NSLineBreakMode
+    /// `NSView.toolTip` for the title field — set only where the visible title
+    /// hides something (a middle-truncated path). Nil elsewhere: a tooltip that
+    /// merely repeats a fully-visible short title is noise.
+    let titleTooltip: String?
     let style: RowStyle
 
     init(
@@ -71,6 +75,7 @@ struct ActivityRowPresentation: Equatable {
         badges: [ActivityRowBadge],
         openTargetID: String?,
         titleTruncation: NSLineBreakMode = .byTruncatingTail,
+        titleTooltip: String? = nil,
         style: RowStyle = .chrome
     ) {
         self.iconSystemName = iconSystemName
@@ -80,6 +85,7 @@ struct ActivityRowPresentation: Equatable {
         self.badges = badges
         self.openTargetID = openTargetID
         self.titleTruncation = titleTruncation
+        self.titleTooltip = titleTooltip
         self.style = style
     }
 }
@@ -425,7 +431,11 @@ enum ActivityRowFormatter {
             isError: false,
             badges: [ActivityRowBadge(text: label, kind: .neutral)],
             openTargetID: id,
-            titleTruncation: .byTruncatingMiddle
+            titleTruncation: .byTruncatingMiddle,
+            // Paths get middle-truncated to fit the row, so hovering must be
+            // able to reveal the whole thing. Hook names are short and fully
+            // visible — no tooltip for those.
+            titleTooltip: (kind == .nestedMemory) ? source.flatMap { $0.isEmpty ? nil : $0 } : nil
         )
     }
 

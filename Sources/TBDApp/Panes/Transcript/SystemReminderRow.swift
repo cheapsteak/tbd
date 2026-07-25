@@ -46,6 +46,9 @@ struct SystemReminderRow: View {
                     Text(source)
                         .truncationMode(.middle)
                         .lineLimit(1)
+                        // Middle-truncated paths need hover to reveal the whole
+                        // thing; hook names are short and need no tooltip.
+                        .help(kind == .nestedMemory ? source : "")
                     Text("· \(ActivityRowFormatter.injectedSize(text: text, truncatedTo: truncatedTo))")
                         .foregroundStyle(.tertiary)
                 }

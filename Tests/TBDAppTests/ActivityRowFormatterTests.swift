@@ -133,6 +133,24 @@ struct ActivityRowFormatterTests {
         #expect(p.openTargetID == "m1")
     }
 
+    @Test("Injected file path gets a hover tooltip carrying the untruncated path")
+    func nestedMemoryTitleCarriesTooltip() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "m2", kind: .nestedMemory, text: "# acme rules",
+            source: "~/scratch/acme/very/deep/nesting/iam-pr-body.md")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.titleTruncation == .byTruncatingMiddle)
+        #expect(p.titleTooltip == "~/scratch/acme/very/deep/nesting/iam-pr-body.md")
+    }
+
+    @Test("Hook rows get no tooltip — a short hook name is fully visible")
+    func hookRowHasNoTooltip() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "h2", kind: .hookOutput, text: "injected", source: "PostToolUse:Read")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.titleTooltip == nil)
+    }
+
     @Test("Injected hook context → 'hook' badge + '<hookName> · <size>' title")
     func hookAdditionalContextTitleCarriesHookName() throws {
         let node = TranscriptRenderNode.makeSystemReminder(

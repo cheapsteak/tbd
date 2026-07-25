@@ -1761,10 +1761,69 @@ public struct TerminalTranscriptItemFullBodyParams: Codable, Sendable {
     }
 }
 
+/// How one injected-context row got into the context window: the hook that ran
+/// (name, event, command, exit status, timing, stderr), the memory tier / path
+/// of a loaded file, and the tool call that triggered it.
+///
+/// Rides the `terminal.transcriptItemFullBody` round-trip rather than living on
+/// `TranscriptItem`: it is only read when a row is opened, and every extra
+/// associated value on `TranscriptItem.systemReminder` costs ~15 switch sites.
+/// Every field is optional — only what a row actually carries is populated, and
+/// the overlay omits the rest rather than rendering placeholders.
+public struct TranscriptAttachmentMetadata: Codable, Sendable, Equatable {
+    public let hookName: String?
+    public let hookEvent: String?
+    public let command: String?
+    public let exitCode: Int?
+    public let durationMs: Int?
+    public let stderr: String?
+    /// `nested_memory`'s inner `content.type` — the memory tier, e.g. "Project".
+    /// Passed through verbatim; the set of values is Claude Code's, not ours.
+    public let memoryType: String?
+    /// Absolute path of the loaded file, for display (tilde-abbreviated) and
+    /// copy (verbatim).
+    public let path: String?
+    /// Short summary of the `tool_use` named by `attachment.toolUseID`, e.g.
+    /// "Read ai-review-gate.yml". Nil when the row carries no `toolUseID` or
+    /// the id resolves to nothing — never guessed from row position.
+    public let triggeredBy: String?
+
+    public var isEmpty: Bool {
+        hookName == nil && hookEvent == nil && command == nil && exitCode == nil
+            && durationMs == nil && stderr == nil && memoryType == nil
+            && path == nil && triggeredBy == nil
+    }
+
+    public init(
+        hookName: String? = nil,
+        hookEvent: String? = nil,
+        command: String? = nil,
+        exitCode: Int? = nil,
+        durationMs: Int? = nil,
+        stderr: String? = nil,
+        memoryType: String? = nil,
+        path: String? = nil,
+        triggeredBy: String? = nil
+    ) {
+        self.hookName = hookName
+        self.hookEvent = hookEvent
+        self.command = command
+        self.exitCode = exitCode
+        self.durationMs = durationMs
+        self.stderr = stderr
+        self.memoryType = memoryType
+        self.path = path
+        self.triggeredBy = triggeredBy
+    }
+}
+
 public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
     public let text: String
-    public init(text: String) {
+    /// Present only for `attachment` rows (hook output, CLAUDE.md / file bodies).
+    public let attachment: TranscriptAttachmentMetadata?
+    public init(text: String, attachment: TranscriptAttachmentMetadata? = nil) {
         self.text = text
+        self.attachment = attachment
     }
 }
 

@@ -277,9 +277,10 @@ struct TranscriptOverlayView: View {
                     SkillBodyRowBody(text: text)
                 case .thinking(_, let text, _):
                     ThinkingRowBody(text: text)
-                case .systemReminder(let itemID, _, let text, _, _, let truncatedTo):
+                case .systemReminder(let itemID, let kind, let text, _, _, let truncatedTo):
                     SystemReminderRowBody(
                         id: itemID,
+                        kind: kind,
                         text: text,
                         truncatedTo: truncatedTo,
                         terminalID: f?.terminalID

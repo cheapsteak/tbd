@@ -2120,9 +2120,10 @@ extension RPCRouter {
             }
             primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         }
-        let text = TranscriptParser.lookupFullBody(filePath: primaryPath, itemID: params.itemID)
-            ?? "Output no longer available."
+        let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
 
-        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))
+        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(
+            text: detail.text ?? "Output no longer available.",
+            attachment: detail.attachment))
     }
 }
