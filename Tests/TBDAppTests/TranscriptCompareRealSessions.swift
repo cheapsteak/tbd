@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Loads REAL Claude Code session JSONL files into `[TranscriptItem]` for the
-/// env-gated visual-comparison harness (`TranscriptVisualCompareHarness`).
+/// env-gated visual-comparison harness (`TableTranscriptHarness`).
 ///
 /// The production parser (`TranscriptParser`) lives in `TBDDaemonLib`, which the
 /// `TBDAppTests` target does NOT link (it depends only on `TBDApp`). So this is

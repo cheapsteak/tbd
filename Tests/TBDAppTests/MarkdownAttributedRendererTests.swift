@@ -108,7 +108,7 @@ struct MarkdownAttributedRendererTests {
 
     @Test("GFM table becomes a single grid-view attachment carrying its cell text")
     func table() {
-        // `NSTextTable` does not lay out under STTextView's TextKit 2; the table
+        // `NSTextTable` grids are not used; the table
         // is now rendered as ONE `TranscriptCardAttachment` hosting a SwiftUI
         // grid. The cell strings live inside the view, not the attributed string,
         // so we assert the attachment + its parsed table data instead. (#129)

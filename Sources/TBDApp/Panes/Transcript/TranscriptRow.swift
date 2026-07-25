@@ -117,3 +117,41 @@ struct TranscriptRow: View {
         }
     }
 }
+
+/// Wraps a single `TranscriptRow` and owns its own hover state, so a hover
+/// re-renders ONLY the entered/exited row — the enclosing list body never
+/// re-runs on hover. This is the load-bearing half of the issue #129
+/// hover-rebuild fix: previously the hovered-row id lived on the list view as
+/// `@State`, so every mouse crossing re-ran the whole list body (rebuilding the
+/// node array, re-diffing the list, forcing AttributeGraph to deep-copy the
+/// input). Mirrors the per-row local-hover pattern already used by
+/// `ActivityRowChrome`.
+///
+/// The selection gate (`transcriptTextSelection`) is materialized only while
+/// this row is hovered, preserving the #120 fix that keeps at most one row's
+/// `NSTextField` alive at a time and avoids the ~17 s per-row-NSTextField storm.
+///
+/// Latch decision (issue #129): the previous gate was *latched* — it never
+/// cleared on hover-exit so a drag-select that wandered slightly outside the row
+/// survived. Per-row local state clears on exit instead, and that is safe:
+/// AppKit `NSTrackingArea`s (what SwiftUI `.onHover` is built on) do NOT post
+/// `mouseExited` during an active drag unless `.enabledDuringMouseDrag` is set,
+/// which `.onHover` does not. So while the button is held during a drag-select,
+/// `isHovered` stays `true` and the `NSTextField` is not torn down — the latch
+/// was only ever protecting a case AppKit already handles. Trade-off: if the
+/// pointer leaves the row with no button held, selection clears, which is
+/// acceptable since each row is its own `NSTextField` and selection cannot span
+/// rows anyway. This guarantee assumes the drag-select begins inside the row; a
+/// drag that starts outside never armed this row's selection in the first place.
+struct SelectableTranscriptRow: View {
+    let node: TranscriptRenderNode
+    let terminalID: UUID?
+
+    @State private var isHovered = false
+
+    var body: some View {
+        TranscriptRow(node: node, terminalID: terminalID)
+            .environment(\.transcriptTextSelection, isHovered)
+            .onHover { isHovered = $0 }
+    }
+}

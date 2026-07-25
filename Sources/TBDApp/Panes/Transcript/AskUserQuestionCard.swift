@@ -17,10 +17,10 @@ struct AskUserQuestionCard: View {
     /// When true the card renders at a STABLE height that never changes after
     /// first layout: question bubbles are always-expanded and non-collapsible,
     /// and the async `fetchFull`/`fetchFullInput` truncation footers are
-    /// suppressed. This is required for the read-only TextKit2 transcript, whose
-    /// card attachments reserve vertical space from a SINGLE measurement at
-    /// layout time — any post-measure growth would overlap the next message.
-    /// Defaults to false so the live (interactive) usage is unchanged. (#129)
+    /// suppressed. This is required by the NSTableView transcript renderer,
+    /// whose row-height cache reserves vertical space from a SINGLE measurement
+    /// at layout time — any post-measure growth would overlap the next message.
+    /// Defaults to false for previews/tests; the renderer sets it true. (#129)
     var staticHeight: Bool = false
 
     @State private var fullResultText: String? = nil
@@ -127,8 +127,8 @@ struct AskUserQuestionCard: View {
             }
 
             // The truncation footers trigger an async fetch that GROWS the card
-            // after first render. In `staticHeight` mode (the read-only TextKit2
-            // transcript) that post-measure growth would overlap the next
+            // after first render. In `staticHeight` mode (the single-measurement
+            // table renderer) that post-measure growth would overlap the next
             // message, so they're suppressed — the card shows content as
             // available at build time and never changes height. (#129)
             if !staticHeight {
@@ -216,7 +216,7 @@ private struct QuestionBubble: View {
     let selectedIndices: Set<Int>
     /// When true the bubble is always-expanded and the disclosure toggle is
     /// inert, so the bubble's height never changes after first render — required
-    /// by the single-measurement TextKit2 transcript attachment. (#129)
+    /// by the single-measurement table renderer's row-height cache. (#129)
     var staticHeight: Bool = false
 
     @State private var expanded = true

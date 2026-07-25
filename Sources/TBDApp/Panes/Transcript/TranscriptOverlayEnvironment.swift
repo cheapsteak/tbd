@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Closure injected by `LiveTranscriptPaneView` (which knows its bound
+/// Closure injected by the transcript pane (which knows its bound
 /// `terminalID`) so any transcript row card can request the overlay
 /// without knowing which terminal it belongs to. The closure takes only
 /// the item ID; the terminalID is captured at injection time.

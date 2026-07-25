@@ -1323,7 +1323,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
     }
 
     /// The `TokenUsage` stamped on items derived from an assistant API call,
-    /// `nil` for all other item kinds. Used by `TranscriptItemsView` to find
+    /// `nil` for all other item kinds. Used by the transcript pane to find
     /// the latest item whose context size is worth surfacing in the UI.
     public var usage: TokenUsage? {
         switch self {

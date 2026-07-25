@@ -53,9 +53,8 @@ struct PanePlaceholder: View {
     @State private var hasRenderableContent = false
     @StateObject private var webviewState = WebviewState()
     @State private var didCopyURL = false
-    @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
-    @AppStorage(AppState.useTextKitTranscriptKey) private var useTextKitTranscript = false
-    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = true
+    @AppStorage(AppState.enableTranscriptKey)
+    private var transcriptFeatureEnabled = AppState.enableTranscriptDefault
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -342,15 +341,7 @@ struct PanePlaceholder: View {
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             if transcriptFeatureEnabled {
-                Group {
-                    if useTableViewTranscript {
-                        TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    } else if useTextKitTranscript {
-                        STTextViewTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    } else {
-                        LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    }
-                }
+                TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                 .environment(\.openFilePreview, { path in
                     let newContent = PaneContent.codeViewer(id: UUID(), path: path)
                     layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
@@ -544,7 +535,7 @@ struct PanePlaceholder: View {
             Text("Transcript view is turned off")
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            Text("Enable it in Settings → Experimental")
+            Text("Enable it in Settings → General → Claude")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
