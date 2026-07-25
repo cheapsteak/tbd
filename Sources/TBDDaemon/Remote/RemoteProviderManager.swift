@@ -29,6 +29,12 @@ actor RemoteProviderManager {
     private var health: [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
+    /// Guards `spawnPollLoops`'s compound stopAll()+startLoop() sequence
+    /// against a second concurrent call to the same sequence (e.g. two
+    /// overlapping `start()`s). See the comment on `spawnPollLoops` for the
+    /// race this closes.
+    private var reconfiguring = false
+    private var reconfigureWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(db: TBDDatabase, subscriptions: StateSubscriptionManager,
          runner: any RemoteProviderInvoking, registryURL: URL) {
@@ -104,11 +110,45 @@ actor RemoteProviderManager {
     /// events supervisors) first so a second call can't orphan one that
     /// `stopAll()` would no longer be able to reach (the stored handle would
     /// just get overwritten).
+    /// The whole stopAll()+startLoop() sequence runs under `reconfiguring` so
+    /// two concurrent calls (e.g. overlapping `start()`s) can never
+    /// interleave. Without it: `startLoop` inserts a supervisor into
+    /// `supervisors` and then suspends at `await supervisor.start()` — a
+    /// different actor, so this actor's executor is released for that
+    /// window. A second call's `stopAll()` could run entirely in that
+    /// window: its `await supervisor.stop()` on the just-inserted supervisor
+    /// returns instantly (nothing has started yet) and `removeAll()` drops
+    /// it, then the first call resumes and arms `start()` on a supervisor
+    /// nothing holds — the provider's child process respawns on backoff for
+    /// the daemon's life with no handle able to stop it. The symmetric case
+    /// (a supervisor inserted during one of `stopAll()`'s own awaits, then
+    /// dropped by that call's `removeAll()`) is closed the same way, since
+    /// the two call sequences now can't overlap at all.
     private func spawnPollLoops() async {
+        await acquireReconfigureLock()
+        defer { releaseReconfigureLock() }
         await stopAll()
         for name in describes.keys {
             guard let config = providers[name] else { continue }
             await startLoop(for: config)
+        }
+    }
+
+    private func acquireReconfigureLock() async {
+        if reconfiguring {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                reconfigureWaiters.append(continuation)
+            }
+        } else {
+            reconfiguring = true
+        }
+    }
+
+    private func releaseReconfigureLock() {
+        if reconfigureWaiters.isEmpty {
+            reconfiguring = false
+        } else {
+            reconfigureWaiters.removeFirst().resume()
         }
     }
 
@@ -129,12 +169,12 @@ actor RemoteProviderManager {
         if describes[config.name]?.capabilities.contains("events") == true {
             let supervisor = ProviderEventsSupervisor(config: config, manager: self)
             supervisors[config.name] = supervisor
-            // Awaited, not fired off as a detached `Task`: a queued `start()`
-            // could otherwise land AFTER a concurrent `stopAll()` had already
-            // stopped (a no-op, since nothing was started yet) and dropped this
-            // supervisor, arming a supervision loop on an object nobody holds —
-            // provider children respawning on backoff for the daemon's life
-            // with no way to reach them.
+            // Awaiting `supervisor.start()` (a different actor) suspends this
+            // actor's executor, which by itself does NOT close the race
+            // described on `spawnPollLoops` — only that method's
+            // `reconfiguring` guard does, by making it impossible for a
+            // concurrent stopAll()/spawnPollLoops() call to run while this
+            // one is still in flight.
             await supervisor.start()
         }
         loops[config.name] = Task { [weak self] in
@@ -184,9 +224,15 @@ actor RemoteProviderManager {
     /// bookkeeping happens here — only `apply(snapshot:)` drives the
     /// two-absence rule, since only a full snapshot can tell what's missing.
     func applyUpsert(_ session: RemoteSessionPayload, provider: String) async {
-        let outcome = try? await db.remoteSessions.upsertOne(
-            provider: provider, session: session, now: Date())
-        guard let outcome else { return }
+        let outcome: SnapshotOutcome
+        do {
+            outcome = try await db.remoteSessions.upsertOne(
+                provider: provider, session: session, now: Date())
+        } catch {
+            remoteLogger.error(
+                "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)")
+            return
+        }
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
@@ -201,11 +247,25 @@ actor RemoteProviderManager {
     /// authoritative about this — skip the two-absence rule entirely and
     /// mark the row gone immediately.
     func applyRemoval(sessionID: String, provider: String) async {
-        let changed = try? await db.remoteSessions.markGone(
-            provider: provider, sessionID: sessionID)
-        if changed == true {
+        let changed: Bool
+        do {
+            changed = try await db.remoteSessions.markGone(
+                provider: provider, sessionID: sessionID)
+        } catch {
+            remoteLogger.error(
+                "events removal failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(String(describing: error), privacy: .public)")
+            return
+        }
+        if changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
+    }
+
+    /// Test seam: whether a supervisor currently exists for `name` — used
+    /// only to make the events-vs-poll capability gate in `startLoop`
+    /// observable from tests without exposing `supervisors` itself.
+    func hasSupervisor(named name: String) -> Bool {
+        supervisors[name] != nil
     }
 
     func invoke(providerName: String, verb: [String], stdin: Data?,

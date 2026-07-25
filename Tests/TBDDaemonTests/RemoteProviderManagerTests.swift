@@ -25,6 +25,14 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         precondition(!script.isEmpty, "FakeProviderInvoker script exhausted for verb \(verb)")
         return script.removeFirst()
     }
+
+    /// Locked snapshot of `calls`, for tests that read it while a manager's
+    /// background poll `Task` may still be writing (the plain `calls`
+    /// getter is fine only when nothing concurrent is running).
+    func callsSnapshot() -> [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return calls
+    }
 }
 
 /// Not `private` — reused by later provider-RPC tests in this target.
@@ -180,6 +188,48 @@ struct RemoteProviderManagerTests {
         #expect(statuses.first?.remediationLabel == "login")
         #expect(statuses.first?.remediationCommand == "fake login")
         #expect(invoker.calls == [["describe"]])
+    }
+
+    @Test func eventsCapabilityCreatesSupervisor() async throws {
+        // A provider whose `describe` declares the `events` capability must
+        // get a supervisor spawned for it alongside the always-on poll loop
+        // — the low-latency path is entirely gated on this string match, so
+        // a typo here would silently disable it for real providers.
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"contract_versions": [1], "name": "fake", "capabilities": ["events"]}"#),
+            providerOK(#"{"sessions": []}"#),   // in case the 60s poll's first tick fires before teardown
+        ])
+        let m = manager(invoker)
+        await m.start()
+        #expect(await m.hasSupervisor(named: "fake"),
+                "describe declaring the events capability must spawn a supervisor")
+        await m.stopAll()
+    }
+
+    @Test func noEventsCapabilityPollsWithoutSupervisor() async throws {
+        // The mirror-image branch: no `events` capability means no
+        // supervisor, but the 60s `list` poll fallback must still cover the
+        // provider (it's the universal floor, events-capable or not).
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            providerOK(#"{"sessions": []}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        #expect(await !m.hasSupervisor(named: "fake"),
+                "describe without the events capability must not spawn a supervisor")
+
+        // The poll loop's first tick fires with no initial delay but runs on
+        // a background Task, so bound-poll for it rather than asserting
+        // immediately.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if invoker.callsSnapshot().contains(["list"]) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(invoker.callsSnapshot().contains(["list"]),
+                "provider without events capability must still be covered by the 60s list poll; observed calls=\(invoker.callsSnapshot())")
+        await m.stopAll()
     }
 
     @Test func versionMismatchNeverPolls() async throws {

@@ -61,10 +61,18 @@ private final class ProcessExitGate: @unchecked Sendable {
 /// individual `Task`s so ordering is preserved: `session`/`removed` events
 /// must be applied in the order the provider emitted them.
 private final class PipeLineReader: @unchecked Sendable {
+    /// No valid `events` line is anywhere near this long — a newline-free
+    /// torrent (or a consumer that can't drain as fast as the provider
+    /// emits) would otherwise grow `pending` without bound for the daemon's
+    /// whole lifetime, and since any bytes at all count as activity, the
+    /// silence watchdog would never notice and kill it.
+    private static let maxPendingBytes = 1 << 20  // 1 MB
+
     private let lock = NSLock()
     private let continuation: AsyncStream<String>.Continuation
     private var pending = Data()
     private var finished = false
+    private var loggedOverflow = false
 
     init(continuation: AsyncStream<String>.Continuation) {
         self.continuation = continuation
@@ -130,6 +138,14 @@ private final class PipeLineReader: @unchecked Sendable {
         }
         // Compact so the slice's dropped prefix is actually released.
         pending = Data(pending)
+        if pending.count > Self.maxPendingBytes {
+            if !loggedOverflow {
+                loggedOverflow = true
+                remoteLogger.error(
+                    "events pipe buffered \(self.pending.count, privacy: .public) bytes with no newline (cap \(Self.maxPendingBytes, privacy: .public)); discarding")
+            }
+            pending.removeAll()
+        }
     }
 }
 
@@ -190,8 +206,16 @@ actor ProviderEventsSupervisor {
         if let process = currentProcess {
             await killTree(process)
         }
+        // No unconditional `currentProcess = nil` here: `runOnce`'s own
+        // post-run teardown already clears it under the generation guard
+        // once the awaited task above actually finishes (cancellation makes
+        // `superviseForever` return right after that teardown, with no
+        // backoff sleep in between — see its `Task.isCancelled` check). A
+        // concurrent `start()` landing in the window between `task.cancel()`
+        // and `await task.value` would otherwise have its NEW generation's
+        // `currentProcess` wiped by this OLD call, leaving the silence
+        // watchdog with no process to kill.
         await task.value
-        currentProcess = nil
     }
 
     private func superviseForever() async {
@@ -305,7 +329,7 @@ actor ProviderEventsSupervisor {
     /// unrelated group if that ever changes.
     private func killTree(_ process: Process) async {
         let pid = process.processIdentifier
-        guard pid > 0 else { return }
+        guard pid > 0, process.isRunning else { return }
         signalTree(pid, SIGTERM)
         // A cancelled caller (e.g. the supervision task during `stop()`) skips
         // the grace and escalates immediately, which is the right degradation.
