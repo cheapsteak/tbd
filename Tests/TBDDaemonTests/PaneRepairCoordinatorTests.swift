@@ -19,7 +19,7 @@ import Testing
 /// with recorded stream writes, reply blocks fed by hand, and a real
 /// supervisor + fanout so the gate/generation/fence/repair semantics under
 /// test are the production ones.
-@Suite("PaneRepairCoordinator", .clockDriven)
+@Suite("PaneRepairCoordinator", .clockDriven, .serialized)
 struct PaneRepairCoordinatorTests {
     private let server = "tbd-repair-unit"
 

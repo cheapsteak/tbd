@@ -108,7 +108,7 @@ struct AttachRPCStubTests {
     }
 }
 
-@Suite("Attach RPC orchestration", .clockDriven)
+@Suite("Attach RPC orchestration", .clockDriven, .serialized)
 struct AttachRPCOrchestrationTests {
 
     private func makeSocketPair() throws -> (Int32, Int32) {
