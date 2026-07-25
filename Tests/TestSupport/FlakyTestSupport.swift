@@ -79,12 +79,25 @@ public struct FlakyTrait: TestTrait, TestScoping {
     ) async throws {
         for attempt in 1...Self.maxAttempts {
             let isFinal = attempt == Self.maxAttempts
-            let failed = try await Self.runAttempt(
+            let result = await Self.runAttempt(
                 comment: "flaky issue #\(issue), attempt \(attempt)",
                 suppressing: !isFinal,
                 function
             )
-            if !failed {
+            if result.cancelled {
+                // Cancellation ends the sequence — there is nothing to retry.
+                // But `#expect` records without throwing, so an attempt can
+                // record a real failure and *then* be cancelled. On the final
+                // attempt that verdict was surfaced unsuppressed, so it is a
+                // genuine red and belongs in the ledger; leaving it out would
+                // make CI red and the audit data silent. On a non-final
+                // attempt the failure was suppressed and no verdict stands.
+                if isFinal, result.failed {
+                    RetryMetrics.record(test: test, issue: issue, attempts: attempt, outcome: .failed)
+                }
+                throw CancellationError()
+            }
+            if !result.failed {
                 RetryMetrics.record(
                     test: test,
                     issue: issue,
@@ -98,6 +111,14 @@ public struct FlakyTrait: TestTrait, TestScoping {
                 return
             }
         }
+    }
+
+    /// What one attempt did. `failed` and `cancelled` are independent: a body
+    /// can record a failing `#expect` (which does not throw) and then hit
+    /// cancellation in the same attempt.
+    private struct AttemptResult {
+        let failed: Bool
+        let cancelled: Bool
     }
 
     /// Runs one attempt and reports whether it recorded any issue.
@@ -117,16 +138,17 @@ public struct FlakyTrait: TestTrait, TestScoping {
     /// recorded its issue, so re-recording that specific error trips Swift
     /// Testing's "An API was misused" diagnostic — it must be swallowed.
     ///
-    /// Cancellation is neither a failure nor a pass, so it is rethrown rather
-    /// than retried. Swallowing it would green a cancelled test; recording it
-    /// as an issue would burn all three attempts and write
-    /// `attempts: 3, outcome: .failed` — indistinguishable, in the ledger, from
-    /// a genuinely always-failing flake. A cancelled run writes no record.
+    /// Cancellation is reported separately rather than retried. Swallowing it
+    /// would green a cancelled test; recording it as an issue would burn all
+    /// three attempts and write `attempts: 3, outcome: .failed` —
+    /// indistinguishable, in the ledger, from a genuinely always-failing flake.
+    /// It is "neither a failure nor a pass" only until an unsuppressed verdict
+    /// has already been recorded; see the caller for that case.
     private static func runAttempt(
         comment: Comment,
         suppressing: Bool,
         _ function: @Sendable () async throws -> Void
-    ) async throws -> Bool {
+    ) async -> AttemptResult {
         let failed = FlagBox()
         let cancelled = FlagBox()
         await withKnownIssue(comment, isIntermittent: true) {
@@ -143,8 +165,7 @@ public struct FlakyTrait: TestTrait, TestScoping {
             failed.set()
             return suppressing
         }
-        if cancelled.isSet { throw CancellationError() }
-        return failed.isSet
+        return AttemptResult(failed: failed.isSet, cancelled: cancelled.isSet)
     }
 }
 
