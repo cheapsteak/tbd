@@ -38,8 +38,15 @@ jobs:
     # (docs/specs/2026-07-24-test-hardening-design.md §7), so one run produces
     # one artifact covering the fast and quiet passes together. Unset locally,
     # where the trait writes nothing.
+    #
+    # A LITERAL path, not `${{ runner.temp }}`: the `runner` context is not
+    # available in a job-level `env:` block, and GitHub resolves an unavailable
+    # context to the empty string instead of erroring — so that spelling would
+    # silently hand the tests `/retry-metrics.jsonl`, fail to open at the
+    # filesystem root, and upload an empty artifact forever. The existing test
+    # steps already `tee` to /tmp on these runners.
     env:
-      TBD_RETRY_METRICS_PATH: ${{ runner.temp }}/retry-metrics.jsonl
+      TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
     steps:
       - uses: actions/checkout@v4
         with:
@@ -182,7 +189,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: retry-metrics
-          path: ${{ runner.temp }}/retry-metrics.jsonl
+          path: /tmp/retry-metrics.jsonl
           if-no-files-found: warn
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)

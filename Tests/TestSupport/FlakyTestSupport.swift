@@ -52,7 +52,9 @@ import Testing
 /// `Task { }` that outlives the scope keeps the matcher alive past the end of
 /// this test, so an issue it records during a **later** test gets silently
 /// swallowed as "known". Do not quarantine a test that reports failures from an
-/// escaping Task; fix the escape first.
+/// escaping Task; fix the escape first. The ledger inherits that lie: the
+/// attempt looks clean, so a false-green attempt is recorded `passedFirstTry`
+/// while the run itself goes red — a green record for a red run.
 ///
 /// Metrics: with `TBD_RETRY_METRICS_PATH` set (CI does this at the job level;
 /// unset locally, where the trait writes nothing and does no work), every
@@ -77,7 +79,7 @@ public struct FlakyTrait: TestTrait, TestScoping {
     ) async throws {
         for attempt in 1...Self.maxAttempts {
             let isFinal = attempt == Self.maxAttempts
-            let failed = await Self.runAttempt(
+            let failed = try await Self.runAttempt(
                 comment: "flaky issue #\(issue), attempt \(attempt)",
                 suppressing: !isFinal,
                 function
@@ -114,17 +116,26 @@ public struct FlakyTrait: TestTrait, TestScoping {
     /// `#require` throws `ExpectationFailedError` *after* it has already
     /// recorded its issue, so re-recording that specific error trips Swift
     /// Testing's "An API was misused" diagnostic — it must be swallowed.
+    ///
+    /// Cancellation is neither a failure nor a pass, so it is rethrown rather
+    /// than retried. Swallowing it would green a cancelled test; recording it
+    /// as an issue would burn all three attempts and write
+    /// `attempts: 3, outcome: .failed` — indistinguishable, in the ledger, from
+    /// a genuinely always-failing flake. A cancelled run writes no record.
     private static func runAttempt(
         comment: Comment,
         suppressing: Bool,
         _ function: @Sendable () async throws -> Void
-    ) async -> Bool {
+    ) async throws -> Bool {
         let failed = FlagBox()
+        let cancelled = FlagBox()
         await withKnownIssue(comment, isIntermittent: true) {
             do {
                 try await function()
             } catch is ExpectationFailedError {
                 // Already recorded by `#require`; re-recording misuses the API.
+            } catch is CancellationError {
+                cancelled.set()
             } catch {
                 Issue.record(error)
             }
@@ -132,6 +143,7 @@ public struct FlakyTrait: TestTrait, TestScoping {
             failed.set()
             return suppressing
         }
+        if cancelled.isSet { throw CancellationError() }
         return failed.isSet
     }
 }
@@ -202,7 +214,9 @@ enum RetryMetrics {
     /// `Tests/<Target>/<File>.swift` layout and only loses nested directories.
     private static func repoRelativePath(_ location: SourceLocation) -> String {
         let path = location._filePath
-        if let marker = path.range(of: "/Tests/") {
+        // `.backwards`: a checkout path that itself contains `/Tests/` would
+        // otherwise be cut at the wrong occurrence.
+        if let marker = path.range(of: "/Tests/", options: .backwards) {
             return "Tests/" + path[marker.upperBound...]
         }
         return "Tests/" + location.fileID
@@ -244,9 +258,22 @@ private final class MetricsAppender: @unchecked Sendable {
         }
         guard let fd = descriptor else { return }
         let bytes = Array((line + "\n").utf8)
-        let written = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-        if written != bytes.count {
-            warnLocked("short write to \(path) (\(written) of \(bytes.count) bytes, errno \(errno))")
+        // Loop rather than one `write`: the consumer is a line parser, so a
+        // partial write would leave a fragment that the next record
+        // concatenates onto, yielding one unparseable line. Retries EINTR too.
+        bytes.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let written = write(fd, buffer.baseAddress! + offset, buffer.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0, errno == EINTR {
+                    continue
+                } else {
+                    warnLocked("short write to \(path) (\(offset) of \(buffer.count) bytes, errno \(errno))")
+                    return
+                }
+            }
         }
     }
 
