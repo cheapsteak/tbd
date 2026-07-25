@@ -45,11 +45,6 @@ struct TranscriptCardAttachmentTests {
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let appState = AppState(userDefaults: defaults)
-        let context = TranscriptCardContext(
-            terminalID: nil,
-            openTranscriptOverlay: { _ in },
-            appState: appState
-        )
 
         let items = TranscriptCompareFixtures.items(for: "tallAsk")
         let askNode = try #require(
@@ -58,7 +53,15 @@ struct TranscriptCardAttachmentTests {
                 return false
             }
         )
-        let card = try #require(TranscriptCardFactory.card(for: askNode, context: context))
+        // Same root view the table renderer hosts per row (see
+        // `TableTranscriptView.Coordinator.rowRootView`).
+        let card = AnyView(
+            SelectableTranscriptRow(node: askNode, terminalID: nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .environment(\.transcriptStaticCards, true)
+                .environment(\.openTranscriptOverlay, { _ in })
+                .environmentObject(appState)
+        )
 
         let width = TranscriptCardSizing.width(forLineFragmentWidth: 680)
         let host = NSHostingView(rootView: card)

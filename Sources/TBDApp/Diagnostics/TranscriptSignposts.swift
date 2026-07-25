@@ -11,7 +11,6 @@ import os
 /// and docs/diagnostics-strategy.md for capture recipes):
 /// - "transcript.swap"             — pollOnce compare+swap phase (compare runs in a
 ///                                   detached task; only the publish is on-main)
-/// - "transcript.items.body"       — TranscriptItemsView.body (whole pass)
 /// - "transcript.row.body"         — TranscriptRow.body per row (issue #129 signposts)
 /// - "transcript.markdown.build"   — ChatBubbleView.bubbleBody (split + Markdown view tree)
 /// - "transcript.markdown.segment" — MarkdownSegments.split

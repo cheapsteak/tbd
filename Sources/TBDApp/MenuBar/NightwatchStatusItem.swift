@@ -10,7 +10,7 @@ import TBDShared
 /// is answerable at a glance without opening the menu.
 struct NightwatchStatusItem: Commands {
     @ObservedObject var appState: AppState
-    /// Gated behind the same Settings → Experimental opt-in as the sidebar
+    /// Gated behind the same Settings → Fleet Automation opt-in as the sidebar
     /// control, so the whole Nightwatch feature (both entry points) is off by
     /// default. Fail-closed to hidden when the user has never opted in.
     @AppStorage(AppState.nightwatchExperimentalKey) private var experimentalEnabled: Bool = false

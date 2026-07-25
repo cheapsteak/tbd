@@ -36,8 +36,8 @@ struct TranscriptSelectableTextTests {
     }
 
     @Test func env_can_be_set_true() {
-        // The only place we flip this is `TranscriptItemsView` setting
-        // `.environment(\.transcriptTextSelection, hoveredItemID == item.id)`.
+        // The only place we flip this is `SelectableTranscriptRow` setting
+        // `.environment(\.transcriptTextSelection, isHovered)`.
         // Round-trip the setter to make sure the EnvironmentKey wiring works.
         var env = EnvironmentValues()
         env.transcriptTextSelection = true

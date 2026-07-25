@@ -3,10 +3,8 @@ import Markdown
 
 /// Extracts cell data from a GFM `Markdown.Table` node into a `TranscriptTableData`
 /// of pre-rendered `NSAttributedString` cells. The table is then rendered as a
-/// SwiftUI `TranscriptTableView` hosted in a `TranscriptCardAttachment`, because
-/// `NSTextTable`/`NSTextTableBlock` is a TextKit 1 construct that STTextView's
-/// TextKit 2 `NSTextLayoutManager` does NOT lay out as a grid (it flattens cells
-/// into a vertical list). (#129)
+/// SwiftUI `TranscriptTableView` hosted in a `TranscriptCardAttachment`, rather
+/// than as an `NSTextTable`/`NSTextTableBlock` grid. (#129)
 @MainActor
 enum MarkdownTable {
     /// Converts a parsed `Markdown.Table` into header + body cell data.

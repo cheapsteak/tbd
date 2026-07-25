@@ -1,7 +1,7 @@
 import CoreGraphics
 
-/// The kind of TextKit edit a new poll result implies, derived purely from the
-/// node arrays so it is unit-testable away from the live STTextView. (#129)
+/// The kind of edit a new poll result implies, derived purely from the node
+/// arrays so it is unit-testable away from the live table view. (#129)
 enum TranscriptStreamStep: Equatable {
     case noop
     case rebuild

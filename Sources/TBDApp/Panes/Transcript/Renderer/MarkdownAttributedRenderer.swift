@@ -2,8 +2,12 @@ import AppKit
 import Markdown
 import SwiftUI
 
-/// Converts a message's Markdown into an `NSAttributedString` for the TextKit 2
-/// transcript. Pure: same input → same output, no view/layout state. (#129)
+/// Converts a message's Markdown into attributed text for the transcript
+/// bubbles. Pure: same input → same output, no view/layout state.
+///
+/// `renderBlocks` is the production entry point (used by
+/// `TranscriptBubbleCellView`); `render` and `tableData` are whole-document
+/// test seams. (#129)
 @MainActor
 enum MarkdownAttributedRenderer {
     static func render(_ markdown: String, theme: TranscriptTextTheme = .chatBubble) -> NSAttributedString {
@@ -247,9 +251,9 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
     }
 
     mutating func visitTable(_ table: Markdown.Table) -> NSAttributedString {
-        // `NSTextTable` is a TextKit 1 construct that STTextView's TextKit 2
-        // layout flattens into a vertical cell list. Instead emit the whole
-        // table as ONE view attachment hosting a real SwiftUI grid. (#129)
+        // `NSTextTable` grids are brittle to lay out and measure inside the
+        // bubble's text views. Instead emit the whole table as ONE view
+        // attachment hosting a real SwiftUI grid. (#129)
         let data = MarkdownTable.data(table, theme: theme, render: { self.visit($0) })
         guard data.columnCount > 0 else { return NSAttributedString() }
         let tableView = TranscriptTableView(

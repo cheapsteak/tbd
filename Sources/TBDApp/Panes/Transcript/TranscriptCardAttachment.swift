@@ -1,10 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// An `NSTextAttachment` that hosts a SwiftUI card view inline within a
-/// TextKit 2 document. Each attachment carries a stable `nodeID` so the
+/// An `NSTextAttachment` that hosts a SwiftUI card view inline in an
+/// attributed-string document. Each attachment carries a stable `nodeID` so the
 /// document can correlate attachments with `TranscriptRenderNode` values when
-/// the attributed string is rebuilt during streaming. (#129)
+/// the attributed string is rebuilt during streaming.
+///
+/// Reachable only via `MarkdownAttributedRenderer.render` → `visitTable`, which
+/// is now a whole-document test seam: the live bubble path (`renderBlocks`)
+/// breaks tables out as native `MessageBlock.table`s instead, and the table
+/// renderer measures rows with its own inline `NSHostingController.sizeThatFits`
+/// rather than calling `TranscriptCardSizing` below. Kept because the render/
+/// tableData seams and their tests still exercise the attachment path. (#129)
 @MainActor
 final class TranscriptCardAttachment: NSTextAttachment {
     let nodeID: String
@@ -53,7 +60,7 @@ final class TranscriptCardAttachment: NSTextAttachment {
 /// The `NSTextAttachmentViewProvider` that creates an `NSHostingView` for the
 /// card and calculates its bounds to fill the available line-fragment width.
 ///
-/// TextKit 2 calls `loadView()` and `attachmentBounds` on the main thread.
+/// TextKit calls `loadView()` and `attachmentBounds` on the main thread.
 /// The card is captured at construction time from the `@MainActor` context of
 /// `viewProvider(for:location:textContainer:)` and stored in a `_SendableBox`
 /// because `NSTextAttachmentViewProvider` override methods are nonisolated in

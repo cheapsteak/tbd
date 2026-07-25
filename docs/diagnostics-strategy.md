@@ -228,8 +228,7 @@ row* the main thread was measuring:
      with `id=`, `kind=` (e.g. `tool:Bash`, `assistantText`), and `len=`.
    - `transcript.markdown.build` — chat-bubble Markdown view-tree assembly.
    - `transcript.markdown.segment` — the prose/code split inside `bubbleBody`.
-   - `transcript.items.body`, `transcript.swap`, `transcript.scrollTo`
-     (existing wider-grain intervals).
+   - `transcript.swap`, `transcript.scrollTo` (existing wider-grain intervals).
 4. Reproduce the hang. Look for the `hang.detected` **event** marker on the
    same lane and the *longest* `transcript.row.body` interval near it — its
    metadata identifies the offending row's kind, id, and payload size.

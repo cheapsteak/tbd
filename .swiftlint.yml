@@ -75,9 +75,9 @@ custom_rules:
     included:
       - "Sources/TBDApp/Panes/Transcript/.*\\.swift"
     excluded:
-      # TranscriptOverlayView renders outside the LazyVStack — ScrollView is safe here (#129).
+      # TranscriptOverlayView renders outside the transcript list — ScrollView is safe here (#129).
       - "Sources/TBDApp/Panes/Transcript/TranscriptOverlayView\\.swift"
-      # OverlayFileView is the body of a file frame in the overlay — sibling of LazyVStack, real ScrollView is safe.
+      # OverlayFileView is the body of a file frame in the overlay — outside the transcript list, real ScrollView is safe.
       - "Sources/TBDApp/Panes/Transcript/OverlayFileView\\.swift"
     regex: '\bScrollView\b'
     match_kinds:

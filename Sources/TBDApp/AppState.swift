@@ -1335,7 +1335,7 @@ final class AppState: ObservableObject {
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)
-    /// directly to the in-memory Terminal so LiveTranscriptPaneView re-targets
+    /// directly to the in-memory Terminal so TableTranscriptPaneView re-targets
     /// without waiting for the next 2s `terminal.list` poll. Silently ignores
     /// terminals we don't know about — the next refresh will reconcile.
     private func applyTerminalSessionDelta(_ delta: TerminalSessionDelta) {
@@ -2150,14 +2150,14 @@ final class AppState: ObservableObject {
     }
 
     /// UserDefaults key mirroring the `@AppStorage` toggle in
-    /// Settings → Experimental that gates the Nightwatch / Daywatch feature.
+    /// Settings → Fleet Automation that gates the Nightwatch / Daywatch feature.
     /// When off (the default), the sidebar mode control is hidden entirely —
     /// the feature is unfinished and evaluate-only, so it stays opt-in.
     static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
 
     /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails
     /// closed: defaults to false so the sidebar control only appears once the
-    /// user opts in from Settings → Experimental. Tests pass a private
+    /// user opts in from Settings → Fleet Automation. Tests pass a private
     /// `UserDefaults(suiteName:)` so they never touch live app preferences.
     static func nightwatchExperimentalEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: nightwatchExperimentalKey) as? Bool ?? false
@@ -2215,13 +2215,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// UserDefaults key for the `@AppStorage` toggle in the
-    /// Settings → Experimental section that gates the experimental live
-    /// transcript pane. The View layer (`PanePlaceholder`) reads it directly
-    /// via `@AppStorage`; `transcriptFeatureEnabled(defaults:)` exposes the
-    /// same fail-closed read for non-View callers. The feature can freeze the
-    /// UI on very large transcripts, so it is opt-in and fails closed.
+    /// UserDefaults key for the `@AppStorage` toggle in the Settings → Claude
+    /// section that gates the live transcript pane. The View layer
+    /// (`PanePlaceholder`) reads it directly via `@AppStorage`;
+    /// `transcriptFeatureEnabled(defaults:)` exposes the same read for non-View
+    /// callers. On by default — the toggle only exists so a user can turn the
+    /// pane off.
     static let enableTranscriptKey = "enableTranscript"
+
+    /// The one default for `enableTranscriptKey`. Every read site — this
+    /// helper and each View's `@AppStorage` — must spell the default with this
+    /// constant, never a bare literal: an `@AppStorage` default that disagrees
+    /// with the helper is invisible (both compile, both "work") and silently
+    /// makes the pane appear enabled to one caller and disabled to another.
+    static let enableTranscriptDefault = true
 
     /// UserDefaults key for the usage reset-time display preference
     /// (Settings → Claude → "Usage reset times"). Stores the raw value of
@@ -2232,43 +2239,11 @@ final class AppState: ObservableObject {
     /// values).
     static let usageResetTimeStyleKey = "usageResetTimeStyle"
 
-    /// Fail-closed read of the experimental live-transcript toggle for
-    /// non-View callers (the View layer uses `@AppStorage` directly).
-    /// Defaults to false when the user has never touched the toggle, matching
-    /// the `@AppStorage` default.
+    /// Read of the live-transcript toggle for non-View callers (the View layer
+    /// uses `@AppStorage` directly). Defaults to true when the user has never
+    /// touched the toggle, matching the `@AppStorage` default.
     static func transcriptFeatureEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key for the second-stage gate: when the experimental
-    /// transcript is enabled, this picks the TextKit 2 / STTextView renderer
-    /// over the SwiftUI `LiveTranscriptPaneView`. Defaults false. (#129)
-    static let useTextKitTranscriptKey = "useTextKitTranscript"
-
-    /// Fail-closed read of the TextKit 2 transcript toggle for non-View callers
-    /// (the View layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true.
-    static func useTextKitTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTextKitTranscriptKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key for the NSTableView-based transcript renderer. When the
-    /// experimental transcript is enabled, this gate takes precedence over the
-    /// TextKit 2 / STTextView renderer: the table pane reuses the existing
-    /// SwiftUI row views (`SelectableTranscriptRow`) hosted per-cell with an
-    /// explicit height cache, replacing the fragile single-document TextKit
-    /// approach. Defaults true — the table pane is the default renderer; the
-    /// Settings toggle can turn it off to fall back to the legacy SwiftUI pane
-    /// for comparison. (#129)
-    static let useTableViewTranscriptKey = "useTableViewTranscript"
-
-    /// Read of the NSTableView transcript toggle for non-View callers (the View
-    /// layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true. Defaults true (the table pane is
-    /// the default renderer); returns false only when the user explicitly turns
-    /// it off. Takes precedence over `useTextKitTranscript` when set.
-    static func useTableViewTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? true
+        defaults.object(forKey: enableTranscriptKey) as? Bool ?? enableTranscriptDefault
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.

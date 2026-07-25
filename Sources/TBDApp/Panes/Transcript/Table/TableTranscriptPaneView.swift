@@ -2,17 +2,13 @@ import SwiftUI
 import TBDShared
 import os
 
-/// NSTableView live-transcript pane: mirrors `STTextViewTranscriptPaneView`'s
-/// data path (poll loop, session-rollover guard, thread resolution, jump-to-
-/// bottom) but renders via `TableTranscriptView` — a view-based NSTableView
-/// hosting the existing SwiftUI `SelectableTranscriptRow` per cell with an
-/// explicit height cache, instead of the single-document STTextView.
+/// The live-transcript pane: a poll loop (with session-rollover guard, thread
+/// resolution and jump-to-bottom) feeding `TableTranscriptView` — a view-based
+/// NSTableView hosting one SwiftUI `SelectableTranscriptRow` per cell with an
+/// explicit height cache.
 ///
-/// Rendered in place of the other panes when
-/// `AppState.useTableViewTranscriptKey` is `true` (precedence:
-/// tableview > textkit > swiftui). Shares the same
-/// `init(terminalID:worktreeID:)` shape so the `PanePlaceholder` call site swaps
-/// cleanly. (#129)
+/// The only transcript renderer; shown by `PanePlaceholder` whenever
+/// `AppState.enableTranscriptKey` is on. (#129)
 struct TableTranscriptPaneView: View {
     let terminalID: UUID
     let worktreeID: UUID
@@ -97,6 +93,37 @@ struct TableTranscriptPaneView: View {
         .task(id: TaskKey(terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken)) {
             await pollLoop()
         }
+        .onAppear { recordWatchdogContext(count: displayedMessages.count) }
+        .onChange(of: displayedMessages.count) { _, newCount in
+            recordWatchdogContext(count: newCount)
+        }
+        .onDisappear { clearWatchdogContext() }
+    }
+
+    // MARK: - Hang watchdog context
+
+    /// Feed the hang watchdog so a main-thread stall caught during transcript
+    /// layout names the terminal, pane, and item count that triggered it —
+    /// without this a hang stack reports `Focused terminal: -` / `Pane: -` and
+    /// the #129-class freeze this pane exists to avoid is unattributable.
+    private func recordWatchdogContext(count: Int) {
+        let tidShort = String(terminalID.uuidString.suffix(4))
+        HangWatchdog.shared.recordContext { snap in
+            snap.focusedTerminalIDShort = tidShort
+            snap.transcriptItemCount = count
+            snap.paneLabel = "liveTranscript"
+        }
+    }
+
+    /// Clear the pane-specific fields on disappear so a hang in another pane
+    /// (terminal, file viewer, …) isn't logged with a stale `pane=liveTranscript`
+    /// tag and a dead item count.
+    private func clearWatchdogContext() {
+        HangWatchdog.shared.recordContext { snap in
+            snap.focusedTerminalIDShort = nil
+            snap.transcriptItemCount = nil
+            snap.paneLabel = nil
+        }
     }
 
     // MARK: - States
@@ -155,8 +182,7 @@ struct TableTranscriptPaneView: View {
         // Compose the terminal with its current Claude session so a session
         // rollover within one terminal tears down and rebuilds the stateful
         // Coordinator, re-resolving from a clean baseline rather than persisting
-        // the prior session's drilled-in subagent thread. Mirrors the TextKit
-        // pane's identity rationale. (#129)
+        // the prior session's drilled-in subagent thread. (#129)
         .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
         .overlay(alignment: .bottomLeading) {
             jumpToBottomButton
