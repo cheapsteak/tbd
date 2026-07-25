@@ -212,6 +212,13 @@ final class AppState: ObservableObject {
     /// fetched on demand alongside `archivedWorktrees`.
     @Published var reapRecords: [UUID: [ReapRecord]] = [:]
 
+    /// Every registered remote-agent provider's negotiated contract + health,
+    /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
+    @Published var remoteProviders: [RemoteProviderStatus] = []
+    /// The daemon's remote-session mirror across all providers, fetched by
+    /// `refreshRemote()`. See `AppState+Remote.swift`.
+    @Published var remoteSessions: [RemoteSessionInfo] = []
+
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
     /// row, then clears the value after the flash animation completes.
@@ -720,6 +727,16 @@ final class AppState: ObservableObject {
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
     /// redundant RPC fan-out as `loadTabStates` runs per worktree.
     private var hasAttemptedPanelImport = false
+    /// How `refreshRemote()` fetches the provider roster — injectable for the
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so tests can exercise the disabled-refusal and
+    /// genuine-error branches without a real daemon.
+    lazy var remoteProvidersFetcher: @MainActor () async throws -> RemoteProvidersResult =
+        { [daemonClient] in try await daemonClient.remoteProviders() }
+    /// How `refreshRemote()` fetches the session mirror — injectable for the
+    /// same reason as `remoteProvidersFetcher`.
+    lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
+        { [daemonClient] in try await daemonClient.remoteSessions() }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from
@@ -1229,6 +1246,10 @@ final class AppState: ObservableObject {
             if let repoID = selectedRepoID {
                 Task { [weak self] in await self?.refreshReapRecords(repoID: repoID) }
             }
+        case .remoteSessionsChanged:
+            Task { [weak self] in await self?.refreshRemote() }
+        case .remoteSessionAttention(let d):
+            handleRemoteSessionAttentionDelta(d)
         default:
             break
         }
@@ -1640,6 +1661,7 @@ final class AppState: ObservableObject {
             }
             await loadModelProfiles()
             await loadHibernationConfig()
+            await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
