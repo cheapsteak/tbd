@@ -59,6 +59,8 @@ final class AppState: ObservableObject {
     }
     /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
     private var appearanceSubscription: AnyCancellable?
+    /// Owns the trailing-edge quiet window in front of that subscription.
+    private let appearanceDebouncer = AppearanceBroadcastDebouncer()
     /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
     private var themeStoreSubscription: AnyCancellable?
 
@@ -896,24 +898,24 @@ final class AppState: ObservableObject {
         // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
         // multiple RPCs into a single request. The 200ms window is long enough to capture
         // rapid picker changes but short enough to feel responsive.
-        appearanceSubscription = appearance.$schemeID
-            // `@Published` delivers the current value at subscription time. Without
-            // `dropFirst()`, broadcastAppearanceColorFgBg runs on app launch before
-            // the daemon connection is even established — the RPC fails, the error
-            // gets logged and swallowed. Drop that subscriber-time emission so we
-            // only react to actual user-driven scheme changes.
-            .dropFirst()
-            .removeDuplicates()
-            // `DispatchQueue.main` rather than `RunLoop.main`: Combine's RunLoop
-            // scheduler fires its debounce Timer in `.default` mode only, so while
-            // the user scrubs the scheme picker (run loop in `.eventTracking` mode)
-            // the trailing emission stalls until the drag ends. The dispatch
-            // scheduler delivers regardless of run-loop mode — and is reliably
-            // serviced under structured concurrency, which the unit test depends on.
-            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.broadcastAppearanceColorFgBg(appearance)
-            }
+        // The debounce lives in `AppearanceBroadcastDebouncer` rather than in a
+        // Combine `.debounce` operator: that operator takes a `Scheduler`, which
+        // cannot be an `any Clock<Duration>`, so the delay was untestable except
+        // by reconstructing the whole chain in the test and waiting on a real
+        // 200ms timer. The debouncer keeps `dropFirst()`/`removeDuplicates()`
+        // (pure, no time) in Combine and replaces only the timed stage with
+        // cancel-and-replace on the injected clock. Run-loop-mode independence
+        // is unchanged, not new: the operator being replaced was already
+        // `DispatchQueue.main` for exactly that reason (a picker scrub puts the
+        // run loop in `.eventTracking`, which stalls a `RunLoop.main` timer).
+        //
+        // Drop any fire still pending from a previous `appearance`: this runs
+        // from that property's `didSet`, and releasing the old subscription no
+        // longer kills an armed timer the way tearing down a Combine chain did.
+        appearanceDebouncer.cancel()
+        appearanceSubscription = appearanceDebouncer.start(observing: appearance) { [weak self] _ in
+            self?.broadcastAppearanceColorFgBg(appearance)
+        }
 
         // When the theme store reloads (external file add/delete/edit), reconcile
         // the active schemeID so a deleted theme falls back to the default rather

@@ -160,6 +160,7 @@ let package = Package(
                 // assembles replay bytes, the app's SwiftTerm consumes them,
                 // and only this test target links the SwiftTerm product.
                 "TBDDaemonLib",
+                "TestSupport",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             resources: [
