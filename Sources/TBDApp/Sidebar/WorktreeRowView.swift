@@ -199,7 +199,7 @@ struct WorktreeRowView: View {
                 onStartEditing: { appState.isRenamingWorktree = true },
                 onStopEditing: { appState.isRenamingWorktree = false }
             ) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: -2) {
                     Text(worktree.displayName)
                         .font(.system(size: 13))
                         .fontWeight(hasBoldNotification ? .bold : .regular)

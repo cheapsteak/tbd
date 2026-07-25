@@ -277,7 +277,7 @@ struct RemoteSessionRowView: View {
                 // persisted key entirely for an empty/whitespace name.
                 allowsEmptyCommit: true
             ) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: -2) {
                     Text(displayName)
                         .font(.system(size: 13))
                         .fontWeight(hasBoldNotification ? .bold : .regular)
