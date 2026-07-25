@@ -330,11 +330,17 @@ private struct ClaudeProfileRow: View {
 private struct ModelRailView: View {
     let onSelectModel: (String) -> Void
 
-    /// Per-spawn model buttons: label + exact model id.
+    /// Per-spawn model buttons: label + Claude Code model *alias*.
+    ///
+    /// Aliases, not pinned ids (`claude-opus-4-8`): the `claude` binary carries
+    /// the alias table (`opus` → latest opus, resolved per provider), so a CLI
+    /// auto-update picks up each new Opus/Sonnet/Fable with no TBD rebuild.
+    /// `ANTHROPIC_MODEL` — how the spawn delivers this (see
+    /// `ClaudeSpawnCommandBuilder`) — runs the same resolution as `--model`.
     private static let models: [(label: String, id: String, help: String)] = [
-        ("Fable", "claude-fable-5", "Spawn with Claude Fable 5"),
-        ("Opus", "claude-opus-4-8", "Spawn with Claude Opus 4.8"),
-        ("Sonnet", "claude-sonnet-5", "Spawn with Claude Sonnet 5"),
+        ("Fable", "fable", "Spawn with the latest Claude Fable"),
+        ("Opus", "opus", "Spawn with the latest Claude Opus"),
+        ("Sonnet", "sonnet", "Spawn with the latest Claude Sonnet"),
     ]
 
     var body: some View {

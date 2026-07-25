@@ -864,7 +864,8 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// existing precedence-based resolution. Not persisted — creation-time only.
     /// Optional/defaulted for backward compatibility with older clients.
     public let profileID: UUID?
-    /// Explicit per-creation Claude model override (e.g. "claude-fable-5"),
+    /// Explicit per-creation Claude model override — either a Claude Code alias
+    /// ("opus", what the model rail sends) or an exact id ("claude-opus-5"),
     /// injected as ANTHROPIC_MODEL for the new worktree's INITIAL Claude spawn
     /// only — later respawns (hibernation wake, new sessions) fall back to the
     /// profile default. nil preserves the profile's own model. Optional/
