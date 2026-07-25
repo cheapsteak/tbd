@@ -34,6 +34,12 @@ jobs:
 
   test:
     runs-on: macos-26
+    # Both test steps below append their `.flaky(issue:)` retry records here
+    # (docs/specs/2026-07-24-test-hardening-design.md §7), so one run produces
+    # one artifact covering the fast and quiet passes together. Unset locally,
+    # where the trait writes nothing.
+    env:
+      TBD_RETRY_METRICS_PATH: ${{ runner.temp }}/retry-metrics.jsonl
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,6 +128,19 @@ jobs:
       # The floors sit well below those so ordinary test additions/removals never
       # trip them — they only fire when a pass collapses to near-nothing.
       - name: Test (fast parallel pass — tiers 1 and 2)
+        # A tier-1 test can still hang indefinitely: an over-long TestClock
+        # advance chain wedged for >10 min and `.clockDriven` did NOT bound it
+        # (the hung work sits where the time limit cannot cancel it). Without
+        # this the job falls back to the 6 h default.
+        #
+        # 30, not 10: this step runs the FIRST `swift test`, so it pays the
+        # whole test-target compile, not just the ~30 s of test runtime. Three
+        # consecutive warm-cache runs on main measured 2m22s / 3m33s / 6m02s —
+        # a 10-minute budget is under 2x the observed worst case and a cold
+        # cache (Package.resolved change, cache eviction) would blow through it
+        # and kill a healthy build. This bounds a hang at 1/12 of the default
+        # while staying far above any legitimate run.
+        timeout-minutes: 30
         run: |
           set -o pipefail
           swift test --parallel -j 2 --skip '^TBDDaemonLiveTests\.' 2>&1 | tee /tmp/fast-pass.log
@@ -155,6 +174,16 @@ jobs:
             exit 1
           fi
           echo "Quiet pass executed $count tests."
+
+      # `warn`, not `ignore`: an absent file means the metrics wiring broke, and
+      # that must be visible rather than silently producing an empty dashboard.
+      - name: Upload retry metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retry-metrics
+          path: ${{ runner.temp }}/retry-metrics.jsonl
+          if-no-files-found: warn
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j 2
