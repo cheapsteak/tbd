@@ -68,7 +68,9 @@ Governing rule: **`Duration` is behavior, `Date` is data.**
   init(..., clock: any Clock<Duration> = ContinuousClock())
   ```
 
-  Tests inject `TestClock` from pointfree's `swift-clocks` (**test-target-only dependency**) and drive time with `await clock.advance(by:)` — no sleeping, no load sensitivity. A debounce test asserts *exact* virtual timings instead of tolerance windows.
+  Tests inject `TestClock` from pointfree's `swift-clocks` (**test-target-only dependency**) and drive time with `await clock.advance(by:)`. A debounce test asserts *exact* virtual timings instead of tolerance windows.
+
+  **Amended by slice C1 (measured):** "no sleeping, no load sensitivity" holds for the *behaviour under test*, not for the process. Observing that the code under test has reached its `sleep` is real task scheduling, so the shared `advanceWhenSuspended` helper polls with a real `Task.sleep` against a deadline; yield-spinning there provably does not converge (a budget of 5000 turned a 17 s run into 577 s and still failed). And because `TestClock.advance(to:)` calls `Task.megaYield()` twice per advance — 20 background-QoS tasks each — a large parallel population of clock-driven tests starves itself. Clock-driven suites are therefore load-**tolerant**, not load-**independent**; `@Suite(.serialized)` is the per-suite remedy. True independence would need a megaYield-free virtual clock replacing `TestClock`.
 - **Data** — timestamps that get persisted or compared (`lastUsedAt`, hibernation stamps): the existing lightweight seam, a defaulted `date: Date = Date()` / `now: @Sendable () -> Date` parameter (the `touchLastUsed(at:)` pattern). No clock object needed to stamp a row.
 - **`PollerClock` stays untouched** — chunked, suspend-aware wall-deadline sleeping is a genuinely different job (Darwin's `Task.sleep` uses the suspending clock; see its doc comment) — but it stops being the template. A doc comment points new code at the standard seam.
 

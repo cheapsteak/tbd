@@ -61,29 +61,92 @@ public extension TestClock {
         await advance(by: duration)
     }
 
-    /// Yields until at least one task is suspended on this clock.
+    /// Waits until at least one task is suspended on this clock.
     ///
     /// Detection is inverted from how it reads: `checkSuspension()` **throws**
     /// when a sleeper *is* registered (its job is to prove "no further
     /// time-based asynchrony"), so catching its error is the success signal
     /// here, and a normal return means nobody has reached their `sleep` yet.
     ///
-    /// Budget-exhausted is a test bug, not a flake, so it records an Issue
-    /// naming the likely cause instead of hanging or throwing.
-    func waitForSuspension(maxYields: Int = 20,
+    /// ## Why this polls with a real sleep instead of yielding
+    ///
+    /// This waiter used to spin `await Task.yield()` up to a fixed budget of 20.
+    /// That budget was not merely too small — **the loop does not converge**, and
+    /// raising it makes things worse: measured on the 1331-test `TBDAppTests`
+    /// target, a budget of 5000 turned a 17 s run into a **577 s** run that still
+    /// failed. The contrast that identifies the variable: the same six tests are
+    /// 6/6 green under `--filter AppearanceDebounceTests`, 10/10 green under a
+    /// 24-test filter, and 0/3 in the full target *at the same machine load*. So
+    /// the failure scales with the number of runnable tasks in the process, not
+    /// with CPU load.
+    ///
+    /// The reason is what `Task.yield()` actually does: it keeps the calling task
+    /// **runnable** and re-enqueues it behind every other runnable task in the
+    /// process. In a large parallel target that queue is thousands deep, so the
+    /// waiter spends its whole budget cycling through the back of the queue while
+    /// the one task it is waiting for — the code under test, on its way to its
+    /// `sleep` — never gets a turn. Spinning harder enqueues more work and starves
+    /// it further, which is exactly the 577 s result.
+    ///
+    /// A real `Task.sleep` inverts that: it makes this task **non-runnable** and
+    /// hands the executor back, so the runtime schedules the code under test
+    /// normally instead of making it win a race against our own spin loop.
+    ///
+    /// This is bounded polling with a deadline — sanctioned by `Tests/CLAUDE.md`
+    /// assertion-hygiene rule 3 — and it is *not* a wall-clock assertion. What is
+    /// being waited on here is real task scheduling, which is genuinely real-time;
+    /// the behaviour under test stays on virtual time and its assertions stay
+    /// exact. The timeout is a hang-catcher, in the same family as `.clockDriven`,
+    /// not a timing budget.
+    ///
+    /// ## What this does NOT fix
+    ///
+    /// `checkSuspension()` opens with `Task.megaYield()` — 20 serially-awaited
+    /// **background-QoS** detached tasks — and `TestClock.advance(to:)` calls it
+    /// twice more per advance. That is inside swift-clocks, on the hot path of
+    /// every clock-driven test, and no change here can remove it. macOS starves
+    /// background QoS under saturation, so a residual load sensitivity remains:
+    /// this is load-*tolerant*, not load-*independent*. Measured healthy-path
+    /// cost is tens of microseconds to a few milliseconds, but a 6-test suite was
+    /// observed taking 8.4 s instead of 0.05 s — green, visibly stuck behind a
+    /// slow megaYield — at load average >= 200 on 12 cores. CI (3–4 cores, `-j 2`,
+    /// otherwise idle) is far from that regime. Making this load-independent
+    /// means a megaYield-free virtual clock replacing `TestClock`, which is a
+    /// shared-contract change and deliberately not bundled here.
+    ///
+    /// - Parameters:
+    ///   - timeout: hang guard, and the value is a two-sided constraint. It must
+    ///     stay well under `.clockDriven`'s one-minute limit (Swift Testing's
+    ///     floor granularity) — a test that waits twice has to afford both waits
+    ///     and still get this helper's diagnostic, rather than tripping the
+    ///     suite limit first and reporting an uninformative "wedged". But it
+    ///     must also clear the worst-case real arming latency: at 5 s, the
+    ///     appearance suite failed 4 of 6 full-target runs on this handshake.
+    ///     15 s is ~10x the observed healthy-path arming cost inside a
+    ///     1332-test target while still leaving half the per-test budget for a
+    ///     twice-waiting test. Only a genuinely un-armed timer ever pays it.
+    ///   - pollInterval: how long to step aside between probes. Each probe costs
+    ///     a megaYield, so probing tightly floods the pool with background tasks
+    ///     and starves the very task being waited for — lazier is better.
+    /// Note both are `Swift.Duration`, not this clock's generic `Duration`: they
+    /// are real wall-clock quantities for the scheduling handshake, deliberately
+    /// unrelated to the virtual time the clock hands out.
+    func waitForSuspension(timeout: Swift.Duration = .seconds(15),
+                           pollInterval: Swift.Duration = .milliseconds(25),
                            sourceLocation: SourceLocation = #_sourceLocation) async {
-        for _ in 0..<maxYields {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        repeat {
             do {
                 try await checkSuspension()
             } catch {
                 return  // A sleeper is registered — that is what we were waiting for.
             }
-            await Task.yield()
-        }
+            try? await Task.sleep(for: pollInterval)
+        } while ContinuousClock.now < deadline
         Issue.record(
             """
-            TestClock: no task was suspended on the clock after \(maxYields) yields — \
-            the code under test never reached its sleep. Did you start the task, or \
+            TestClock: no task was suspended on the clock within \(timeout) — the \
+            code under test never reached its sleep. Did you start the task, or \
             advance before it was armed?
             """,
             sourceLocation: sourceLocation

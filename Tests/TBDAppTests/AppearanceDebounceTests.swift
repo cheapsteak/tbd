@@ -1,109 +1,268 @@
+import Clocks
 import Combine
 import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
-/// Tests that scheme changes are debounced before they turn into daemon RPCs.
+/// Tier 1. Debounce contract for scheme changes before they turn into daemon RPCs.
 ///
-/// These tests reconstruct the same Combine pipeline that
-/// `AppState.setupAppearanceSubscriptions` wires onto `appearance.$schemeID`
-/// (`dropFirst().removeDuplicates().debounce(for: .milliseconds(200),
-/// scheduler: DispatchQueue.main)`) and observe its emissions directly, so the
-/// debounce contract is verified without standing up a daemon connection.
+/// What changed and why: this suite used to *reconstruct*
+/// `AppState.setupAppearanceSubscriptions`' Combine chain inside its own body
+/// and assert against the copy, then wait on the real 200 ms
+/// `DispatchQueue.main` debounce by polling a 5 s wall-clock deadline. So the
+/// production wiring had no coverage at all, and the test failed under load
+/// (reproduced locally, 2 of 5 runs). Combine's `.debounce` takes a `Scheduler`,
+/// which can never be an `any Clock<Duration>`, so the fix was to move the
+/// timed stage out of Combine entirely — see `AppearanceBroadcastDebouncer`,
+/// which these tests now drive directly against a `TestClock`.
 ///
-/// Why `DispatchQueue.main` + condition-based waiting: a `RunLoop.main` Combine
-/// scheduler fires its debounce `Timer` in `.default` mode, which only advances
-/// while a `CFRunLoop` is actively spinning. Under `swift test` there is no
-/// `NSApplication.run()` pumping the main run loop, so those timers fire
-/// unreliably while the test is suspended in `Task.sleep` — the original flake.
-/// `DispatchQueue.main` blocks are serviced by the main-actor executor
-/// regardless, so the emission always lands; we then poll for it instead of
-/// sleeping a fixed window and asserting blind.
+/// Consequence: there is no wall clock anywhere below. Every timing is virtual
+/// and exact, so the assertions are boundary-precise rather than
+/// tolerance-windowed. The old doc comment's `DispatchQueue.main` vs
+/// `RunLoop.main` reasoning no longer applies — no Combine scheduler is
+/// involved.
+/// `.serialized` is load-bearing, not tidiness. Every test here drives a
+/// `TestClock`, and each probe/advance costs a `Task.megaYield()` — 20
+/// serially-awaited background-QoS detached tasks. Run in parallel, seven such
+/// tests flood the pool with exactly the low-priority work they are each
+/// waiting on, and they starve *each other*: measured in the full 1332-test
+/// target, the unserialized suite failed 4 of 6 runs on the arming handshake
+/// while taking ~12.6 s even when it passed. Serialized, the suite stops being
+/// its own contention source. This narrows one suite, not the target — other
+/// suites still run in parallel around it.
 @MainActor
-@Suite("AppState appearance debounce")
+@Suite("AppState appearance debounce", .clockDriven, .serialized)
 struct AppearanceDebounceTests {
-    @Test("rapid scheme changes within debounce window collapse to single emission")
-    func rapidSchemeChangesDebounce() async {
-        // Use isolated UserDefaults so the test never touches the developer's app preferences.
+    private static let interval = Duration.milliseconds(200)
+
+    /// Isolated `AppearanceSettings` + debouncer + fired-value recorder.
+    /// `UserDefaults.standard` on this unbundled executable is the developer's
+    /// real `TBDApp.plist`, so the suite name must be unique and torn down.
+    @MainActor
+    private final class Harness {
+        let suiteName: String
+        let defaults: UserDefaults
+        let appearance: AppearanceSettings
+        let clock = TestClock()
+        let debouncer: AppearanceBroadcastDebouncer
+        let fired = Box()
+        var subscription: AnyCancellable?
+
+        final class Box { var values: [String] = [] }
+
+        init() {
+            suiteName = "TBDAppTests.AppearanceDebounce.\(UUID().uuidString)"
+            defaults = UserDefaults(suiteName: suiteName)!
+            // `userThemesDirectory` is the injection seam named in the root
+            // CLAUDE.md; without it `init` stats the developer's real `~/tbd`.
+            // A non-existent temp path is the point — the lookup must miss
+            // deterministically rather than depend on what is on this machine.
+            appearance = AppearanceSettings(
+                defaults: defaults,
+                userThemesDirectory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("TBDAppTests.AppearanceDebounce.\(UUID().uuidString)")
+            )
+            debouncer = AppearanceBroadcastDebouncer(
+                interval: AppearanceDebounceTests.interval,
+                clock: clock
+            )
+        }
+
+        func subscribe() {
+            subscription = debouncer.start(observing: appearance) { [fired] value in
+                fired.values.append(value)
+            }
+        }
+
+        func tearDown() {
+            subscription?.cancel()
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+    }
+
+    /// A `Clock<Duration>` that delegates to a `TestClock` and then cancels the
+    /// sleeping task the instant its sleep resumes.
+    ///
+    /// This reproduces the one window a `try? await clock.sleep(...)` cannot
+    /// see: cancellation that arrives *after* the sleep completed, which cannot
+    /// retroactively make that `await` throw. `withUnsafeCurrentTask` is what
+    /// makes it exact — the hook runs inside the production debounce task
+    /// itself, so it cancels precisely that task, synchronously, between its
+    /// sleep returning and its next statement.
+    ///
+    /// (An earlier attempt called `debouncer.cancel()` through
+    /// `MainActor.assumeIsolated` here and crashed with SIGTRAP: `sleep` is a
+    /// `nonisolated` protocol requirement, so it runs on the generic executor
+    /// even when the calling task is `@MainActor`.)
+    ///
+    /// Delegating rather than reimplementing keeps virtual time exact —
+    /// `TestClock` still owns every suspension, so `advanceWhenSuspended` on the
+    /// base clock behaves normally.
+    fileprivate struct CancelOnResumeClock: Clock {
+        let base: TestClock<Swift.Duration>
+
+        var now: TestClock<Swift.Duration>.Instant { base.now }
+        var minimumResolution: Swift.Duration { base.minimumResolution }
+
+        func sleep(until deadline: TestClock<Swift.Duration>.Instant,
+                   tolerance: Swift.Duration?) async throws {
+            try await base.sleep(until: deadline, tolerance: tolerance)
+            withUnsafeCurrentTask { $0?.cancel() }
+        }
+    }
+
+    @MainActor
+    private static func withHarness(_ body: (Harness) async -> Void) async {
+        let harness = Harness()
+        harness.subscribe()
+        // `defer`, not a trailing call: `schemeID`'s `didSet` writes to the
+        // suite, so skipping teardown leaks a plist into the developer's real
+        // ~/Library/Preferences. Same length, one less coupling to `body`
+        // never throwing.
+        defer { harness.tearDown() }
+        await body(harness)
+    }
+
+    // Tier 1.
+    @Test("rapid scheme changes within one window collapse to a single fire")
+    func rapidChangesCollapse() async {
+        await Self.withHarness { h in
+            h.appearance.schemeID = "scheme-a"
+            h.appearance.schemeID = "scheme-b"
+            h.appearance.schemeID = "scheme-c"
+
+            await h.clock.advanceWhenSuspended(by: Self.interval)
+            #expect(h.fired.values == ["scheme-c"])
+        }
+    }
+
+    // Tier 1. The boundary the old wall-clock test structurally could not express.
+    @Test("nothing fires until the full interval has elapsed")
+    func firesExactlyOnTheBoundary() async {
+        await Self.withHarness { h in
+            h.appearance.schemeID = "scheme-a"
+
+            await h.clock.advanceWhenSuspended(by: Self.interval - .milliseconds(1))
+            #expect(h.fired.values.isEmpty, "one millisecond short of the window must not fire")
+
+            await h.clock.advance(by: .milliseconds(1))
+            #expect(h.fired.values == ["scheme-a"])
+        }
+    }
+
+    // Tier 1.
+    @Test("a late change restarts the quiet window")
+    func lateChangeRestartsWindow() async {
+        await Self.withHarness { h in
+            h.appearance.schemeID = "scheme-a"
+            await h.clock.advanceWhenSuspended(by: .milliseconds(150))
+            #expect(h.fired.values.isEmpty)
+
+            // Restarts the window: the first sleeper is cancelled, a fresh
+            // 200 ms one is armed. Note what the wait below can and cannot
+            // promise — `checkSuspension()` only asks "is anything suspended",
+            // so it can in principle be satisfied by the superseded sleeper
+            // whose entry is still being cleaned up, rather than by the new one.
+            // `advance(to:)` megaYields before touching `suspensions`, which is
+            // why the cleanup and the re-arm land first in practice. A
+            // "wait for a sleeper at/after deadline X" helper would make it a
+            // guarantee; that is a shared-helper change, not a C1 change.
+            h.appearance.schemeID = "scheme-b"
+            await h.clock.advanceWhenSuspended(by: .milliseconds(150))
+            #expect(h.fired.values.isEmpty, "only 150ms since the restart — must not fire yet")
+
+            await h.clock.advance(by: .milliseconds(50))
+            #expect(h.fired.values == ["scheme-b"])
+        }
+    }
+
+    // Tier 1.
+    @Test("changes separated by a full window fire twice, in order")
+    func separatedChangesFireTwice() async {
+        await Self.withHarness { h in
+            h.appearance.schemeID = "scheme-a"
+            await h.clock.advanceWhenSuspended(by: Self.interval)
+            #expect(h.fired.values == ["scheme-a"])
+
+            h.appearance.schemeID = "scheme-b"
+            await h.clock.advanceWhenSuspended(by: Self.interval)
+            #expect(h.fired.values == ["scheme-a", "scheme-b"])
+        }
+    }
+
+    // Tier 1.
+    @Test("dropFirst skips the subscriber-time value and removeDuplicates collapses repeats")
+    func dropFirstAndRemoveDuplicates() async {
+        await Self.withHarness { h in
+            // `dropFirst`: `@Published` replayed the current value at
+            // subscription time in `subscribe()`. Assert on the SLEEPER, not on
+            // `fired`: with no advance yet, `fired` is empty either way, so
+            // checking it would pass just as happily with `dropFirst()` deleted
+            // from production. `checkSuspension()` throws when a sleeper is
+            // registered, so "does not throw" is the real assertion — the
+            // subscriber-time replay never armed a timer at all.
+            await #expect(throws: Never.self) { try await h.clock.checkSuspension() }
+            #expect(h.fired.values.isEmpty)
+
+            // `removeDuplicates`: the second assignment is not a distinct value,
+            // so it never reaches the timer and cannot restart the window.
+            h.appearance.schemeID = "scheme-a"
+            await h.clock.advanceWhenSuspended(by: .milliseconds(100))
+            h.appearance.schemeID = "scheme-a"
+            await h.clock.advance(by: .milliseconds(100))
+
+            #expect(h.fired.values == ["scheme-a"], "a repeated value must neither fire twice nor restart the window")
+        }
+    }
+
+    /// Tier 1. Covers the branch that a plain `try? await clock.sleep(...)`
+    /// does **not**: cancellation arriving *after* the sleep has already
+    /// resumed, which cannot retroactively make that `await` throw.
+    ///
+    /// The other cancellation test below cancels while the timer is still
+    /// asleep, which the thrown-error path already handles — delete the
+    /// `Task.isCancelled` guard in production and that test stays green. This
+    /// one goes red, because `PostResumeCancelClock` lands the cancel in
+    /// exactly the window the guard exists for.
+    @Test("a cancel landing after the sleep resumes still suppresses the fire")
+    func cancelAfterSleepResumesSuppressesFire() async {
         let suiteName = "TBDAppTests.AppearanceDebounce.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appearance = AppearanceSettings(
+            defaults: defaults,
+            userThemesDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("TBDAppTests.AppearanceDebounce.\(UUID().uuidString)")
+        )
 
-        let appearance = AppearanceSettings(defaults: defaults)
+        let base = TestClock()
+        let debouncer = AppearanceBroadcastDebouncer(
+            interval: Self.interval,
+            clock: CancelOnResumeClock(base: base)
+        )
+        let fired = Harness.Box()
+        let subscription = debouncer.start(observing: appearance) { [fired] value in
+            fired.values.append(value)
+        }
+        defer { subscription.cancel() }
 
-        // Subscribe to the debounced schemeID emissions to count how many fire.
-        var debounceEmissions: [String] = []
-        let testSubscription = appearance.$schemeID
-            .dropFirst()
-            .removeDuplicates()
-            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
-            .sink { debounceEmissions.append($0) }
-
-        // Three changes with no suspension between them stay inside one debounce
-        // window, so the operator must coalesce them into a single trailing emission.
         appearance.schemeID = "scheme-a"
-        appearance.schemeID = "scheme-b"
-        appearance.schemeID = "scheme-c"
-
-        // Wait (condition-based) for the coalesced emission rather than sleeping a
-        // fixed window then asserting — no wall-clock dependency.
-        let landed = await poll { debounceEmissions.contains("scheme-c") }
-        #expect(landed, "Debounced emission of the final scheme should land within the deadline")
-
-        // The three rapid changes collapsed to exactly one emission of the last value;
-        // the intermediate values were never emitted on their own.
-        #expect(debounceEmissions == ["scheme-c"], "Rapid changes should coalesce to a single final emission")
-
-        testSubscription.cancel()
+        await base.advanceWhenSuspended(by: Self.interval)
+        #expect(fired.values.isEmpty, "a fire cancelled after its sleep resumed must not land")
     }
 
-    @Test("separated scheme changes produce separate emissions")
-    func separatedSchemeChangesProduceMultipleEmissions() async {
-        let suiteName = "TBDAppTests.AppearanceDebounceSpaced.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+    // Tier 1.
+    @Test("cancel() suppresses a pending fire")
+    func cancelSuppressesPendingFire() async {
+        await Self.withHarness { h in
+            h.appearance.schemeID = "scheme-a"
+            await h.clock.advanceWhenSuspended(by: .milliseconds(100))
 
-        let appearance = AppearanceSettings(defaults: defaults)
-
-        var debounceEmissions: [String] = []
-        let testSubscription = appearance.$schemeID
-            .dropFirst()
-            .removeDuplicates()
-            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
-            .sink { debounceEmissions.append($0) }
-
-        // First change: wait for its debounced emission to land.
-        appearance.schemeID = "scheme-a"
-        let first = await poll { debounceEmissions.count >= 1 }
-        #expect(first, "First separated change should produce an emission")
-        let countAfterFirst = debounceEmissions.count
-
-        // Second change after the first window settled: must emit again.
-        appearance.schemeID = "scheme-b"
-        let second = await poll { debounceEmissions.count > countAfterFirst }
-        #expect(second, "Second separated change should produce another emission")
-        #expect(debounceEmissions.count > countAfterFirst, "Separated changes should produce multiple emissions")
-
-        testSubscription.cancel()
+            h.debouncer.cancel()
+            await h.clock.advance(by: Self.interval)
+            #expect(h.fired.values.isEmpty)
+        }
     }
-}
-
-/// Polls `condition` on the main actor until it returns true or `timeout`
-/// elapses, returning the final result. Used instead of a fixed `Task.sleep`
-/// so the test proceeds the instant the asynchronous debounce emission arrives
-/// and never depends on a wall-clock window. The `Task.sleep` suspension points
-/// let `DispatchQueue.main` debounce blocks drain between checks.
-@MainActor
-private func poll(
-    timeout: Duration = .seconds(5),
-    interval: Duration = .milliseconds(10),
-    _ condition: () -> Bool
-) async -> Bool {
-    let deadline = ContinuousClock.now.advanced(by: timeout)
-    while ContinuousClock.now < deadline {
-        if condition() { return true }
-        try? await Task.sleep(for: interval)
-    }
-    return condition()
 }
