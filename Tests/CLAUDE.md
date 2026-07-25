@@ -138,6 +138,13 @@ that a quarantine mechanism that silently stopped retrying cannot look
 identical to a working one. Its issue (#499) is a permanently-open fixture
 anchor. **The audit must exclude that exact test ID and no other.**
 
+The same file's `alwaysFails()` fixture shares issue #499 and is deliberately
+**not** excluded. It is gated off by `TBD_FLAKY_SELFTEST_FAILURE` and nothing in
+CI sets that, so it should contribute no records at all — if `failed` records
+for it ever appear in the ledger, the gate has leaked into CI, and the audit
+should **report that** rather than filter it away. An exclusion list that grew
+to cover it would turn a broken gate into silence.
+
 ## Assertion hygiene
 
 Four rules. Each traces to a real flake — provenance kept so the rule sticks.
