@@ -50,8 +50,11 @@ actor PaneRepairCoordinator {
     /// Recapture depth — matches the attach orchestrator's (see its note on
     /// the server-side `history-limit 50000`).
     private let historyDepth: Int
-    /// Reader-catch-up poll pacing (step 2) — injectable so tests can wedge
-    /// the reader on tiny intervals. The wait has NO deadline: pacing starts
+    /// Reader-catch-up poll pacing (step 2) — injectable so tests can choose
+    /// a pacing that reaches a threshold in a few clock advances (typically
+    /// LARGER than production: virtual time makes small intervals pointless,
+    /// and a long advance chain is a load-sensitivity hazard). The wait has
+    /// NO deadline: pacing starts
     /// at `writableCheckInterval` and relaxes to `writableSlowInterval` once
     /// the wait exceeds `writableEscalationThreshold`.
     private let writableCheckInterval: Duration
@@ -65,13 +68,18 @@ actor PaneRepairCoordinator {
     /// `repairing` flag already gates re-signaling at the fanout, but a
     /// duplicate signal for a key mid-repair must still be a no-op here.
     private var inFlight: Set<PaneKey> = []
+    /// Clock behind the reader-catch-up pacing below. Defaulted, so no call
+    /// site changes; tests pass a `TestClock` and drive virtual time.
+    private let clock: any Clock<Duration>
 
     init(supervisor: TmuxControlSupervisor,
          commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          historyDepth: Int = 50_000,
          writableCheckInterval: Duration = .milliseconds(50),
          writableSlowInterval: Duration = .milliseconds(500),
-         writableEscalationThreshold: Duration = .seconds(5)) {
+         writableEscalationThreshold: Duration = .seconds(5),
+         clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
         self.supervisor = supervisor
         self.commandProvider = commandProvider
         self.historyDepth = historyDepth
@@ -182,7 +190,15 @@ actor PaneRepairCoordinator {
         // the viewer is gone or dying, the app-death detach path finishes the
         // job, and leaving the pane unpaused keeps it healthy for the next
         // attach.
-        let waitStart = ContinuousClock.now
+        //
+        // Elapsed is ACCUMULATED from the intervals this loop actually slept,
+        // not read off an `Instant` — `any Clock<Duration>` erases `Instant`,
+        // and both thresholds below are pure pacing/logging (neither gates a
+        // send, an unpause, or a generation decision), so excluding the
+        // nanosecond-scale writability check between slices is noise against
+        // a 5 s / 30 s mark, and makes both exactly advanceable on a
+        // `TestClock`.
+        var waited: Duration = .zero
         var loggedStall = false
         waitLoop: while true {
             switch supervisor.fanout.isPipeWritable(key: key, generation: generation) {
@@ -209,7 +225,6 @@ actor PaneRepairCoordinator {
                 }
                 return
             case .full?:
-                let waited = ContinuousClock.now - waitStart
                 if !loggedStall, waited >= Self.readerStallLogThreshold {
                     loggedStall = true
                     Self.logger.error("""
@@ -220,17 +235,17 @@ actor PaneRepairCoordinator {
                 let interval = waited >= writableEscalationThreshold
                     ? writableSlowInterval : writableCheckInterval
                 // Cancellation bail (latent — the bridge's dispatch Tasks are
-                // never cancelled today): in a cancelled task `Task.sleep`
+                // never cancelled today): in a cancelled task the sleep
                 // throws immediately, which would turn this deadline-free
                 // wait into an unbounded busy-spin. Exit silently, like the
                 // superseded `nil` case above: send nothing — the sink stays
                 // `repairing`, and a later overflow signal or attach heals it.
                 do {
-                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-                    try await Task.sleep(for: interval)
+                    try await clock.sleep(for: interval)
                 } catch {
                     return
                 }
+                waited += interval
             }
         }
 

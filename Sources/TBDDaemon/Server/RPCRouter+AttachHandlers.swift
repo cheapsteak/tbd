@@ -117,9 +117,21 @@ extension RPCRouter {
             // Generation-scoped so a timer outliving a superseded attach can't
             // kill the fresh attach that replaced it.
             let timeout = bridge.readyTimeout
-            Task { [supervisor = bridge.supervisor] in
-                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-                try? await Task.sleep(for: timeout)
+            Task { [supervisor = bridge.supervisor, clock = bridge.clock] in
+                // `try?` is HEAD's shape, kept bit-for-bit. Note what it does
+                // NOT mean: on cancellation the sleep throws, `try?` swallows
+                // it, and control FALLS THROUGH to the detach below — so a
+                // cancelled timer runs the teardown IMMEDIATELY rather than
+                // skipping it. Latent today (nothing retains this Task handle,
+                // so nothing can cancel it), and harmless if it ever isn't —
+                // BECAUSE `detachIfNotReady` is generation-scoped and a no-op
+                // once the attach is acked. That "because" is the invariant
+                // this relies on, not a passing remark: if `detachIfNotReady`
+                // ever stops checking the generation, or a side effect is
+                // added AHEAD of that check, an early-fired timer starts
+                // tearing down a live attach. Spelled out because the opposite
+                // reading of `try?` is the natural one.
+                try? await clock.sleep(for: timeout)
                 await supervisor.detachIfNotReady(server: server, paneID: paneID, generation: generation)
             }
             // The generation rides the result so the app can echo it back in
