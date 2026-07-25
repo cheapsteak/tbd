@@ -838,6 +838,10 @@ final class ContinuationGuard: @unchecked Sendable {
             return true
         }
     }
+
+    /// Whether the continuation has already been resumed by someone. Read by the
+    /// spawn path to detect a deadline that fired *during* `Process.run()`.
+    var isClaimed: Bool { lock.withLock { $0 } }
 }
 
 public enum TmuxError: Error, Sendable {

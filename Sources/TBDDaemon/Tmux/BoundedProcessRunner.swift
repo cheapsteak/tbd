@@ -296,6 +296,34 @@ func runBoundedProcess(
             deadline.disarm()
         })
 
+        // Armer 2 — the injected clock. Under `ContinuousClock` this races armer
+        // 1 to the same instant and the loser is a no-op; under a `TestClock` it
+        // is the only armer that can fire, which is what makes the timeout tests
+        // deterministic.
+        //
+        // Armed HERE, before `Process.run()`, and the ordering is load-bearing in
+        // both directions:
+        //
+        //  - It must not be LATER. A `TestClock` sleeper has to be registered
+        //    before the test's bounded `advanceWhenSuspended` wait gives up.
+        //    Arming after `run()` puts a real fork/exec in front of that
+        //    registration, and on a loaded box the spawn outruns the wait — the
+        //    test then advances a clock with nobody sleeping on it, the sleep
+        //    registers against the new `now`, and the deadline never fires.
+        //    (Measured: 1 failure in 10 whole-target runs at loadavg ~150.)
+        //  - It must not be UNGUARDED. A virtual deadline can fire microseconds
+        //    from here, while `processIdentifier` is still 0 and the kill below
+        //    is skipped — which would resolve `.timedOut` and orphan the child
+        //    `run()` is about to create. The post-spawn check handles that case.
+        //
+        // A plain `try await` rather than `try?`: cancellation before the sleep
+        // resumes must end the task, not fall through to the action.
+        deadline.arm(task: Task {
+            try await clock.sleep(for: timeout)
+            deadline.fire()
+            deadline.disarm()
+        })
+
         process.terminationHandler = { _ in
             // The direct child exited; everything it wrote is already in the
             // kernel pipe buffers. `snapshot` captures that without waiting for
@@ -322,27 +350,21 @@ func runBoundedProcess(
 
         do {
             try process.run()
-            // Armer 2 — the injected clock. Under `ContinuousClock` this races
-            // armer 1 to the same instant and the loser is a no-op; under a
-            // `TestClock` it is the only armer that can fire, which is what makes
-            // the timeout tests deterministic.
-            //
-            // Armed AFTER `run()`, unlike the watchdog. The watchdog cannot fire
-            // before the spawn because its delay is real (production timeouts are
-            // >=5s), but a virtual deadline can fire microseconds from now — and
-            // the fire path needs a live `processIdentifier` to signal. Arming
-            // pre-spawn would let a test advance the clock into a fire that finds
-            // pid 0, skips the kill, resolves `.timedOut`, and orphans the child
-            // that `run()` is about to create. The sub-millisecond difference in
-            // where the deadline is measured from is invisible next to that.
-            //
-            // A plain `try await` rather than `try?`: cancellation before the
-            // sleep resumes must end the task, not fall through to the action.
-            deadline.arm(task: Task {
-                try await clock.sleep(for: timeout)
-                deadline.fire()
-                deadline.disarm()
-            })
+            // KILL ON ARRIVAL. The deadline may have fired *during* the spawn,
+            // when `processIdentifier` was still 0 and its own kill was skipped.
+            // Whoever claimed the continuation, a child that is still running at
+            // this point has nobody left to reap it, so signal it here rather
+            // than orphan it. A normal completion leaves `isRunning` false, so
+            // this is inert on the happy path.
+            if state.isClaimed, process.isRunning {
+                let pid = process.processIdentifier
+                if pid > 0 {
+                    kill(pid, SIGTERM)
+                    SubprocessWatchdog.shared.schedule(after: .milliseconds(500)) {
+                        if process.isRunning { kill(pid, SIGKILL) }
+                    }
+                }
+            }
         } catch {
             // Spawn failed: no child will ever write — detach the drain handlers
             // and close the read ends so nothing lingers. `run()` fails
