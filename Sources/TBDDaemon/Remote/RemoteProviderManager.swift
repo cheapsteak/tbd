@@ -26,6 +26,10 @@ public actor RemoteProviderManager {
     /// race this closes.
     private var reconfiguring = false
     private var reconfigureWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Set by `shutdown()` while still holding the reconfigure lock, and
+    /// never cleared — shutdown is terminal for this actor's lifetime. See
+    /// `shutdown()`'s doc comment for the race this closes.
+    private var shuttingDown = false
 
     init(db: TBDDatabase, subscriptions: StateSubscriptionManager,
          runner: any RemoteProviderInvoking, registryURL: URL) {
@@ -118,6 +122,12 @@ public actor RemoteProviderManager {
     private func spawnPollLoops() async {
         await acquireReconfigureLock()
         defer { releaseReconfigureLock() }
+        // A call already parked in the FIFO waiter queue when `shutdown()`
+        // ran receives the baton right after `shutdown()` releases it — FIFO
+        // ordering alone doesn't stop that hand-off, only this flag does.
+        // Without it, this would respawn poll loops (and events supervisors)
+        // on a manager the daemon believes it already tore down.
+        guard !shuttingDown else { return }
         await stopAll()
         for name in describes.keys {
             guard let config = providers[name] else { continue }
@@ -154,13 +164,20 @@ public actor RemoteProviderManager {
     /// to call directly from outside `spawnPollLoops` — it's the FIFO
     /// reconfigure lock (see `spawnPollLoops`'s comment) that makes teardown
     /// and a concurrent spawn mutually exclusive, and `stopAll()` on its own
-    /// doesn't take it. Daemon shutdown can race a just-started poll loop
-    /// spawning its own reconfigure (e.g. a `start()` still in flight at
-    /// shutdown), so it must take the same lock rather than calling
-    /// `stopAll()` bare.
+    /// doesn't take it.
+    ///
+    /// Taking the lock alone is NOT sufficient, and this does not merely
+    /// guard against "a `start()` still in flight at shutdown": FIFO means a
+    /// `spawnPollLoops()` call already parked in the waiter queue when this
+    /// runs receives the baton right after `shutdown()` releases the lock —
+    /// it would then respawn poll loops/supervisors on a manager the daemon
+    /// believes is torn down. `shuttingDown` (set here, before `stopAll()`,
+    /// and never cleared) makes shutdown terminal: every `spawnPollLoops()`
+    /// call that resumes after this one — queued or future — is a no-op.
     func shutdown() async {
         await acquireReconfigureLock()
         defer { releaseReconfigureLock() }
+        shuttingDown = true
         await stopAll()
     }
 

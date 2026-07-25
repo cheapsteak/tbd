@@ -1639,19 +1639,35 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// uses this to decide whether `panel.get`/`panel.apply` are live or the
     /// legacy client-owned layout path should still be used.
     public let panelSurfaceEnabled: Bool
+    /// Whether `config.remoteBackendsEnabled` is currently set. Default OFF
+    /// while the feature soaks (Task 7). The app can already read this off
+    /// `Config`, but this lets `remoteBackendsLive` sit next to it in one
+    /// payload — see that field's doc comment for why both are needed.
+    public let remoteBackendsEnabled: Bool
+    /// Whether the daemon actually constructed a `RemoteProviderManager` at
+    /// boot — `false` when the flag is off, AND when the flag is on but was
+    /// flipped on after the daemon last started (it only constructs the
+    /// manager at boot; see `Daemon.swift`). Lets the app distinguish "flag
+    /// on and live" from "flag on but needs a restart" without calling a
+    /// `remote.*` verb and parsing its error string.
+    public let remoteBackendsLive: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
-                panelSurfaceEnabled: Bool = false) {
+                panelSurfaceEnabled: Bool = false,
+                remoteBackendsEnabled: Bool = false,
+                remoteBackendsLive: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.panelSurfaceEnabled = panelSurfaceEnabled
+        self.remoteBackendsEnabled = remoteBackendsEnabled
+        self.remoteBackendsLive = remoteBackendsLive
     }
 
     public init(from decoder: Decoder) throws {
@@ -1667,6 +1683,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
         panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
+        // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).
+        remoteBackendsEnabled = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsEnabled) ?? false
+        remoteBackendsLive = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsLive) ?? false
     }
 }
 

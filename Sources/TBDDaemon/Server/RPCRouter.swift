@@ -449,7 +449,9 @@ public final class RPCRouter: Sendable {
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
-            panelSurfaceEnabled: config.panelSurfaceEnabled))
+            panelSurfaceEnabled: config.panelSurfaceEnabled,
+            remoteBackendsEnabled: config.remoteBackendsEnabled,
+            remoteBackendsLive: remoteManager != nil))
     }
 
     // MARK: - PR Status

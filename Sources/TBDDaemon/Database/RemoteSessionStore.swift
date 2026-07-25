@@ -169,11 +169,16 @@ public struct RemoteSessionStore: Sendable {
         }
     }
 
-    public func dismiss(provider: String, sessionID: String) async throws {
+    /// Returns whether a row actually changed (an unknown session, or one
+    /// already dismissed, changes nothing) — mirrors `markGone`'s contract so
+    /// callers can skip a pointless UI broadcast.
+    @discardableResult
+    public func dismiss(provider: String, sessionID: String) async throws -> Bool {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE remote_session SET dismissed = 1 WHERE provider = ? AND sessionID = ?",
+                sql: "UPDATE remote_session SET dismissed = 1 WHERE provider = ? AND sessionID = ? AND dismissed = 0",
                 arguments: [provider, sessionID])
+            return db.changesCount > 0
         }
     }
 }

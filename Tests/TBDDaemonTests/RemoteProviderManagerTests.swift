@@ -3,27 +3,56 @@ import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// One scripted outcome for a `FakeProviderInvoker` call: either a canned
+/// `ProviderResult` or a simulated provider timeout. Not `private` for the
+/// same reason `FakeProviderInvoker` isn't.
+enum FakeProviderOutcome: Sendable {
+    case result(ProviderResult)
+    /// Throws `ProviderRunError.timeout(verb:)` for this call — scripts the
+    /// create-retry path (RPCRouterRemoteTests), which needs the FIRST
+    /// invocation to time out and the SECOND to succeed with the SAME stdin.
+    case timeout
+}
+
 /// Scriptable fake provider: each verb invocation pops the next canned
-/// result. Intentionally NOT `private` — a later task's RPC-handler tests
+/// outcome. Intentionally NOT `private` — a later task's RPC-handler tests
 /// reuse this against the same `RemoteProviderInvoking` protocol.
 final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
     private let lock = NSLock()
-    private var script: [ProviderResult]
+    private var script: [FakeProviderOutcome]
     private(set) var calls: [[String]] = []
-    init(script: [ProviderResult]) { self.script = script }
+    /// stdin bytes for each call, same index as `calls`. `nil` entries are
+    /// calls made with no stdin (e.g. `stop`/`log`).
+    private(set) var stdins: [Data?] = []
+
+    init(script: [ProviderResult]) {
+        self.script = script.map { .result($0) }
+    }
+
+    /// Scriptable with timeouts interleaved among results.
+    init(outcomes: [FakeProviderOutcome]) {
+        self.script = outcomes
+    }
+
     func run(_ config: RemoteProviderConfig, verb: [String], stdin: Data?,
              timeout: TimeInterval) async throws -> ProviderResult {
-        popScript(verb)
+        try popScript(verb, stdin: stdin)
     }
 
     /// Synchronous helper so the NSLock critical section isn't taken from an
     /// `async` context (recent Foundation marks `NSLock.lock`/`unlock` as
     /// unavailable from async contexts to discourage blocking there).
-    private func popScript(_ verb: [String]) -> ProviderResult {
+    private func popScript(_ verb: [String], stdin: Data?) throws -> ProviderResult {
         lock.lock(); defer { lock.unlock() }
         calls.append(verb)
+        stdins.append(stdin)
         precondition(!script.isEmpty, "FakeProviderInvoker script exhausted for verb \(verb)")
-        return script.removeFirst()
+        switch script.removeFirst() {
+        case .result(let result):
+            return result
+        case .timeout:
+            throw ProviderRunError.timeout(verb: verb.first ?? "?")
+        }
     }
 
     /// Locked snapshot of `calls`, for tests that read it while a manager's
@@ -32,6 +61,12 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
     func callsSnapshot() -> [[String]] {
         lock.lock(); defer { lock.unlock() }
         return calls
+    }
+
+    /// Locked snapshot of `stdins`, same rationale as `callsSnapshot()`.
+    func stdinsSnapshot() -> [Data?] {
+        lock.lock(); defer { lock.unlock() }
+        return stdins
     }
 }
 

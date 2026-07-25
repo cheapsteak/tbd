@@ -400,12 +400,20 @@ public final class Daemon: Sendable {
         // backends disabled" (RPCRouter+RemoteHandlers.swift) rather than a
         // crash, until the next restart picks it up. Skipped in mock mode,
         // like every other background-task guard in this method.
+        //
+        // `self.remoteManager` is assigned IMMEDIATELY, before `start()` is
+        // even called (start() is deferred below, off the boot critical
+        // path, alongside the reaper/GC tasks) — so a SIGTERM that lands
+        // while `start()` is still describing providers still finds a
+        // non-nil `remoteManager` and `stop()` can reach `shutdown()`.
+        // Assigning only after an awaited `start()` would leave a mid-start
+        // shutdown request with nothing to call, orphaning the manager and
+        // any provider child processes it spawned.
         var remoteManager: RemoteProviderManager?
         if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
             let manager = RemoteProviderManager(
                 db: database, subscriptions: subs, runner: ProviderRunner(),
                 registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath))
-            await manager.start()
             self.remoteManager = manager
             remoteManager = manager
         }
@@ -631,6 +639,21 @@ public final class Daemon: Sendable {
                         guard !Task.isCancelled else { break }
                         _ = await orphanGC.sweep()
                     }
+                }
+            }
+
+            // 11a-remote. Remote backends (Task 7): `manager.start()` runs a
+            // sequential `describe` (10s timeout each) per registered
+            // provider, then spawns poll loops. Fired off the boot critical
+            // path — same shape as the reaper/GC tasks above — so N slow or
+            // hung providers don't delay the RPC listener coming up.
+            // `remoteManager` was already assigned on `self` above, so a
+            // shutdown request racing this task still has a live handle to
+            // call `shutdown()` on (see the `shuttingDown` guard in
+            // `spawnPollLoops()`).
+            if let remoteManager {
+                Task {
+                    await remoteManager.start()
                 }
             }
 
