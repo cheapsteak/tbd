@@ -108,7 +108,7 @@ actor RemoteProviderManager {
         await stopAll()
         for name in describes.keys {
             guard let config = providers[name] else { continue }
-            startLoop(for: config)
+            await startLoop(for: config)
         }
     }
 
@@ -125,11 +125,17 @@ actor RemoteProviderManager {
     /// stream that's down or restarting. Providers that declared the
     /// `events` capability in their cached `describe` additionally get a
     /// supervised low-latency NDJSON stream.
-    private func startLoop(for config: RemoteProviderConfig) {
+    private func startLoop(for config: RemoteProviderConfig) async {
         if describes[config.name]?.capabilities.contains("events") == true {
             let supervisor = ProviderEventsSupervisor(config: config, manager: self)
             supervisors[config.name] = supervisor
-            Task { await supervisor.start() }
+            // Awaited, not fired off as a detached `Task`: a queued `start()`
+            // could otherwise land AFTER a concurrent `stopAll()` had already
+            // stopped (a no-op, since nothing was started yet) and dropped this
+            // supervisor, arming a supervision loop on an object nobody holds —
+            // provider children respawning on backoff for the daemon's life
+            // with no way to reach them.
+            await supervisor.start()
         }
         loops[config.name] = Task { [weak self] in
             while !Task.isCancelled {
@@ -195,8 +201,11 @@ actor RemoteProviderManager {
     /// authoritative about this — skip the two-absence rule entirely and
     /// mark the row gone immediately.
     func applyRemoval(sessionID: String, provider: String) async {
-        try? await db.remoteSessions.markGone(provider: provider, sessionID: sessionID)
-        subscriptions.broadcast(delta: .remoteSessionsChanged)
+        let changed = try? await db.remoteSessions.markGone(
+            provider: provider, sessionID: sessionID)
+        if changed == true {
+            subscriptions.broadcast(delta: .remoteSessionsChanged)
+        }
     }
 
     func invoke(providerName: String, verb: [String], stdin: Data?,

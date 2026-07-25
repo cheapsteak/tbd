@@ -101,9 +101,16 @@ struct RemoteSessionStoreTests {
         #expect(rows[0].gone == false)
         // A single explicit removal is enough — unlike a single snapshot
         // absence, which only bumps missingCount to 1.
-        try await db.remoteSessions.markGone(provider: "p", sessionID: "a")
+        let changed = try await db.remoteSessions.markGone(provider: "p", sessionID: "a")
+        #expect(changed, "marking a live row gone must report a change so the UI broadcast fires")
         rows = try await db.remoteSessions.list()
         #expect(rows[0].gone == true)
+        // Nothing left to change: re-removing, or removing a session that was
+        // never mirrored, must report false so callers skip the broadcast.
+        let again = try await db.remoteSessions.markGone(provider: "p", sessionID: "a")
+        #expect(again == false)
+        let unknown = try await db.remoteSessions.markGone(provider: "p", sessionID: "nope")
+        #expect(unknown == false)
     }
 
     @Test func configFlagDefaultsOffAndPersists() async throws {

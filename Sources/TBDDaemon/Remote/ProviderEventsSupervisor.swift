@@ -42,21 +42,127 @@ private final class ProcessExitGate: @unchecked Sendable {
     }
 }
 
+/// Turns a pipe into an ordered stream of complete lines using
+/// `readabilityHandler` — the `PipeDataAccumulator` shape from
+/// `BoundedProcessRunner`, not `FileHandle.bytes.lines`.
+///
+/// Why not the simpler async-bytes sequence: teardown of this stream has to be
+/// safe at an arbitrary moment (the silence watchdog or `stop()` can fire mid
+/// stream), and on Darwin `close()`ing an fd out from under a thread already
+/// parked in `read(2)` does NOT wake that thread — it leaks the reader and,
+/// worse, frees the fd *number* for reuse by another consumer in this same
+/// process (GRDB, NIO) which the parked reader then reads from when it finally
+/// wakes. `TmuxControlConnection.stop()` documents that hazard and dances
+/// around it with a semaphore; this type sidesteps it entirely, because a
+/// `readabilityHandler` only ever reads when bytes (or EOF) are already
+/// waiting, so no thread is ever parked at close time.
+///
+/// Lines are yielded into an `AsyncStream` rather than dispatched as
+/// individual `Task`s so ordering is preserved: `session`/`removed` events
+/// must be applied in the order the provider emitted them.
+private final class PipeLineReader: @unchecked Sendable {
+    private let lock = NSLock()
+    private let continuation: AsyncStream<String>.Continuation
+    private var pending = Data()
+    private var finished = false
+
+    init(continuation: AsyncStream<String>.Continuation) {
+        self.continuation = continuation
+    }
+
+    /// `readabilityHandler` body. Returns `false` at EOF or after `finish`, so
+    /// the caller detaches itself.
+    func readAvailable(from handle: FileHandle) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return false }
+        let chunk = handle.availableData
+        guard !chunk.isEmpty else { return false }
+        emitLinesLocked(from: chunk)
+        return true
+    }
+
+    /// Drains whatever is already buffered WITHOUT blocking (so events sitting
+    /// in the kernel pipe buffer at exit are still applied rather than
+    /// dropped), emits any trailing unterminated line, closes the parent's
+    /// read end, and finishes the stream. Idempotent. The caller must detach
+    /// the readability handler first; acquiring the lock then blocks until any
+    /// in-flight handler call has finished touching the handle.
+    func finish(handle: FileHandle) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        finished = true
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+        var chunk = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let count = read(fd, &chunk, chunk.count)
+            if count > 0 {
+                emitLinesLocked(from: Data(chunk.prefix(count)))
+            } else if count < 0 && errno == EINTR {
+                continue
+            } else {
+                // 0 = EOF; -1/EAGAIN = every buffered byte is drained. Either
+                // way there is nothing we are obliged to wait for.
+                break
+            }
+        }
+        if !pending.isEmpty, let line = String(data: pending, encoding: .utf8) {
+            continuation.yield(line)
+        }
+        pending.removeAll()
+        try? handle.close()
+        continuation.finish()
+    }
+
+    private func emitLinesLocked(from chunk: Data) {
+        pending.append(chunk)
+        while let newline = pending.firstIndex(of: 0x0A) {
+            let lineData = pending[pending.startIndex..<newline]
+            pending = pending[pending.index(after: newline)...]
+            if let line = String(data: lineData, encoding: .utf8) {
+                continuation.yield(line)
+            }
+        }
+        // Compact so the slice's dropped prefix is actually released.
+        pending = Data(pending)
+    }
+}
+
 /// Supervises one provider's long-running `events` process: spawn, stream
 /// NDJSON lines to the manager, watchdog silence, and restart with backoff.
 /// Reconnect-and-resnapshot is the entire resync mechanism (no cursors) —
 /// every restart just relies on the provider re-emitting `hello`+`snapshot`.
 actor ProviderEventsSupervisor {
     private let config: RemoteProviderConfig
-    private weak var manager: RemoteProviderManager?
+    /// Held STRONGLY on purpose. Ownership runs the other way: the manager
+    /// owns its supervisors (`RemoteProviderManager.supervisors`) and breaks
+    /// the reference cycle in `stopAll()`, which awaits `stop()` and drops the
+    /// dictionary entry. A `weak` manager instead produces the worst failure
+    /// available — a supervisor that keeps spawning provider children forever
+    /// while every event it parses applies to nobody, silently.
+    private let manager: RemoteProviderManager
     private var supervision: Task<Void, Never>?
     private var currentProcess: Process?
+    /// Incremented per `runOnce`, so a previous run's teardown can never nil
+    /// out or kill the *current* run's process after a `stop()`/`start()`
+    /// cycle on the same instance.
+    private var generation = 0
     private var lastActivity = Date()
 
     /// Injectable timing so the live test runs in seconds, not minutes.
     let silenceLimit: TimeInterval
     let backoffCap: TimeInterval
     let healthyResetUptime: TimeInterval
+
+    /// Grace between SIGTERM and SIGKILL, and between observing the child's
+    /// exit and finishing the line stream (so late bytes still get applied).
+    private static let killGrace: Duration = .milliseconds(500)
+    private static let drainGrace: Duration = .milliseconds(50)
 
     init(config: RemoteProviderConfig, manager: RemoteProviderManager,
          silenceLimit: TimeInterval = 90, backoffCap: TimeInterval = 60,
@@ -73,10 +179,18 @@ actor ProviderEventsSupervisor {
         supervision = Task { await superviseForever() }
     }
 
-    func stop() {
-        supervision?.cancel()
+    /// Deterministic teardown: when this returns, the child (and its whole
+    /// process group) is dead and the supervision task has finished, so no
+    /// respawn can follow. Kill and join in that order — the supervision task
+    /// is parked on the line stream, which only ends once the child is gone.
+    func stop() async {
+        guard let task = supervision else { return }
         supervision = nil
-        currentProcess?.terminate()
+        task.cancel()
+        if let process = currentProcess {
+            await killTree(process)
+        }
+        await task.value
         currentProcess = nil
     }
 
@@ -97,11 +211,13 @@ actor ProviderEventsSupervisor {
         }
     }
 
-    /// One process lifetime: spawn `events`, stream lines concurrently while
-    /// racing actual process-exit detection, then tear down without
-    /// blocking this actor's executor. Any stream failure just returns —
-    /// the outer loop restarts, and the reconnect snapshot resyncs
-    /// everything (contract: no cursors).
+    /// One process lifetime: spawn `events`, apply every line the provider
+    /// emits, and return once the stream is over. Bounded by construction: the
+    /// stream ends at EOF, at child exit, or when the silence watchdog kills
+    /// the child — and every kill escalates SIGTERM→SIGKILL against the whole
+    /// process group, so there is no path where this parks forever. Any
+    /// failure just returns; the outer loop restarts and the reconnect
+    /// snapshot resyncs everything (contract: no cursors).
     private func runOnce() async {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.exec)
@@ -113,6 +229,20 @@ actor ProviderEventsSupervisor {
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
 
+        let (lines, continuation) = AsyncStream.makeStream(of: String.self)
+        let reader = PipeLineReader(continuation: continuation)
+        let readHandle = pipe.fileHandleForReading
+        readHandle.readabilityHandler = { handle in
+            if !reader.readAvailable(from: handle) {
+                handle.readabilityHandler = nil
+                reader.finish(handle: handle)
+            }
+        }
+        @Sendable func endStream() {
+            readHandle.readabilityHandler = nil
+            reader.finish(handle: readHandle)
+        }
+
         let exitGate = ProcessExitGate()
         process.terminationHandler = { _ in exitGate.markExited() }
 
@@ -121,82 +251,100 @@ actor ProviderEventsSupervisor {
         } catch {
             remoteLogger.error(
                 "events spawn failed for \(self.config.name, privacy: .public): \(String(describing: error), privacy: .public)")
+            endStream()
             return
         }
+        generation += 1
+        let myGeneration = generation
         currentProcess = process
         lastActivity = Date()
 
-        let watchdog = startWatchdog()
-        defer {
-            watchdog.cancel()
-            currentProcess = nil
+        // Teardown is driven by process EXIT, not by pipe EOF. A provider that
+        // leaves a grandchild holding the pipe's write end (the stub in the
+        // live test does exactly that, and `BoundedProcessRunner` documents
+        // the same caveat for `[shell, -ic, cmd]` call sites) never delivers
+        // EOF, so waiting for it would wedge this supervisor permanently. The
+        // short grace lets bytes already in the kernel buffer land first.
+        let exitWatcher = Task {
+            await exitGate.wait()
+            try? await Task.sleep(for: Self.drainGrace)
+            endStream()
+        }
+        let watchdog = startWatchdog(generation: myGeneration)
+
+        for await line in lines {
+            lastActivity = Date()
+            guard let event = RemoteEventParser.parse(line: line) else { continue }
+            await handle(event)
         }
 
-        // Stream lines on a child task, concurrently with waiting for exit
-        // below, rather than looping to EOF first: a process whose child
-        // forks a background grandchild that inherits the pipe's write end
-        // (a documented Foundation Process/Pipe footgun — see the EOF
-        // caveat in BoundedProcessRunner.swift) may never close that fd
-        // even after the process we spawned and can kill is long dead, so
-        // a bare `for try await line in pipe.fileHandleForReading.bytes.lines`
-        // can hang forever waiting for an EOF nobody will ever send.
-        // (Verified empirically: a stub `events` script that backgrounds a
-        // `sleep` as its last line reproduces exactly this hang.)
-        let readTask = Task { [weak self, config = config] in
-            do {
-                for try await line in pipe.fileHandleForReading.bytes.lines {
-                    guard let self else { return }
-                    if Task.isCancelled { return }
-                    await self.noteActivity()
-                    guard let event = RemoteEventParser.parse(line: line) else { continue }
-                    await self.handle(event)
-                }
-            } catch {
-                remoteLogger.debug(
-                    "events stream error \(config.name, privacy: .public): \(String(describing: error), privacy: .public)")
-            }
+        watchdog.cancel()
+        exitWatcher.cancel()
+        // The stream is over, so this run is over: make sure the child tree is
+        // actually gone before the outer loop can spawn a replacement (a
+        // provider that closes stdout but keeps running would otherwise
+        // accumulate one live process per restart).
+        if process.isRunning {
+            await killTree(process)
         }
-
-        // Wait for the DIRECT child to actually exit — non-blocking, via
-        // `terminationHandler` (see `ProcessExitGate`) rather than
-        // `Process.waitUntilExit()`, which would block this actor's
-        // executor for the child's full lifetime, exactly the starvation
-        // class `BoundedProcessRunner`'s dedicated watchdog thread exists
-        // to avoid elsewhere in this codebase. Once the child is gone,
-        // force-close the pipe's read end so a `readTask` stuck on the
-        // grandchild-holds-the-fd scenario above unblocks instead of
-        // leaking forever. Losing whatever was still in flight at that
-        // instant is fine — reconnect-and-resnapshot is the documented
-        // recovery for exactly this kind of gap (no cursors).
-        await exitGate.wait()
-        try? pipe.fileHandleForReading.close()
-        readTask.cancel()
-        await readTask.value
+        endStream()
+        if generation == myGeneration { currentProcess = nil }
     }
 
-    private func noteActivity() {
-        lastActivity = Date()
+    /// SIGTERM the child's whole process GROUP, then SIGKILL it after a grace
+    /// period if anything survived — the same escalation `BoundedProcessRunner`
+    /// and `TmuxControlConnection` already use, applied to the group rather
+    /// than the single pid for two reasons: a `bash` parked in a foreground
+    /// `sleep` defers SIGTERM until that command finishes (so pid-only SIGTERM
+    /// never kills it), and grandchildren that inherited the pipe's write end
+    /// have to die for the stream to end.
+    ///
+    /// Foundation's `Process` makes the child its own process-group leader on
+    /// Darwin (verified: child pgid == child pid), but that is checked with
+    /// `getpgid` before signaling a negative pid so we can never signal an
+    /// unrelated group if that ever changes.
+    private func killTree(_ process: Process) async {
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
+        signalTree(pid, SIGTERM)
+        // A cancelled caller (e.g. the supervision task during `stop()`) skips
+        // the grace and escalates immediately, which is the right degradation.
+        try? await Task.sleep(for: Self.killGrace)
+        if process.isRunning {
+            remoteLogger.debug(
+                "events \(self.config.name, privacy: .public) ignored SIGTERM; escalating to SIGKILL")
+            signalTree(pid, SIGKILL)
+        }
+    }
+
+    private func signalTree(_ pid: pid_t, _ signal: Int32) {
+        if getpgid(pid) == pid {
+            kill(-pid, signal)
+        } else {
+            kill(pid, signal)
+        }
     }
 
     /// Polls activity roughly three times per silence window and kills the
-    /// process (from actor-isolated context, so touching `currentProcess`
-    /// stays safe) once the window is exceeded. 90s of stream silence with
-    /// no `ping` means the caller must treat the stream as dead.
-    private func startWatchdog() -> Task<Void, Never> {
+    /// process tree once the window is exceeded. 90s of stream silence with no
+    /// `ping` means the stream is dead and must be replaced.
+    private func startWatchdog(generation: Int) -> Task<Void, Never> {
         Task { [weak self, silenceLimit] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(silenceLimit / 3))
                 if Task.isCancelled { return }
                 guard let self else { return }
-                await self.killIfSilent()
+                await self.killIfSilent(generation: generation)
             }
         }
     }
 
-    private func killIfSilent() {
-        guard Date().timeIntervalSince(lastActivity) > silenceLimit else { return }
-        remoteLogger.debug("events \(self.config.name, privacy: .public) silent past \(self.silenceLimit, privacy: .public)s; killing")
-        currentProcess?.terminate()
+    private func killIfSilent(generation: Int) async {
+        guard generation == self.generation, let process = currentProcess,
+              Date().timeIntervalSince(lastActivity) > silenceLimit else { return }
+        remoteLogger.debug(
+            "events \(self.config.name, privacy: .public) silent past \(self.silenceLimit, privacy: .public)s; killing")
+        await killTree(process)
     }
 
     private func handle(_ event: RemoteEvent) async {
@@ -204,11 +352,11 @@ actor ProviderEventsSupervisor {
         case .hello, .ping:
             break   // activity timestamp already updated by the caller
         case .snapshot(let sessions):
-            try? await manager?.apply(snapshot: sessions, provider: config.name)
+            try? await manager.apply(snapshot: sessions, provider: config.name)
         case .session(let session):
-            await manager?.applyUpsert(session, provider: config.name)
+            await manager.applyUpsert(session, provider: config.name)
         case .removed(let id):
-            await manager?.applyRemoval(sessionID: id, provider: config.name)
+            await manager.applyRemoval(sessionID: id, provider: config.name)
         }
     }
 }

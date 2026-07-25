@@ -149,12 +149,17 @@ public struct RemoteSessionStore: Sendable {
     /// Explicit removal from an `events` `removed` line. The provider is
     /// authoritative about this, so it marks the row gone immediately —
     /// unlike inferred absence from a snapshot, this skips the two-absence
-    /// rule entirely.
-    public func markGone(provider: String, sessionID: String) async throws {
+    /// rule entirely. Returns whether a row actually changed (an unknown
+    /// session, or one already gone, changes nothing) so callers can skip a
+    /// pointless UI broadcast — the same `changed` contract `applySnapshot`
+    /// and `upsertOne` report.
+    @discardableResult
+    public func markGone(provider: String, sessionID: String) async throws -> Bool {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE remote_session SET gone = 1 WHERE provider = ? AND sessionID = ?",
+                sql: "UPDATE remote_session SET gone = 1 WHERE provider = ? AND sessionID = ? AND gone = 0",
                 arguments: [provider, sessionID])
+            return db.changesCount > 0
         }
     }
 
