@@ -15,8 +15,8 @@ The gap has been actively harmful, not merely absent.
 
 ### 1.1 The phantom command
 
-`Sources/TBDShared/NightwatchDeskPrompts.swift:112` — a **compiled-in** desk tick
-prompt — instructs sessions:
+`Sources/TBDShared/NightwatchDeskPrompts.swift` — a **compiled-in** desk tick
+prompt (at `33494d80:112`, before the fix in this branch) — instructed sessions:
 
 > Remedy: call `tbd terminal close --all` on the desk, let daemon respawn fresh
 
@@ -343,8 +343,12 @@ refused — the successor should retry briefly rather than lead with `--force`.
 
 The successor prompt's step 2 (`handoff.py:107-109`) should name the new command.
 
-**No other raw `kill-window` callers exist outside `Sources/`** — the only hits
-are `handoff.py` itself and prose in `docs/specs/`.
+**`handoff.py` is the only raw `kill-window` caller to migrate.** It now ships
+from `NightwatchSkillContent.handoffPy`, so the migration is a source edit in
+this repo rather than a hand-patch of the installed copy — and the daemon
+rewrites the installed copy on every start, so editing only the on-disk file
+would be reverted. Every other `kill-window` reference is either daemon code
+using `worktree.tmuxServer` correctly, or prose in `docs/specs/`.
 
 **One-time fleet sweep.** Shipping this does not retroactively fix predecessors
 already zombified by the old path. Those rows are parked with `.recovery` (or nil

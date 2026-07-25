@@ -37,19 +37,56 @@ struct NightwatchDeskPromptsTests {
         }
     }
 
-    @Test("No prompt tells the session to flag for respawn", arguments: liveModes)
-    func noRespawnFlagging(mode: NightwatchMode) {
-        // There is no babysitter daemon and no respawner — flagging is a no-op
-        // that leaves the session running past its ceiling.
+    /// The context ceiling has exactly one correct remedy: the handoff relay.
+    ///
+    /// Asserted as "the relay is named" rather than "the old wording is absent",
+    /// because the banned-substring form is defeated by any rephrasing — a
+    /// reintroduction reading "mark for respawn" or "the daemon will restart
+    /// you" sails past `!contains("flag for respawn")`. Pinning the positive
+    /// invariant catches every phrasing, including ones nobody has written yet.
+    @Test("The only context-ceiling remedy offered is the handoff relay", arguments: liveModes)
+    func ceilingRemedyIsTheRelay(mode: NightwatchMode) {
         for (label, text) in prompts(mode: mode, skillDir: "/skill") {
+            let mentionsCeiling = text.contains("200k") || text.lowercased().contains("context ceiling")
+            #expect(mentionsCeiling, "\(mode) \(label) never states the context ceiling")
+
             #expect(
-                !text.lowercased().contains("flag for respawn"),
-                "\(mode) \(label) tells the session to flag for respawn; nothing respawns it"
+                text.contains("handoff.py"),
+                "\(mode) \(label) raises the context ceiling without naming the handoff relay"
             )
-            #expect(
-                !text.lowercased().contains("daemon respawn"),
-                "\(mode) \(label) claims a daemon respawns the desk; no such daemon exists"
-            )
+            // No prompt may point at a recycler that does not exist. Asserted on
+            // concrete artifacts rather than on phrasing: a blacklist of wordings
+            // like "will restart you" is defeated from BOTH sides — a reworded
+            // reintroduction slips through, and the sentence that *forbids* the
+            // promise trips it, because a prohibition quotes what it prohibits.
+            // These names have no innocent reading in a prompt; none of them exist.
+            for phantom in ["daemon.py", "watchdog.sh", "~/.fleet", "babysitter_daemon"] {
+                #expect(
+                    !text.contains(phantom),
+                    "\(mode) \(label) points at \(phantom), which was never built"
+                )
+            }
+        }
+    }
+
+    /// The path a prompt tells a session to run must be a path the daemon
+    /// installs. This is the structural guard for the phantom-command class:
+    /// `tbd terminal close --all` was one, and a prompt naming an unshipped
+    /// `scripts/handoff.py` would have been the next.
+    @Test("Every script named in a desk prompt is actually shipped", arguments: liveModes)
+    func promptedScriptsAreShipped(mode: NightwatchMode) {
+        let shipped = Set(NightwatchSkillContent.scripts.map(\.name))
+        let pattern = /scripts\/([A-Za-z0-9_.-]+\.(?:py|sh))/
+
+        for (label, text) in prompts(mode: mode, skillDir: "/skill") {
+            let named = Set(text.matches(of: pattern).map { String($0.1) })
+            #expect(!named.isEmpty, "\(mode) \(label) names no script; the relay reference was lost")
+            for script in named {
+                #expect(
+                    shipped.contains(script),
+                    "\(mode) \(label) tells the session to run scripts/\(script), which PluginDirWriter does not install"
+                )
+            }
         }
     }
 
@@ -79,17 +116,88 @@ struct NightwatchDeskPromptsTests {
         }
     }
 
-    @Test("Every prompt carries the never-/closeout standing rule", arguments: liveModes)
+    /// Pins the *prohibition*, not the mere presence of the word. `contains("/closeout")`
+    /// is satisfied by a prompt that tells the session to fire `/closeout` — the
+    /// exact rule's opposite — so it proves nothing on its own.
+    @Test("Every prompt forbids /closeout, and says why", arguments: liveModes)
     func closeoutForbidden(mode: NightwatchMode) {
         for (label, text) in prompts(mode: mode, skillDir: "/skill") {
             #expect(
-                text.contains("/closeout"),
-                "\(mode) \(label) omits the never-/closeout rule"
+                text.contains("NEVER trigger `/closeout`") || text.contains("Never trigger `/closeout`")
+                    || text.contains("never trigger `/closeout`"),
+                "\(mode) \(label) does not forbid /closeout"
             )
             #expect(
                 text.lowercased().contains("archive question for the human"),
                 "\(mode) \(label) states the /closeout rule without the reason it exists"
             )
+            // A prohibition plus a licence elsewhere in the same prompt is not a
+            // prohibition. `/closeout` may appear only in the forbidding sense.
+            for licence in ["trigger `/closeout` on", "fire `/closeout`", "run `/closeout`",
+                            "small_safe action"] {
+                #expect(
+                    !text.contains(licence),
+                    "\(mode) \(label) forbids /closeout but also licenses it (\"\(licence)\")"
+                )
+            }
+        }
+    }
+
+    /// The compiled SKILL.md is what the daemon writes to disk on every start,
+    /// and `initialPrompt` sends the session there for its "full job description".
+    /// It must not contradict the prompt.
+    @Suite("Shipped nightwatch skill content")
+    struct SkillContentTests {
+        @Test("SKILL.md does not claim a babysitter daemon exists")
+        func noBabysitterDaemonClaim() {
+            let md = NightwatchSkillContent.skillMd
+            for claim in ["durable spine (already on launchd",
+                          "These keep the critical safety net running",
+                          "`scripts/daemon.py` (babysitter) — auto-approves"] {
+                #expect(!md.contains(claim), "SKILL.md still asserts a babysitter daemon: \(claim)")
+            }
+            #expect(md.contains("There is no babysitter daemon"))
+        }
+
+        @Test("SKILL.md carries the standing rules the prompts echo")
+        func standingRulesPresent() {
+            let md = NightwatchSkillContent.skillMd
+            #expect(md.contains("NEVER trigger `/closeout`"))
+            #expect(md.contains("handoff.py"))
+        }
+
+        @Test("tick.py ships the composer ghost-guard")
+        func tickShipsGhostGuard() {
+            // Without these, STRANDED counts dim ghost suggestions and SGR mouse
+            // reports as human input, and the dispatch path types them into live
+            // sessions. Measured on the fleet: STRANDED 14 -> 5, nine phantom.
+            let tick = NightwatchSkillContent.tickPy
+            for marker in ["ANSI_RE", "DIM_RE", "MOUSE_RE", "STATUS_RE",
+                           #""capture-pane","-p","-e""#,
+                           "def _composer(lines, raw_lines=None)",
+                           "DIM_RE.search(raw_lines[j])",
+                           "if len(raw_lines) != len(lines): raw_lines = None"] {
+                #expect(tick.contains(marker), "tick.py lost the ghost-guard: \(marker)")
+            }
+            // The retired babysitter's log path must not come back with it.
+            #expect(!tick.contains("DAEMON_LOG"))
+        }
+
+        @Test("handoff.py is shipped and exposes the three relay verbs")
+        func handoffShipped() {
+            #expect(NightwatchSkillContent.scripts.contains { $0.name == "handoff.py" })
+            let py = NightwatchSkillContent.handoffPy
+            for flag in ["--check", "--act", "--close-predecessor"] {
+                #expect(py.contains(flag), "handoff.py missing \(flag)")
+            }
+            #expect(py.contains("refusing to close myself"),
+                    "handoff.py lost the self-close guard the relay depends on")
+        }
+
+        @Test("Script names are unique")
+        func scriptNamesUnique() {
+            let names = NightwatchSkillContent.scripts.map(\.name)
+            #expect(Set(names).count == names.count, "duplicate script name would clobber a sibling")
         }
     }
 

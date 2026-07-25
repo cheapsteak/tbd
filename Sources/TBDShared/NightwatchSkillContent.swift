@@ -7,6 +7,26 @@ import Foundation
 /// Single source of truth, written by PluginDirWriter. Generated from the skill files.
 public enum NightwatchSkillContent {
 
+    /// Every script the daemon installs into `<skillDir>/scripts/`, in install
+    /// order. `PluginDirWriter.writeNightwatch` iterates this rather than
+    /// carrying its own list, so the set is visible to TBDShared tests — which
+    /// is what lets `NightwatchDeskPromptsTests` assert that every script a desk
+    /// prompt tells a session to run is actually shipped.
+    ///
+    /// That cross-check exists because the two drifted once: the judge prompt
+    /// spent five days naming `tbd terminal close --all` (a command that never
+    /// existed), and its replacement initially named `scripts/handoff.py` while
+    /// the writer shipped only five scripts, none of them that one. A prompt
+    /// naming an uninstalled path is the same defect wearing a different hat.
+    public static let scripts: [(name: String, body: String)] = [
+        ("tick.py", tickPy),
+        ("wake.py", wakePy),
+        ("judge.py", judgePy),
+        ("handoff.py", handoffPy),
+        ("tick-cron.sh", tickCronSh),
+        ("scheduler.sh", schedulerSh)
+    ]
+
     public static let skillMd: String = #"""
 ---
 name: nightwatch
@@ -21,7 +41,7 @@ Keep a fleet of TBD agent worktrees unblocked, productive, and gated while the h
 
 | Tier | Runs on | Does |
 |---|---|---|
-| **0** | `scripts/tick.py` — pure Python, $0 | sweep all panes (every tmux server), daemon health + fleet capacity, classify every agent, split into auto/judgment/human, write `queue/tick-report.json` |
+| **0** | `scripts/tick.py` — pure Python, $0 | sweep all panes (every tmux server), fleet capacity, classify every agent, split into auto/judgment/human, write `queue/tick-report.json` |
 | **1** | local model (Ollama) or Haiku — *future* | classify ambiguous panes, triage escalations, draft routine nudges. Off the Opus quota. |
 | **2** | **Opus — rare** | resolve genuinely ambiguous decisions, the deep review, any prod/security/CJI/access call. Wakes only when `queue/decisions.jsonl` has items. |
 | **Human** | Adam | merge PRs, proxy/IAM/prod restarts, Slack pings, access, the capacity (Bedrock) lever. |
@@ -36,7 +56,7 @@ python3 scripts/tick.py --prs  # also gate open PRs (wraps loop_perfect_sweep.py
 ```
 
 `tick.py` prints a short human summary AND writes:
-- `queue/tick-report.json` — full structured state (daemon, capacity, every agent, auto_actions, judgment_queue)
+- `queue/tick-report.json` — full structured state (capacity, every agent, auto_actions, judgment_queue)
 - `queue/decisions.jsonl` — append-only judgment items (decisions to resolve, maybe-archive)
 - `queue/for-adam.md` — human-only items
 
@@ -88,6 +108,40 @@ for.) And phrase gate outcomes honestly: nightwatch cannot deny a GitHub enqueue
 *stricter than the org's required checks* (AI Review is advisory until the ADR-0013 apply), so a
 bot-verdict shortfall on a human-approved PR is an **advisory heads-up**, not a "denied".
 
+## Standing rules (set by Chang — these override the tick prompt)
+
+**NEVER trigger `/closeout`.** Not on a DONE pane, not on a "candidate for /closeout"
+self-report, not because the composer already suggests it. A worktree that looks finished
+is an *archive question for the human*, not a harvest to fire. Report it and move on.
+(The tick prompt and older judge-summary passes treat `/closeout` as a small_safe action —
+they are wrong; this rule wins.)
+
+**Hand off at the context ceiling — never push through it.** A judge session that runs past
+~200k tokens starts truncating its own shift. Do not "flag for respawn" and keep working, and
+do NOT use `tbd terminal close --all` — **that command does not exist** (there is no
+`tbd terminal close` subcommand at all; the only real close is killing the tmux window).
+The working relay is `scripts/handoff.py`:
+
+```
+python3 scripts/handoff.py --check                       # exit 0 under · exit 10 OVER (reads
+                                                         # your own transcript's usage records)
+python3 scripts/handoff.py --act --notes-file notes.md   # writes queue/handoff-<ts>.md (+ the
+                                                         # HANDOFF-LATEST.md pointer) and spawns
+                                                         # a successor in THIS worktree on Opus,
+                                                         # briefed with the doc + this same rule
+python3 scripts/handoff.py --close-predecessor <tid>     # the SUCCESSOR runs this
+```
+
+**The predecessor never closes itself.** It writes notes → spawns → goes idle; the successor
+reads the doc and *then* kills the old terminal. If the spawn fails the script says so and
+stays alive — a half-completed relay must never leave the desk with nobody on it. The rule is
+recursive: the spawn prompt hands the successor the same ceiling instruction, so the relay
+continues without a human in the loop.
+
+*Tab caveat:* TBD has no "restart the session in this tab" command. `handoff.py` uses
+`tbd terminal create` on the **same worktree**, so the desk survives but the successor is a new
+tab; the old tab disappears when the successor closes it.
+
 ## Operating rules (hard-won via incidents)
 
 **REBALANCE FIRST on saturation** — A capacity crunch is usually too many sessions piled on ONE rate-capped account, not global scarcity. Swap stuck (STRANDED/RATE/ERROR) sessions onto an emptier account via `tbd terminal swap-profile --terminal <tid> --profile <name>` (parked=cold/cheap, awake=respawn). Passive holding just freezes them. *(Incident 2026-07-10: 14 of 19 stuck sessions were piled on one account; the watcher held instead of rebalancing and the whole fleet stalled overnight until rebalanced.)*
@@ -100,13 +154,23 @@ bot-verdict shortfall on a human-approved PR is an **advisory heads-up**, not a 
 
 ## Config (`config/`)
 - `priorities.txt` — must-keep-moving worktrees (flagged ★, reported first)
-- `safe_wedges.txt` — permission-wedge prefixes the daemon may auto-approve (never `gh pr merge`)
+- `safe_wedges.txt` — permission-wedge prefixes a future daemon may auto-approve (never `gh pr merge`)
 - `dont_touch.txt` — panes/names nightwatch must never nudge (human-driven, e.g. Adam's own session)
 
-## The durable spine (already on launchd, model-free)
-- `scripts/daemon.py` (babysitter) — auto-approves safe wedges, escalates real ones
-- `scripts/watchdog.sh` — restarts the daemon if its log goes >12min stale (hang/sleep)
-These keep the critical safety net running even when Opus is fully capped. (Currently live as `~/.fleet/babysitter_daemon.py` + `daemon_watchdog.sh`; copy in for a self-contained skill.)
+## There is no babysitter daemon (retired 2026-07-25)
+
+This section used to describe a "durable spine already on launchd": `scripts/daemon.py`
+auto-approving safe wedges, `scripts/watchdog.sh` restarting it, both "currently live as
+`~/.fleet/babysitter_daemon.py`". **None of it ever existed** — no scripts in this skill, no
+`~/.fleet/`, no launchd jobs, no plists, no log. Every tick dutifully reported
+`daemon: log-missing` as though a live service had crashed, and judge sessions burned five
+days escalating a *restart* for software with no install to restore.
+
+The fleet ran fine without it. `tick.py`'s `daemon_health()` is now a stub, `config/safe_wedges.txt`
+is the allowlist a future daemon *would* use (kept for that reason), and wedges route through
+judge ticks. If you ever build one: it types into ~96 live panes, so it MUST use the composer
+ghost-guard in `_composer()` — before that guard existed the dispatch path would have fired dim
+suggestions and raw mouse escape sequences as if a human had typed them.
 
 ## TBD integration
 - **Read:** `~/tbd/state.db` (worktrees/terminals/`tmuxServer` per pane — pane IDs collide across servers, always read the server, never hardcode)
@@ -487,7 +551,6 @@ DB = f"{HOME}/tbd/state.db"
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUEUE = f"{SKILL}/queue"
 CFG = f"{SKILL}/config"
-DAEMON_LOG = "/tmp/babysitter.log"
 
 # Fleet-wide backoff threshold. Post-ccflare (proxy removed 2026-07-01) there is no
 # shared account pool to saturate: every session talks to Anthropic directly over its
@@ -537,14 +600,33 @@ RATE_PAT = re.compile(r"rate.?limit|overloaded|usage limit|weekly limit|reset[s]
 ERR_PAT = re.compile(r"API error|503|ECONNRESET|inference gateway", re.I)
 DONE_PAT = re.compile(r"ready to archive|you're done|nothing (?:open|left)|winding down|wind down|/closeout|all merged", re.I)
 
-def classify(cap):
-    """Return state for a captured pane: WORKING / DECISION / RATE / ERROR / STRANDED / DONE / IDLE."""
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+# Claude Code renders its OWN suggestions in the composer as dim (ESC[2m) ghost text.
+DIM_RE = re.compile(r"\x1b\[(?:[0-9;]*;)?2m")
+# SGR mouse reports ("<65;61;31M") land in the composer on a stray click. Never input.
+MOUSE_RE = re.compile(r"^<\d+;\d+;\d+[Mm]$")
+# The TBD statusline ("Opus 5(high)  494k/1000k  5h(65% →20:00)  7d(21% →Thu 8pm)") is chrome,
+# not something an agent said — it must never be reported as a pane's last meaningful line.
+STATUS_RE = re.compile(r"\d+k/\d+k|\d+%\s*→|bypass permissions|Jump to bottom|^⧉ ")
+
+def classify(cap, cap_raw=None):
+    """Return state for a captured pane: WORKING / DECISION / RATE / ERROR / STRANDED / DONE / IDLE.
+
+    cap is ANSI-stripped; cap_raw (optional) keeps the escapes so the composer can tell
+    real typed input from dim ghost suggestions. Without cap_raw the ghost check degrades
+    to the mouse-sequence filter only.
+    """
     lines = [x for x in cap.splitlines() if x.strip()]
     if not lines: return "EMPTY", ""
+    raw_lines = None
+    if cap_raw is not None:
+        raw_lines = [x for x in cap_raw.splitlines() if ANSI_RE.sub("", x).strip()]
+        # Indices must line up 1:1 with `lines` or the dim lookup reads the wrong row.
+        if len(raw_lines) != len(lines): raw_lines = None
     tail = "\n".join(lines[-18:])
     if "esc to interrupt" in tail: return "WORKING", _lastmeaning(lines)
     if DECISION_PAT.search(tail): return "DECISION", _lastmeaning(lines)
-    comp = _composer(lines)
+    comp = _composer(lines, raw_lines)
     if RATE_PAT.search(tail): return "RATE", comp or _lastmeaning(lines)
     if ERR_PAT.search(tail): return "ERROR", comp or _lastmeaning(lines)
     if DONE_PAT.search(tail): return "DONE", _lastmeaning(lines)
@@ -555,6 +637,7 @@ def _lastmeaning(lines):
     for x in reversed(lines):
         s = x.strip()
         if any(k in s for k in ("bypass permissions","esc to interrupt","context used","auto-compact","/model")): continue
+        if STATUS_RE.search(s): continue
         if s.startswith(("─","✻","✳","✶","⏺","◯")): continue
         if not s or s == "❯": continue
         return s[:90]
@@ -577,20 +660,44 @@ def burn_risk(cap):
     risk = pct is not None and pct >= 85
     return pct, is_1m, risk
 
-def _composer(lines):
+def _composer(lines, raw_lines=None):
+    """Text a HUMAN actually left in the composer, or "" if there's nothing real there.
+
+    This feeds STRANDED, and STRANDED feeds the daemon's auto-dispatch — whatever
+    this returns gets typed into a live session as if a person had written it. So
+    two impostors are rejected:
+      · dim (ESC[2m) ghost text — Claude Code's own suggestion, identical to typed
+        input once ANSI is stripped. Dispatching one makes the agent "obey" a
+        suggestion nobody chose.
+      · SGR mouse reports from a stray click in the pane.
+    Rejecting is the safe direction: a missed nudge costs one tick, a bad dispatch
+    corrupts a session.
+    """
     for i, x in enumerate(lines):
         if "bypass permissions" in x and i > 0:
             for j in range(i-1, -1, -1):
                 s = lines[j].strip()
-                if s.startswith("❯"): return s[1:].strip()[:120]
+                if s.startswith("❯"):
+                    text = s[1:].strip()[:120]
+                    if not text or MOUSE_RE.match(text): return ""
+                    if raw_lines and DIM_RE.search(raw_lines[j]): return ""
+                    return text
                 if s.startswith("─"): continue
             break
     return ""
 
 def daemon_health():
-    if not os.path.exists(DAEMON_LOG): return {"ok": False, "age_s": None, "reason": "log-missing"}
-    age = int(time.time() - os.path.getmtime(DAEMON_LOG))
-    return {"ok": age <= 720, "age_s": age, "reason": ("stale" if age > 720 else "fresh")}
+    """Health of the babysitter daemon — which does not exist on this machine.
+
+    Retired 2026-07-25 (Chang's call). There is no daemon.py, no watchdog, no
+    launchd job and no log: the "durable spine" SKILL.md described was never
+    built. For five days every tick reported `daemon: log-missing` as if a live
+    service had fallen over, and judge sessions kept escalating a restart for
+    software that had no install to restore. The fleet ran fine without it.
+    Kept as a stub returning absent=True so anything still reading
+    tick-report.json["daemon"] gets a shape instead of a KeyError.
+    """
+    return {"ok": True, "absent": True, "age_s": None, "reason": "no-daemon (retired 2026-07-25)"}
 
 def fleet():
     rows = sh(["sqlite3","-separator","\t",DB,
@@ -602,8 +709,11 @@ def fleet():
         p = l.split("\t")
         if len(p) < 5: continue
         pane, name, srv, tid, rid = p
-        cap = sh(["tmux","-L",srv,"capture-pane","-p","-t",pane])
-        state, note = classify(cap)
+        # -e keeps the escapes: dimness is the only thing distinguishing a ghost
+        # suggestion from typed input, and it's gone by the time tmux strips ANSI.
+        cap_raw = sh(["tmux","-L",srv,"capture-pane","-p","-e","-t",pane])
+        cap = ANSI_RE.sub("", cap_raw)
+        state, note = classify(cap, cap_raw)
         ctx_pct, is_1m, burn = burn_risk(cap)
         hook = POLICIES.get(rid, {})
         pol = hook.get("policy", {})
@@ -698,15 +808,14 @@ def main():
             for j in judgment: f.write(json.dumps({**j,"ts":rep["ts"]})+"\n")
 
     # ---- human-readable summary ----
-    d, c = rep["daemon"], capacity
+    c = capacity
     print(f"=== nightwatch tick @ {time.strftime('%H:%M:%S')} ===")
     if rep["hooks"]:
         print("hooks: " + " · ".join(f"{n}[gate={h['gate'] or '-'},advance={h['advance_skill'] or '-'}]"
                                       for n,h in rep["hooks"].items()))
     else:
         print("hooks: (none — repos can ship .nightwatch/policy.json)")
-    print(f"daemon: {d['reason']} ({d['age_s']}s)   "
-          f"capacity: {c['status']} (rate-limited {c['rate_limited']}/{len(rep['agents'])})"
+    print(f"capacity: {c['status']} (rate-limited {c['rate_limited']}/{len(rep['agents'])})"
           f"{' ⚠ SATURATED — backoff, no nudging' if saturated else ''}")
     sm = rep["summary"]
     print(f"agents: {len(rep['agents'])}  working={sm['working']} idle={sm['idle']} "
@@ -742,6 +851,241 @@ def main():
 if __name__ == "__main__":
     main()
 """#
+
+    /// Context-ceiling relay for long-running desk sessions. A judge session past
+    /// its ceiling writes a handoff doc, spawns a successor in the same worktree,
+    /// and the SUCCESSOR closes the predecessor — never the reverse, so a failed
+    /// spawn leaves the desk still watched.
+    ///
+    /// Delimited with `##"""` because the script embeds `"""#` (an f-string opening
+    /// a markdown heading), which would otherwise close a `#"""` literal.
+    public static let handoffPy: String = ##"""
+#!/usr/bin/env python3
+"""Context-ceiling handoff for long-running desk sessions.
+
+A judge/watch session that runs past its context ceiling starts truncating its
+own history mid-shift ("I kept getting cut off"). The fix is a relay: the tiring
+session writes a handoff, spawns a fresh Opus session in the same worktree, and
+the SUCCESSOR closes the predecessor once it has actually read the handoff.
+
+  handoff.py --check                      # exit 0 = under ceiling, 10 = over
+  handoff.py --act --notes-file notes.md  # write handoff + spawn successor
+  handoff.py --close-predecessor <tid>    # successor calls this when it's ready
+
+Ordering matters: the predecessor NEVER closes itself. If the spawn fails or the
+successor dies on boot, the old session is still there and the shift survives.
+"""
+
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+QUEUE = pathlib.Path(__file__).resolve().parent.parent / "queue"
+LATEST = QUEUE / "HANDOFF-LATEST.md"
+DEFAULT_THRESHOLD = 200_000
+SUCCESSOR_MODEL = "opus"
+
+
+def _run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def terminal_row(terminal_id, worktree_id):
+    """Live TBD record for a terminal (pane/window ids, transcript path)."""
+    r = _run(["tbd", "terminal", "list", worktree_id, "--json"])
+    if r.returncode != 0:
+        return {}
+    for row in json.loads(r.stdout or "[]"):
+        if row.get("id") == terminal_id:
+            return row
+    return {}
+
+
+def tmux_server():
+    """Server name from $TMUX — pane ids collide across servers, never guess."""
+    tmux = os.environ.get("TMUX", "")
+    return pathlib.PurePath(tmux.split(",")[0]).name if tmux else ""
+
+
+def context_tokens(transcript_path):
+    """Current context size, read off the transcript's own usage records.
+
+    Claude Code stamps every assistant message with the usage that produced it;
+    input + both cache buckets is what the statusline renders as `NNNk/1000k`.
+    Returns None when the transcript can't be read rather than guessing zero —
+    a bogus low reading would silently disable the ceiling.
+    """
+    try:
+        with open(transcript_path, "rb") as fh:
+            tail = fh.readlines()[-400:]
+    except OSError:
+        return None
+    best = None
+    for raw in tail:
+        try:
+            u = json.loads(raw).get("message", {}).get("usage") or {}
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        total = (
+            u.get("input_tokens", 0)
+            + u.get("cache_creation_input_tokens", 0)
+            + u.get("cache_read_input_tokens", 0)
+        )
+        if total and (best is None or total > best):
+            best = total
+    return best
+
+
+def resolve_self():
+    tid = os.environ.get("TBD_TERMINAL_ID")
+    wid = os.environ.get("TBD_WORKTREE_ID")
+    if not tid or not wid:
+        sys.exit("not inside a TBD terminal (TBD_TERMINAL_ID/TBD_WORKTREE_ID unset)")
+    return tid, wid, terminal_row(tid, wid)
+
+
+def cmd_check(args):
+    *_, row = resolve_self()
+    used = context_tokens(row.get("transcriptPath", ""))
+    if used is None:
+        print("context: UNKNOWN (transcript unreadable) — treating as under ceiling")
+        return 0
+    over = used >= args.threshold
+    print(f"context: {used:,} / ceiling {args.threshold:,} — {'OVER' if over else 'ok'}")
+    return 10 if over else 0
+
+
+def successor_prompt(doc_path, pred_tid, pred_window, server, threshold):
+    return f"""You are the successor Nightwatch/Daywatch judge session for this desk.
+The previous session hit its context ceiling ({threshold:,} tokens) and handed off
+to you rather than getting truncated mid-shift.
+
+FIRST, before anything else:
+1. Read the handoff document: {doc_path}
+2. Close the predecessor — it is idle and waiting for you to do this:
+     python3 "{pathlib.Path(__file__).resolve()}" --close-predecessor {pred_tid}
+   (predecessor terminal {pred_tid}, tmux window {pred_window} on server {server})
+3. Confirm in your first message what you picked up and what you closed.
+
+STANDING INSTRUCTION — this applies to YOU now, and to every session you spawn:
+When your own context passes {threshold:,} tokens, do not push through it. Run
+  python3 "{pathlib.Path(__file__).resolve()}" --check
+and when it reports OVER, write your own handoff notes to a file and run
+  python3 "{pathlib.Path(__file__).resolve()}" --act --notes-file <your-notes.md>
+That spawns your replacement on {SUCCESSOR_MODEL} in this same worktree with this
+same instruction, and your replacement closes you. Never close yourself first —
+if the spawn fails, you are still the only thing keeping the shift alive.
+
+Then continue the shift from the handoff.
+"""
+
+
+def cmd_act(args):
+    tid, wid, row = resolve_self()
+    server = tmux_server()
+    used = context_tokens(row.get("transcriptPath", ""))
+    ts = int(time.time())
+
+    notes = pathlib.Path(args.notes_file).read_text() if args.notes_file else ""
+    if not notes.strip():
+        sys.exit("refusing to hand off with empty notes — write the handoff first")
+
+    doc = QUEUE / f"handoff-{ts}.md"
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        f"""# Desk handoff — {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}
+
+Predecessor terminal: {tid} (pane {row.get('tmuxPaneID')}, window
+{row.get('tmuxWindowID')}, server {server})
+Context at handoff: {f'{used:,}' if used else 'unknown'} tokens
+Worktree: {wid}
+Transcript: {row.get('transcriptPath')}
+
+---
+
+{notes.strip()}
+"""
+    )
+    if LATEST.exists() or LATEST.is_symlink():
+        LATEST.unlink()
+    LATEST.symlink_to(doc.name)
+
+    prompt = successor_prompt(doc, tid, row.get("tmuxWindowID"), server, args.threshold)
+    spawn = _run(
+        [
+            "tbd", "terminal", "create", wid,
+            "--type", "claude",
+            "--claude-settings", json.dumps({"model": SUCCESSOR_MODEL}),
+            "--prompt-file", "-",
+            "--json",
+        ],
+        input=prompt,
+    )
+    if spawn.returncode != 0:
+        sys.exit(f"spawn FAILED, staying alive: {spawn.stderr.strip()}")
+
+    try:
+        new_id = json.loads(spawn.stdout).get("id", "?")
+    except json.JSONDecodeError:
+        new_id = spawn.stdout.strip() or "?"
+
+    print(f"handoff written: {doc}")
+    print(f"successor spawned: {new_id} (model={SUCCESSOR_MODEL})")
+    print("go idle now — the successor closes this terminal once it has read the doc.")
+    return 0
+
+
+def cmd_close(args):
+    """Close a predecessor terminal by killing its tmux window."""
+    target = args.close_predecessor
+    r = _run(["tbd", "terminal", "list", os.environ.get("TBD_WORKTREE_ID", ""), "--json"])
+    row = {}
+    if r.returncode == 0:
+        for candidate in json.loads(r.stdout or "[]"):
+            if candidate.get("id") == target:
+                row = candidate
+                break
+    if not row:
+        print(f"terminal {target} not found — already closed, nothing to do")
+        return 0
+    if target == os.environ.get("TBD_TERMINAL_ID"):
+        sys.exit("refusing to close myself — pass the PREDECESSOR's terminal id")
+
+    window = row.get("tmuxWindowID")
+    server = tmux_server()
+    if not window or not server:
+        sys.exit(f"cannot resolve tmux window/server for {target}")
+    kill = _run(["tmux", "-L", server, "kill-window", "-t", window])
+    if kill.returncode != 0 and "can't find" not in (kill.stderr or ""):
+        sys.exit(f"kill-window failed: {kill.stderr.strip()}")
+    print(f"closed predecessor {target} (window {window} on {server})")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--check", action="store_true", help="report context vs ceiling (exit 10 = over)")
+    g.add_argument("--act", action="store_true", help="write handoff + spawn successor")
+    g.add_argument("--close-predecessor", metavar="TID", help="successor closes the old session")
+    p.add_argument("--notes-file", help="markdown file holding the handoff body (required with --act)")
+    p.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
+    args = p.parse_args()
+
+    if args.check:
+        return cmd_check(args)
+    if args.act:
+        return cmd_act(args)
+    return cmd_close(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""##
 
     public static let judgePy: String = #"""
 #!/usr/bin/env python3
