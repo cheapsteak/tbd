@@ -56,6 +56,16 @@ import Testing
 /// attempt looks clean, so a false-green attempt is recorded `passedFirstTry`
 /// while the run itself goes red — a green record for a red run.
 ///
+/// **Second limitation — a plain `throw` loses its throw site.** `#expect` and
+/// `#require` failures keep their exact location (they record at their own call
+/// site, before the trait ever sees them). A body that instead does a bare
+/// `throw someError` reaches this trait's generic `catch`, and Swift does not
+/// carry the throw site on an error, so the final attempt's failure is
+/// attributed to the `@Test` declaration rather than the throwing line. That is
+/// the closest true answer available, and it beats the default — which would
+/// point into this file's plumbing — but prefer `#require` in a quarantined
+/// test if you want the precise line.
+///
 /// Metrics: with `TBD_RETRY_METRICS_PATH` set (CI does this at the job level;
 /// unset locally, where the trait writes nothing and does no work), every
 /// execution appends one JSONL record — including clean first-try passes,
@@ -82,6 +92,7 @@ public struct FlakyTrait: TestTrait, TestScoping {
             let result = await Self.runAttempt(
                 comment: "flaky issue #\(issue), attempt \(attempt)",
                 suppressing: !isFinal,
+                attributingTo: test.sourceLocation,
                 function
             )
             if result.cancelled {
@@ -144,9 +155,19 @@ public struct FlakyTrait: TestTrait, TestScoping {
     /// indistinguishable, in the ledger, from a genuinely always-failing flake.
     /// It is "neither a failure nor a pass" only until an unsuppressed verdict
     /// has already been recorded; see the caller for that case.
+    ///
+    /// `attributingTo` is the `@Test` declaration site. It is only used for a
+    /// body that does a plain `throw` rather than failing through `#expect` or
+    /// `#require`: that error reaches the generic `catch`, and `Issue.record`
+    /// would otherwise default `sourceLocation` to *its own* call site in this
+    /// file, pointing the reader at the trait's plumbing on the one attempt
+    /// designed to surface honestly. The original throw site is not recoverable
+    /// — Swift does not carry it on the error — so the test declaration is the
+    /// closest true answer.
     private static func runAttempt(
         comment: Comment,
         suppressing: Bool,
+        attributingTo sourceLocation: SourceLocation,
         _ function: @Sendable () async throws -> Void
     ) async -> AttemptResult {
         let failed = FlagBox()
@@ -159,7 +180,7 @@ public struct FlakyTrait: TestTrait, TestScoping {
             } catch is CancellationError {
                 cancelled.set()
             } catch {
-                Issue.record(error)
+                Issue.record(error, sourceLocation: sourceLocation)
             }
         } matching: { _ in
             failed.set()
