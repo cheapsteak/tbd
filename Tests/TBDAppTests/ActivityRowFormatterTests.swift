@@ -139,7 +139,10 @@ struct ActivityRowFormatterTests {
             id: "m2", kind: .nestedMemory, text: "# acme rules",
             source: "~/scratch/acme/very/deep/nesting/iam-pr-body.md")
         let p = try #require(ActivityRowFormatter.presentation(for: node))
-        #expect(p.titleTruncation == .byTruncatingMiddle)
+        // Head truncation: the ellipsis eats the path PREFIX so the whole
+        // filename survives. Middle truncation kept a short tail that cut into
+        // the filename itself (`…pr-body.md` for `iam-pr-body.md`).
+        #expect(p.titleTruncation == .byTruncatingHead)
         #expect(p.titleTooltip == "~/scratch/acme/very/deep/nesting/iam-pr-body.md")
     }
 
@@ -149,6 +152,9 @@ struct ActivityRowFormatterTests {
             id: "h2", kind: .hookOutput, text: "injected", source: "PostToolUse:Read")
         let p = try #require(ActivityRowFormatter.presentation(for: node))
         #expect(p.titleTooltip == nil)
+        // NOT head-truncated: the informative front of `PostToolUse:Read` is
+        // exactly what head truncation would drop.
+        #expect(p.titleTruncation == .byTruncatingMiddle)
     }
 
     @Test("Injected hook context → 'hook' badge + '<hookName> · <size>' title")

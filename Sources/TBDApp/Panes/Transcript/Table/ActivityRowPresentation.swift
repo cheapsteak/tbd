@@ -59,7 +59,9 @@ struct ActivityRowPresentation: Equatable {
     let badges: [ActivityRowBadge]
     /// `openTranscriptOverlay(id)` target — most kinds.
     let openTargetID: String?
-    /// Title truncation: `.byTruncatingMiddle` for Read (file path), else tail.
+    /// Title truncation: `.byTruncatingMiddle` for Read (file path),
+    /// `.byTruncatingHead` for injected file paths (keep the whole filename),
+    /// else tail.
     let titleTruncation: NSLineBreakMode
     /// `NSView.toolTip` for the title field — set only where the visible title
     /// hides something (a middle-truncated path). Nil elsewhere: a tooltip that
@@ -431,10 +433,14 @@ enum ActivityRowFormatter {
             isError: false,
             badges: [ActivityRowBadge(text: label, kind: .neutral)],
             openTargetID: id,
-            titleTruncation: .byTruncatingMiddle,
-            // Paths get middle-truncated to fit the row, so hovering must be
-            // able to reveal the whole thing. Hook names are short and fully
-            // visible — no tooltip for those.
+            // Path sources head-truncate: the whole filename must survive, and
+            // middle truncation kept a short tail that cut into it
+            // (`/private/tmp/claude-5…pr-body.md` for `iam-pr-body.md`).
+            // Non-path sources keep middle truncation — head-truncating
+            // `PostToolUse:Read` would eat the informative front.
+            titleTruncation: (kind == .nestedMemory) ? .byTruncatingHead : .byTruncatingMiddle,
+            // Truncated paths need hovering to reveal the whole thing. Hook
+            // names are short and fully visible — no tooltip for those.
             titleTooltip: (kind == .nestedMemory) ? source.flatMap { $0.isEmpty ? nil : $0 } : nil
         )
     }

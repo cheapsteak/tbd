@@ -44,10 +44,12 @@ struct SystemReminderRow: View {
                 // one another, and the size is the point.
                 if let source, !source.isEmpty {
                     Text(source)
-                        .truncationMode(.middle)
+                        // Paths head-truncate so the whole filename survives —
+                        // matches the table renderer's `titleTruncation`.
+                        .truncationMode(kind == .nestedMemory ? .head : .middle)
                         .lineLimit(1)
-                        // Middle-truncated paths need hover to reveal the whole
-                        // thing; hook names are short and need no tooltip.
+                        // Truncated paths need hover to reveal the whole thing;
+                        // hook names are short and need no tooltip.
                         .help(kind == .nestedMemory ? source : "")
                     Text("· \(ActivityRowFormatter.injectedSize(text: text, truncatedTo: truncatedTo))")
                         .foregroundStyle(.tertiary)

@@ -13,7 +13,15 @@ import TBDShared
 /// Injected rows additionally fetch their *injection metadata* (which hook,
 /// which command, which tool call triggered it) on appear. That rides the same
 /// `terminal.transcriptItemFullBody` RPC, so nothing is paid until a row is
-/// opened, and no field is added to `TranscriptItem`.
+/// opened, and no field is added to `TranscriptItem`. The on-appear fetch passes
+/// `includeBody: false` — it only reads `attachment`, and an injected CLAUDE.md
+/// body is routinely tens of KB.
+///
+/// Expanding a truncated row therefore re-reads the JSONL a second time. That
+/// is deliberate: the second read is user-initiated, bounded to one row, and
+/// caching the body from the metadata fetch would both defeat the truncation
+/// footer (the body would appear expanded unasked) and re-introduce the large
+/// payload on every open.
 struct SystemReminderRowBody: View {
     let id: String
     let kind: SystemKind
@@ -37,9 +45,12 @@ struct SystemReminderRowBody: View {
                 metadataBlock(metadata)
                 Divider()
             }
+            // `.caption`/`.primary` — this is the content the row was opened to
+            // read, matching `SkillBodyRow`'s injected body. `.caption2` +
+            // `.tertiary` is for small section labels, not a whole body.
             Text(fullText ?? text)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .font(.caption)
+                .foregroundStyle(.primary)
                 .transcriptSelectableText()
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let cap = truncatedTo, fullText == nil, terminalID != nil {
@@ -74,14 +85,26 @@ struct SystemReminderRowBody: View {
     @ViewBuilder
     private func field(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
+            // One step up from the `.tertiary`/`.secondary` pair the rest of the
+            // file uses for section labels: the label/value contrast survives,
+            // but both stay legible against the overlay's light background.
             Text(label)
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
             Text(value)
                 .font(monospaced ? .caption2.monospaced() : .caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
                 .textSelection(.enabled)
         }
+    }
+
+    /// `$HOME` → `~`, on path-component boundaries. A plain substring replace
+    /// would turn `/Users/changelog-archive/x` into `~elog-archive/x` — a
+    /// different directory presented as living inside the user's home. Foundation
+    /// reads the same `NSHomeDirectory()`, so the daemon's `injectedPathSource`
+    /// abbreviates identically.
+    static func abbreviatedPath(_ path: String) -> String {
+        (path as NSString).abbreviatingWithTildeInPath
     }
 
     /// Tilde-abbreviated path + copy button, matching `RepoHooksSettingsView`'s
@@ -92,12 +115,14 @@ struct SystemReminderRowBody: View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text("Path")
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
-            Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+            Text(Self.abbreviatedPath(path))
+                .font(.caption.monospaced())
+                .foregroundStyle(.primary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                // Head, not middle: when the field is too narrow the filename
+                // must survive and the path prefix goes.
+                .truncationMode(.head)
                 .help(path)
 
             Button {
@@ -118,7 +143,7 @@ struct SystemReminderRowBody: View {
     private func fetchMetadata() async {
         guard carriesInjectionMetadata, metadata == nil, let terminalID else { return }
         if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(
-            terminalID: terminalID, itemID: id), let attachment = r.attachment {
+            terminalID: terminalID, itemID: id, includeBody: false), let attachment = r.attachment {
             await MainActor.run { metadata = attachment }
         }
     }
