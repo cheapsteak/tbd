@@ -213,6 +213,52 @@ struct RemoteSessionSelectionTests {
         }
     }
 
+    /// Pins the ordering bug fixed in this pass: the attention delta and the
+    /// separate `.remoteSessionsChanged` mirror refresh are broadcast
+    /// independently, so the attention delta can arrive BEFORE the mirror
+    /// has this session's exit code. Classification must come from the
+    /// delta's own `exitCode` field, not `remoteSessions.first { ... }`,
+    /// which here still has the mirror's default `exitCode: nil` (as if a
+    /// crashed session hadn't been refreshed into the mirror yet).
+    @Test func attentionDeltaClassifiesFromItsOwnExitCodeWhenMirrorIsStale() {
+        withState { state in
+            // Mirror NOT yet refreshed — pre-seeded with a stale/default
+            // exitCode of nil, unlike `attentionDeltaExitedWithNonzeroExitCodeRecordsError`
+            // above, which seeds the mirror with the correct nonzero code.
+            state.remoteSessions = [RemoteSessionInfo(
+                provider: "acme",
+                payload: RemoteSessionPayload(id: "s1", state: .running, exitCode: nil),
+                gone: false, dismissed: false, lastSeen: Date()
+            )]
+            state.handleRemoteSessionAttentionDelta(
+                RemoteSessionAttentionDelta(
+                    provider: "acme", sessionID: "s1", title: nil, kind: "exited", reason: nil, exitCode: 1
+                )
+            )
+            let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+            #expect(state.unreadByRemoteSession[selection]?.type == .error,
+                     "a nonzero exit code carried on the delta must classify as error even when the mirror is stale")
+        }
+    }
+
+    /// Older-daemon payloads never set `exitCode` on the delta (back-compat
+    /// default `nil`) — classification must fall back to the mirror lookup,
+    /// preserving the pre-existing behavior.
+    @Test func attentionDeltaFallsBackToMirrorWhenDeltaExitCodeIsNil() {
+        withState { state in
+            state.remoteSessions = [RemoteSessionInfo(
+                provider: "acme",
+                payload: RemoteSessionPayload(id: "s1", state: .exited, exitCode: 1),
+                gone: false, dismissed: false, lastSeen: Date()
+            )]
+            state.handleRemoteSessionAttentionDelta(
+                RemoteSessionAttentionDelta(provider: "acme", sessionID: "s1", title: nil, kind: "exited", reason: nil)
+            )
+            let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+            #expect(state.unreadByRemoteSession[selection]?.type == .error)
+        }
+    }
+
     @Test func attentionDeltaMergesToHigherSeverityWithoutDowngrading() {
         withState { state in
             state.remoteSessions = [RemoteSessionInfo(
@@ -263,6 +309,36 @@ struct RemoteSessionSelectionTests {
             state.renameRemoteSession(provider: "acme", sessionID: "s1", displayName: "renamed")
             let name = state.remoteSessionDisplayName(provider: "acme", sessionID: "s2", providerTitle: "other title")
             #expect(name == "other title")
+        }
+    }
+
+    /// `RenameableLabel`'s `allowsEmptyCommit` (wired in `RemoteSessionRowView`)
+    /// commits `""` to clear an override back to the provider's title — the
+    /// same "clear to default" affordance a blank tab rename has. Renaming
+    /// to blank must REMOVE the key (not store `""`), or `remoteSessionDisplayName`
+    /// would show a blank name forever instead of falling back.
+    @Test func renamingToEmptyStringClearsTheOverride() {
+        withState { state in
+            state.renameRemoteSession(provider: "acme", sessionID: "s1", displayName: "my session")
+            #expect(state.remoteSessionDisplayName(provider: "acme", sessionID: "s1", providerTitle: "fix ci") == "my session")
+
+            state.renameRemoteSession(provider: "acme", sessionID: "s1", displayName: "")
+
+            let name = state.remoteSessionDisplayName(provider: "acme", sessionID: "s1", providerTitle: "fix ci")
+            #expect(name == "fix ci")
+            let key = AppState.remoteSessionKey(provider: "acme", sessionID: "s1")
+            #expect(state.remoteSessionDisplayNames[key] == nil)
+        }
+    }
+
+    /// Whitespace-only counts as empty too (mirrors `RenameableLabel.commit`'s
+    /// own trimming before it decides whether to call `onCommit`).
+    @Test func renamingToWhitespaceOnlyClearsTheOverride() {
+        withState { state in
+            state.renameRemoteSession(provider: "acme", sessionID: "s1", displayName: "my session")
+            state.renameRemoteSession(provider: "acme", sessionID: "s1", displayName: "   ")
+            let key = AppState.remoteSessionKey(provider: "acme", sessionID: "s1")
+            #expect(state.remoteSessionDisplayNames[key] == nil)
         }
     }
 }

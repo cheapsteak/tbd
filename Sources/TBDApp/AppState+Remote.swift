@@ -44,14 +44,43 @@ extension AppState {
             let sessions = try await remoteSessionsFetcher()
             remoteProviders = providers.providers
             remoteSessions = sessions.sessions
+            pruneRemoteSessionState(toKnownSessions: sessions.sessions)
         } catch {
             switch AppState.classifyRemoteRefreshFailure(error) {
             case .unavailable:
+                // Deliberately does NOT prune: the daemon hasn't reported
+                // anything here (the feature is off), so `remoteSessions`
+                // is being cleared locally, not authoritatively replaced. A
+                // transient disabled state must not delete the user's
+                // rename overrides or unread bookkeeping.
                 remoteProviders = []
                 remoteSessions = []
             case .error:
                 remoteLogger.error("Failed to refresh remote backends: \(error, privacy: .public)")
             }
+        }
+    }
+
+    /// Prunes `unreadByRemoteSession` and `remoteSessionDisplayNames` down to
+    /// the sessions the daemon just authoritatively returned, and clears
+    /// `selectedRemoteSession` if the selected session is no longer among
+    /// them. Mirrors `unreadByWorktree`'s wholesale-replace-on-refresh
+    /// pattern: a remote session that goes `gone` and is then dismissed is
+    /// filtered out of the row list (`RemoteSectionView.sessions`) but never
+    /// deleted from the daemon's mirror the way an archived worktree's DB row
+    /// eventually is, so without this call both maps grow forever —
+    /// `remoteSessionDisplayNames` in particular is persisted to
+    /// `UserDefaults` and would accumulate dead keys across restarts. Called
+    /// only from the success path of `refreshRemote()` — see the doc comment
+    /// on the `.unavailable` branch there for why the disabled path must NOT
+    /// prune.
+    func pruneRemoteSessionState(toKnownSessions sessions: [RemoteSessionInfo]) {
+        let selections = Set(sessions.map { RemoteSessionSelection(provider: $0.provider, sessionID: $0.payload.id) })
+        let keys = Set(sessions.map { AppState.remoteSessionKey(provider: $0.provider, sessionID: $0.payload.id) })
+        unreadByRemoteSession = unreadByRemoteSession.filter { selections.contains($0.key) }
+        remoteSessionDisplayNames = remoteSessionDisplayNames.filter { keys.contains($0.key) }
+        if let selected = selectedRemoteSession, !selections.contains(selected) {
+            selectedRemoteSession = nil
         }
     }
 
@@ -119,7 +148,13 @@ extension AppState {
         // Currently viewing this session — no unread to record, mirrors the
         // `visible` guard in `handleNotificationDelta`.
         guard selectedRemoteSession != selection else { return }
-        let exitCode = remoteSessions.first {
+        // Classify from the delta's own `exitCode` first — the attention
+        // delta and the `.remoteSessionsChanged` mirror refresh are broadcast
+        // independently, so the mirror may not have this session's exit code
+        // yet when this delta arrives (see `RemoteSessionAttentionDelta.exitCode`
+        // doc comment). Only fall back to the (possibly stale) mirror lookup
+        // for payloads from an older daemon that never set the field.
+        let exitCode = delta.exitCode ?? remoteSessions.first {
             $0.provider == delta.provider && $0.payload.id == delta.sessionID
         }?.payload.exitCode
         guard let type = AppState.remoteUnreadType(kind: delta.kind, exitCode: exitCode) else { return }

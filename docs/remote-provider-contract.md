@@ -187,7 +187,7 @@ The contract version is a single integer major, exposed on every invocation as t
 
 At registration, the caller invokes `describe`, intersects its own supported major versions with the provider's `contract_versions`, and picks the highest common value. If the intersection is empty, the caller refuses to use the provider and shows a clear error. Whatever major is chosen is what rides on every subsequent invocation via `TBD_CONTRACT_VERSION`.
 
-Within a major version: providers may add new response fields at any time, and callers MUST ignore fields they don't recognize. Removing or renaming a field, or changing the semantics of a verb, requires a new major version.
+Within a major version: providers may add new response fields at any time, and callers MUST ignore fields they don't recognize. Removing or renaming a field, or changing the semantics of a verb, requires a new major version. Adding a new optional verb — gated behind a new entry in `capabilities`, as `rename` was — is likewise additive within a major version: a caller that doesn't recognize the capability string simply never invokes the verb, so no version bump is needed for it either.
 
 ## Identity & drift
 

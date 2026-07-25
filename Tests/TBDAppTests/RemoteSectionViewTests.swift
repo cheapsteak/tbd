@@ -145,10 +145,10 @@ struct RemoteSectionViewTests {
         #expect(AppState.remoteUnreadType(kind: "idle", exitCode: nil) == nil)
     }
 
-    // MARK: - RemoteSessionRowView.suffixIndicator(agentState:) — steady-state mapping
+    // MARK: - RemoteSessionRowView.suffixIndicator(agentState:unreadType:) — steady-state mapping + severity merge
 
     @Test func suffixIndicator_workingIsWorking() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .working) == .working)
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .working, unreadType: nil) == .working)
     }
 
     /// The steady-state divergence: `waitingInput` maps to `.attention` on
@@ -157,22 +157,64 @@ struct RemoteSectionViewTests {
     /// triggered and clears on select). Calling this twice in a row for the
     /// same still-waiting session must keep returning `.attention`.
     @Test func suffixIndicator_waitingInputIsAttentionSteadily() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput) == .attention)
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput) == .attention)
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: nil) == .attention)
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: nil) == .attention)
     }
 
     @Test func suffixIndicator_idleIsNil() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .idle) == nil)
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .idle, unreadType: nil) == nil)
     }
 
     @Test func suffixIndicator_unknownIsNil() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .unknown) == nil)
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .unknown, unreadType: nil) == nil)
     }
 
-    @Test func suffixIndicator_exitedIsNil() {
-        // `.exited` agentState produces no suffix glyph — the exited/gone
-        // presentation is secondary-toned text + a caption, not a suffix icon.
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .exited) == nil)
+    @Test func suffixIndicator_exitedWithNoUnreadIsNil() {
+        // `.exited` agentState alone produces no suffix glyph — the exited/gone
+        // presentation is secondary-toned text + a caption, not a suffix icon —
+        // UNLESS the unread entry says otherwise (see the nonzero-exit test below).
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .exited, unreadType: nil) == nil)
+    }
+
+    // MARK: - severity merge (unread entry vs. steady agentState)
+
+    /// The bug this merge fixes: a nonzero exit records `.error` in
+    /// `unreadByRemoteSession`, but `agentState` is `.exited` (no steady
+    /// mapping) — without folding the unread entry in, the suffix would be
+    /// nil and the loudest case would render as the quietest row.
+    @Test func suffixIndicator_erroredUnreadShowsErrorEvenWithNoSteadySignal() {
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .exited, unreadType: .error) == .error)
+    }
+
+    /// Error (severity 4) beats the steady attention mapping (severity 3) —
+    /// `RowStatusIndicator.suffix`'s existing precedence, not a new ladder.
+    @Test func suffixIndicator_erroredUnreadBeatsSteadyWaitingInput() {
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: .error) == .error)
+    }
+
+    /// A lower-severity unread entry (`.responseComplete`, severity 1) must
+    /// not mask a still-waiting steady state (severity 3 via `.attentionNeeded`).
+    @Test func suffixIndicator_steadyWaitingInputBeatsLowerSeverityUnread() {
+        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: .responseComplete) == .attention)
+    }
+
+    // MARK: - RemoteSessionRowView.higherSeverity(_:_:)
+
+    @Test func higherSeverity_bothNilIsNil() {
+        #expect(RemoteSessionRowView.higherSeverity(nil, nil) == nil)
+    }
+
+    @Test func higherSeverity_onlyFirstIsFirst() {
+        #expect(RemoteSessionRowView.higherSeverity(.error, nil) == .error)
+    }
+
+    @Test func higherSeverity_onlySecondIsSecond() {
+        #expect(RemoteSessionRowView.higherSeverity(nil, .attentionNeeded) == .attentionNeeded)
+    }
+
+    @Test func higherSeverity_picksHigherOfTwo() {
+        #expect(RemoteSessionRowView.higherSeverity(.responseComplete, .error) == .error)
+        #expect(RemoteSessionRowView.higherSeverity(.error, .responseComplete) == .error)
     }
 
     // MARK: - AppState.remoteSectionVisible(providers:)

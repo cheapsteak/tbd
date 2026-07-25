@@ -336,8 +336,17 @@ public struct RemoteSessionAttentionDelta: Codable, Sendable {
     public let title: String?
     public let kind: String
     public let reason: String?
-    public init(provider: String, sessionID: String, title: String?, kind: String, reason: String?) {
+    /// The session's exit code at the moment this delta was raised, when
+    /// `kind == "exited"` — carried on the delta itself so the app can
+    /// classify error-vs-clean without racing the separate
+    /// `.remoteSessionsChanged` mirror refresh (the two deltas are broadcast
+    /// independently, and the attention delta can arrive first). Optional
+    /// with a nil default so payloads from older daemons still decode; the
+    /// app falls back to the mirror when nil.
+    public let exitCode: Int?
+    public init(provider: String, sessionID: String, title: String?, kind: String, reason: String?, exitCode: Int? = nil) {
         self.provider = provider; self.sessionID = sessionID
         self.title = title; self.kind = kind; self.reason = reason
+        self.exitCode = exitCode
     }
 }

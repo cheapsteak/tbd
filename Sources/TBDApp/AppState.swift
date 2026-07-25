@@ -1049,9 +1049,19 @@ final class AppState: ObservableObject {
 
     /// Rename a remote session. TBD-owned and local-only for now — pushing
     /// this to a provider that declares the `rename` capability is future
-    /// work (see `remoteSessionDisplayNames` doc comment).
+    /// work (see `remoteSessionDisplayNames` doc comment). A blank name
+    /// (`RenameableLabel`'s `allowsEmptyCommit`) REMOVES the override rather
+    /// than storing an empty string, so `remoteSessionDisplayName` falls back
+    /// to the provider's `title` again — the same "clear to default"
+    /// affordance a blank tab rename has (`AppState+Tabs.renameTab`).
     func renameRemoteSession(provider: String, sessionID: String, displayName: String) {
-        remoteSessionDisplayNames[Self.remoteSessionKey(provider: provider, sessionID: sessionID)] = displayName
+        let key = Self.remoteSessionKey(provider: provider, sessionID: sessionID)
+        let trimmed = displayName.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            remoteSessionDisplayNames.removeValue(forKey: key)
+        } else {
+            remoteSessionDisplayNames[key] = trimmed
+        }
     }
 
     /// Pushes the outgoing content of an in-place slot replacement onto that

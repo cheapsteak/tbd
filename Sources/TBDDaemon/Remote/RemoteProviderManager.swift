@@ -244,7 +244,8 @@ public actor RemoteProviderManager {
         for session in outcome.attention {
             subscriptions.broadcast(delta: .remoteSessionAttention(RemoteSessionAttentionDelta(
                 provider: provider, sessionID: session.id, title: session.title,
-                kind: session.agentState.rawValue, reason: session.agentStateReason)))
+                kind: session.agentState.rawValue, reason: session.agentStateReason,
+                exitCode: session.exitCode)))
         }
     }
 
@@ -267,7 +268,8 @@ public actor RemoteProviderManager {
         for session in outcome.attention {
             subscriptions.broadcast(delta: .remoteSessionAttention(RemoteSessionAttentionDelta(
                 provider: provider, sessionID: session.id, title: session.title,
-                kind: session.agentState.rawValue, reason: session.agentStateReason)))
+                kind: session.agentState.rawValue, reason: session.agentStateReason,
+                exitCode: session.exitCode)))
         }
     }
 

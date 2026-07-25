@@ -1,6 +1,9 @@
 import AppKit
 import SwiftUI
 import TBDShared
+import os
+
+private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote")
 
 /// Sidebar section listing every registered remote-agent provider and its
 /// live sessions. Modeled on `ScratchSectionView`'s flat header+rows
@@ -79,14 +82,18 @@ struct RemoteProviderHeaderRow: View {
                 .foregroundStyle(.secondary)
                 .help("Provider unreachable — sessions may be stale")
         case .needsAuth:
+            // Reuses the shared adaptive attention tint (`RowStatusIndicator.swift`)
+            // rather than raw `.orange` — that pair was chosen for legibility
+            // against this exact sidebar background in both appearances.
             Image(systemName: "key.slash")
                 .font(.system(size: 11))
-                .foregroundStyle(.orange)
+                .foregroundStyle(SuffixRowIndicator.attention.color)
                 .help(provider.errorMessage ?? provider.remediationLabel ?? "Authentication needed")
         case .error:
+            // Reuses the shared suffix error tint rather than raw `.red`.
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 11))
-                .foregroundStyle(.red)
+                .foregroundStyle(SuffixRowIndicator.error.color)
                 .help(provider.errorMessage ?? "Provider error")
         case .ok:
             EmptyView()
@@ -145,29 +152,60 @@ struct RemoteSessionRowView: View {
     }
 
     private var suffixIndicator: SuffixRowIndicator? {
-        RemoteSessionRowView.suffixIndicator(agentState: session.payload.agentState)
+        RemoteSessionRowView.suffixIndicator(
+            agentState: session.payload.agentState,
+            unreadType: appState.unreadByRemoteSession[selection]?.type
+        )
     }
 
-    /// Pure `agentState` → suffix-slot mapping. Split out (static, no
-    /// `appState`/`session` dependency) so the steady-state `waitingInput`
-    /// case is directly testable.
+    /// Pure `agentState` + unread-entry → suffix-slot mapping. Split out
+    /// (static, no `appState`/`session` dependency beyond its parameters) so
+    /// the steady-state `waitingInput` case and the severity merge are
+    /// directly testable.
     ///
-    /// STEADY, not edge-triggered — deliberately diverges from local edge
-    /// semantics. See `AppState.handleRemoteSessionAttentionDelta`'s doc
-    /// comment (`AppState+Remote.swift`) for the full rationale: the
+    /// Feeds the SAME `notification` argument `WorktreeRowView` feeds
+    /// `RowStatusIndicator.suffix` — the higher-severity of the row's edge-
+    /// triggered unread entry (e.g. `.error` from a nonzero exit) and the
+    /// steady-state `agentState` mapped into the same `NotificationType`
+    /// vocabulary (`waitingInput` → `.attentionNeeded`). This is a merge of
+    /// two inputs into `suffix`'s existing precedence ladder, not a second
+    /// ladder: `RowStatusIndicator.suffix` alone still decides what renders.
+    /// Without the unread half of this merge, a session that exits nonzero
+    /// would render with NO suffix at all (agentState is `.exited`, which
+    /// maps to no steady signal) even though `unreadByRemoteSession` holds
+    /// `.error` for it — the loudest case rendering as the quietest row.
+    ///
+    /// The steady half is STEADY, not edge-triggered — deliberately diverges
+    /// from local edge semantics. See `AppState.handleRemoteSessionAttentionDelta`'s
+    /// doc comment (`AppState+Remote.swift`) for the full rationale: the
     /// contract reports `agent_state` continuously in every poll, exactly
     /// like `.working` (already rendered steady below), and a remote
     /// session has no pane the user can glance at to rediscover it — so
-    /// this reads `agentState` fresh every render rather than consulting
-    /// the edge-triggered `unreadByRemoteSession` map (which clears the
+    /// this reads `agentState` fresh every render rather than relying solely
+    /// on the edge-triggered `unreadByRemoteSession` map (which clears the
     /// moment the session is selected, even if it's still waiting).
-    nonisolated static func suffixIndicator(agentState: RemoteAgentState) -> SuffixRowIndicator? {
-        RowStatusIndicator.suffix(
-            notification: agentState == .waitingInput ? .attentionNeeded : nil,
+    nonisolated static func suffixIndicator(
+        agentState: RemoteAgentState, unreadType: NotificationType?
+    ) -> SuffixRowIndicator? {
+        let steadyType: NotificationType? = agentState == .waitingInput ? .attentionNeeded : nil
+        return RowStatusIndicator.suffix(
+            notification: RemoteSessionRowView.higherSeverity(unreadType, steadyType),
             isWorking: agentState == .working,
             isSuspended: false,
             isHibernated: false
         )
+    }
+
+    /// The higher-severity of two optional `NotificationType`s (nil sorts
+    /// lowest). Uses the existing `NotificationType.severity` ordering — no
+    /// new precedence scale invented here.
+    nonisolated static func higherSeverity(_ a: NotificationType?, _ b: NotificationType?) -> NotificationType? {
+        switch (a, b) {
+        case (nil, nil): return nil
+        case (let x?, nil): return x
+        case (nil, let y?): return y
+        case (let x?, let y?): return x.severity >= y.severity ? x : y
+        }
     }
 
     @ViewBuilder
@@ -231,7 +269,13 @@ struct RemoteSessionRowView: View {
                     appState.renameRemoteSession(
                         provider: session.provider, sessionID: session.payload.id, displayName: newName
                     )
-                }
+                },
+                // Lets an empty commit clear the TBD-owned override back to
+                // the provider's reported `title` (or the raw id) — without
+                // this, once renamed a session could never fall back to the
+                // computed default again. `renameRemoteSession` removes the
+                // persisted key entirely for an empty/whitespace name.
+                allowsEmptyCommit: true
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(displayName)
@@ -284,13 +328,27 @@ struct RemoteSessionRowView: View {
             Button("Rename…") { isEditing = true }
             if session.gone {
                 Button("Dismiss") {
-                    Task { try? await appState.daemonClient.remoteDismiss(
-                        provider: session.provider, sessionID: session.payload.id) }
+                    Task {
+                        do {
+                            try await appState.daemonClient.remoteDismiss(
+                                provider: session.provider, sessionID: session.payload.id)
+                        } catch {
+                            remoteRowLogger.error(
+                                "remoteDismiss failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
+                        }
+                    }
                 }
             } else {
                 Button("Stop", role: .destructive) {
-                    Task { try? await appState.daemonClient.remoteStop(
-                        provider: session.provider, sessionID: session.payload.id) }
+                    Task {
+                        do {
+                            try await appState.daemonClient.remoteStop(
+                                provider: session.provider, sessionID: session.payload.id)
+                        } catch {
+                            remoteRowLogger.error(
+                                "remoteStop failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
+                        }
+                    }
                 }
             }
         }
