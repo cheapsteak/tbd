@@ -72,9 +72,15 @@ struct RemoteSessionStoreTests {
 
     @Test func dismissHidesRow() async throws {
         _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
-        try await db.remoteSessions.dismiss(provider: "p", sessionID: "a")
+        let first = try await db.remoteSessions.dismiss(provider: "p", sessionID: "a")
+        #expect(first == true)
         let rows = try await db.remoteSessions.list()
         #expect(rows[0].dismissed == true)
+        // Second dismiss of an already-dismissed session must be a no-op:
+        // exercises the `AND dismissed = 0` predicate itself, not just an
+        // unknown-id miss (which would return false even without it).
+        let second = try await db.remoteSessions.dismiss(provider: "p", sessionID: "a")
+        #expect(second == false)
     }
 
     @Test func upsertOneAppliesEdgeDetectionWithoutTouchingOtherRows() async throws {

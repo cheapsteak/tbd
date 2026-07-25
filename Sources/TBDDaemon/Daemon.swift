@@ -76,6 +76,11 @@ public final class Daemon: Sendable {
     /// flag genuinely off) — constructed only once, at startup; flipping the
     /// flag on later takes effect on the next restart.
     public nonisolated(unsafe) var remoteManager: RemoteProviderManager?
+    /// Deferred `remoteManager.start()` task (see call site below). Stored so
+    /// `stop()` can cancel it — otherwise a SIGTERM inside the boot window
+    /// leaves `loadRegistryAndDescribe` spawning `describe` child processes
+    /// after `shutdown()` has already torn down the manager, orphaning them.
+    public nonisolated(unsafe) var remoteStartTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -652,7 +657,7 @@ public final class Daemon: Sendable {
             // call `shutdown()` on (see the `shuttingDown` guard in
             // `spawnPollLoops()`).
             if let remoteManager {
-                Task {
+                self.remoteStartTask = Task {
                     await remoteManager.start()
                 }
             }
@@ -912,6 +917,7 @@ public final class Daemon: Sendable {
         reaperTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
+        remoteStartTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {

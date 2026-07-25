@@ -1650,6 +1650,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// manager at boot; see `Daemon.swift`). Lets the app distinguish "flag
     /// on and live" from "flag on but needs a restart" without calling a
     /// `remote.*` verb and parsing its error string.
+    ///
+    /// True from the moment the manager is *constructed*, not from when it
+    /// has finished describing providers — so during the brief boot window
+    /// before `remoteManager.start()` completes, `remoteBackendsLive` can be
+    /// true while the provider list is still empty. Fine for the
+    /// restart-required distinction this field exists for; just don't read
+    /// it as "at least one provider is up."
     public let remoteBackendsLive: Bool
 
     public init(controlModeEnabled: Bool,

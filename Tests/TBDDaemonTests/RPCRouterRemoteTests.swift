@@ -380,4 +380,23 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(json.contains(#""health":"needs_auth""#),
                 "ProviderHealth.needsAuth's raw wire value must stay \"needs_auth\" — app code matches on it literally")
     }
+
+    /// Pins the remaining three `ProviderHealth` raw values directly against
+    /// its `Codable` conformance — app code matches on all four literally
+    /// (see the case above for `needs_auth` exercised through the full
+    /// manager pipeline), so a rename to any of these would silently change
+    /// the wire without this failing.
+    @Test func providerHealthRemainingRawValuesArePinned() throws {
+        let expected: [(ProviderHealth, String)] = [
+            (.ok, "ok"),
+            (.stale, "stale"),
+            (.error, "error"),
+        ]
+        for (health, raw) in expected {
+            let encoded = try JSONEncoder().encode(health)
+            let json = try #require(String(data: encoded, encoding: .utf8))
+            #expect(json == "\"\(raw)\"",
+                    "ProviderHealth.\(health)'s raw wire value must stay \"\(raw)\" — app code matches on it literally")
+        }
+    }
 }

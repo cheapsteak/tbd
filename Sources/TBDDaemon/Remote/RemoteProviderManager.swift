@@ -53,6 +53,11 @@ public actor RemoteProviderManager {
     /// populating `providers`/`describes`/`health`. Spawns no poll loops —
     /// safe to call from tests that only want to exercise describe/invoke
     /// routing without racing a real 60s timer.
+    ///
+    /// Checks `Task.isCancelled` before each provider's `describe` so a
+    /// caller cancelling the enclosing task (daemon shutdown racing boot)
+    /// bounds this to at most one `describe` child process in flight rather
+    /// than one per remaining provider.
     func loadRegistryAndDescribe() async {
         let configs: [RemoteProviderConfig]
         do {
@@ -62,6 +67,7 @@ public actor RemoteProviderManager {
             return
         }
         for config in configs {
+            guard !Task.isCancelled else { return }
             registerIfNeeded(config)
             await describeProvider(config)
         }
