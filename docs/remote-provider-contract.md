@@ -20,6 +20,7 @@ Four verbs are **required**. The rest are optional and declared as **capabilitie
 | `stop` | required | `<exec> stop <id>` | — | JSON session | 30s |
 | `log` | capability `log` | `<exec> log <id> [--lines N]` | — | raw bytes | 30s |
 | `send` | capability `send` | `<exec> send <id>` | raw bytes | JSON `{}` | 30s |
+| `rename` | capability `rename` | `<exec> rename <id> <title>` | — | JSON session | 30s |
 | `attach` | capability `attach` | `<exec> attach <id>` | TTY | TTY | unbounded |
 | `events` | capability `events` | `<exec> events` | — | NDJSON stream | unbounded |
 
@@ -49,7 +50,7 @@ Session state is two independent axes:
 Other fields:
 
 - `exit_code` is present if and only if `state` is `"exited"` and the code is known.
-- `meta` is a flat string-to-string map of provider-defined display pairs (e.g. repo, branch). The caller renders these as opaque detail rows and never interprets their keys or values.
+- `meta` is a flat string-to-string map of provider-defined display pairs. The keys `repo` and `branch` are well-known: a caller MAY interpret them (for example, to look up PR status for that repo/branch pair) when present — mirroring how `create_params` already blesses well-known field names below. Providers are not required to supply `repo`/`branch`, and a caller MUST degrade gracefully when they're absent (falling back to opaque rendering, or simply showing nothing extra). Every other key, and `repo`/`branch` themselves whenever a caller has no special handling for them, are rendered as opaque detail rows — the caller never interprets arbitrary `meta` keys or values.
 
 The condition worth notifying a human about is an **edge** in `agent_state` — a transition into `waiting_input` or `exited` — not the value in isolation.
 
@@ -62,7 +63,7 @@ The condition worth notifying a human about is an **edge** in `agent_state` — 
   "contract_versions": [1],
   "name": "example-provider",
   "provider_version": "0.4.2",
-  "capabilities": ["log", "send", "attach", "events"],
+  "capabilities": ["log", "send", "attach", "events", "rename"],
   "create_params": [
     {"name": "repo",   "type": "string", "label": "Repository", "required": true},
     {"name": "branch", "type": "string", "label": "Branch", "default": "main"},
@@ -74,7 +75,7 @@ The condition worth notifying a human about is an **edge** in `agent_state` — 
 
 - `contract_versions` — every contract major version this provider supports (see Versioning).
 - `name` — a stable machine identifier for the provider (used, along with each session id, as the caller's key for this provider's sessions).
-- `capabilities` — which optional verbs (`log`, `send`, `attach`, `events`) this provider implements.
+- `capabilities` — which optional verbs (`log`, `send`, `attach`, `events`, `rename`) this provider implements.
 - `create_params` — a flat field list, not a JSON Schema, describing the form for `create`. Supported `type` values: `string`, `text`, `bool`, `int`, `enum`. The caller renders this generically (the most complex widget is an enum dropdown) and only does required/type checks client-side — the provider is the validator of record, via the error model below. The field names `repo`, `branch`, `prompt`, and `title` are well-known: a caller may prefill them from ambient context (e.g. a currently selected repository) when present.
 
 ## `create`
@@ -115,6 +116,14 @@ Rendering scrollback to a human is not the thing the machine-interface rule (abo
 ## `send <id>`
 
 stdin bytes are delivered verbatim to the session as keystrokes. The caller decides whether to append a trailing newline — the provider does not add one on its own. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
+
+## `rename <id> <title>` (optional)
+
+`<title>` is passed as a single argv value — TBD invokes the provider directly, never through a shell, so the caller need not shell-escape it, and the provider must accept it verbatim including spaces. Response: the updated Session object (with `title` reflecting the new value).
+
+This lets a caller push a display name to the provider so other clients of the same backend — another machine, or the provider's own UI — see it too. The verb is optional and declared via the `rename` capability, and MUST stay optional: a caller keeps its own display name for a session regardless of whether the provider can persist one, so a provider that cannot support renaming (or cannot support it for some sessions) remains fully usable without it. A caller SHOULD invoke `rename` when the capability is present so the name doesn't drift between clients, but MUST NOT require it to succeed in order to rename a session locally.
+
+Failure follows the standard error model below (for example, exit 1 with `code: "not_found"` if `id` no longer exists).
 
 ## `attach <id>`
 
