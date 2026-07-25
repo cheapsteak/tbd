@@ -68,6 +68,14 @@ public final class Daemon: Sendable {
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
     /// in mock mode (never constructed).
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// Remote-backends actor (Task 7). Owned here so shutdown can reach it —
+    /// the events supervisor's own supervision task retains the manager
+    /// strongly, so without an explicit `shutdown()` call it (and its child
+    /// processes) would outlive the daemon process. `nil` when
+    /// `config.remoteBackendsEnabled` was off at boot (mock mode, or the
+    /// flag genuinely off) — constructed only once, at startup; flipping the
+    /// flag on later takes effect on the next restart.
+    public nonisolated(unsafe) var remoteManager: RemoteProviderManager?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -386,6 +394,22 @@ public final class Daemon: Sendable {
             }
         }
 
+        // Remote backends (Task 7): constructed at boot ONLY when the flag
+        // is already on — a user flipping `config.setRemoteBackends` on
+        // without restarting will see `remote.*` RPCs degrade to "remote
+        // backends disabled" (RPCRouter+RemoteHandlers.swift) rather than a
+        // crash, until the next restart picks it up. Skipped in mock mode,
+        // like every other background-task guard in this method.
+        var remoteManager: RemoteProviderManager?
+        if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
+            let manager = RemoteProviderManager(
+                db: database, subscriptions: subs, runner: ProviderRunner(),
+                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath))
+            await manager.start()
+            self.remoteManager = manager
+            remoteManager = manager
+        }
+
         let prManager = PRStatusManager()
 
         // Hydrate PR status cache from the DB so PR icons survive restart, then
@@ -462,7 +486,8 @@ public final class Daemon: Sendable {
             subscriptions: subs,
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
-            pendingQuestions: pendingQuestions
+            pendingQuestions: pendingQuestions,
+            remoteManager: remoteManager
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
@@ -834,6 +859,16 @@ public final class Daemon: Sendable {
 
         if let resumeScheduler = limitResumeScheduler {
             await resumeScheduler.stop()
+        }
+
+        // Stop remote-backends poll loops / events supervisors. Required,
+        // not optional: the events supervisor's supervision task retains
+        // the manager strongly, so without this call the manager and its
+        // child provider processes are immortal. `shutdown()` (not the bare
+        // `stopAll()`) takes the manager's own reconfigure lock so this
+        // can't interleave with an in-flight `start()`/`spawnPollLoops()`.
+        if let remoteManager {
+            await remoteManager.shutdown()
         }
 
         // Stop daywatch runner.

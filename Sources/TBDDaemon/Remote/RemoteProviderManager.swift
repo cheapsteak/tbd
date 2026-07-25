@@ -4,20 +4,11 @@ import TBDShared
 
 private let remoteLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
-public struct RemoteProviderStatus: Codable, Sendable {
-    public let config: RemoteProviderConfig
-    public let describe: ProviderDescribe?
-    public let health: ProviderHealth
-    public let errorMessage: String?
-    public let remediationLabel: String?
-    public let remediationCommand: String?
-}
-
 /// Owns the remote-backend feature at runtime: registry, describe cache,
 /// per-provider poll loops, provider health, and pass-through invocations.
 /// Source of truth for sessions is always the provider; this actor only
 /// maintains the mirror + broadcasts.
-actor RemoteProviderManager {
+public actor RemoteProviderManager {
     private let db: TBDDatabase
     private let subscriptions: StateSubscriptionManager
     private let runner: any RemoteProviderInvoking
@@ -157,6 +148,20 @@ actor RemoteProviderManager {
         loops.removeAll()
         for supervisor in supervisors.values { await supervisor.stop() }
         supervisors.removeAll()
+    }
+
+    /// Guarded daemon-shutdown entry point. `stopAll()` itself is not safe
+    /// to call directly from outside `spawnPollLoops` — it's the FIFO
+    /// reconfigure lock (see `spawnPollLoops`'s comment) that makes teardown
+    /// and a concurrent spawn mutually exclusive, and `stopAll()` on its own
+    /// doesn't take it. Daemon shutdown can race a just-started poll loop
+    /// spawning its own reconfigure (e.g. a `start()` still in flight at
+    /// shutdown), so it must take the same lock rather than calling
+    /// `stopAll()` bare.
+    func shutdown() async {
+        await acquireReconfigureLock()
+        defer { releaseReconfigureLock() }
+        await stopAll()
     }
 
     /// The 60s `list` poll is the universal floor for every provider,

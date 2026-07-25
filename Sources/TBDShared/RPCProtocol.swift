@@ -214,6 +214,14 @@ public enum RPCMethod {
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
+    public static let remoteProviders = "remote.providers"
+    public static let remoteSessions = "remote.sessions"
+    public static let remoteCreate = "remote.create"
+    public static let remoteStop = "remote.stop"
+    public static let remoteSend = "remote.send"
+    public static let remoteLog = "remote.log"
+    public static let remoteDismiss = "remote.dismiss"
+    public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
     public static let panelImportLegacy = "panel.importLegacy"
@@ -986,6 +994,89 @@ public struct GCSweepNowParams: Codable, Sendable {
     public init(dryRun: Bool = false) {
         self.dryRun = dryRun
     }
+}
+
+/// Result of `remote.providers` — every registered provider's negotiated
+/// contract + current health.
+public struct RemoteProvidersResult: Codable, Sendable {
+    public let providers: [RemoteProviderStatus]
+    public init(providers: [RemoteProviderStatus]) { self.providers = providers }
+}
+
+/// One row of the `remote.sessions` mirror — the provider-scoped payload
+/// plus the drift bookkeeping (`gone`/`dismissed`) the app needs to render
+/// (or hide) a stale session.
+public struct RemoteSessionInfo: Codable, Sendable {
+    public let provider: String
+    public let payload: RemoteSessionPayload
+    public let gone: Bool
+    public let dismissed: Bool
+    public let lastSeen: Date
+    public init(provider: String, payload: RemoteSessionPayload,
+                gone: Bool, dismissed: Bool, lastSeen: Date) {
+        self.provider = provider; self.payload = payload
+        self.gone = gone; self.dismissed = dismissed; self.lastSeen = lastSeen
+    }
+}
+
+public struct RemoteSessionsResult: Codable, Sendable {
+    public let sessions: [RemoteSessionInfo]
+    public init(sessions: [RemoteSessionInfo]) { self.sessions = sessions }
+}
+
+public struct RemoteCreateParams: Codable, Sendable {
+    public let provider: String
+    /// Raw JSON object of create-form values; passed to the provider verbatim
+    /// inside the contract's create request. Kept as a string so RPC stays
+    /// schema-free about provider-specific fields.
+    public let paramsJSON: String
+    public init(provider: String, paramsJSON: String) {
+        self.provider = provider; self.paramsJSON = paramsJSON
+    }
+}
+
+public struct RemoteStopParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+public struct RemoteSendParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let text: String
+    public init(provider: String, sessionID: String, text: String) {
+        self.provider = provider; self.sessionID = sessionID; self.text = text
+    }
+}
+
+public struct RemoteLogParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let lines: Int?
+    public init(provider: String, sessionID: String, lines: Int? = nil) {
+        self.provider = provider; self.sessionID = sessionID; self.lines = lines
+    }
+}
+
+public struct RemoteLogResult: Codable, Sendable {
+    public let text: String
+    public init(text: String) { self.text = text }
+}
+
+public struct RemoteDismissParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
 }
 
 /// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return

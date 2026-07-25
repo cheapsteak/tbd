@@ -130,4 +130,18 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the remote-backends master switch. Takes effect for polling
+    /// on the NEXT daemon start — the manager is constructed at boot only
+    /// when the flag was already on (see `Daemon.swift`), so flipping this
+    /// on alone does not start polling until a restart. `remote.*` RPC
+    /// verbs re-check the flag on every call, so disabling it cuts off
+    /// access immediately even without a restart.
+    func handleConfigSetRemoteBackends(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetRemoteBackendsParams.self, from: paramsData)
+        try await db.config.setRemoteBackendsEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

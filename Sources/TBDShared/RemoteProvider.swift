@@ -165,6 +165,24 @@ public struct ProviderRemediation: Codable, Sendable {
     public let command: String?
 }
 
+/// One provider's negotiated contract + current health, as tracked by
+/// `RemoteProviderManager` (daemon) and rendered by the app. Lives here (not
+/// daemon-side) because `remote.providers` puts it on the wire.
+public struct RemoteProviderStatus: Codable, Sendable {
+    public let config: RemoteProviderConfig
+    public let describe: ProviderDescribe?
+    public let health: ProviderHealth
+    public let errorMessage: String?
+    public let remediationLabel: String?
+    public let remediationCommand: String?
+    public init(config: RemoteProviderConfig, describe: ProviderDescribe?, health: ProviderHealth,
+                errorMessage: String?, remediationLabel: String?, remediationCommand: String?) {
+        self.config = config; self.describe = describe; self.health = health
+        self.errorMessage = errorMessage
+        self.remediationLabel = remediationLabel; self.remediationCommand = remediationCommand
+    }
+}
+
 /// Loads `agent-providers.json`. Missing file = no providers (not an error);
 /// duplicate names or empty exec = configuration error.
 public enum RemoteProviderRegistry {

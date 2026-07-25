@@ -24,6 +24,12 @@ public final class RPCRouter: Sendable {
     /// The `gc.*` handlers return an error response rather than crashing when
     /// this is nil.
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// Remote-backends actor. Constructed at boot ONLY when
+    /// `config.remoteBackendsEnabled` is true (see `Daemon.swift`); `nil`
+    /// otherwise, including when a user flips the flag on without
+    /// restarting. `remote.*` handlers return an error response rather than
+    /// crashing when this is nil — see `RPCRouter+RemoteHandlers.swift`.
+    let remoteManager: RemoteProviderManager?
     /// In-memory per-profile OAuth usage poller. Wired post-construction by
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
     /// mode, where usage snapshots are simply absent.
@@ -98,7 +104,8 @@ public final class RPCRouter: Sendable {
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator()
+        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
+        remoteManager: RemoteProviderManager? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -126,6 +133,7 @@ public final class RPCRouter: Sendable {
         self.loginSessions = loginSessions
         self.panelCoordinator = PanelCoordinator(
             db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
+        self.remoteManager = remoteManager
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -382,6 +390,22 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
+            case RPCMethod.remoteProviders:
+                return try await handleRemoteProviders()
+            case RPCMethod.remoteSessions:
+                return try await handleRemoteSessions()
+            case RPCMethod.remoteCreate:
+                return try await handleRemoteCreate(request.paramsData)
+            case RPCMethod.remoteStop:
+                return try await handleRemoteStop(request.paramsData)
+            case RPCMethod.remoteSend:
+                return try await handleRemoteSend(request.paramsData)
+            case RPCMethod.remoteLog:
+                return try await handleRemoteLog(request.paramsData)
+            case RPCMethod.remoteDismiss:
+                return try await handleRemoteDismiss(request.paramsData)
+            case RPCMethod.configSetRemoteBackends:
+                return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.gcList:
                 return try await handleGCList(request.paramsData)
             case RPCMethod.gcRestore:
