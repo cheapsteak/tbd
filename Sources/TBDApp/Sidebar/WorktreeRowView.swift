@@ -3,6 +3,14 @@ import SwiftUI
 import TBDShared
 
 struct WorktreeRowView: View {
+    /// Fixed height of one worktree row. Shared with `PinnedDockMetrics` so the
+    /// dock's height arithmetic cannot silently drift from the row it measures.
+    /// `nonisolated` because it is a plain constant, not UI state — without it,
+    /// `WorktreeRowView`'s `View` conformance infers whole-type `@MainActor`
+    /// isolation onto even this static constant, which a pure/testable
+    /// `PinnedDockMetrics` cannot reference from a nonisolated context.
+    nonisolated static let rowHeight: CGFloat = 28
+
     let worktree: Worktree
     var isMain: Bool = false
     var indentLevel: Int = 0
@@ -246,7 +254,7 @@ struct WorktreeRowView: View {
         }
         .padding(.leading, CGFloat(indentLevel) * 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 28)
+        .frame(height: Self.rowHeight)
         // Scratch spaces have no repo-level `.missing` status to inherit, so a
         // missing directory is surfaced client-side with a per-row FS stat
         // (mirrors RepoSectionView dimming a `.missing` repo). The stat is an
