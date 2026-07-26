@@ -18,16 +18,20 @@ enum RemoteCreateFormLogic {
     }
 
     /// Derives the `repo` create-param prefill from a repo's `remoteURL`,
-    /// reusing the SAME normalization `RemoteRepoMatching` uses to resolve a
-    /// session's `meta["repo"]` back to a local repo — so a session created
-    /// with this prefill round-trips into the very repo section its `+`
-    /// button was clicked from, instead of landing unmatched in the
-    /// provider-named section. Returns nil when there's no ambient repo (the
-    /// sheet was opened from the Remote section header, not a repo) or the
-    /// repo has no parseable remote URL.
+    /// using `RemoteRepoMatching.displayKey` — the SAME segment parsing
+    /// `normalizedKey` uses to resolve a session's `meta["repo"]` back to a
+    /// local repo, so a session created with this prefill still round-trips
+    /// into the very repo section its `+` button was clicked from (matching
+    /// stays case-insensitive on both sides). Unlike `normalizedKey`,
+    /// `displayKey` preserves the repo's original casing ("Acme/API" prefills
+    /// as "Acme/API", not "acme/api") — a provider that clones against a
+    /// case-sensitive host needs what's actually sent to be the real casing,
+    /// not the lowercase comparison key. Returns nil when there's no ambient
+    /// repo (the sheet was opened from the Remote section header, not a
+    /// repo) or the repo has no parseable remote URL.
     static func repoPrefill(remoteURL: String?) -> String? {
         guard let remoteURL else { return nil }
-        return RemoteRepoMatching.normalizedKey(remoteURL)
+        return RemoteRepoMatching.displayKey(remoteURL)
     }
 
     /// Seeds initial string-typed field values (every type except `bool`):

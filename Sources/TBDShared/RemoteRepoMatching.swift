@@ -22,11 +22,13 @@ import Foundation
 /// would collide. The contract does not attempt to solve that; it's rare
 /// enough in practice to accept.
 public enum RemoteRepoMatching {
-    /// Normalizes a git remote URL (`https://`, `ssh://`, or scp-like
-    /// `user@host:org/name` syntax) or a bare `org/name` string to a
-    /// lowercase "org/name" comparison key. Returns nil when fewer than two
-    /// non-empty path segments are present — nothing meaningful to compare.
-    public static func normalizedKey(_ raw: String) -> String? {
+    /// Shared parsing behind both `normalizedKey` (matching) and
+    /// `displayKey` (prefill) — the one place that understands a git remote
+    /// URL's (`https://`, `ssh://`, or scp-like `user@host:org/name`) or bare
+    /// `org/name` string's shape. Returns the raw, un-lowercased (org, name)
+    /// pair, or nil when fewer than two non-empty path segments are present
+    /// — nothing meaningful to compare/display.
+    private static func segments(_ raw: String) -> (org: String, name: String)? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -51,7 +53,29 @@ public enum RemoteRepoMatching {
             name = String(name.dropLast(4))
         }
         guard !org.isEmpty, !name.isEmpty else { return nil }
+        return (org, name)
+    }
+
+    /// Normalizes a git remote URL (`https://`, `ssh://`, or scp-like
+    /// `user@host:org/name` syntax) or a bare `org/name` string to a
+    /// lowercase "org/name" comparison key. Returns nil when fewer than two
+    /// non-empty path segments are present — nothing meaningful to compare.
+    public static func normalizedKey(_ raw: String) -> String? {
+        guard let (org, name) = segments(raw) else { return nil }
         return "\(org.lowercased())/\(name.lowercased())"
+    }
+
+    /// Same parsing as `normalizedKey`, but preserves the source's original
+    /// casing ("Acme/API" stays "Acme/API" rather than becoming
+    /// "acme/api") — for DISPLAY/PREFILL contexts
+    /// (`RemoteCreateFormLogic.repoPrefill`), where a provider that uses the
+    /// value verbatim (e.g. cloning against a case-sensitive host) needs the
+    /// repo's real casing. MATCHING must keep using `normalizedKey` on both
+    /// sides — this is display-only and intentionally not used by
+    /// `resolveRepoID`.
+    public static func displayKey(_ raw: String) -> String? {
+        guard let (org, name) = segments(raw) else { return nil }
+        return "\(org)/\(name)"
     }
 
     /// Resolves `metaRepo` (a provider's `meta["repo"]` value) against

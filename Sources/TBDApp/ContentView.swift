@@ -8,7 +8,6 @@ struct ContentView: View {
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
-    @State private var contentAreaHeight: CGFloat = 600
     // Part of the PR split button's .id key: the baked (non-template) icon
     // colors depend on the appearance, and the materialized-once toolbar item
     // only picks up a re-bake when the id changes.
@@ -28,6 +27,40 @@ struct ContentView: View {
                 worktree: worktree,
                 repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
             )
+        }
+    }
+
+    /// The `NavigationSplitView`'s `detail:` content — extracted from an
+    /// inline `if/else` chain that had grown to include a nested `HStack`
+    /// with several `.background`/`.overlay`/`.onPreferenceChange` closures
+    /// (now `WorktreeDetailAreaView`), which was contributing to
+    /// `ContentView.body`'s type-check time (and SourceKit occasionally
+    /// giving up on live diagnostics for this file). Pure restructuring —
+    /// same branches, same order, same conditions.
+    @ViewBuilder
+    private var detailContent: some View {
+        if !appState.isConnected {
+            disconnectedView
+        } else if appState.selectedScratchSection {
+            ScratchDetailView()
+        } else if let remoteSelection = appState.selectedRemoteSession {
+            // Keyed by the selection itself so switching to a
+            // DIFFERENT remote session always starts fresh @State —
+            // never an attach process left running against, or a
+            // cached log for, the wrong session. Routed independently
+            // of `appState.repos.isEmpty`/`selectedWorktreeIDs`: a
+            // remote session has no local repo requirement.
+            RemoteSessionDetailView(selection: remoteSelection)
+                .id(remoteSelection)
+        } else if appState.repos.isEmpty {
+            emptyStateView
+        } else if let repoID = appState.selectedRepoID {
+            RepoDetailView(repoID: repoID)
+        } else if appState.selectedWorktreeIDs.isEmpty {
+            Text("Select a worktree or click + to create one")
+                .foregroundStyle(.secondary)
+        } else {
+            WorktreeDetailAreaView(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
         }
     }
 
@@ -64,73 +97,7 @@ struct ContentView: View {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
             } detail: {
-                if !appState.isConnected {
-                    disconnectedView
-                } else if appState.selectedScratchSection {
-                    ScratchDetailView()
-                } else if let remoteSelection = appState.selectedRemoteSession {
-                    // Keyed by the selection itself so switching to a
-                    // DIFFERENT remote session always starts fresh @State —
-                    // never an attach process left running against, or a
-                    // cached log for, the wrong session. Routed independently
-                    // of `appState.repos.isEmpty`/`selectedWorktreeIDs`: a
-                    // remote session has no local repo requirement.
-                    RemoteSessionDetailView(selection: remoteSelection)
-                        .id(remoteSelection)
-                } else if appState.repos.isEmpty {
-                    emptyStateView
-                } else if let repoID = appState.selectedRepoID {
-                    RepoDetailView(repoID: repoID)
-                } else if appState.selectedWorktreeIDs.isEmpty {
-                    Text("Select a worktree or click + to create one")
-                        .foregroundStyle(.secondary)
-                } else {
-                    HStack(spacing: 0) {
-                        TerminalContainerView()
-                        if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
-                            FilePanelDivider(panelWidth: Binding(
-                                get: { CGFloat(filePanelWidth) },
-                                set: { filePanelWidth = Double($0) }
-                            ))
-                            FileViewerPanel(worktree: worktree)
-                                .frame(width: CGFloat(filePanelWidth))
-                                .id(worktree.id)
-                        }
-                    }
-                    .background(GeometryReader { geometry in
-                        Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
-                    })
-                    .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
-                    .overlay {
-                        // Uses the canonical tab-keyed set — never iterate
-                        // `layouts.values` unkeyed: stale worktree-keyed
-                        // entries persisted by the pre-split grid path would
-                        // make hidden terminals look visible. Those entries
-                        // are not pruned at restore time (keys can't be
-                        // classified at init; Phase 2 import drops them).
-                        if let frame = overlayCoordinator.current,
-                           overlayFrameIsWindowRoot(frame, visibleTerminalIDs: appState.visibleTerminalIDs) {
-                            TranscriptOverlayView(
-                                frame: frame,
-                                hasBack: overlayCoordinator.hasBack,
-                                onBack: { overlayCoordinator.pop() },
-                                onClose: { overlayCoordinator.close() }
-                            )
-                            .frame(maxWidth: 900, maxHeight: 700)
-                            .padding(20)
-                        }
-                    }
-                    .background {
-                        // Window-wide click-outside catcher. Renders transparently behind
-                        // the entire detail area; only consumes taps when an overlay is
-                        // currently open, so it doesn't interfere with normal interaction.
-                        if overlayCoordinator.isOpen {
-                            Color.black.opacity(0.001)
-                                .onTapGesture { overlayCoordinator.close() }
-                                .allowsHitTesting(true)
-                        }
-                    }
-                }
+                detailContent
             }
             .toolbar(removing: .sidebarToggle)
             .toolbar {
@@ -453,6 +420,84 @@ struct ContentView: View {
         appState.macNotificationManager.dismissDelivered(worktreeIDs: selection)
     }
 
+}
+
+// MARK: - WorktreeDetailAreaView
+
+/// The terminal-grid branch of `ContentView.detailContent` — rendered when a
+/// worktree (not a remote session, scratch section, or repo-only selection)
+/// is what's showing. Extracted verbatim out of `ContentView.body`'s
+/// `detail:` closure (pure restructuring, see `detailContent`'s doc
+/// comment): `TerminalContainerView` + the optional file panel, the overlay
+/// coordinator's transcript overlay, and the window-wide click-outside
+/// catcher.
+///
+/// `showFilePanel`/`filePanelWidth` stay `@Binding` (not independent
+/// `@AppStorage` re-declarations of the same keys) — `ContentView`'s
+/// toolbar toggle button needs the SAME state, and threading one `Binding`
+/// through avoids two literal copies of the UserDefaults key strings ever
+/// drifting apart. `contentAreaHeight` moves in as this view's own `@State`
+/// instead: nothing outside this branch ever read it in `ContentView`.
+private struct WorktreeDetailAreaView: View {
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+    @Binding var showFilePanel: Bool
+    @Binding var filePanelWidth: Double
+    @State private var contentAreaHeight: CGFloat = 600
+
+    private var selectedWorktree: Worktree? {
+        guard let id = appState.selectedWorktreeIDs.first else { return nil }
+        // findWorktree also resolves scratch spaces (repo-less worktrees).
+        return appState.findWorktree(id: id)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            TerminalContainerView()
+            if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
+                FilePanelDivider(panelWidth: Binding(
+                    get: { CGFloat(filePanelWidth) },
+                    set: { filePanelWidth = Double($0) }
+                ))
+                FileViewerPanel(worktree: worktree)
+                    .frame(width: CGFloat(filePanelWidth))
+                    .id(worktree.id)
+            }
+        }
+        .background(GeometryReader { geometry in
+            Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
+        })
+        .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
+        .overlay {
+            // Uses the canonical tab-keyed set — never iterate
+            // `layouts.values` unkeyed: stale worktree-keyed
+            // entries persisted by the pre-split grid path would
+            // make hidden terminals look visible. Those entries
+            // are not pruned at restore time (keys can't be
+            // classified at init; Phase 2 import drops them).
+            if let frame = overlayCoordinator.current,
+               overlayFrameIsWindowRoot(frame, visibleTerminalIDs: appState.visibleTerminalIDs) {
+                TranscriptOverlayView(
+                    frame: frame,
+                    hasBack: overlayCoordinator.hasBack,
+                    onBack: { overlayCoordinator.pop() },
+                    onClose: { overlayCoordinator.close() }
+                )
+                .frame(maxWidth: 900, maxHeight: 700)
+                .padding(20)
+            }
+        }
+        .background {
+            // Window-wide click-outside catcher. Renders transparently behind
+            // the entire detail area; only consumes taps when an overlay is
+            // currently open, so it doesn't interfere with normal interaction.
+            if overlayCoordinator.isOpen {
+                Color.black.opacity(0.001)
+                    .onTapGesture { overlayCoordinator.close() }
+                    .allowsHitTesting(true)
+            }
+        }
+    }
 }
 
 // MARK: - Overlay helpers

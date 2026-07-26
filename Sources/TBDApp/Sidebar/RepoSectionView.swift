@@ -33,7 +33,10 @@ struct RepoSectionView: View {
     @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
-    @State private var showingRemoteCreateSheet = false
+    // `.sheet(item:)` over the provider itself (not `.sheet(isPresented:)` +
+    // a separate `Bool`) — a nil provider structurally can't present an
+    // empty sheet, unlike the previous `if let` inside an `isPresented`
+    // sheet body.
     @State private var remoteCreateSheetProvider: RemoteProviderStatus?
     // Hover the `+` (or ⌥-click it) to open the model-profile picker; a plain
     // click still creates a worktree with the default profile.
@@ -92,91 +95,45 @@ struct RepoSectionView: View {
         return base
     }
 
+    /// Hoisted out of the chevron `Image`'s `.foregroundStyle` so the type
+    /// checker sees a plain property reference there instead of an inline
+    /// `AnyShapeStyle`-wrapped ternary — one of two such properties (see
+    /// `nameForegroundStyle`) contributing to `RepoSectionView.body`'s
+    /// type-check time. Deliberately NOT merged into one shared property
+    /// with `nameForegroundStyle`: their non-missing branches differ
+    /// (`.secondary` here vs. selection-dependent there), and folding them
+    /// together would change the chevron's rendered color when a repo is
+    /// selected — a real behavior change, not a pure restructuring.
+    private var chevronForegroundStyle: AnyShapeStyle {
+        repo.status == .missing
+            ? AnyShapeStyle(Color.secondary.opacity(0.5))
+            : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+    }
+
+    /// See `chevronForegroundStyle` — same hoist, for the repo name label.
+    private var nameForegroundStyle: AnyShapeStyle {
+        repo.status == .missing
+            ? AnyShapeStyle(Color.secondary.opacity(0.5))
+            : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
-            Button {
-                Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
-            } label: {
-                Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 11))
-                    .foregroundStyle(
-                        repo.status == .missing
-                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                            : AnyShapeStyle(HierarchicalShapeStyle.secondary)
-                    )
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { isChevronHovered = $0 }
-            .help(repo.expanded ? "Collapse" : "Expand")
-            RenameableLabel(
-                text: repo.displayName,
-                isEditing: $isEditing,
-                onCommit: { newName in
-                    Task {
-                        await appState.renameRepo(id: repo.id, displayName: newName)
-                    }
-                }
-            ) {
-                Text(repo.displayName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(
-                        repo.status == .missing
-                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                            : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
-                    )
-            }
-            .padding(.leading, -2)
-
-            if repo.status == .missing {
-                Text("[missing]")
-                    .font(.caption)
-                    .foregroundStyle(.red.opacity(0.7))
-                Button("Locate…") {
-                    locateRepo()
-                }
-                .buttonStyle(.link)
-                .font(.caption)
-            }
-
-            Spacer()
-
-            Group {
-                if HoverMenuModel.shouldShowPlus(hovered: isSectionHovered, menuOpen: newWorktreeMenu.isOpen) {
-                    // Hover opens the unified profile picker; its "Choose a
-                    // branch…" row drills into the branch list. ⌥-click opens
-                    // it immediately. No tooltip — it would render on top of
-                    // the hover menu.
-                    SectionHeaderPlusButton(action: handlePlusButton)
-                    .accessibilityLabel("New worktree")
-                    .disabled(repo.status == .missing)
-                    // `.disabled` blocks the click path but NOT `.onHover`
-                    // tracking-area events, so gate the hover-open explicitly —
-                    // a missing repo must never open the picker.
-                    .onHover { if repo.status != .missing { newWorktreeMenu.triggerHover($0) } }
-                    .background(
-                        FloatingMenuAnchor(
-                            isPresented: newWorktreeMenu.isOpen,
-                            content: WorktreeProfilePickerView(
-                                repoID: repo.id,
-                                highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
-                                onClose: { newWorktreeMenu.closeNow() }
-                            )
-                            .environmentObject(appState)
-                            .background(.ultraThickMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .onHover { newWorktreeMenu.menuHover($0) }
-                        )
-                    )
-                } else {
-                    Color.clear
-                }
-            }
-            .frame(width: 20, height: 20)
+        headerRow
+        if repo.expanded {
+            expandedContent
         }
+    }
+
+    /// The section header row (chevron + name + `+`) and every modifier
+    /// attached to it — extracted out of `body` alongside `expandedContent`,
+    /// and further split into `headerHStack` + its own sub-pieces below, so
+    /// the type checker sees several smaller expressions instead of one
+    /// combining all of them (see the `-warn-long-function-bodies` note on
+    /// this file). Pure restructuring: identical content, order, and
+    /// modifiers.
+    @ViewBuilder
+    private var headerRow: some View {
+        headerHStack
         .frame(height: 22, alignment: .bottom)
         .background(Color.white.opacity(0.0001))
         .contentShape(Rectangle())
@@ -186,52 +143,9 @@ struct RepoSectionView: View {
         .onHover { hovering in
             onSectionHoverChange(hovering)
         }
-        .contextMenu {
-            Button(repo.expanded ? "Collapse" : "Expand") {
-                Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
-            }
-            Button("Rename...") {
-                isEditing = true
-            }
-            Button(repo.hidden ? "Unhide" : "Hide") {
-                Task { await appState.setRepoHidden(id: repo.id, hidden: !repo.hidden) }
-            }
-            // Task 10: a repo-scoped entry point into the create sheet,
-            // prefilled with this repo — omitted (not disabled) when no
-            // remote provider is registered at all, mirroring how
-            // `RemoteSessionActionMenu` omits capability-gated items rather
-            // than graying them out. A single provider skips straight to the
-            // sheet; more than one asks which provider first.
-            if !appState.remoteProviders.isEmpty {
-                if appState.remoteProviders.count == 1, let only = appState.remoteProviders.first {
-                    Button("New Remote Session…") { openRemoteCreateSheet(for: only) }
-                } else {
-                    Menu("New Remote Session…") {
-                        ForEach(appState.remoteProviders, id: \.config.name) { provider in
-                            Button(provider.describe?.name ?? provider.config.name) {
-                                openRemoteCreateSheet(for: provider)
-                            }
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button("Remove from List...", role: .destructive) {
-                showRemoveConfirm = true
-            }
-        }
-        .sheet(isPresented: $showingRemoteCreateSheet) {
-            if let remoteCreateSheetProvider {
-                RemoteCreateSheet(
-                    provider: remoteCreateSheetProvider.config,
-                    describe: remoteCreateSheetProvider.describe,
-                    // Same normalization `RemoteRepoMatching` uses to resolve
-                    // a session's `meta["repo"]` back to a repo — so a
-                    // session created from here round-trips into THIS repo's
-                    // section instead of landing unmatched.
-                    repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL)
-                )
-            }
+        .contextMenu { repoContextMenu }
+        .sheet(item: $remoteCreateSheetProvider) { provider in
+            remoteCreateSheetContent(for: provider)
         }
         .confirmationDialog(
             "Remove \(repo.displayName) from list?",
@@ -249,46 +163,154 @@ struct RepoSectionView: View {
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .tag(repo.id)
+    }
 
-        if repo.expanded {
-            if let main = mainWorktree {
-                WorktreeRowView(worktree: main, isMain: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.0001))
-                    .opacity(isChevronHovered ? 0.7 : 1.0)
-                    .onHover { onSectionHoverChange($0) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .tag(main.id)
+    /// The header row's actual content (chevron + name + optional "missing"
+    /// badge + `+`), with none of `headerRow`'s trailing modifiers — see
+    /// `headerRow`'s doc comment.
+    @ViewBuilder
+    private var headerHStack: some View {
+        HStack(spacing: 4) {
+            chevronButton
+            nameLabel
+            if repo.status == .missing {
+                missingBadge
             }
-            ForEach(topLevelWorktrees) { wt in
-                WorktreeSubtreeView(worktree: wt, depth: 0, sectionRepoID: repo.id)
-                    .opacity(isChevronHovered ? 0.7 : 1.0)
-                    .onHover { onSectionHoverChange($0) }
+            Spacer()
+            newWorktreePlusButton
+        }
+    }
+
+    @ViewBuilder
+    private var chevronButton: some View {
+        Button {
+            Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+        } label: {
+            Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 11))
+                .foregroundStyle(chevronForegroundStyle)
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isChevronHovered = $0 }
+        .help(repo.expanded ? "Collapse" : "Expand")
+    }
+
+    @ViewBuilder
+    private var nameLabel: some View {
+        RenameableLabel(
+            text: repo.displayName,
+            isEditing: $isEditing,
+            onCommit: { newName in
+                Task {
+                    await appState.renameRepo(id: repo.id, displayName: newName)
+                }
             }
-            .onMove { source, destination in
-                appState.reorderTopLevelWorktrees(
-                    repoID: repo.id,
-                    fromOffsets: source,
-                    toOffset: destination
+        ) {
+            Text(repo.displayName)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(nameForegroundStyle)
+        }
+        .padding(.leading, -2)
+    }
+
+    @ViewBuilder
+    private var missingBadge: some View {
+        Text("[missing]")
+            .font(.caption)
+            .foregroundStyle(.red.opacity(0.7))
+        Button("Locate…") {
+            locateRepo()
+        }
+        .buttonStyle(.link)
+        .font(.caption)
+    }
+
+    /// Hover the `+` (or ⌥-click it) to open the model-profile picker; a
+    /// plain click still creates a worktree with the default profile — see
+    /// `HoverMenuModel`/`handlePlusButton`.
+    @ViewBuilder
+    private var newWorktreePlusButton: some View {
+        Group {
+            if HoverMenuModel.shouldShowPlus(hovered: isSectionHovered, menuOpen: newWorktreeMenu.isOpen) {
+                // Hover opens the unified profile picker; its "Choose a
+                // branch…" row drills into the branch list. ⌥-click opens
+                // it immediately. No tooltip — it would render on top of
+                // the hover menu.
+                SectionHeaderPlusButton(action: handlePlusButton)
+                .accessibilityLabel("New worktree")
+                .disabled(repo.status == .missing)
+                // `.disabled` blocks the click path but NOT `.onHover`
+                // tracking-area events, so gate the hover-open explicitly —
+                // a missing repo must never open the picker.
+                .onHover { if repo.status != .missing { newWorktreeMenu.triggerHover($0) } }
+                .background(
+                    FloatingMenuAnchor(
+                        isPresented: newWorktreeMenu.isOpen,
+                        content: WorktreeProfilePickerView(
+                            repoID: repo.id,
+                            highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
+                            onClose: { newWorktreeMenu.closeNow() }
+                        )
+                        .environmentObject(appState)
+                        .background(.ultraThickMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .onHover { newWorktreeMenu.menuHover($0) }
+                    )
                 )
+            } else {
+                Color.clear
             }
-            // Matched remote sessions render AFTER local worktrees, never
-            // interleaved: local worktrees have a user-controlled sort order
-            // (`sortOrder`/drag reorder above) and remote ones have nothing
-            // comparable, so appending is predictable while interleaving
-            // would look arbitrary relative to a manual reorder the user set
-            // up on purpose.
-            ForEach(matchedRemoteSessions) { session in
-                RemoteSessionRowView(session: session)
-                    .opacity(isChevronHovered ? 0.7 : 1.0)
-                    .onHover { onSectionHoverChange($0) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .tag(session.id)
-            }
+        }
+        .frame(width: 20, height: 20)
+    }
+
+    /// The expanded repo's rows: main worktree, top-level worktree subtree
+    /// (with drag reorder), then matched remote sessions — extracted out of
+    /// `body` alongside `headerRow`. Pure restructuring: identical content,
+    /// order, and modifiers.
+    @ViewBuilder
+    private var expandedContent: some View {
+        if let main = mainWorktree {
+            WorktreeRowView(worktree: main, isMain: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.0001))
+                .opacity(isChevronHovered ? 0.7 : 1.0)
+                .onHover { onSectionHoverChange($0) }
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .tag(main.id)
+        }
+        ForEach(topLevelWorktrees) { wt in
+            WorktreeSubtreeView(worktree: wt, depth: 0, sectionRepoID: repo.id)
+                .opacity(isChevronHovered ? 0.7 : 1.0)
+                .onHover { onSectionHoverChange($0) }
+        }
+        .onMove { source, destination in
+            appState.reorderTopLevelWorktrees(
+                repoID: repo.id,
+                fromOffsets: source,
+                toOffset: destination
+            )
+        }
+        // Matched remote sessions render AFTER local worktrees, never
+        // interleaved: local worktrees have a user-controlled sort order
+        // (`sortOrder`/drag reorder above) and remote ones have nothing
+        // comparable, so appending is predictable while interleaving
+        // would look arbitrary relative to a manual reorder the user set
+        // up on purpose.
+        ForEach(matchedRemoteSessions) { session in
+            RemoteSessionRowView(session: session)
+                .opacity(isChevronHovered ? 0.7 : 1.0)
+                .onHover { onSectionHoverChange($0) }
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .tag(session.id)
         }
     }
 
@@ -341,6 +363,71 @@ struct RepoSectionView: View {
         return ISO8601DateFormatter().date(from: raw)
     }
 
+    // MARK: - Context menu
+
+    /// Extracted out of the row's `.contextMenu` — the nested conditionals
+    /// plus `ForEach` in `newRemoteSessionMenuItem` were part of what pushed
+    /// `body`'s type-check time well past budget (see the `-warn-long-
+    /// function-bodies` note on this file). Pure restructuring: same items,
+    /// same order, same conditions.
+    @ViewBuilder
+    private var repoContextMenu: some View {
+        Button(repo.expanded ? "Collapse" : "Expand") {
+            Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+        }
+        Button("Rename...") {
+            isEditing = true
+        }
+        Button(repo.hidden ? "Unhide" : "Hide") {
+            Task { await appState.setRepoHidden(id: repo.id, hidden: !repo.hidden) }
+        }
+        newRemoteSessionMenuItem
+        Divider()
+        Button("Remove from List...", role: .destructive) {
+            showRemoveConfirm = true
+        }
+    }
+
+    /// Task 10: a repo-scoped entry point into the create sheet, prefilled
+    /// with this repo — omitted (not disabled) when no remote provider is
+    /// registered at all, mirroring how `RemoteSessionActionMenu` omits
+    /// capability-gated items rather than graying them out. A single
+    /// provider skips straight to the sheet; more than one asks which
+    /// provider first.
+    @ViewBuilder
+    private var newRemoteSessionMenuItem: some View {
+        if !appState.remoteProviders.isEmpty {
+            if appState.remoteProviders.count == 1, let only = appState.remoteProviders.first {
+                Button("New Remote Session…") { openRemoteCreateSheet(for: only) }
+            } else {
+                Menu("New Remote Session…") {
+                    ForEach(appState.remoteProviders, id: \.config.name) { provider in
+                        Button(provider.describe?.name ?? provider.config.name) {
+                            openRemoteCreateSheet(for: provider)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extracted out of the `.sheet(item:)` body for the same reason as
+    /// `repoContextMenu` — a multi-argument `RemoteCreateSheet` init with a
+    /// nested `RemoteCreateFormLogic.repoPrefill` call inline in the trailing
+    /// closure was contributing to `body`'s type-check time.
+    @ViewBuilder
+    private func remoteCreateSheetContent(for provider: RemoteProviderStatus) -> some View {
+        RemoteCreateSheet(
+            provider: provider.config,
+            describe: provider.describe,
+            // Same normalization `RemoteRepoMatching` uses to resolve a
+            // session's `meta["repo"]` back to a repo — so a session created
+            // from here round-trips into THIS repo's section instead of
+            // landing unmatched.
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL)
+        )
+    }
+
     private func handlePlusButton() {
         guard repo.status != .missing else { return }
         switch HoverMenuModel.plusOutcome(optionHeld: NSEvent.modifierFlags.contains(.option)) {
@@ -360,7 +447,6 @@ struct RepoSectionView: View {
 
     private func openRemoteCreateSheet(for provider: RemoteProviderStatus) {
         remoteCreateSheetProvider = provider
-        showingRemoteCreateSheet = true
     }
 
     private func locateRepo() {

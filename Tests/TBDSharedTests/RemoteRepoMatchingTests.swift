@@ -76,6 +76,46 @@ struct RemoteRepoMatchingTests {
         #expect(RemoteRepoMatching.normalizedKey("just-a-name") == nil)
     }
 
+    // MARK: - displayKey — same parsing as normalizedKey, casing preserved
+
+    @Test func displayKey_preservesOriginalCasing() {
+        // Fix pass 1 (task-10 review finding 6): unlike `normalizedKey`,
+        // `displayKey` must NOT lowercase — a provider using the prefilled
+        // value verbatim (e.g. cloning against a case-sensitive host) needs
+        // the repo's real casing.
+        #expect(RemoteRepoMatching.displayKey("https://github.com/Acme/API") == "Acme/API")
+    }
+
+    @Test func displayKey_stripsDotGitSuffixLikeNormalizedKey() {
+        #expect(RemoteRepoMatching.displayKey("https://github.com/Acme/API.git") == "Acme/API")
+    }
+
+    @Test func displayKey_scpLikeSSHSyntax() {
+        #expect(RemoteRepoMatching.displayKey("git@github.com:Acme/API.git") == "Acme/API")
+    }
+
+    @Test func displayKey_bareOrgNameUnchanged() {
+        #expect(RemoteRepoMatching.displayKey("Acme/API") == "Acme/API")
+    }
+
+    @Test func displayKey_emptyStringIsNil() {
+        #expect(RemoteRepoMatching.displayKey("") == nil)
+    }
+
+    @Test func displayKey_singleSegmentIsNil() {
+        #expect(RemoteRepoMatching.displayKey("just-a-name") == nil)
+    }
+
+    @Test func displayKey_andNormalizedKey_agreeCaseInsensitively() {
+        // The two must stay in lockstep on WHICH url parses and WHAT
+        // segments it finds — only casing differs. This is what keeps
+        // matching (`normalizedKey` on both sides) correct even though the
+        // prefill (`displayKey`) now shows the original casing.
+        let display = RemoteRepoMatching.displayKey("https://github.com/Acme/API")
+        let normalized = RemoteRepoMatching.normalizedKey("https://github.com/Acme/API")
+        #expect(display?.lowercased() == normalized)
+    }
+
     // MARK: - resolveRepoID
 
     private func repo(id: UUID = UUID(), remoteURL: String?) -> Repo {

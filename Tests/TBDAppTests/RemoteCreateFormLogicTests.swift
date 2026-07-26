@@ -12,7 +12,7 @@ import TBDShared
 @Suite("Remote create form logic — pure")
 struct RemoteCreateFormLogicTests {
 
-    // MARK: - repoPrefill (reuses RemoteRepoMatching.normalizedKey)
+    // MARK: - repoPrefill (reuses RemoteRepoMatching.displayKey)
 
     @Test func repoPrefillNormalizesAnHTTPSRemoteURL() {
         #expect(RemoteCreateFormLogic.repoPrefill(remoteURL: "https://github.com/acme/api") == "acme/api")
@@ -28,6 +28,17 @@ struct RemoteCreateFormLogicTests {
 
     @Test func repoPrefillReturnsNilForAnUnparseableRemoteURL() {
         #expect(RemoteCreateFormLogic.repoPrefill(remoteURL: "not-a-url") == nil)
+    }
+
+    @Test func repoPrefillPreservesTheRepoSDisplayCasing() {
+        // Fix pass 1 (task-10 review finding 6): the prefill must NOT
+        // lowercase — a provider that clones against a case-sensitive host
+        // using this value verbatim needs the repo's real casing, not the
+        // lowercase comparison key `RemoteRepoMatching.normalizedKey`
+        // produces for matching. Round-tripping the created session back
+        // into this repo's section still works because BOTH sides of that
+        // match normalize.
+        #expect(RemoteCreateFormLogic.repoPrefill(remoteURL: "https://github.com/Acme/API") == "Acme/API")
     }
 
     // MARK: - prefillStrings

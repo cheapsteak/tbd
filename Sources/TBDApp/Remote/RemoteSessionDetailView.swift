@@ -51,11 +51,29 @@ struct RemoteSessionDetailView: View {
         providerStatus?.describe?.capabilities ?? []
     }
 
+    /// `gone` (absent from the provider's last two `list` snapshots) drops
+    /// Attach/Send the same way `RemoteSessionActionMenu.items(gone:)`
+    /// collapses the context menu — see `RemoteSessionDetailGates`. A
+    /// session not yet found in the mirror at all (`session == nil`) is a
+    /// distinct, more transient state and isn't treated as gone here.
+    private var isGone: Bool {
+        session?.gone ?? false
+    }
+
     private var availableTabs: [RemoteSessionDetailTab] {
-        var tabs: [RemoteSessionDetailTab] = []
-        if capabilities.contains("attach") { tabs.append(.attach) }
-        if capabilities.contains("log") { tabs.append(.log) }
-        return tabs
+        RemoteSessionDetailGates.available(capabilities: capabilities, gone: isGone)
+    }
+
+    /// The tab actually rendered — derived from `availableTabs` and
+    /// `selectedTab` on every `body` evaluation (see
+    /// `RemoteSessionDetailGates.initialTab`), rather than trusting
+    /// `selectedTab`'s `@State` default to already be correct. This is what
+    /// makes a single-tab provider (e.g. `log`-only) render unconditionally:
+    /// `selectedTab`'s placeholder default is `.attach`, which is simply not
+    /// in `availableTabs` for that provider, so `effectiveTab` falls back to
+    /// `.log` — no dependence on `onAppear`/`onChange` timing.
+    private var effectiveTab: RemoteSessionDetailTab? {
+        RemoteSessionDetailGates.initialTab(available: availableTabs, requested: selectedTab)
     }
 
     private var displayName: String {
@@ -68,7 +86,7 @@ struct RemoteSessionDetailView: View {
             header
             Divider()
 
-            if availableTabs.count > 1 {
+            if RemoteSessionDetailGates.showsPicker(available: availableTabs) {
                 Picker("", selection: $selectedTab) {
                     ForEach(availableTabs, id: \.self) { Text($0.rawValue).tag($0) }
                 }
@@ -81,7 +99,7 @@ struct RemoteSessionDetailView: View {
 
             contentArea
 
-            if capabilities.contains("send") {
+            if RemoteSessionDetailGates.showsSendField(capabilities: capabilities, gone: isGone) {
                 Divider()
                 sendField
             }
@@ -89,8 +107,14 @@ struct RemoteSessionDetailView: View {
         .onAppear { adoptPendingTab() }
         .onChange(of: appState.remoteSessionRequestedTab) { _, _ in adoptPendingTab() }
         .onChange(of: availableTabs) { _, tabs in
-            if !tabs.isEmpty, !tabs.contains(selectedTab), let first = tabs.first {
-                selectedTab = first
+            // Keeps `selectedTab` itself valid (not just what's rendered,
+            // which `effectiveTab` already guarantees) so the Picker's
+            // binding never retains a selection that's dropped out of
+            // `availableTabs` — e.g. a provider's capabilities shrinking
+            // while this view is mounted.
+            if let corrected = RemoteSessionDetailGates.initialTab(available: tabs, requested: selectedTab),
+               corrected != selectedTab {
+                selectedTab = corrected
             }
         }
     }
@@ -241,10 +265,10 @@ struct RemoteSessionDetailView: View {
                 // on-demand instead.
                 if availableTabs.contains(.attach) {
                     attachSection
-                        .opacity(selectedTab == .attach ? 1 : 0)
-                        .allowsHitTesting(selectedTab == .attach)
+                        .opacity(effectiveTab == .attach ? 1 : 0)
+                        .allowsHitTesting(effectiveTab == .attach)
                 }
-                if selectedTab == .log, availableTabs.contains(.log) {
+                if effectiveTab == .log, availableTabs.contains(.log) {
                     RemoteLogTabView(
                         provider: selection.provider, sessionID: selection.sessionID, refreshToken: logRefreshToken)
                 }

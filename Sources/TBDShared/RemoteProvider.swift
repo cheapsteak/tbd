@@ -194,7 +194,7 @@ public struct ProviderRemediation: Codable, Sendable {
 /// One provider's negotiated contract + current health, as tracked by
 /// `RemoteProviderManager` (daemon) and rendered by the app. Lives here (not
 /// daemon-side) because `remote.providers` puts it on the wire.
-public struct RemoteProviderStatus: Codable, Sendable {
+public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
     public let config: RemoteProviderConfig
     public let describe: ProviderDescribe?
     public let health: ProviderHealth
@@ -207,6 +207,15 @@ public struct RemoteProviderStatus: Codable, Sendable {
         self.errorMessage = errorMessage
         self.remediationLabel = remediationLabel; self.remediationCommand = remediationCommand
     }
+
+    // Provider names are already the unique identity used everywhere else in
+    // this codebase (`ForEach(appState.remoteProviders, id: \.config.name)`,
+    // `RemoteProviderRegistry.load` rejects duplicates) — a computed `id`
+    // here doesn't participate in `Codable` synthesis, so this is purely
+    // additive. Lets a `RemoteProviderStatus?` drive `.sheet(item:)` instead
+    // of `.sheet(isPresented:)` + `if let`, which can structurally present
+    // an empty sheet.
+    public var id: String { config.name }
 }
 
 /// Loads `agent-providers.json`. Missing file = no providers (not an error);

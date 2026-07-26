@@ -16,9 +16,14 @@ private let attachLogger = Logger(subsystem: "com.tbd.app", category: "remoteAtt
 ///
 /// Per the contract, pane exit means the viewer detached — it never means
 /// the remote session died (only `list`/`events` are authoritative about
-/// that). So this view never renders anything alarming on process exit: it
-/// shows a "Detached" overlay with a Reattach action, and session state
-/// continues to come from the poll/mirror exactly as it did before attach.
+/// that). So this view always shows an overlay that keeps that framing
+/// ("the session keeps running remotely") regardless of exit code, with a
+/// Reattach action — session state continues to come from the poll/mirror
+/// exactly as it did before attach. The overlay's TITLE does distinguish a
+/// clean detach (exit 0) from the local `attach` process ending on its own
+/// (non-zero/unreadable exit — e.g. a bad credential or unreachable host
+/// that never actually connected), so a failed connection doesn't read as a
+/// successful detach; see `RemoteAttachTerminalView.isUnexpectedExit`.
 struct RemoteAttachTerminalView: View {
     let provider: RemoteProviderConfig
     let sessionID: String
@@ -29,7 +34,24 @@ struct RemoteAttachTerminalView: View {
     /// rather than trying to resume a torn-down one.
     @State private var generation = 0
     @State private var isDetached = false
-    @State private var detachDetail: String?
+    @State private var detachExitCode: Int32?
+
+    /// A non-zero (or unreadable) exit code means the local `attach` process
+    /// ended on its own rather than the user cleanly detaching — e.g. a bad
+    /// credential or an unreachable host that made the provider's `attach`
+    /// fail to even connect. `nil` (no exit code available) is treated as
+    /// the non-alarming case: there's nothing here to confidently call a
+    /// failure. Either way the session itself is unaffected — only the
+    /// framing (title/icon) changes, never the "keeps running remotely"
+    /// contract line.
+    private var isUnexpectedExit: Bool {
+        RemoteAttachTerminalView.isUnexpectedExit(exitCode: detachExitCode)
+    }
+
+    static func isUnexpectedExit(exitCode: Int32?) -> Bool {
+        guard let exitCode else { return false }
+        return exitCode != 0
+    }
 
     var body: some View {
         ZStack {
@@ -37,9 +59,9 @@ struct RemoteAttachTerminalView: View {
                 provider: provider,
                 sessionID: sessionID,
                 appearance: appearance,
-                onDetached: { detail in
+                onDetached: { exitCode in
                     isDetached = true
-                    detachDetail = detail
+                    detachExitCode = exitCode
                 }
             )
             .id(generation)
@@ -54,22 +76,27 @@ struct RemoteAttachTerminalView: View {
 
     private var detachOverlay: some View {
         VStack(spacing: 10) {
-            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+            Image(systemName: isUnexpectedExit
+                  ? "exclamationmark.triangle"
+                  : "antenna.radiowaves.left.and.right.slash")
                 .font(.system(size: 22))
                 .foregroundStyle(.secondary)
-            Text("Detached")
+            Text(isUnexpectedExit ? "Attach ended unexpectedly" : "Detached")
                 .font(.headline)
+            // Contract-correct framing kept regardless of exit code: only
+            // `list`/`events` are authoritative about the remote session's
+            // fate, never this local viewer process exiting.
             Text("The session keeps running remotely.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            if let detachDetail {
-                Text(detachDetail)
+            if let detachExitCode {
+                Text("exit code \(detachExitCode)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Button("Reattach") {
                 isDetached = false
-                detachDetail = nil
+                detachExitCode = nil
                 generation += 1
             }
             .buttonStyle(.borderedProminent)
@@ -93,7 +120,7 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
     let provider: RemoteProviderConfig
     let sessionID: String
     let appearance: AppearanceSettings
-    let onDetached: (String?) -> Void
+    let onDetached: (Int32?) -> Void
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -128,7 +155,7 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
 
     final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
         weak var terminalView: TerminalView?
-        var onDetached: ((String?) -> Void)?
+        var onDetached: ((Int32?) -> Void)?
         private var localProcess: LocalProcess?
         private var started = false
         private var tornDown = false
@@ -170,10 +197,21 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
 
         func cleanup() {
             tornDown = true
-            // No explicit process.terminate() call: LocalProcess tears its
-            // child down via its own deinit/process-monitor path when
-            // `localProcess` is released below, same as `TerminalPanelView`
-            // relies on for its own `localProcess`.
+            // Explicit terminate() — SwiftTerm's LocalProcess.deinit says
+            // outright that it does NOT send SIGTERM (see its doc comment):
+            // "we intentionally don't send SIGTERM here; terminate() remains
+            // the explicit API for killing the shell." Dropping our
+            // reference below only releases OUR side; without this call the
+            // forked child (or, over SSH/SSM-style providers, a wrapper
+            // process it execs into) is left to notice the closed master fd
+            // (SIGHUP) on its own — which a well-behaved attach handles, but
+            // a provider whose attach traps/ignores SIGHUP, or that
+            // `setsid`s a detached wrapper, would leak a process per attach.
+            // Safe by contract regardless: terminate() only kills the LOCAL
+            // viewer process running the provider's `attach` verb — the
+            // remote session itself is unaffected
+            // (docs/remote-provider-contract.md § attach).
+            localProcess?.terminate()
             localProcess = nil
         }
 
@@ -182,8 +220,15 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
         func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.tornDown else { return }
-                let detail: String? = exitCode.map { "exit code \($0)" }
-                self.onDetached?(detail)
+                // The child already exited, but `LocalProcess` doesn't close
+                // its own master fd/DispatchIO channel on this path — only
+                // the `childfd` EOF marker is cleared. Without an explicit
+                // terminate() here, that fd stays open for as long as the
+                // user sits on the "Detached" overlay, i.e. until they
+                // navigate away (`cleanup()`) or hit Reattach (a fresh
+                // `LocalProcess` via `.id(generation)`).
+                self.localProcess?.terminate()
+                self.onDetached?(exitCode)
             }
         }
 
