@@ -197,6 +197,57 @@ struct PaneHistoryAppStateTests {
         }
     }
 
+    /// Restart regression: on launch, worktrees reconcile one at a time as
+    /// their terminal lists arrive. Reconciling the FIRST worktree must not
+    /// delete a second worktree's slot history just because that worktree's
+    /// tabs haven't been loaded yet. Before the fix, `reconcileTabs` pruned
+    /// against the partially-populated `tabs`, wiping (and persisting as `[]`)
+    /// every other worktree's history on the first pass.
+    @Test func startupReconcileKeepsOtherWorktreesHistoriesUntilAllLoaded() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+
+            // Two worktrees, each with a viewer slot recorded in a persisted
+            // layout + a persisted history — the on-disk state after a restart.
+            let wtA = UUID(), tabA = UUID(), slotA = UUID()
+            let wtB = UUID(), tabB = UUID(), slotB = UUID()
+
+            func viewerLayout(tabTerminal: UUID, slot: UUID) -> LayoutNode {
+                .split(
+                    id: UUID(), direction: .horizontal,
+                    children: [
+                        .pane(.terminal(terminalID: tabTerminal)),
+                        .pane(.codeViewer(id: slot, path: "/a")),
+                    ],
+                    ratios: [0.5, 0.5]
+                )
+            }
+            state.layouts[tabA] = viewerLayout(tabTerminal: tabA, slot: slotA)
+            state.layouts[tabB] = viewerLayout(tabTerminal: tabB, slot: slotB)
+
+            func history(for slot: UUID) -> PaneHistory {
+                var h = PaneHistory()
+                h.recordReplacement(
+                    outgoing: .codeViewer(id: slot, path: "/old"),
+                    incoming: .codeViewer(id: slot, path: "/a")
+                )
+                return h
+            }
+            state.paneHistories = [slotA: history(for: slotA), slotB: history(for: slotB)]
+
+            let terminalA = Terminal(id: tabA, worktreeID: wtA, tmuxWindowID: "@a",
+                                     tmuxPaneID: "%a", label: "A", kind: .shell)
+
+            // First loop iteration: only worktree A reconciles. Worktree B's
+            // tabs are still absent — its history must survive regardless.
+            state.reconcileTabs(worktreeID: wtA, terminals: [terminalA])
+
+            #expect(state.paneHistories[slotB] != nil,
+                    "a not-yet-reconciled worktree's history must not be wiped on the first startup pass")
+            #expect(state.paneHistories[slotA] != nil)
+        }
+    }
+
     /// #477 regression: a stale worktree-keyed entry left in the tab-keyed
     /// `layouts` dict (pre-#478 pollution — not a real tab) must not keep its
     /// history alive just because `layouts.values` used to include it.
