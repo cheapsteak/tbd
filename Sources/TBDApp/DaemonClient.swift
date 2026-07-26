@@ -944,6 +944,18 @@ actor DaemonClient {
         )
     }
 
+    /// Push a display-name rename to a provider that declares the `rename`
+    /// capability (docs/remote-provider-contract.md § `rename`). Callers must
+    /// check the capability themselves (`AppState.pushRemoteRenameIfSupported`)
+    /// before calling — this method, like `remoteSend`/`remoteLog`, does not
+    /// re-check it.
+    func remoteRename(provider: String, sessionID: String, title: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteRename,
+            params: RemoteRenameParams(provider: provider, sessionID: sessionID, title: title)
+        )
+    }
+
     /// Dismiss a gone/errored remote session from the mirror.
     func remoteDismiss(provider: String, sessionID: String) async throws {
         try await callVoidAsync(

@@ -220,6 +220,7 @@ public enum RPCMethod {
     public static let remoteStop = "remote.stop"
     public static let remoteSend = "remote.send"
     public static let remoteLog = "remote.log"
+    public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
     public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
@@ -1107,6 +1108,20 @@ public struct RemoteDismissParams: Codable, Sendable {
     public let sessionID: String
     public init(provider: String, sessionID: String) {
         self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Params for `remote.rename` — pushes a display-name rename to a provider
+/// that declares the optional `rename` capability
+/// (`docs/remote-provider-contract.md` § `rename`). `title` rides as a
+/// single argv value (never shell-escaped — the daemon execs the provider
+/// directly, per contract).
+public struct RemoteRenameParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let title: String
+    public init(provider: String, sessionID: String, title: String) {
+        self.provider = provider; self.sessionID = sessionID; self.title = title
     }
 }
 

@@ -402,6 +402,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteSend(request.paramsData)
             case RPCMethod.remoteLog:
                 return try await handleRemoteLog(request.paramsData)
+            case RPCMethod.remoteRename:
+                return try await handleRemoteRename(request.paramsData)
             case RPCMethod.remoteDismiss:
                 return try await handleRemoteDismiss(request.paramsData)
             case RPCMethod.configSetRemoteBackends:

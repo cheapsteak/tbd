@@ -80,9 +80,9 @@ struct RPCRouterRemoteTests: ~Copyable {
     @Test func remoteVerbsErrorWhenFlagOff() async throws {
         let r = router(invoker: FakeProviderInvoker(script: []))
         for method in ["remote.providers", "remote.sessions", "remote.create",
-                       "remote.stop", "remote.send", "remote.log", "remote.dismiss"] {
+                       "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss"] {
             let response = await call(r, method,
-                #"{"provider": "fake", "sessionID": "x", "text": "t", "paramsJSON": "{}"}"#)
+                #"{"provider": "fake", "sessionID": "x", "text": "t", "title": "t", "paramsJSON": "{}"}"#)
             #expect(response.success == false, "expected \(method) to be gated")
             #expect(response.error == "remote backends disabled")
         }
@@ -97,9 +97,9 @@ struct RPCRouterRemoteTests: ~Copyable {
         try await db.config.setRemoteBackendsEnabled(true)
         let r = router(manager: nil)
         for method in ["remote.providers", "remote.sessions", "remote.create",
-                       "remote.stop", "remote.send", "remote.log", "remote.dismiss"] {
+                       "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss"] {
             let response = await call(r, method,
-                #"{"provider": "fake", "sessionID": "x", "text": "t", "paramsJSON": "{}"}"#)
+                #"{"provider": "fake", "sessionID": "x", "text": "t", "title": "t", "paramsJSON": "{}"}"#)
             #expect(response.success == false, "expected \(method) to be gated")
             #expect(response.error == "remote backends disabled")
         }
@@ -299,6 +299,68 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(response.success)
         #expect(invoker.calls == [["send", "a"]])
         #expect(invoker.stdinsSnapshot().first ?? nil == Data("hello agent".utf8))
+    }
+
+    // MARK: - remote.rename (Task 10)
+
+    @Test func renameInvokesRenameVerbWithIDAndTitle() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"id": "a", "title": "new title", "state": "running"}"#)
+        ])
+        let r = router(invoker: invoker)
+        let response = await call(r, "remote.rename",
+            #"{"provider": "fake", "sessionID": "a", "title": "new title"}"#)
+        #expect(response.success)
+        #expect(invoker.calls == [["rename", "a", "new title"]])
+    }
+
+    /// A title containing spaces must survive as ONE argv element (the
+    /// contract: "TBD invokes the provider directly, never through a shell,
+    /// so the caller need not shell-escape it") — asserted via the exact
+    /// verb array `FakeProviderInvoker` records, which preserves argv
+    /// boundaries rather than a shell-joined string.
+    @Test func renamePassesMultiWordTitleAsOneArgvElement() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"id": "a", "state": "running"}"#)
+        ])
+        let r = router(invoker: invoker)
+        let response = await call(r, "remote.rename",
+            #"{"provider": "fake", "sessionID": "a", "title": "fix the flaky CI job"}"#)
+        #expect(response.success)
+        #expect(invoker.calls == [["rename", "a", "fix the flaky CI job"]])
+    }
+
+    /// A successful rename must adopt the returned session (new title) into
+    /// the mirror, mirroring `stopAdoptsReturnedSessionIntoMirror` — so a
+    /// provider that reflects the rename immediately doesn't wait for the
+    /// next 60s poll to show it.
+    @Test func renameAdoptsReturnedSessionIntoMirror() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"id": "a", "title": "new title", "state": "running"}"#)
+        ])
+        let r = router(invoker: invoker)
+        let response = await call(r, "remote.rename",
+            #"{"provider": "fake", "sessionID": "a", "title": "new title"}"#)
+        #expect(response.success)
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first?.decodedPayload?.title == "new title")
+    }
+
+    @Test func renameSurfacesProviderErrorMessage() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 1,
+                stdout: Data(#"{"error": {"code": "not_found", "message": "no such session"}}"#.utf8),
+                stderr: "")
+        ])
+        let r = router(invoker: invoker)
+        let response = await call(r, "remote.rename",
+            #"{"provider": "fake", "sessionID": "a", "title": "new title"}"#)
+        #expect(response.success == false)
+        #expect(response.error?.contains("no such session") == true)
     }
 
     @Test func dismissMarksRowDismissedAndBroadcastsChange() async throws {

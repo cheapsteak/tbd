@@ -191,6 +191,43 @@ extension RPCRouter {
         return try RPCResponse(result: RemoteLogResult(text: text))
     }
 
+    /// Pushes a rename to the provider (`<exec> rename <id> <title>`,
+    /// capability `rename`). Mirrors `handleRemoteStop`'s shape exactly: same
+    /// gate, same timeout/friendly-timeout-message handling, same
+    /// failureClass → message surfacing, and the same best-effort mirror
+    /// upsert of whatever session object the provider hands back. Whether the
+    /// provider actually declares the capability is an APP-side decision
+    /// (`AppState.pushRemoteRenameIfSupported`) — same division of
+    /// responsibility as `remote.send`/`remote.log`, which also don't
+    /// re-check capabilities here; a provider that doesn't implement `rename`
+    /// simply exits non-2 and this surfaces that as an ordinary failure.
+    func handleRemoteRename(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteRenameParams.self, from: paramsData)
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider,
+                verb: ["rename", params.sessionID, params.title],
+                stdin: nil, timeout: 30)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error("remote.rename provider=\(params.provider, privacy: .public) timed out")
+            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "rename failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.rename provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        }
+        if let session = try? result.decoded(RemoteSessionPayload.self) {
+            await manager.applyUpsert(session, provider: params.provider)
+        }
+        return .ok()
+    }
+
     func handleRemoteDismiss(_ paramsData: Data) async throws -> RPCResponse {
         guard try await remoteGate() != nil else {
             return Self.remoteBackendsDisabledResponse
