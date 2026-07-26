@@ -681,15 +681,37 @@ final class AppState: ObservableObject {
     /// and cost — see `RemoteAttachLifecycle`'s doc comment).
     @Published private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
 
+    /// Sessions whose attach terminal ended UNEXPECTEDLY (nonzero/unreadable
+    /// exit — `RemoteAttachTerminalView.isUnexpectedExit`) — the transport's
+    /// fault, not a user detach. Distinct from `explicitlyDetachedRemoteSessions`
+    /// in how it clears: instead of requiring a user gesture, entries here
+    /// clear THEMSELVES the moment `RemoteReconnectPolicy.isBlocked` stops
+    /// excluding them — i.e. once their provider reports healthy again and
+    /// this entry's own backoff window has elapsed (see that type's doc
+    /// comment). `AppState.attachedRemoteSelections` recomputes this
+    /// evaluation on every read, driven by the app's existing provider-health
+    /// poll cycle — no dedicated timer. Still respects every other
+    /// constraint `explicitlyDetached` does (capability gating, `gone`/
+    /// `dismissed` exclusion, and above all `remoteAttachKeepAliveLimit`),
+    /// so a laptop waking from a long outage can't reattach more than the
+    /// cap at once even with many pending entries at once.
+    @Published private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
+
     /// Cap on how many remote sessions may have a live attach terminal at
-    /// once (the current selection plus warm background ones). Mirrors
-    /// `keepAliveLimit`'s cap verbatim (the same 8) rather than inventing a
-    /// separate number — deliberately NOT halved for remote's higher
-    /// per-connection cost/concurrency sensitivity (SSM/ssh), per this
-    /// task's explicit instruction to mirror the existing keep-alive
-    /// machinery's shape AND cap. Easy single-constant tuning point if the
-    /// maintainer wants it smaller after soaking.
-    let remoteAttachKeepAliveLimit = 8
+    /// once (the current selection plus warm background ones). Deliberately
+    /// SMALLER than `keepAliveLimit` (the local worktree cap, 8) even though
+    /// both share the same protected-selection + capped-recency shape: a
+    /// warm LOCAL tmux attach is free (the daemon already keeps the tmux
+    /// session running regardless), but a warm REMOTE attach is a real,
+    /// live connection to another machine — for an SSM- or ssh-backed
+    /// provider, a billed and concurrency-limited resource — that buys
+    /// nothing the user can see, since awareness of a remote session's
+    /// state rides the provider's shared events/poll channel, not its
+    /// per-session attach. A smaller cap only costs reattach latency
+    /// (a fresh spawn instead of an already-warm one) when switching back
+    /// to a session evicted past the cap. Easy single-constant tuning point
+    /// if the maintainer wants it different after soaking.
+    let remoteAttachKeepAliveLimit = 3
 
     /// Move `selection` to the front of the attach-recency log, trimming it
     /// so it never grows unbounded over a long-running app session. Mirrors
@@ -713,23 +735,52 @@ final class AppState: ObservableObject {
     /// (`docs/remote-provider-contract.md` § `attach`), this NEVER means the
     /// remote session died, only that the local viewer process stopped;
     /// `remoteSessions`/`gone` remain the only authoritative source for the
-    /// session's actual fate. Excludes `selection` from
-    /// `attachedRemoteSelections` until an explicit gesture clears it (see
-    /// `activateRemoteSession` in `AppState+Navigation.swift`, and
-    /// `reattachRemoteSession` below) — the rule that prevents a respawn
-    /// loop while the row stays selected.
+    /// session's actual fate.
+    ///
+    /// Branches on `RemoteAttachTerminalView.isUnexpectedExit(exitCode:)` —
+    /// the same classification that already drove the overlay's wording —
+    /// to decide which of the two "don't respawn yet" mechanisms applies:
+    ///
+    /// - **Clean exit** (0, the user deliberately detached) →
+    ///   `explicitlyDetachedRemoteSessions`, cleared only by an explicit
+    ///   gesture (see `activateRemoteSession` in `AppState+Navigation.swift`,
+    ///   and `reattachRemoteSession` below).
+    /// - **Unexpected exit** (nonzero/unreadable — a network drop, failed
+    ///   credential, or crashed shim, not a user choice) →
+    ///   `pendingReconnectRemoteSessions`, which clears ITSELF once the
+    ///   provider is healthy again and this entry's backoff window has
+    ///   elapsed (`RemoteReconnectPolicy`) — no Reattach click required. Any
+    ///   pre-existing pending entry for this selection has its `attempts`
+    ///   incremented (a session that keeps failing immediately after each
+    ///   automatic retry backs off further each time).
+    ///
+    /// Either way `selection` is excluded from `attachedRemoteSelections`
+    /// until its respective clearing condition is met — the rule that
+    /// prevents a respawn loop while the row stays selected.
     func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?) {
-        explicitlyDetachedRemoteSessions[selection] = RemoteAttachDetachInfo(exitCode: exitCode)
+        if RemoteAttachTerminalView.isUnexpectedExit(exitCode: exitCode) {
+            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+            )
+        } else {
+            explicitlyDetachedRemoteSessions[selection] = RemoteAttachDetachInfo(exitCode: exitCode)
+            // A clean detach always wins over any stale pending-reconnect
+            // bookkeeping from an earlier flapping run — the user's clean
+            // exit is the more recent, more authoritative signal.
+            pendingReconnectRemoteSessions.removeValue(forKey: selection)
+        }
     }
 
     /// The explicit "Reattach" affordance shown by `RemoteSessionDetailView`
-    /// once a session has detached. Clears the flag AND re-touches recency
-    /// (so a session that had aged toward eviction gets a fresh position at
-    /// the front) — an unambiguous user gesture, always allowed to
-    /// re-attach regardless of the transition/`.attach`-tab rule
-    /// `activateRemoteSession` applies to selection itself.
+    /// once a session has detached. Clears BOTH detach flags AND re-touches
+    /// recency (so a session that had aged toward eviction gets a fresh
+    /// position at the front) — an unambiguous user gesture, always allowed
+    /// to re-attach immediately regardless of the transition/`.attach`-tab
+    /// rule `activateRemoteSession` applies to selection itself, and
+    /// regardless of any still-pending reconnect backoff window.
     func reattachRemoteSession(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+        pendingReconnectRemoteSessions.removeValue(forKey: selection)
         touchAttachedRemoteSession(selection)
     }
 
@@ -737,18 +788,22 @@ final class AppState: ObservableObject {
     /// the narrow write `activateRemoteSession` (in
     /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
     /// rule, kept here (not duplicated) so `explicitlyDetachedRemoteSessions`
-    /// has exactly one file's worth of direct mutators.
+    /// has exactly one file's worth of direct mutators. Deliberately does
+    /// NOT touch `pendingReconnectRemoteSessions` — re-selecting (even via a
+    /// genuine transition) must not bypass provider-health/backoff gating
+    /// the way an explicit Reattach click does; see `reattachRemoteSession`.
     func clearRemoteSessionDetachedFlag(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
     }
 
     /// Drops attach-lifecycle bookkeeping for sessions the daemon no longer
     /// reports — called from `pruneRemoteSessionState` alongside its other
-    /// maps, for the same reason: without this, `explicitlyDetachedRemoteSessions`
-    /// and `recentlyAttachedRemoteSessions` would accumulate dead entries for
-    /// the lifetime of the app.
+    /// maps, for the same reason: without this, `explicitlyDetachedRemoteSessions`,
+    /// `pendingReconnectRemoteSessions`, and `recentlyAttachedRemoteSessions`
+    /// would accumulate dead entries for the lifetime of the app.
     func pruneRemoteAttachState(toKnownSelections selections: Set<RemoteSessionSelection>) {
         explicitlyDetachedRemoteSessions = explicitlyDetachedRemoteSessions.filter { selections.contains($0.key) }
+        pendingReconnectRemoteSessions = pendingReconnectRemoteSessions.filter { selections.contains($0.key) }
         recentlyAttachedRemoteSessions = recentlyAttachedRemoteSessions.filter { selections.contains($0) }
     }
 

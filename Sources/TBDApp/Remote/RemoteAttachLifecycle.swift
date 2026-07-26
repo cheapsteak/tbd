@@ -51,15 +51,27 @@ enum RemoteAttachLifecycle {
     ///   cache never happens for the OPPOSITE reason (a session doesn't need
     ///   to be "explicitly detached" to be evicted — plain cap pressure
     ///   already handles that via `recentlyViewed`'s ordering).
+    /// - `pendingReconnect` is the same kind of override as
+    ///   `explicitlyDetached` (excludes even a protected `selected`), but for
+    ///   a DIFFERENT reason: a session whose attach ended UNEXPECTEDLY
+    ///   (transport failure, not a user detach) rather than being flagged
+    ///   forever. The caller (`AppState.attachedRemoteSelections`) computes
+    ///   this set fresh from `RemoteReconnectPolicy.isBlocked` against
+    ///   current provider health + backoff, so a selection leaves this set
+    ///   on its own once the provider recovers — no explicit gesture
+    ///   required, unlike `explicitlyDetached`.
     static func attachedSelections(
         selected: RemoteSessionSelection?,
         recentlyViewed: [RemoteSessionSelection],
         eligible: Set<RemoteSessionSelection>,
         explicitlyDetached: Set<RemoteSessionSelection>,
+        pendingReconnect: Set<RemoteSessionSelection> = [],
         cap: Int
     ) -> [RemoteSessionSelection] {
         func attachable(_ selection: RemoteSessionSelection) -> Bool {
-            eligible.contains(selection) && !explicitlyDetached.contains(selection)
+            eligible.contains(selection)
+                && !explicitlyDetached.contains(selection)
+                && !pendingReconnect.contains(selection)
         }
 
         var result: [RemoteSessionSelection] = []

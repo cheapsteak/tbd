@@ -214,6 +214,64 @@ struct RemoteSectionViewTests {
         #expect(RemoteSessionRowView.caption(state: .starting, gone: true, exitCode: nil) == "no longer reported")
     }
 
+    // MARK: - RemoteSessionRowView.caption(staleness:) combining
+
+    @Test func caption_stalenessAloneRendersWhenThereIsNoOtherCaption() {
+        // The maintainer's exact scenario: a plain running session (no other
+        // caption) under an unhealthy provider must not go silent — this is
+        // the only signal a grouped row (no visible provider header nearby)
+        // gets that its data might be hours old.
+        #expect(
+            RemoteSessionRowView.caption(state: .running, gone: false, exitCode: nil, staleness: "as of 2h ago")
+                == "as of 2h ago"
+        )
+    }
+
+    @Test func caption_stalenessCombinesWithAnExistingCaption() {
+        #expect(
+            RemoteSessionRowView.caption(state: .exited, gone: false, exitCode: 1, staleness: "as of 2h ago")
+                == "exited (code 1) · as of 2h ago"
+        )
+    }
+
+    @Test func caption_stalenessCombinesWithGone() {
+        #expect(
+            RemoteSessionRowView.caption(state: .exited, gone: true, exitCode: 1, staleness: "as of 2h ago")
+                == "no longer reported · as of 2h ago"
+        )
+    }
+
+    @Test func caption_nilStalenessLeavesExistingCaptionsUnchanged() {
+        // Every pre-existing call site (no `staleness` argument) must render
+        // exactly as before this task.
+        #expect(RemoteSessionRowView.caption(state: .running, gone: false, exitCode: nil) == nil)
+        #expect(RemoteSessionRowView.caption(state: .starting, gone: false, exitCode: nil) == "Starting…")
+    }
+
+    // MARK: - RemoteSessionRowView.stalenessCaption(health:lastSeen:now:)
+
+    @Test func stalenessCaption_nilWhenProviderIsHealthy() {
+        #expect(RemoteSessionRowView.stalenessCaption(health: .ok, lastSeen: Date(), now: Date()) == nil)
+    }
+
+    @Test func stalenessCaption_reflectsRelativeAgeWhenStale() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let lastSeen = now.addingTimeInterval(-2 * 3600)
+        #expect(RemoteSessionRowView.stalenessCaption(health: .stale, lastSeen: lastSeen, now: now) == "as of 2h ago")
+    }
+
+    @Test func stalenessCaption_justNowOmitsTheTrailingAgo() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let lastSeen = now.addingTimeInterval(-5)
+        #expect(RemoteSessionRowView.stalenessCaption(health: .error, lastSeen: lastSeen, now: now) == "as of just now")
+    }
+
+    @Test func stalenessCaption_rendersForNeedsAuthHealthToo() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let lastSeen = now.addingTimeInterval(-5 * 60)
+        #expect(RemoteSessionRowView.stalenessCaption(health: .needsAuth, lastSeen: lastSeen, now: now) == "as of 5m ago")
+    }
+
     // MARK: - AppState.remoteUnreadType(kind:exitCode:)
 
     @Test func remoteUnreadType_waitingInputIsAttentionNeeded() {

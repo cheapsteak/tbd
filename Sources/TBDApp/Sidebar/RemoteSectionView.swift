@@ -231,6 +231,14 @@ struct RemoteSessionRowView: View {
         )
     }
 
+    /// The row's provider health, looked up fresh each render. `.ok` when
+    /// the provider is unknown/unregistered — an edge case (the session's
+    /// own provider vanished from the roster) that shouldn't paint every
+    /// row with a staleness note it can't actually reason about.
+    private var providerHealth: ProviderHealth {
+        appState.remoteProviders.first { $0.config.name == session.provider }?.health ?? .ok
+    }
+
     /// Pure `agentState` + unread-entry → suffix-slot mapping. Split out
     /// (static, no `appState`/`session` dependency beyond its parameters) so
     /// the steady-state `waitingInput` case and the severity merge are
@@ -371,7 +379,8 @@ struct RemoteSessionRowView: View {
                                 : nil
                         }
                     if let caption = RemoteSessionRowView.caption(
-                        state: session.payload.state, gone: session.gone, exitCode: session.payload.exitCode
+                        state: session.payload.state, gone: session.gone, exitCode: session.payload.exitCode,
+                        staleness: RemoteSessionRowView.stalenessCaption(health: providerHealth, lastSeen: session.lastSeen)
                     ) {
                         Text(caption)
                             .font(.caption)
@@ -478,16 +487,56 @@ struct RemoteSessionRowView: View {
     /// `docs/remote-provider-contract.md` § Identity & drift — not merely
     /// exited), so the two captions never stack. Exit code is omitted when
     /// the provider didn't report one.
-    nonisolated static func caption(state: RemoteProcessState, gone: Bool, exitCode: Int?) -> String? {
-        if gone { return "no longer reported" }
-        switch state {
-        case .starting:
-            return "Starting…"
-        case .exited:
-            if let exitCode { return "exited (code \(exitCode))" }
-            return "exited"
-        case .running, .unknown:
-            return nil
+    ///
+    /// `staleness`, when non-nil (see `stalenessCaption`), is appended after
+    /// a " · " separator — the same combining idiom
+    /// `ProfileUsagePresentation.retryingNote` uses for "usage unavailable —
+    /// retrying · last data 2h ago". When there's no other caption to
+    /// combine with (a plain `running` session under an unhealthy provider),
+    /// `staleness` renders alone rather than being dropped — this is
+    /// precisely the case the maintainer flagged: a row that otherwise looks
+    /// completely normal during an outage.
+    nonisolated static func caption(state: RemoteProcessState, gone: Bool, exitCode: Int?, staleness: String? = nil) -> String? {
+        let base: String? = {
+            if gone { return "no longer reported" }
+            switch state {
+            case .starting:
+                return "Starting…"
+            case .exited:
+                if let exitCode { return "exited (code \(exitCode))" }
+                return "exited"
+            case .running, .unknown:
+                return nil
+            }
+        }()
+        switch (base, staleness) {
+        case (nil, nil): return nil
+        case (let base?, nil): return base
+        case (nil, let staleness?): return staleness
+        case (let base?, let staleness?): return "\(base) · \(staleness)"
         }
+    }
+
+    /// "as of 2h ago" style note shown when this session's provider isn't
+    /// `.ok` — the row-level (as opposed to provider-header-level) staleness
+    /// signal. Needed because a remote session grouped into its repo's own
+    /// sidebar section sits under a REPO header, nowhere near the provider's
+    /// health glyph (`RemoteProviderHeaderRow.healthSuffix`) — that glyph
+    /// alone is invisible for a matched session, so without this, a two-hour
+    /// outage would leave a grouped row looking completely fresh (its
+    /// `agentState` chip/caption reflecting whatever was last polled, with
+    /// no cue that it's old). Deliberately reuses
+    /// `ProfileUsagePresentation.ageText` — the one relative-age formatter
+    /// this codebase already has ("just now"/"3m"/"2h"/"1d") — rather than
+    /// inventing a second one. Returns nil when healthy so a fully-working
+    /// provider's rows never carry the extra text.
+    nonisolated static func stalenessCaption(health: ProviderHealth, lastSeen: Date, now: Date = Date()) -> String? {
+        guard health != .ok else { return nil }
+        let age = ProfileUsagePresentation.ageText(since: lastSeen, now: now)
+        // `ageText`'s "just now" already reads as a complete phrase (see its
+        // own callers in `ProfileUsagePresentation`) — appending "ago" to it
+        // would read as "as of just now ago". Every other bucket ("3m",
+        // "2h", "1d") needs the suffix.
+        return age == "just now" ? "as of just now" : "as of \(age) ago"
     }
 }

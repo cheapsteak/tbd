@@ -160,8 +160,16 @@ struct RemoteSessionDetailView: View {
         appState.attachedRemoteSelections.contains(selection)
     }
 
+    /// Covers both detach mechanisms — a clean, explicit detach
+    /// (`explicitlyDetachedRemoteSessions`) and an unexpected exit still
+    /// waiting on provider-health recovery (`pendingReconnectRemoteSessions`)
+    /// — so this view renders the same "why aren't we attached" prompt
+    /// regardless of which one currently applies. The two are mutually
+    /// exclusive per selection (`markRemoteSessionDetached` only ever writes
+    /// one of them for a given exit), so lookup order doesn't matter.
     private var detachInfo: RemoteAttachDetachInfo? {
         appState.explicitlyDetachedRemoteSessions[selection]
+            ?? appState.pendingReconnectRemoteSessions[selection].map { RemoteAttachDetachInfo(exitCode: $0.exitCode) }
     }
 
     private var isUnexpectedDetach: Bool {

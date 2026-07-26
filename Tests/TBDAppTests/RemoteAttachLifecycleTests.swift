@@ -142,4 +142,57 @@ struct RemoteAttachLifecycleTests {
         )
         #expect(result == [a])
     }
+
+    // MARK: - pendingReconnect (unexpected exit awaiting provider-health recovery)
+
+    @Test func selectedPendingReconnectSessionIsExcludedEvenThoughSelectedAndEligible() {
+        // Mirrors `selectedExplicitlyDetachedSessionIsExcludedEvenThoughSelectedAndEligible`
+        // — a session blocked on reconnect backoff must not respawn merely
+        // by being the current selection, exactly like an explicit detach.
+        let a = selection("a")
+        let result = RemoteAttachLifecycle.attachedSelections(
+            selected: a, recentlyViewed: [], eligible: [a], explicitlyDetached: [], pendingReconnect: [a], cap: 8
+        )
+        #expect(result.isEmpty)
+    }
+
+    @Test func recentPendingReconnectSessionIsExcludedRegardlessOfPosition() {
+        let a = selection("a"), b = selection("b")
+        let result = RemoteAttachLifecycle.attachedSelections(
+            selected: nil, recentlyViewed: [a, b], eligible: [a, b], explicitlyDetached: [], pendingReconnect: [a], cap: 8
+        )
+        #expect(result == [b])
+    }
+
+    @Test func pendingReconnectAndExplicitlyDetachedCombineWithoutInterfering() {
+        let a = selection("a"), b = selection("b"), c = selection("c")
+        let result = RemoteAttachLifecycle.attachedSelections(
+            selected: nil, recentlyViewed: [a, b, c], eligible: [a, b, c],
+            explicitlyDetached: [a], pendingReconnect: [b], cap: 8
+        )
+        #expect(result == [c])
+    }
+
+    @Test func omittingPendingReconnectDefaultsToExcludingNothing() {
+        // Every pre-existing call site (no `pendingReconnect` argument) must
+        // behave exactly as before this parameter was added.
+        let a = selection("a")
+        let result = RemoteAttachLifecycle.attachedSelections(
+            selected: a, recentlyViewed: [], eligible: [a], explicitlyDetached: [], cap: 8
+        )
+        #expect(result == [a])
+    }
+
+    @Test func pendingReconnectClearingRespectsTheCapOnceUnblocked() {
+        // Once a batch of previously-pending sessions all become unblocked
+        // at the same instant (a provider recovering after an outage), the
+        // ordinary recency+cap budget still applies — no burst beyond it.
+        let a = selection("a"), b = selection("b"), c = selection("c")
+        let result = RemoteAttachLifecycle.attachedSelections(
+            selected: nil, recentlyViewed: [a, b, c], eligible: [a, b, c],
+            explicitlyDetached: [], pendingReconnect: [], cap: 2
+        )
+        #expect(result == [a, b])
+        #expect(!result.contains(c))
+    }
 }
