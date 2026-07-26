@@ -2152,7 +2152,9 @@ final class AppState: ObservableObject {
     /// UserDefaults key mirroring the `@AppStorage` toggle in
     /// Settings → Fleet Automation that gates the Nightwatch / Daywatch feature.
     /// When off (the default), the sidebar mode control is hidden entirely —
-    /// the feature is unfinished and evaluate-only, so it stays opt-in.
+    /// the desk agent acts on the live fleet (nudging stuck sessions,
+    /// dispatching work) and its safety rules are still changing, so it
+    /// stays opt-in.
     static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
 
     /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails

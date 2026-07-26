@@ -209,7 +209,6 @@ public enum RPCMethod {
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
-    public static let nightwatchReport = "nightwatch.report"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
@@ -350,16 +349,6 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
 public struct NightwatchSetModeParams: Codable, Sendable {
     public let mode: NightwatchMode
     public init(mode: NightwatchMode) { self.mode = mode }
-}
-
-public struct NightwatchReportParams: Codable, Sendable {
-    public let since: Date?
-    public let action: AuditAction?
-
-    public init(since: Date? = nil, action: AuditAction? = nil) {
-        self.since = since
-        self.action = action
-    }
 }
 
 // MARK: - Terminal Swap Profile
