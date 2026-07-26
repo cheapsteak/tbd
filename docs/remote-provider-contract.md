@@ -106,13 +106,13 @@ Only a profile's name and routing may cross the process boundary to a provider â
   "name": "acme-default",
   "kind": "oauth",
   "routing": {
-    "model": "claude-opus-4-x",
+    "model": "acme-large-v2",
     "base_url": "https://api.example.com",
     "aws_region": "us-east-1",
     "aws_profile": "acme-bedrock"
   },
   "env": {"ACME_FEATURE_FLAG": "1"},
-  "credential_ref": "acme-vault://claude-oauth/acme-default"
+  "credential_ref": "acme-vault://oauth/acme-default"
 }
 ```
 
@@ -156,7 +156,7 @@ Why credentials never travel, by kind:
     {"name": "size",   "type": "enum",   "label": "Size", "values": ["small","large"], "default": "small"}
   ],
   "profile_kinds": ["oauth", "api_key", "bedrock"],
-  "credential_ref_hint": "acme-vault path, e.g. acme-vault://claude-oauth/<name>"
+  "credential_ref_hint": "acme-vault path, e.g. acme-vault://oauth/<name>"
 }
 ```
 
@@ -173,7 +173,7 @@ stdin:
 ```json
 {
   "params": {"repo": "acme/api", "branch": "fix-ci", "prompt": "..."},
-  "profile": {"name": "acme-default", "kind": "oauth", "credential_ref": "acme-vault://claude-oauth/acme-default"},
+  "profile": {"name": "acme-default", "kind": "oauth", "credential_ref": "acme-vault://oauth/acme-default"},
   "idempotency_key": "tbd-9a1c..."
 }
 ```
@@ -305,7 +305,7 @@ Well-known `code` values in v1: `auth_expired`, `auth_missing`, `not_found`, `al
 {
   "error": {
     "code": "credential_unresolvable",
-    "message": "credential_ref \"acme-vault://claude-oauth/acme-default\" not found in provider secret store",
+    "message": "credential_ref \"acme-vault://oauth/acme-default\" not found in provider secret store",
     "retryable": false,
     "remediation": {"label": "Register credential in acme-vault", "command": "acme-provider credentials add acme-default"}
   }
