@@ -3,7 +3,7 @@ import Foundation
 /// Prompt templates for the visible daywatch/nightwatch desk session.
 public enum NightwatchDeskPrompts {
     /// Shared display name for the Watch Desk worktree.
-    /// Used by both DeskSessionManager and NightwatchDeskStatusBanner to identify the desk session.
+    /// Used by both DeskSessionManager and NightwatchDeskStatusLabel to identify the desk session.
     public static let deskDisplayName = "◐ Watch Desk"
 
     /// Initial prompt when spawning the desk session.

@@ -7,7 +7,6 @@ struct ContentView: View {
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
-    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @State private var contentAreaHeight: CGFloat = 600
     // Part of the PR split button's .id key: the baked (non-template) icon
     // colors depend on the appearance, and the materialized-once toolbar item
@@ -51,13 +50,6 @@ struct ContentView: View {
                 }
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
-            }
-
-            // Nightwatch desk session status banner (Phase A visible worker).
-            // Gated on the experimental flag like every other nightwatch surface
-            // (fail-closed to hidden when the user never opted in).
-            if nightwatchExperimental {
-                NightwatchDeskStatusBanner()
             }
 
             NavigationSplitView {
@@ -361,7 +353,6 @@ struct ContentView: View {
                 appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
         }
-        .nightwatchModeTint(appState.nightwatchMode, experimentalEnabled: nightwatchExperimental)
     }
 
     // MARK: - Empty State
