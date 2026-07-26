@@ -300,11 +300,20 @@ belongs to a different repo than the section containing it. In the dock:
   its expansion, so a child pulled in from another repo gets the same `(repo-name)` suffix it
   carries in the list. That is what "behaviour exactly the same" requires.
 
-A second `List` bound to the same selection set is what buys full row fidelity: `.tag`,
-native selection highlight, native row metrics, and `.listRowInsets` all work verbatim, so
-`WorktreeRowView` is reused with no changes. The alternative — a `VStack` plus hand-rolled
-selection chrome — would mean reimplementing List's accent fill, rounded-rect inset, and
-inactive-window gray, three things that drift on every macOS release.
+A second `List` bound to the same selection set is what buys **click-to-select**.
+`WorktreeRowView` has no tap gesture of its own (verified: no `onTapGesture`,
+`simultaneousGesture`, or wrapping `Button` anywhere in the file) — selection happens entirely
+through the enclosing `List`'s `.tag(worktree.id)`.
+
+Note that the *highlight* is not what the `List` provides. The row paints its own
+(`WorktreeRowView.swift:261-264`: a `RoundedRectangle` filled with `Color.accentColor.opacity(0.2)`
+when `appState.selectedWorktreeIDs.contains(worktree.id)`), which is why selection already
+renders correctly in both mirrors the moment the shared binding updates.
+
+The alternative — a `VStack` plus `.onTapGesture` to set selection — is the trap here.
+**`.onTapGesture` blocks `.contextMenu` on macOS**, so the dock rows would silently lose their
+right-click menu, breaking the "behaviour exactly the same" requirement in the least visible
+way possible. Using a `List` sidesteps it entirely.
 
 Known cost: two `List`s means two keyboard-navigation islands. Arrow keys move within
 whichever list has focus rather than crossing between them. Accepted — the dock is a
@@ -336,9 +345,10 @@ struct PinnedDockDeskSlot: View {
 }
 ```
 
-Using a `List` here rather than a bare `WorktreeRowView` is not ceremony — it is what gives
-the desk row the same native selection highlight and row metrics as every other row. A bare
-row would need hand-rolled selection chrome, which is the thing this design rejects.
+A `List` for a single row looks like ceremony, but it is what makes the desk row clickable:
+`WorktreeRowView` carries no tap gesture, so without a `List` the row would render correctly
+and simply not respond to clicks. Adding `.onTapGesture` instead would kill its
+`.contextMenu` — the same trap described above.
 
 Both slot into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, in this order:
 
