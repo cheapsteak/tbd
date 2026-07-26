@@ -174,6 +174,7 @@ actor ProviderEventsSupervisor {
     let silenceLimit: TimeInterval
     let backoffCap: TimeInterval
     let healthyResetUptime: TimeInterval
+    private let clock: any Clock<Duration>
 
     /// Grace between SIGTERM and SIGKILL, and between observing the child's
     /// exit and finishing the line stream (so late bytes still get applied).
@@ -182,12 +183,14 @@ actor ProviderEventsSupervisor {
 
     init(config: RemoteProviderConfig, manager: RemoteProviderManager,
          silenceLimit: TimeInterval = 90, backoffCap: TimeInterval = 60,
-         healthyResetUptime: TimeInterval = 300) {
+         healthyResetUptime: TimeInterval = 300,
+         clock: any Clock<Duration> = ContinuousClock()) {
         self.config = config
         self.manager = manager
         self.silenceLimit = silenceLimit
         self.backoffCap = backoffCap
         self.healthyResetUptime = healthyResetUptime
+        self.clock = clock
     }
 
     func start() {
@@ -231,7 +234,7 @@ actor ProviderEventsSupervisor {
             let delay = max(0.1, base + jitter)
             remoteLogger.debug(
                 "events \(self.config.name, privacy: .public) exited; restart in \(delay, privacy: .public)s")
-            try? await Task.sleep(for: .seconds(delay))
+            try? await clock.sleep(for: .seconds(delay))
         }
     }
 
@@ -289,9 +292,9 @@ actor ProviderEventsSupervisor {
         // the same caveat for `[shell, -ic, cmd]` call sites) never delivers
         // EOF, so waiting for it would wedge this supervisor permanently. The
         // short grace lets bytes already in the kernel buffer land first.
-        let exitWatcher = Task {
+        let exitWatcher = Task { [clock] in
             await exitGate.wait()
-            try? await Task.sleep(for: Self.drainGrace)
+            try? await clock.sleep(for: Self.drainGrace)
             endStream()
         }
         let watchdog = startWatchdog(generation: myGeneration)
@@ -333,7 +336,7 @@ actor ProviderEventsSupervisor {
         signalTree(pid, SIGTERM)
         // A cancelled caller (e.g. the supervision task during `stop()`) skips
         // the grace and escalates immediately, which is the right degradation.
-        try? await Task.sleep(for: Self.killGrace)
+        try? await clock.sleep(for: Self.killGrace)
         if process.isRunning {
             remoteLogger.debug(
                 "events \(self.config.name, privacy: .public) ignored SIGTERM; escalating to SIGKILL")
@@ -353,9 +356,9 @@ actor ProviderEventsSupervisor {
     /// process tree once the window is exceeded. 90s of stream silence with no
     /// `ping` means the stream is dead and must be replaced.
     private func startWatchdog(generation: Int) -> Task<Void, Never> {
-        Task { [weak self, silenceLimit] in
+        Task { [weak self, silenceLimit, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(silenceLimit / 3))
+                try? await clock.sleep(for: .seconds(silenceLimit / 3))
                 if Task.isCancelled { return }
                 guard let self else { return }
                 await self.killIfSilent(generation: generation)

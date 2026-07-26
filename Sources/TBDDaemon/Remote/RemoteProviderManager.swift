@@ -13,6 +13,7 @@ public actor RemoteProviderManager {
     private let subscriptions: StateSubscriptionManager
     private let runner: any RemoteProviderInvoking
     private let registryURL: URL
+    private let clock: any Clock<Duration>
     static let pollInterval: TimeInterval = 60
 
     private var providers: [String: RemoteProviderConfig] = [:]
@@ -32,11 +33,13 @@ public actor RemoteProviderManager {
     private var shuttingDown = false
 
     init(db: TBDDatabase, subscriptions: StateSubscriptionManager,
-         runner: any RemoteProviderInvoking, registryURL: URL) {
+         runner: any RemoteProviderInvoking, registryURL: URL,
+         clock: any Clock<Duration> = ContinuousClock()) {
         self.db = db
         self.subscriptions = subscriptions
         self.runner = runner
         self.registryURL = registryURL
+        self.clock = clock
     }
 
     /// Full boot path: load the registry, describe every provider, then
@@ -195,7 +198,7 @@ public actor RemoteProviderManager {
     /// supervised low-latency NDJSON stream.
     private func startLoop(for config: RemoteProviderConfig) async {
         if describes[config.name]?.capabilities.contains("events") == true {
-            let supervisor = ProviderEventsSupervisor(config: config, manager: self)
+            let supervisor = ProviderEventsSupervisor(config: config, manager: self, clock: clock)
             supervisors[config.name] = supervisor
             // Awaiting `supervisor.start()` (a different actor) suspends this
             // actor's executor, which by itself does NOT close the race
@@ -205,10 +208,10 @@ public actor RemoteProviderManager {
             // one is still in flight.
             await supervisor.start()
         }
-        loops[config.name] = Task { [weak self] in
+        loops[config.name] = Task { [weak self, clock] in
             while !Task.isCancelled {
                 await self?.pollOnce(provider: config)
-                try? await Task.sleep(for: .seconds(Self.pollInterval))
+                try? await clock.sleep(for: .seconds(Self.pollInterval))
             }
         }
     }
