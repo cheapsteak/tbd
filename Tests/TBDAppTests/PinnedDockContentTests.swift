@@ -13,12 +13,14 @@ struct PinnedDockContentTests {
                            parent: UUID? = nil,
                            pinnedAt: Date? = nil,
                            archivedAt: Date? = nil,
-                           displayName: String? = nil) -> Worktree {
+                           displayName: String? = nil,
+                           pinSortOrder: Int? = nil) -> Worktree {
         Worktree(id: id, repoID: repoID, name: name,
                  displayName: displayName ?? name,
                  branch: "b", path: "/tmp/\(name)",
                  archivedAt: archivedAt, tmuxServer: "s",
-                 parentWorktreeID: parent, pinnedAt: pinnedAt)
+                 parentWorktreeID: parent, pinnedAt: pinnedAt,
+                 pinSortOrder: pinSortOrder)
     }
 
     private static func at(_ seconds: TimeInterval) -> Date {
@@ -198,5 +200,66 @@ struct PinnedDockContentTests {
         let rows = PinnedDockContent.rows(allWorktrees: [p, c], selectedIDs: [pID],
                                           children: Self.noChildren)
         #expect(rows.map(\.worktree.name) == ["p"])
+    }
+
+    // MARK: rows — pinSortOrder
+
+    @Test("pins sort by pinSortOrder ascending when every pin has one")
+    func sortsByPinSortOrder() {
+        let a = Self.wt("a", pinnedAt: Self.at(0), pinSortOrder: 2)
+        let b = Self.wt("b", pinnedAt: Self.at(10), pinSortOrder: 0)
+        let c = Self.wt("c", pinnedAt: Self.at(20), pinSortOrder: 1)
+        let rows = PinnedDockContent.rows(allWorktrees: [a, b, c],
+                                          selectedIDs: [], children: Self.noChildren)
+        #expect(rows.map(\.worktree.name) == ["b", "c", "a"])
+    }
+
+    @Test("pins without an order sort after pins that have one")
+    func unorderedSortsLast() {
+        let ordered = Self.wt("ordered", pinnedAt: Self.at(100), pinSortOrder: 5)
+        let unordered = Self.wt("unordered", pinnedAt: Self.at(0))
+        let rows = PinnedDockContent.rows(allWorktrees: [unordered, ordered],
+                                          selectedIDs: [], children: Self.noChildren)
+        #expect(rows.map(\.worktree.name) == ["ordered", "unordered"])
+    }
+
+    @Test("two unordered pins fall back to pinnedAt — the no-backfill guarantee")
+    func fallsBackToPinnedAt() {
+        let older = Self.wt("older", pinnedAt: Self.at(0))
+        let newer = Self.wt("newer", pinnedAt: Self.at(50))
+        let rows = PinnedDockContent.rows(allWorktrees: [newer, older],
+                                          selectedIDs: [], children: Self.noChildren)
+        #expect(rows.map(\.worktree.name) == ["older", "newer"])
+    }
+
+    // MARK: subtree
+
+    @Test("subtree returns just the root when collapsed")
+    func subtreeCollapsed() {
+        let root = Self.wt("root", pinnedAt: Self.at(0), pinSortOrder: 0)
+        let rows = PinnedDockContent.rows(allWorktrees: [root],
+                                          selectedIDs: [], children: Self.noChildren)
+        #expect(PinnedDockContent.subtree(of: root.id, in: rows).map(\.worktree.name) == ["root"])
+    }
+
+    @Test("subtree returns the root plus its descendants, and nothing from a sibling")
+    func subtreeExpanded() {
+        let aID = UUID(), bID = UUID()
+        let a = Self.wt("a", id: aID, pinnedAt: Self.at(0), pinSortOrder: 0)
+        let aKid = Self.wt("aKid", parent: aID)
+        let b = Self.wt("b", id: bID, pinnedAt: Self.at(10), pinSortOrder: 1)
+        let all = [a, aKid, b]
+        let rows = PinnedDockContent.rows(allWorktrees: all, selectedIDs: [aID],
+                                          children: Self.childLookup(all))
+        #expect(PinnedDockContent.subtree(of: aID, in: rows).map(\.worktree.name) == ["a", "aKid"])
+        #expect(PinnedDockContent.subtree(of: bID, in: rows).map(\.worktree.name) == ["b"])
+    }
+
+    @Test("subtree of an id not in the rows is empty")
+    func subtreeMissing() {
+        let root = Self.wt("root", pinnedAt: Self.at(0))
+        let rows = PinnedDockContent.rows(allWorktrees: [root],
+                                          selectedIDs: [], children: Self.noChildren)
+        #expect(PinnedDockContent.subtree(of: UUID(), in: rows).isEmpty)
     }
 }

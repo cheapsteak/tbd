@@ -52,7 +52,18 @@ enum PinnedDockContent {
                      children: (UUID) -> [Worktree]) -> [PinnedDockRow] {
         let pinned = allWorktrees
             .filter { $0.pinnedAt != nil && $0.archivedAt == nil && !$0.isNightwatchDesk }
-            .sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
+            .sorted { lhs, rhs in
+                // Ordered pins first, by their explicit order. Pins that have
+                // never been dragged keep pinnedAt order and sort after —
+                // which is what lets the column ship with no backfill UPDATE.
+                switch (lhs.pinSortOrder, rhs.pinSortOrder) {
+                case let (l?, r?): return l < r
+                case (_?, nil):    return true
+                case (nil, _?):    return false
+                case (nil, nil):
+                    return (lhs.pinnedAt ?? .distantPast) < (rhs.pinnedAt ?? .distantPast)
+                }
+            }
 
         // Emit-once, which both prevents a worktree from appearing twice and
         // makes a cyclic parentWorktreeID chain terminate — so unlike
@@ -104,5 +115,22 @@ enum PinnedDockContent {
                               depth: depth + 1, children: children,
                               emitted: &emitted, into: &result)
         }
+    }
+
+    /// The contiguous run of rows belonging to one pinned root: the root itself
+    /// plus any expanded descendants beneath it.
+    ///
+    /// `PinnedDockView` renders a nested `ForEach` — outer over pinned roots,
+    /// inner over each root's rows — so that `.onMove`'s indices address ROOTS
+    /// rather than the flattened row list. Attaching `.onMove` to a flat
+    /// `ForEach` over `rows(...)` would move the wrong worktree whenever a
+    /// subtree was expanded.
+    static func subtree(of rootID: UUID, in rows: [PinnedDockRow]) -> [PinnedDockRow] {
+        guard let start = rows.firstIndex(where: { $0.worktree.id == rootID }) else { return [] }
+        var end = rows.index(after: start)
+        while end < rows.endIndex, rows[end].depth > rows[start].depth {
+            end = rows.index(after: end)
+        }
+        return Array(rows[start..<end])
     }
 }
