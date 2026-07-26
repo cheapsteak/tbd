@@ -89,7 +89,7 @@ hibernation context (`hibernateReason` is a closed enum; the narrative, includin
 premises, lives in the `suspendedSnapshot` pane text, which wake.py scans ANSI-stripped;
 MERGED/CLOSED never yields a "fix your PR" wake), the checked-out branch's actual open PR +
 failing checks, and unmerged-commit state vs origin/main — then classifies
-(DONE → /closeout · RESUME_FAILING/OPEN · UNSUBMITTED_WORK · UNVERIFIED → neutral "verify
+(DONE → report-and-stop · RESUME_FAILING/OPEN · UNSUBMITTED_WORK · UNVERIFIED → neutral "verify
 first" prompt) and writes `queue/wake-plan.json`. First real sweep: 24/24 hibernated
 terminals verified DONE — every hand-composed "resume" wake would have been stale.
 
@@ -205,7 +205,8 @@ classifies the work, and composes the wake prompt from verified facts only.
 
 Rules it enforces:
   - A PR named in a wake premise is checked live (`gh pr view --json state`);
-    MERGED/CLOSED PRs never produce a "fix your PR" wake — they produce /closeout.
+    MERGED/CLOSED PRs never produce a "fix your PR" wake — they produce a done-report
+wake. No wake ever tells a session to run /closeout; archiving is the human's call.
   - A local branch name is NOT evidence of unfinished work: if the branch has no
     unmerged commits vs origin/main (or its PR merged), the work is DONE.
   - Anything unverifiable (gh failure, no repo, detached head) wakes NEUTRAL —
@@ -233,8 +234,10 @@ DB = f"{HOME}/tbd/state.db"
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUEUE = f"{SKILL}/queue"
 
-STANDING_RULE = ("If the task is complete, run /closeout. Resume only if genuinely "
-                 "unfinished. Do NOT merge — the human merges.")
+STANDING_RULE = ("If the task is complete, SAY SO AND STOP — do not run /closeout. "
+                 "A finished-looking worktree is an archive question for the human, "
+                 "not a harvest to fire. Resume only if genuinely unfinished. "
+                 "Do NOT merge — the human merges.")
 
 
 def sh(args, t=20, cwd=None):
@@ -382,7 +385,7 @@ def verify(item, fetch=True):
         # exact kind of unverified premise this script exists to eliminate.
         if v["dirty"]: facts.append("dirty working tree, merge state unknown")
     if v["dirty"] and v["classification"] == "DONE":
-        facts.append("note: dirty working tree — closeout should triage it")
+        facts.append("note: dirty working tree — needs triage before any archive decision")
     return v
 
 
@@ -392,18 +395,19 @@ def compose(v):
     c = v["classification"]
     if c == "DONE":
         return (f"Nightwatch wake (state verified live): your work here appears COMPLETE "
-                f"({facts}). Run /closeout now. {STANDING_RULE}")
+                f"({facts}). Report that in one line and stop. {STANDING_RULE}")
     if c == "RESUME_FAILING":
         return (f"Nightwatch wake (state verified live): PR #{v['pr']} on branch {v.get('branch')} "
                 f"has failing checks ({facts}). Diagnose, fix, push, drive to checks-green + "
                 f"claude-review approved on the current SHA. {STANDING_RULE}")
     if c == "RESUME_OPEN":
         return (f"Nightwatch wake (state verified live): PR #{v['pr']} on branch {v.get('branch')} "
-                f"is open ({facts}). Drive it to ready (checks green + claude-review approved) or "
-                f"/closeout if it's actually done. {STANDING_RULE}")
+                f"is open ({facts}). Drive it to ready (checks green + claude-review approved); "
+                f"if it is actually done, say so and stop. {STANDING_RULE}")
     if c == "UNSUBMITTED_WORK":
         return (f"Nightwatch wake (state verified live): branch {v.get('branch')} has {facts}. "
-                f"Decide: finish and open a PR, or /closeout and abandon. {STANDING_RULE}")
+                f"Decide: finish and open a PR, or report it to the human as an "
+                f"abandon candidate. {STANDING_RULE}")
     return (f"Nightwatch wake: live state could NOT be verified ({facts}). Before doing anything, "
             f"verify with git/gh what is actually outstanding — do not trust any earlier premise. "
             f"{STANDING_RULE}")
@@ -467,7 +471,31 @@ def selftest():
             snapshot="fix PR #14203 FAILING checks")
     assert any("stale" in f for f in v["facts"]), v
     assert v["classification"] == "DONE", v
-    print("selftest: 8/8 classification scenarios passed")
+    # 9. NO composed wake ever tells a session to run /closeout, in ANY branch.
+    #    These prompts are dispatched by `wake.py --act` with no human in the
+    #    loop, so a "Run /closeout now" is a harvest fired on the human's behalf.
+    #    Chang's standing rule: a finished-looking worktree is an archive
+    #    QUESTION for the human. Asserted on the composed output rather than on
+    #    the source text, so a future rephrasing that reintroduces the
+    #    instruction through STANDING_RULE or a new branch is still caught.
+    #    Whitelist the one permitted context rather than blacklisting imperative
+    #    phrasings: a blacklist is defeated from BOTH sides, since the sentence
+    #    that forbids "run /closeout" contains "run /closeout". Every mention of
+    #    /closeout in a dispatched prompt must be the prohibition itself.
+    PERMITTED = "do not run "
+    for classification in ("DONE", "RESUME_FAILING", "RESUME_OPEN",
+                           "UNSUBMITTED_WORK", "UNVERIFIED"):
+        prompt = compose({"classification": classification, "facts": ["f"],
+                          "pr": 1, "branch": "b"})
+        low, mentions = prompt.lower(), 0
+        i = low.find("/closeout")
+        while i != -1:
+            mentions += 1
+            assert low[max(0, i - len(PERMITTED)):i] == PERMITTED, \
+                f"{classification} wake mentions /closeout outside the prohibition: {prompt}"
+            i = low.find("/closeout", i + 1)
+        assert mentions == 1, f"{classification} wake lost the rule: {prompt}"
+    print("selftest: 9/9 classification scenarios passed")
 
 
 def main():

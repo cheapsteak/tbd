@@ -194,6 +194,35 @@ struct NightwatchDeskPromptsTests {
                     "handoff.py lost the self-close guard the relay depends on")
         }
 
+        /// The never-/closeout standing rule has to hold for the whole shipped
+        /// skill, not just the desk prompts. `wake.py --act` dispatches its
+        /// composed prompt into a hibernated session with no human in the loop,
+        /// so a "Run /closeout now" there is a harvest fired on the human's
+        /// behalf — the exact thing the rule forbids, reached by a different
+        /// door. Behavioural coverage lives in `wake.py --selftest` (scenario 9,
+        /// run by `PluginDirWriterTests.wakePySelftest`); this pins the prose
+        /// that documents it, which is what a reader consults.
+        @Test("SKILL.md does not advertise an automatic DONE → /closeout")
+        func skillMdDoesNotPromiseCloseout() {
+            let md = NightwatchSkillContent.skillMd
+            #expect(!md.contains("DONE → /closeout"),
+                    "SKILL.md still describes wake.py as auto-firing /closeout on DONE")
+            #expect(md.contains("NEVER trigger `/closeout`"))
+        }
+
+        @Test("wake.py's standing rule forbids /closeout rather than prescribing it")
+        func wakePyStandingRuleForbidsCloseout() {
+            let py = NightwatchSkillContent.wakePy
+            #expect(py.contains("do not run /closeout"),
+                    "wake.py's STANDING_RULE no longer carries the prohibition")
+            // The composed-prompt invariant itself is asserted executably in
+            // wake.py's own selftest, which whitelists the prohibition as the
+            // only permitted mention — a blacklist here would trip on that very
+            // sentence, as it did three times while writing this suite.
+            #expect(py.contains("9/9 classification scenarios passed"),
+                    "the selftest scenario pinning the rule was removed")
+        }
+
         @Test("Script names are unique")
         func scriptNamesUnique() {
             let names = NightwatchSkillContent.scripts.map(\.name)
