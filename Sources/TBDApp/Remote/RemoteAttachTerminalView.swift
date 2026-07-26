@@ -176,8 +176,12 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
                 // the `childfd` EOF marker is cleared. Without an explicit
                 // terminate() here, that fd stays open for as long as the
                 // user sits on the "Detached" overlay, i.e. until they
-                // navigate away (`cleanup()`) or hit Reattach (a fresh
-                // `LocalProcess` via `.id(generation)`).
+                // navigate away (`cleanup()`) or hit Reattach: that clears
+                // `explicitlyDetachedRemoteSessions`, which re-admits this
+                // selection into `attachedRemoteSelections`, and
+                // `RemoteAttachPager.updateNSViewController` responds by
+                // removing this tab item (tearing this instance down) and
+                // adding a brand new one backed by a fresh `LocalProcess`.
                 self.localProcess?.terminate()
                 self.onDetached?(exitCode)
             }

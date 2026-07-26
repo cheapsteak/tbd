@@ -283,37 +283,44 @@ struct RemoteSessionDetailView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if availableTabs.isEmpty {
-            VStack {
-                Spacer()
-                Text("This provider doesn't support attach or a log view for this session.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding()
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ZStack {
-                // `RemoteAttachPager` is mounted UNCONDITIONALLY here — never
-                // nested inside an `if availableTabs.contains(.attach)` (or
-                // any other check scoped to the CURRENT selection) — because
-                // it hosts every attached remote session, not just this one.
-                // Gating its existence on this session's own tab
-                // availability would tear down every OTHER (background,
-                // recently-viewed) session's live connection the moment the
-                // user merely LOOKS AT a log-only or gone session — exactly
-                // the kind of accidental mass-teardown this pager exists to
-                // prevent. Visibility (not existence) is controlled by
-                // opacity/hit-testing below, the same idiom the old
-                // intra-session Attach/Log toggle used.
-                RemoteAttachPager(
-                    selections: appState.attachedRemoteSelections,
-                    activeSelection: selection
-                )
-                .opacity(showsAttachSlot ? 1 : 0)
-                .allowsHitTesting(showsAttachSlot)
+        ZStack {
+            // `RemoteAttachPager` is mounted UNCONDITIONALLY here — never
+            // nested inside an `if availableTabs.contains(.attach)`, an `if
+            // availableTabs.isEmpty` (or its `else`), or any other check
+            // scoped to the CURRENT selection's tab set — because it hosts
+            // every attached remote session, not just this one. Gating its
+            // existence on this session's own tab availability would tear
+            // down every OTHER (background, recently-viewed) session's live
+            // connection the moment the user merely LOOKS AT a session with
+            // no available tabs at all — e.g. an attach-only provider whose
+            // session went `gone`, which drops both Attach (gone) and Log
+            // (never had it), collapsing `availableTabs` to empty — exactly
+            // the kind of accidental mass-teardown this pager exists to
+            // prevent. Visibility (not existence) is controlled by
+            // opacity/hit-testing below, the same idiom the old
+            // intra-session Attach/Log toggle used; `showsAttachSlot` is
+            // already `false` whenever `availableTabs` is empty (it requires
+            // `availableTabs.contains(.attach)`), so the pager simply stays
+            // transparent and non-hit-testable behind the empty-state
+            // message below without any special-casing here.
+            RemoteAttachPager(
+                selections: appState.attachedRemoteSelections,
+                activeSelection: selection
+            )
+            .opacity(showsAttachSlot ? 1 : 0)
+            .allowsHitTesting(showsAttachSlot)
 
+            if availableTabs.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("This provider doesn't support attach or a log view for this session.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
                 if effectiveTab == .attach, availableTabs.contains(.attach), !isAttached {
                     detachedPrompt
                 }
@@ -323,8 +330,8 @@ struct RemoteSessionDetailView: View {
                         .id(AppState.remoteSessionKey(provider: selection.provider, sessionID: selection.sessionID))
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Whether the pager's slot for THIS selection should be visually

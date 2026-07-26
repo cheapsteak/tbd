@@ -242,8 +242,11 @@ final class AppState: ObservableObject {
     /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
     /// `selectedScratchSection` but keyed by the provider/session composite id
     /// rather than a UUID (see `RemoteSessionSelection` in
-    /// `AppState+Navigation.swift`); same documented scope cut — no
-    /// `NavigationEntry` integration for v1.
+    /// `AppState+Navigation.swift`). UNLIKE `selectedScratchSection`, this one
+    /// DOES participate in back/forward history — `selectRemoteSession`
+    /// records a `.remoteSession` `NavigationEntry` — since remote sessions
+    /// now sit inside a repo's own sidebar section beside local worktrees
+    /// (see `selectRemoteSession`'s doc comment).
     @Published var selectedRemoteSession: RemoteSessionSelection? = nil
     /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
     /// set when a sidebar context-menu action (e.g. "View Log") jumps

@@ -38,11 +38,11 @@ struct RemoteAttachStateTests {
         ]
     }
 
-    private func seedSession(_ state: AppState, provider: String, id: String, gone: Bool = false) {
+    private func seedSession(_ state: AppState, provider: String, id: String, gone: Bool = false, dismissed: Bool = false) {
         state.remoteSessions.append(RemoteSessionInfo(
             provider: provider,
             payload: RemoteSessionPayload(id: id, state: .running),
-            gone: gone, dismissed: false, lastSeen: Date()
+            gone: gone, dismissed: dismissed, lastSeen: Date()
         ))
     }
 
@@ -82,6 +82,23 @@ struct RemoteAttachStateTests {
             state.selectRemoteSession(provider: "acme", sessionID: "s1")
 
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// `attachEligibleRemoteSelections` must exclude `dismissed` sessions the
+    /// same way it excludes `gone` ones, so it can never disagree with the
+    /// navigation-staleness predicate (`usableEntryIndex` in
+    /// `AppState+Navigation.swift`), which excludes `dismissed` but keeps
+    /// `gone` — see that computed property's doc comment.
+    @Test func selectingADismissedSessionNeverAttaches() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1", dismissed: true)
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+            #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
         }
     }
 
