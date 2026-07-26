@@ -5,37 +5,6 @@ import TBDShared
 struct StatusBarView: View {
     @EnvironmentObject var appState: AppState
 
-    /// Same experimental opt-in that gates every other nightwatch surface.
-    /// Fail-closed: no tint unless the user explicitly turned it on.
-    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
-
-    /// Opacity the mode tint is layered over the bar's `.bar` material at.
-    ///
-    /// One value serves both modes and both appearances — measured, not guessed:
-    ///
-    /// - Light appearance, `.bar` composites to ~white. At 18% the bar becomes
-    ///   (221, 225, 236) for nightwatch and (247, 239, 230) for daywatch, keeping
-    ///   `.primary` ink at 12.2:1 and 13.6:1 respectively (untinted baseline is
-    ///   15.1:1). `.secondary` ink tracks its backdrop, so it barely moves at all:
-    ///   3.95:1 untinted → 3.85/3.78:1 tinted.
-    /// - Dark appearance needs no special case. 18% of a mid-luminance tint over
-    ///   a ~(40, 40, 40) bar lands at (43, 49, 60) / (71, 62, 54), i.e. still
-    ///   dark, and white text stays at 13.1:1 / 10.5:1.
-    ///
-    /// The two tints differ in luminance (amber is far lighter), so nightwatch
-    /// reads as the stronger wash. Their *hue* shift — the part that actually
-    /// distinguishes the modes — is near-identical at this opacity, and the
-    /// luminance asymmetry matches the semantics, so a per-mode opacity is not
-    /// worth the branch.
-    static let tintOpacity: Double = 0.18
-
-    /// The mode tint the status bar paints over its `.bar` material, or nil for
-    /// no tint. Pure so it is testable without instantiating the view.
-    static func statusBarTint(mode: NightwatchMode, experimentalEnabled: Bool) -> Color? {
-        guard experimentalEnabled else { return nil }
-        return tintColor(for: mode)
-    }
-
     /// Path + repo of the resolved single-selected worktree (nil when it has
     /// no path yet). The caller resolves the selection once per body
     /// evaluation and passes it in, so this never re-runs `findWorktree`.
@@ -86,11 +55,6 @@ struct StatusBarView: View {
             : nil
         let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {
-            // The nightwatch/daywatch mode *tint* is confined to this bar; the
-            // sidebar's NightwatchModeToggle stays the in-window control for
-            // changing mode. The label self-hides when mode is .off or the
-            // experimental flag is unset, matching the bar tint below.
-            NightwatchDeskStatusLabel()
             Spacer()
             if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
@@ -108,21 +72,6 @@ struct StatusBarView: View {
         .font(.caption)
         .padding(.horizontal)
         .padding(.vertical, 4)
-        // The bar keeps its native `.bar` material; the mode tint is layered on
-        // top of it but still BEHIND the bar's text. Both layers live in one
-        // background because chaining `.background(.bar).background(tint)` would
-        // put the tint *behind* the material (later backgrounds sit further
-        // back), and `.overlay` would put it in front of the text and wash it.
-        .background {
-            ZStack {
-                Rectangle().fill(.bar)
-                if let tint = Self.statusBarTint(
-                    mode: appState.nightwatchMode,
-                    experimentalEnabled: nightwatchExperimental
-                ) {
-                    tint.opacity(Self.tintOpacity)
-                }
-            }
-        }
+        .background(.bar)
     }
 }
