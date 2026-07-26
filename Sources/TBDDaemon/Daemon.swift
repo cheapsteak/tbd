@@ -68,6 +68,19 @@ public final class Daemon: Sendable {
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
     /// in mock mode (never constructed).
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// Remote-backends actor (Task 7). Owned here so shutdown can reach it —
+    /// the events supervisor's own supervision task retains the manager
+    /// strongly, so without an explicit `shutdown()` call it (and its child
+    /// processes) would outlive the daemon process. `nil` when
+    /// `config.remoteBackendsEnabled` was off at boot (mock mode, or the
+    /// flag genuinely off) — constructed only once, at startup; flipping the
+    /// flag on later takes effect on the next restart.
+    public nonisolated(unsafe) var remoteManager: RemoteProviderManager?
+    /// Deferred `remoteManager.start()` task (see call site below). Stored so
+    /// `stop()` can cancel it — otherwise a SIGTERM inside the boot window
+    /// leaves `loadRegistryAndDescribe` spawning `describe` child processes
+    /// after `shutdown()` has already torn down the manager, orphaning them.
+    public nonisolated(unsafe) var remoteStartTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -387,6 +400,30 @@ public final class Daemon: Sendable {
             }
         }
 
+        // Remote backends (Task 7): constructed at boot ONLY when the flag
+        // is already on — a user flipping `config.setRemoteBackends` on
+        // without restarting will see `remote.*` RPCs degrade to "remote
+        // backends disabled" (RPCRouter+RemoteHandlers.swift) rather than a
+        // crash, until the next restart picks it up. Skipped in mock mode,
+        // like every other background-task guard in this method.
+        //
+        // `self.remoteManager` is assigned IMMEDIATELY, before `start()` is
+        // even called (start() is deferred below, off the boot critical
+        // path, alongside the reaper/GC tasks) — so a SIGTERM that lands
+        // while `start()` is still describing providers still finds a
+        // non-nil `remoteManager` and `stop()` can reach `shutdown()`.
+        // Assigning only after an awaited `start()` would leave a mid-start
+        // shutdown request with nothing to call, orphaning the manager and
+        // any provider child processes it spawned.
+        var remoteManager: RemoteProviderManager?
+        if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
+            let manager = RemoteProviderManager(
+                db: database, subscriptions: subs, runner: ProviderRunner(),
+                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath))
+            self.remoteManager = manager
+            remoteManager = manager
+        }
+
         let prManager = PRStatusManager()
 
         // Hydrate PR status cache from the DB so PR icons survive restart, then
@@ -407,7 +444,8 @@ public final class Daemon: Sendable {
             subscriptions: subs,
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
-            pendingQuestions: pendingQuestions
+            pendingQuestions: pendingQuestions,
+            remoteManager: remoteManager
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
@@ -553,6 +591,21 @@ public final class Daemon: Sendable {
                         guard !Task.isCancelled else { break }
                         _ = await orphanGC.sweep()
                     }
+                }
+            }
+
+            // 11a-remote. Remote backends (Task 7): `manager.start()` runs a
+            // sequential `describe` (10s timeout each) per registered
+            // provider, then spawns poll loops. Fired off the boot critical
+            // path — same shape as the reaper/GC tasks above — so N slow or
+            // hung providers don't delay the RPC listener coming up.
+            // `remoteManager` was already assigned on `self` above, so a
+            // shutdown request racing this task still has a live handle to
+            // call `shutdown()` on (see the `shuttingDown` guard in
+            // `spawnPollLoops()`).
+            if let remoteManager {
+                self.remoteStartTask = Task {
+                    await remoteManager.start()
                 }
             }
 
@@ -786,6 +839,38 @@ public final class Daemon: Sendable {
             await resumeScheduler.stop()
         }
 
+        // Cancel the deferred remote-backends boot task BEFORE tearing down
+        // the manager, and AWAIT it here rather than merely signalling it
+        // (see the old bug this replaces, on `remoteStartTask?.cancel()`
+        // further down): `start()` runs `loadRegistryAndDescribe()` then
+        // `spawnPollLoops()` in sequence, and a SIGTERM landing in the first
+        // few seconds of boot can catch it mid `describe` — before
+        // `spawnPollLoops()` has ever run, `remoteManager.shutdown()` alone
+        // tears down loops/supervisors that don't exist yet and does
+        // nothing for the in-flight child. `runBoundedProcess` now wires
+        // outer-task cancellation into its own deadline (`CancellationRelay`
+        // in `BoundedProcessRunner.swift`), so `cancel()` here interrupts an
+        // in-flight `describe` immediately rather than only being observed
+        // between providers in `loadRegistryAndDescribe`'s loop — but that
+        // interruption still runs ON this task, so it needs the daemon
+        // process (and the `SubprocessWatchdog` thread that reaps the killed
+        // child) to still be alive to finish unwinding. Awaiting `.value`
+        // here, before `Foundation.exit(0)` below, is what guarantees that;
+        // without it the process could tear down mid-unwind and orphan the
+        // child exactly as before.
+        remoteStartTask?.cancel()
+        await remoteStartTask?.value
+
+        // Stop remote-backends poll loops / events supervisors. Required,
+        // not optional: the events supervisor's supervision task retains
+        // the manager strongly, so without this call the manager and its
+        // child provider processes are immortal. `shutdown()` (not the bare
+        // `stopAll()`) takes the manager's own reconfigure lock so this
+        // can't interleave with an in-flight `start()`/`spawnPollLoops()`.
+        if let remoteManager {
+            await remoteManager.shutdown()
+        }
+
         // Stop daywatch runner.
         if let runner = daywatchRunner {
             await runner.apply(mode: .off)
@@ -797,7 +882,9 @@ public final class Daemon: Sendable {
         // Stop the FD-vending sidecar (closes the listener + any client).
         await fdVendingServer.stop()
 
-        // Cancel background tasks
+        // Cancel background tasks. `remoteStartTask` is cancelled (and
+        // awaited) earlier, above — see that comment for why it can't wait
+        // until here.
         sshRefreshTask?.cancel()
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()

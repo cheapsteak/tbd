@@ -7,6 +7,10 @@ import TBDShared
 enum LeadingRowIndicator: Equatable {
     case pending
     case prStatus
+    /// Tucked-away marker that a row's session runs on a remote-agent
+    /// backend rather than a local worktree. Deliberately the lowest
+    /// priority in the slot — see `RowStatusIndicator.leading(isPending:hasPRStatus:isRemote:)`.
+    case remote
 }
 
 /// Indicator shown in the trailing (activity / attention) suffix slot.
@@ -64,14 +68,20 @@ enum SuffixRowIndicator: Equatable {
 /// at most one of error / attention / working / suspended.
 enum RowStatusIndicator {
     /// Leading slot. PR status (when present) always wins so it stays visible
-    /// and clickable; a `.creating` worktree (which has no PR yet) shows the
-    /// pending glyph. `hasPRStatus` is expected to already exclude the main
-    /// worktree at the call site.
-    static func leading(isPending: Bool, hasPRStatus: Bool) -> LeadingRowIndicator? {
+    /// and clickable; a `.creating`/`.starting` row (which has no PR yet)
+    /// shows the pending glyph. `hasPRStatus` is expected to already exclude
+    /// the main worktree at the call site. `isRemote` is lowest priority —
+    /// it's a quiet "elsewhere" marker, not an active-state signal, so PR
+    /// status and the starting spinner both take the slot first when
+    /// present. Defaults to `false` so existing local-row callers are
+    /// unaffected.
+    static func leading(isPending: Bool, hasPRStatus: Bool, isRemote: Bool = false) -> LeadingRowIndicator? {
         if hasPRStatus {
             return .prStatus
         } else if isPending {
             return .pending
+        } else if isRemote {
+            return .remote
         }
         return nil
     }

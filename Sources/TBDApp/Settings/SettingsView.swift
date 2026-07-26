@@ -206,6 +206,11 @@ struct GeneralSettingsTab: View {
                 }
             }
 
+            Section("Remote Sessions") {
+                remoteBackendsToggle
+                remoteProvidersRegistryRow
+            }
+
             Section {
                 EnvOverridesEditor(
                     initial: appState.globalEnvOverrides,
@@ -291,6 +296,101 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setAutoCloseSetupEnabled(newValue) } }
         ))
         .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. Off by default (soaking). Applies to newly created worktrees.")
+    }
+
+    /// Remote agent sessions master switch. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setRemoteBackends`
+    /// (`AppState.setRemoteBackendsEnabled`). The caption below the toggle
+    /// distinguishes "on" from "on and actually polling" — the daemon only
+    /// constructs its provider manager at boot, so a fresh toggle needs a
+    /// restart before anything happens (see `AppState.remoteBackendsStatusCaption`).
+    @ViewBuilder
+    private var remoteBackendsToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let enabled = capabilities?.remoteBackendsEnabled ?? false
+        let live = capabilities?.remoteBackendsLive ?? false
+        Toggle("Enable remote agent sessions", isOn: Binding(
+            get: { enabled },
+            set: { newValue in Task { await appState.setRemoteBackendsEnabled(newValue) } }
+        ))
+        .help("Providers are registered in the file below. The daemon only builds its provider manager at boot, so turning this on requires a daemon restart before polling starts.")
+        Text(AppState.remoteBackendsStatusCaption(enabled: enabled, live: live))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    /// The registry file row — tilde-abbreviated path + copy-path button,
+    /// copying the exact row implementation style `RepoHooksSettingsView`
+    /// uses for every other file-backed settings surface (repo convention:
+    /// user-authored blobs get a path+copy editor, not a DB column). The
+    /// file may not exist yet; when providers ARE loaded, list them with
+    /// their health so the user can see whether their JSON took effect
+    /// without leaving Settings.
+    @ViewBuilder
+    private var remoteProvidersRegistryRow: some View {
+        let path = TBDConstants.agentProvidersPath
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(path, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Copy full path")
+
+                Spacer()
+            }
+
+            if appState.remoteProviders.isEmpty {
+                Text("No providers loaded yet. Add entries to the file above, then restart the daemon.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(appState.remoteProviders) { provider in
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Self.healthColor(provider.health))
+                            .frame(width: 6, height: 6)
+                        Text(provider.config.name)
+                            .font(.caption)
+                        Text(Self.healthLabel(provider.health))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Short human label for a provider's health, as reported by
+    /// `remote.providers`. Presentation-only — not behavior-gating, so no
+    /// dedicated test per the repo's branching-conditional rule.
+    private static func healthLabel(_ health: ProviderHealth) -> String {
+        switch health {
+        case .ok: return "OK"
+        case .stale: return "Stale"
+        case .needsAuth: return "Needs auth"
+        case .error: return "Error"
+        }
+    }
+
+    private static func healthColor(_ health: ProviderHealth) -> Color {
+        switch health {
+        case .ok: return .green
+        case .stale: return .yellow
+        case .needsAuth: return .orange
+        case .error: return .red
+        }
     }
 
     private var primaryAgentPreferenceBinding: Binding<PrimaryAgentPreference> {

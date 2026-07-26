@@ -113,7 +113,10 @@ struct WorktreeRowView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 12, height: 12)
-        case nil:
+        case .remote, nil:
+            // `.remote` never occurs here — local rows never pass
+            // `isRemote: true` — but the switch must stay exhaustive over
+            // `LeadingRowIndicator?`.
             EmptyView()
         }
     }
@@ -196,7 +199,7 @@ struct WorktreeRowView: View {
                 onStartEditing: { appState.isRenamingWorktree = true },
                 onStopEditing: { appState.isRenamingWorktree = false }
             ) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: -2) {
                     Text(worktree.displayName)
                         .font(.system(size: 13))
                         .fontWeight(hasBoldNotification ? .bold : .regular)

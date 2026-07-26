@@ -561,6 +561,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = repoID
         selectedScratchSection = false
+        selectedRemoteSession = nil
         archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
         archivedWorktreesHasMore[repoID] = false
         highlightedArchivedWorktreeID = worktreeID
@@ -616,6 +617,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = id
         selectedScratchSection = false
+        selectedRemoteSession = nil
         Task { await refreshArchivedWorktrees(repoID: id) }
     }
 
@@ -647,6 +649,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = nil
         selectedScratchSection = true
+        selectedRemoteSession = nil
     }
 
     private static let archivedPageSize = 50

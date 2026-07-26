@@ -1,6 +1,8 @@
 import Foundation
 import os
 
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "BoundedProcessRunner")
+
 /// A single dedicated OS thread that fires subprocess deadlines.
 ///
 /// It replaces the `DispatchSource.makeTimerSource(queue: .global())` timer the
@@ -156,6 +158,51 @@ private final class Deadline: @unchecked Sendable {
     }
 }
 
+/// Bridges the calling `Task`'s cancellation into the deadline mechanism as a
+/// THIRD, independent trigger alongside the watchdog-thread and clock armers
+/// (see `Deadline` above). `runBoundedProcess` runs as part of its caller's
+/// own task rather than a detached one, so a caller whose enclosing task is
+/// cancelled (e.g. daemon shutdown cancelling an in-flight `describe`) needs
+/// a way to interrupt an already-suspended continuation — `Task.isCancelled`
+/// alone is not observed while parked in `withCheckedThrowingContinuation`.
+///
+/// `register(action:)` and `requestCancel()` may arrive in either order —
+/// `withTaskCancellationHandler`'s `onCancel` can fire before `operation` has
+/// even created the `Deadline` it wants to trigger. Whichever call arrives
+/// second performs (or triggers) the action; both are idempotent past the
+/// first outcome, matching `Deadline.disarm()`'s own guarantee.
+private final class CancellationRelay: @unchecked Sendable {
+    private struct State {
+        var action: (@Sendable () -> Void)?
+        var requested = false
+        var consumed = false
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    func register(action: @escaping @Sendable () -> Void) {
+        let fireNow = state.withLock { s -> Bool in
+            guard !s.consumed else { return false }
+            if s.requested {
+                s.consumed = true
+                return true
+            }
+            s.action = action
+            return false
+        }
+        if fireNow { action() }
+    }
+
+    func requestCancel() {
+        let pending = state.withLock { s -> (@Sendable () -> Void)? in
+            guard !s.consumed else { return nil }
+            s.consumed = true
+            s.requested = true
+            return s.action
+        }
+        pending?()
+    }
+}
+
 /// Outcome of a bounded subprocess run.
 ///
 /// `.timedOut` means the call exceeded its deadline — either the watchdog fired
@@ -169,8 +216,28 @@ enum BoundedProcessOutcome {
 /// Runs an external command with a hard timeout, draining stdout/stderr, and
 /// resolves to `.completed(status, stdout, stderr)` or `.timedOut` — or throws
 /// the spawn error if `Process.run()` fails. Shared by
-/// `TmuxManager.runExternalCommand` and `GitManager.run`, which map the outcome
-/// to their own error types (`TmuxError` / `GitError` / `GitTimeoutError`).
+/// `TmuxManager.runExternalCommand`, `GitManager.run`, and `ProviderRunner.run`,
+/// which map the outcome to their own error types (`TmuxError` / `GitError` /
+/// `GitTimeoutError` / `ProviderRunError`).
+///
+/// `environment` and `stdin` are optional and default to `nil`, which
+/// preserves the exact behavior existing callers (`GitManager`, `TmuxManager`,
+/// `GCDiskUsage`, `OrphanGC`) already depend on: an unset `environment` leaves
+/// `Process.environment` untouched (inherits the parent's), and no `stdin`
+/// leaves `Process.standardInput` untouched (inherits the parent's), rather
+/// than wiring up a pipe. When `environment` IS provided, it REPLACES the
+/// parent's environment wholesale (`Process.environment = environment`) —
+/// it is not merged, so a caller passing a partial dict gets a child missing
+/// everything it didn't list (e.g. no `PATH`).
+///
+/// `stdin`, when provided, is written synchronously right after `run()`
+/// succeeds, blocking the calling executor thread until the write completes.
+/// That's fine for this codebase's payloads — provider contract params and
+/// keystrokes are at most a few KB, well under the ~64KB pipe buffer — but a
+/// hypothetically large `stdin` (bigger than the pipe buffer, with a child
+/// that doesn't drain concurrently) would block the CALLING thread until the
+/// child reads enough to make room, the same way an undrained large stdout
+/// would block the child.
 ///
 /// The deadline is immune to GCD-pool starvation via two independent guarantees:
 ///
@@ -217,6 +284,8 @@ func runBoundedProcess(
     executable: String,
     arguments: [String],
     currentDirectory: String?,
+    environment: [String: String]? = nil,
+    stdin: Data? = nil,
     timeout: Duration,
     clock: any Clock<Duration> = ContinuousClock()
 ) async throws -> BoundedProcessOutcome {
@@ -226,8 +295,14 @@ func runBoundedProcess(
     let state = ContinuationGuard()
     // Monotonic start instant for the authoritative deadline decision below.
     let start = ContinuousClock.now
+    // Armer 3 — outer-task cancellation (see `CancellationRelay`'s doc
+    // comment). Created here, outside the continuation closure, so
+    // `onCancel` always has somewhere to register with even if the calling
+    // task is already cancelled before `operation` runs.
+    let cancellationRelay = CancellationRelay()
 
-    return try await withCheckedThrowingContinuation { continuation in
+    return try await withTaskCancellationHandler(operation: {
+    try await withCheckedThrowingContinuation { continuation in
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -239,8 +314,18 @@ func runBoundedProcess(
         if let currentDirectory {
             process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
         }
+        if let environment {
+            process.environment = environment
+        }
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // Only wire up a stdin pipe when the caller actually has bytes to
+        // send — otherwise leave `standardInput` unset so the child inherits
+        // the parent's stdin, exactly as it did before this parameter existed.
+        let stdinPipe = stdin.map { _ in Pipe() }
+        if let stdinPipe {
+            process.standardInput = stdinPipe
+        }
 
         // Drain both pipes incrementally as chunks arrive: no thread parks for
         // the subprocess's lifetime, and a child emitting more than the 64KB
@@ -287,6 +372,18 @@ func runBoundedProcess(
                 }
             }
             continuation.resume(returning: .timedOut)
+        }
+
+        // Armer 3 — outer-task cancellation. Registered before `run()`, same
+        // as the other two armers and for the same "KILL ON ARRIVAL" reason:
+        // `onCancel` can fire the instant this registers (or already have
+        // fired before `deadline` even existed — `CancellationRelay` handles
+        // that ordering), and `deadline.fire()`'s own `state.claim()` guard
+        // plus the post-`run()` claimed-but-not-yet-running check below cover
+        // a cancellation that lands before `processIdentifier` is valid.
+        cancellationRelay.register {
+            deadline.fire()
+            deadline.disarm()
         }
 
         // Armer 1 — the watchdog thread. Scheduled before `run()`: as with the
@@ -374,8 +471,42 @@ func runBoundedProcess(
             guard state.claim() else { return }
             deadline.disarm()
             continuation.resume(throwing: error)
+            return
+        }
+
+        if let stdin, let stdinPipe {
+            // MUST be the throwing `write(contentsOf:)` overload, never the
+            // older non-throwing `write(_:)` — that one raises an
+            // Objective-C `NSFileHandleOperationException` on a write
+            // error, which Swift cannot catch, aborting the entire daemon
+            // process rather than failing this one call. This is reachable
+            // any time a child exits (or simply never reads stdin) before
+            // we finish writing — e.g. a bad verb, a missing interpreter, a
+            // `set -e` trip in a provider script — which turns into EPIPE
+            // because `main.swift` sets `signal(SIGPIPE, SIG_IGN)` (so a
+            // broken pipe becomes a write error instead of killing the
+            // process outright, which would be worse). A child that exited
+            // before reading its stdin is a normal condition, not an error
+            // worth propagating: the exit code and stderr already tell the
+            // real story, so a failed write here is swallowed (after being
+            // logged) rather than thrown.
+            do {
+                try stdinPipe.fileHandleForWriting.write(contentsOf: stdin)
+            } catch {
+                logger.debug("stdin write failed, child likely exited before reading: \(error, privacy: .public)")
+            }
+            stdinPipe.fileHandleForWriting.closeFile()
         }
     }
+    }, onCancel: {
+        // Runs concurrently with `operation`, possibly on a different
+        // thread, and possibly before `operation` has created `deadline` —
+        // `CancellationRelay` is exactly the seam that makes that ordering
+        // safe. Only fires the process's kill/resume path; it never itself
+        // touches `process`, `continuation`, or any other state local to the
+        // continuation closure.
+        cancellationRelay.requestCancel()
+    })
 }
 
 extension Duration {

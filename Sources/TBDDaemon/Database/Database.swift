@@ -26,6 +26,7 @@ public final class TBDDatabase: Sendable {
     public let reapRecords: ReapRecordStore
     public let terminalHistory: TerminalHistoryStore
     public let panelSurface: PanelSurfaceStore
+    public let remoteSessions: RemoteSessionStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -64,6 +65,7 @@ public final class TBDDatabase: Sendable {
         self.reapRecords = ReapRecordStore(writer: pool)
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: pool)
+        self.remoteSessions = RemoteSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -102,6 +104,7 @@ public final class TBDDatabase: Sendable {
         self.reapRecords = ReapRecordStore(writer: queue)
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: queue)
+        self.remoteSessions = RemoteSessionStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1042,6 +1045,46 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v60_drop_nightwatch_merge_gate_tables") { db in
             try db.execute(sql: "DROP TABLE IF EXISTS clearance")
             try db.execute(sql: "DROP TABLE IF EXISTS audit_log")
+        }
+
+        // Remote agent backends (spec 2026-07-24). Flag lands default-OFF per
+        // the repo flag policy: the feature polls in the background, spawns
+        // provider subprocesses, and can stop remote sessions. `remote_session`
+        // mirrors provider-owned sessions keyed (provider, sessionID); the
+        // provider is the source of truth — rows here are a cache with drift
+        // bookkeeping (missingCount/gone per the two-absence rule).
+        // (Renumbered v60→v61 on merge: main's #514-adjacent work took v60 as
+        // `v60_drop_nightwatch_merge_gate_tables`. Safe because the migration
+        // body uses the idempotent helpers — see Database/CLAUDE.md.)
+        migrator.registerMigration("v61_remote_backends") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "remote_backends_enabled",
+                type: .boolean, defaults: false)
+            try db.createTableIfNotExists("remote_session") { t in
+                t.column("provider", .text).notNull()
+                t.column("sessionID", .text).notNull()
+                t.column("payload", .text).notNull()      // raw contract Session JSON
+                t.column("state", .text).notNull()
+                t.column("agentState", .text)
+                t.column("firstSeen", .datetime).notNull()
+                t.column("lastSeen", .datetime).notNull()
+                t.column("missingCount", .integer).notNull().defaults(to: 0)
+                t.column("gone", .boolean).notNull().defaults(to: false)
+                t.column("dismissed", .boolean).notNull().defaults(to: false)
+                t.primaryKey(["provider", "sessionID"])
+            }
+        }
+
+        // Pin remote sessions to a local repo (spec 2026-07-24, follow-up to
+        // v61): `resolvedRepoID` caches the outcome of matching a provider's
+        // `meta["repo"]` against registered repos' `remoteURL`
+        // (`RemoteRepoMatching`), computed once at first sighting and never
+        // re-derived once non-null — see `RemoteSessionStore.upsert`.
+        // (Renumbered v61→v62 on merge: see comment on v61_remote_backends above.)
+        migrator.registerMigration("v62_remote_session_resolved_repo") { db in
+            try db.addColumnIfMissing(
+                table: "remote_session", column: "resolvedRepoID",
+                type: .text)
         }
 
         return migrator

@@ -78,6 +78,13 @@ final class AppState: ObservableObject {
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
     @Published var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    /// Unread notification summaries for remote sessions, keyed by
+    /// `RemoteSessionSelection` (provider + provider-minted session id —
+    /// remote sessions have no UUID). Mirrors `unreadByWorktree`: written by
+    /// `handleRemoteSessionAttentionDelta` when an attention delta arrives,
+    /// cleared by `selectRemoteSession`. App-local and in-memory only, same
+    /// as `unreadByWorktree` — not persisted across restarts.
+    @Published var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
     /// Terminal IDs that fired a `.responseComplete` notification while their
     /// tab was NOT the active tab of a focused worktree. Drives the bold tab
     /// label in `TabBar`, mirroring the worktree-row bold. App-local and
@@ -93,6 +100,71 @@ final class AppState: ObservableObject {
             if !selectedRepoIDs.isEmpty {
                 selectedWorktreeIDs.subtract(selectedRepoIDs)
                 // selectRepo() already handles this; avoid overriding it
+                return
+            }
+
+            // Remote session rows are tagged into this same List (and thus
+            // this same Set) purely so they're List-native keyboard
+            // reachable — arrow-key traversal and the focus ring — the same
+            // reason repo header tags are handled just above. UNLIKE the
+            // repo-header case, a PURE remote selection (the remote tag(s)
+            // were the entire selection) routes the stripped id through
+            // `selectRemoteSession` (not just discard) so keyboard-only
+            // navigation — which never fires `RemoteSessionRowView`'s
+            // `.onTapGesture` — still ends up setting `selectedRemoteSession`
+            // and the row's own highlight engages. Every other consumer of
+            // `selectedWorktreeIDs` in this codebase assumes every member is
+            // a real `Worktree.id` (keyboard shortcuts, the jump menu,
+            // navigation history, persisted restore); stripping here before
+            // any of that runs keeps that invariant exactly as it was.
+            //
+            // A MIXED selection (real worktree ids survive after stripping
+            // the remote tag(s) — e.g. shift+↓ extending from a local
+            // worktree row onto a remote row, or a shift-range crossing a
+            // repo section's appended remote rows) must NOT route through
+            // `selectRemoteSession`: that call unconditionally sets
+            // `selectedWorktreeIDs = []`, which would silently wipe every
+            // local id this same gesture just selected. The `subtract` call
+            // below is itself an assignment to `selectedWorktreeIDs`, so it
+            // re-invokes this same `didSet` (nested, synchronously, before
+            // `subtract` returns) with the remote tag(s) already gone — that
+            // nested invocation runs the ordinary worktree-selection
+            // bookkeeping below for whatever local ids survived (or, if
+            // none survived, is a no-op, since the bottom bookkeeping is
+            // itself gated on `!selectedWorktreeIDs.isEmpty`). This
+            // invocation must therefore `return` unconditionally right
+            // after, exactly like the repo-header branch above — falling
+            // through here as well would re-run that bookkeeping a SECOND
+            // time (double `recordNavigation`/`recentWorktreeIDs` entries).
+            //
+            // Known cost of stripping the remote tag back out rather than
+            // letting it live in the set at rest: the AppKit table backing
+            // this List has no selection anchor on a remote row once this
+            // `didSet` returns, since the row's tag no longer appears in the
+            // bound Set. Arrow-key traversal starting FROM a remote row, and
+            // the List-native focus ring, are therefore not guaranteed to
+            // work — only the row's own highlight (driven by
+            // `selectedRemoteSession`/`unreadByRemoteSession`) is guaranteed
+            // to reflect the selection correctly. See the Task 9d fix-pass
+            // report for why letting the tag persist at rest was rejected
+            // (multiple consumers of `selectedWorktreeIDs` — e.g.
+            // `newTerminalTab()` — read `.first` unguarded and would act on
+            // a non-worktree id; `ContentView`'s detail-pane routing checks
+            // `selectedWorktreeIDs.isEmpty` to decide whether to show the
+            // empty state).
+            let remoteIDs = Set(remoteSessions.map(\.id))
+            let selectedRemoteIDs = selectedWorktreeIDs.intersection(remoteIDs)
+            if !selectedRemoteIDs.isEmpty {
+                selectedWorktreeIDs.subtract(selectedRemoteIDs)
+                // Only a PURE remote selection (nothing local survived the
+                // subtract) routes through `selectRemoteSession` — a mixed
+                // selection already got its local-id bookkeeping from the
+                // nested `didSet` triggered by the subtract above.
+                if selectedWorktreeIDs.isEmpty,
+                   let remoteID = selectedRemoteIDs.first,
+                   let session = remoteSessions.first(where: { $0.id == remoteID }) {
+                    selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
+                }
                 return
             }
 
@@ -114,6 +186,7 @@ final class AppState: ObservableObject {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 selectedScratchSection = false
+                selectedRemoteSession = nil
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
@@ -167,6 +240,26 @@ final class AppState: ObservableObject {
     /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`
     /// integration for v1 (documented scope cut — see `selectScratchSection()`).
     @Published var selectedScratchSection: Bool = false
+    /// Selected — set when a `RemoteSectionView` session row is clicked, shows
+    /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
+    /// `selectedScratchSection` but keyed by the provider/session composite id
+    /// rather than a UUID (see `RemoteSessionSelection` in
+    /// `AppState+Navigation.swift`). UNLIKE `selectedScratchSection`, this one
+    /// DOES participate in back/forward history — `selectRemoteSession`
+    /// records a `.remoteSession` `NavigationEntry` — since remote sessions
+    /// now sit inside a repo's own sidebar section beside local worktrees
+    /// (see `selectRemoteSession`'s doc comment).
+    @Published var selectedRemoteSession: RemoteSessionSelection? = nil
+    /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
+    /// set when a sidebar context-menu action (e.g. "View Log") jumps
+    /// straight to a specific tab instead of the default. Consumed (read AND
+    /// cleared) by the detail view on appear/selection-change — mirrors the
+    /// reveal-nonce discipline documented for `RepoDetailView`'s persistent
+    /// `@State`: a reveal must be a one-shot consumed by the acting child,
+    /// checked in BOTH onAppear and onChange, or a stale hint replays on an
+    /// unrelated later selection. `selectRemoteSession(provider:sessionID:tab:)`
+    /// sets this alongside `selectedRemoteSession`; nil means "default tab".
+    @Published var remoteSessionRequestedTab: RemoteSessionDetailTab?
 
     // MARK: - Navigation history (back/forward)
 
@@ -213,6 +306,32 @@ final class AppState: ObservableObject {
     /// Orphan-GC reap records (History → Reclaimed), keyed by repo ID and
     /// fetched on demand alongside `archivedWorktrees`.
     @Published var reapRecords: [UUID: [ReapRecord]] = [:]
+
+    /// Every registered remote-agent provider's negotiated contract + health,
+    /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
+    @Published var remoteProviders: [RemoteProviderStatus] = []
+    /// The daemon's remote-session mirror across all providers, fetched by
+    /// `refreshRemote()`. See `AppState+Remote.swift`.
+    @Published var remoteSessions: [RemoteSessionInfo] = []
+    /// TBD-owned display-name overrides for remote sessions, keyed by
+    /// `AppState.remoteSessionKey(provider:sessionID:)`. Mirrors the
+    /// worktree pattern (`Worktree.displayName` living in TBD's own DB
+    /// rather than being derived from git) — except a remote session has no
+    /// TBD-owned DB row of its own (the daemon's `remote_session` table is
+    /// explicitly a drift-tracking mirror of provider-owned state, never
+    /// authoritative — see `docs/remote-provider-contract.md` § Identity &
+    /// drift), so this lives client-side in UserDefaults instead of a new
+    /// daemon column. Emoji has no separate field, same as `Worktree` — the
+    /// user types `:emoji:` inline via `RenameableLabel` and it ends up as
+    /// plain leading characters in the stored string. This map is the
+    /// source of truth even for a provider that declares the `rename`
+    /// capability (contract v1 amendment): `renameRemoteSession(provider:
+    /// sessionID:displayName:)` writes here first, then fires the provider
+    /// push (`pushRemoteRenameIfSupported`) fire-and-forget, so a rename is
+    /// never gated on — or rolled back by — whether that push lands.
+    @Published var remoteSessionDisplayNames: [String: String] = [:] {
+        didSet { persistRemoteSessionDisplayNames() }
+    }
 
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
@@ -540,6 +659,163 @@ final class AppState: ObservableObject {
 
     private let keepAliveLimit = 8
 
+    // MARK: - Remote attach lifecycle (see `AppState+RemoteAttach.swift`)
+
+    /// Raw most-recent-first log of recently-VIEWED remote sessions, the
+    /// recency input to `RemoteAttachLifecycle.attachedSelections`. Mirrors
+    /// `recentlyVisitedWorktreeIDs`'s split from the computed mount set —
+    /// `attachedRemoteSelections` re-merges the current selection (protected)
+    /// and eligibility/detach state on every read, so this log alone doesn't
+    /// say what's actually attached right now.
+    @Published private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
+
+    /// Sessions whose attach terminal ended (pty exit — clean or not; the
+    /// pane exiting never means the remote session died, only that the
+    /// LOCAL viewer process stopped) and must NOT be silently re-attached
+    /// merely by staying the current selection. Cleared only by an explicit
+    /// user gesture — see `activateRemoteSession`'s doc comment for exactly
+    /// which gestures qualify, and `reattachRemoteSession` for the Reattach
+    /// button's path. This is the state that makes "select = auto-attach"
+    /// safe: without it, a pty exiting while its row is still selected would
+    /// re-enter `attachedRemoteSelections` (still protected) and the pager
+    /// would spawn a fresh process every render, an unbounded respawn loop
+    /// against a resource this codebase must not spam (SSM/ssh concurrency
+    /// and cost — see `RemoteAttachLifecycle`'s doc comment).
+    @Published private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
+
+    /// Sessions whose attach terminal ended UNEXPECTEDLY (nonzero/unreadable
+    /// exit — `RemoteAttachTerminalView.isUnexpectedExit`) — the transport's
+    /// fault, not a user detach. Distinct from `explicitlyDetachedRemoteSessions`
+    /// in how it clears: instead of requiring a user gesture, entries here
+    /// clear THEMSELVES the moment `RemoteReconnectPolicy.isBlocked` stops
+    /// excluding them — i.e. once their provider reports healthy again and
+    /// this entry's own backoff window has elapsed (see that type's doc
+    /// comment). `AppState.attachedRemoteSelections` recomputes this
+    /// evaluation on every read, driven by the app's existing provider-health
+    /// poll cycle — no dedicated timer. Still respects every other
+    /// constraint `explicitlyDetached` does (capability gating, `gone`/
+    /// `dismissed` exclusion, and above all `remoteAttachKeepAliveLimit`),
+    /// so a laptop waking from a long outage can't reattach more than the
+    /// cap at once even with many pending entries at once.
+    @Published private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
+
+    /// Cap on how many WARM BACKGROUND remote sessions may keep a live
+    /// attach terminal around at once. The current selection is separately
+    /// force-protected (see `RemoteAttachLifecycle`) and does NOT consume
+    /// this budget, so the real ceiling on concurrent provider `attach`
+    /// processes is `remoteAttachKeepAliveLimit + 1` — 4 at the constant's
+    /// current value of 3 — which matters because this is exactly the
+    /// billed, concurrency-limited resource the rest of this comment is
+    /// about. Deliberately SMALLER than `keepAliveLimit` (the local
+    /// worktree cap, 8) even though both share the same protected-selection
+    /// + capped-recency shape: a warm LOCAL tmux attach is free (the daemon
+    /// already keeps the tmux session running regardless), but a warm
+    /// REMOTE attach is a real, live connection to another machine — for an
+    /// SSM- or ssh-backed provider, a billed and concurrency-limited
+    /// resource — that buys nothing the user can see, since awareness of a
+    /// remote session's state rides the provider's shared events/poll
+    /// channel, not its per-session attach. A smaller cap only costs
+    /// reattach latency (a fresh spawn instead of an already-warm one) when
+    /// switching back to a session evicted past the cap. Easy
+    /// single-constant tuning point if the maintainer wants it different
+    /// after soaking — but remember any change moves the REAL ceiling by
+    /// the same amount, one more than this constant's value.
+    let remoteAttachKeepAliveLimit = 3
+
+    /// Move `selection` to the front of the attach-recency log, trimming it
+    /// so it never grows unbounded over a long-running app session. Mirrors
+    /// `touchVisitedWorktree`'s shape; unlike that function this trim is
+    /// purely a bound on the stored log's length (there's no "working"-style
+    /// force-protection budget to interact with here — only the current
+    /// selection is ever force-protected by `RemoteAttachLifecycle`, and it
+    /// doesn't consume this log's slots any more than a worktree's
+    /// protection consumes `recentlyVisitedWorktreeIDs`'s).
+    func touchAttachedRemoteSession(_ selection: RemoteSessionSelection) {
+        recentlyAttachedRemoteSessions.removeAll { $0 == selection }
+        recentlyAttachedRemoteSessions.insert(selection, at: 0)
+        let cap = remoteAttachKeepAliveLimit + 1 // +1 headroom for "selected but not yet re-touched"
+        if recentlyAttachedRemoteSessions.count > cap {
+            recentlyAttachedRemoteSessions.removeLast(recentlyAttachedRemoteSessions.count - cap)
+        }
+    }
+
+    /// Records that `selection`'s attach terminal ended — called from the
+    /// pager's `onDetached` bridge. Per the contract
+    /// (`docs/remote-provider-contract.md` § `attach`), this NEVER means the
+    /// remote session died, only that the local viewer process stopped;
+    /// `remoteSessions`/`gone` remain the only authoritative source for the
+    /// session's actual fate.
+    ///
+    /// Branches on `RemoteAttachTerminalView.isUnexpectedExit(exitCode:)` —
+    /// the same classification that already drove the overlay's wording —
+    /// to decide which of the two "don't respawn yet" mechanisms applies:
+    ///
+    /// - **Clean exit** (0, the user deliberately detached) →
+    ///   `explicitlyDetachedRemoteSessions`, cleared only by an explicit
+    ///   gesture (see `activateRemoteSession` in `AppState+Navigation.swift`,
+    ///   and `reattachRemoteSession` below).
+    /// - **Unexpected exit** (nonzero/unreadable — a network drop, failed
+    ///   credential, or crashed shim, not a user choice) →
+    ///   `pendingReconnectRemoteSessions`, which clears ITSELF once the
+    ///   provider is healthy again and this entry's backoff window has
+    ///   elapsed (`RemoteReconnectPolicy`) — no Reattach click required. Any
+    ///   pre-existing pending entry for this selection has its `attempts`
+    ///   incremented (a session that keeps failing immediately after each
+    ///   automatic retry backs off further each time).
+    ///
+    /// Either way `selection` is excluded from `attachedRemoteSelections`
+    /// until its respective clearing condition is met — the rule that
+    /// prevents a respawn loop while the row stays selected.
+    func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?) {
+        if RemoteAttachTerminalView.isUnexpectedExit(exitCode: exitCode) {
+            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+            )
+        } else {
+            explicitlyDetachedRemoteSessions[selection] = RemoteAttachDetachInfo(exitCode: exitCode)
+            // A clean detach always wins over any stale pending-reconnect
+            // bookkeeping from an earlier flapping run — the user's clean
+            // exit is the more recent, more authoritative signal.
+            pendingReconnectRemoteSessions.removeValue(forKey: selection)
+        }
+    }
+
+    /// The explicit "Reattach" affordance shown by `RemoteSessionDetailView`
+    /// once a session has detached. Clears BOTH detach flags AND re-touches
+    /// recency (so a session that had aged toward eviction gets a fresh
+    /// position at the front) — an unambiguous user gesture, always allowed
+    /// to re-attach immediately regardless of the transition/`.attach`-tab
+    /// rule `activateRemoteSession` applies to selection itself, and
+    /// regardless of any still-pending reconnect backoff window.
+    func reattachRemoteSession(_ selection: RemoteSessionSelection) {
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+        pendingReconnectRemoteSessions.removeValue(forKey: selection)
+        touchAttachedRemoteSession(selection)
+    }
+
+    /// Clears a stale explicit-detach flag for `selection`, if present —
+    /// the narrow write `activateRemoteSession` (in
+    /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
+    /// rule, kept here (not duplicated) so `explicitlyDetachedRemoteSessions`
+    /// has exactly one file's worth of direct mutators. Deliberately does
+    /// NOT touch `pendingReconnectRemoteSessions` — re-selecting (even via a
+    /// genuine transition) must not bypass provider-health/backoff gating
+    /// the way an explicit Reattach click does; see `reattachRemoteSession`.
+    func clearRemoteSessionDetachedFlag(_ selection: RemoteSessionSelection) {
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+    }
+
+    /// Drops attach-lifecycle bookkeeping for sessions the daemon no longer
+    /// reports — called from `pruneRemoteSessionState` alongside its other
+    /// maps, for the same reason: without this, `explicitlyDetachedRemoteSessions`,
+    /// `pendingReconnectRemoteSessions`, and `recentlyAttachedRemoteSessions`
+    /// would accumulate dead entries for the lifetime of the app.
+    func pruneRemoteAttachState(toKnownSelections selections: Set<RemoteSessionSelection>) {
+        explicitlyDetachedRemoteSessions = explicitlyDetachedRemoteSessions.filter { selections.contains($0.key) }
+        pendingReconnectRemoteSessions = pendingReconnectRemoteSessions.filter { selections.contains($0.key) }
+        recentlyAttachedRemoteSessions = recentlyAttachedRemoteSessions.filter { selections.contains($0) }
+    }
+
     /// Move `id` to the front of `recentlyVisitedWorktreeIDs`, then trim the LRU
     /// so it never grows unbounded. Protected worktrees (`protectedWorktreeIDs`)
     /// are never evicted here — only the oldest NON-protected entries past
@@ -722,6 +998,30 @@ final class AppState: ObservableObject {
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
     /// redundant RPC fan-out as `loadTabStates` runs per worktree.
     private var hasAttemptedPanelImport = false
+    /// How `refreshRemote()` fetches the provider roster — injectable for the
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so tests can exercise the disabled-refusal and
+    /// genuine-error branches without a real daemon.
+    lazy var remoteProvidersFetcher: @MainActor () async throws -> RemoteProvidersResult =
+        { [daemonClient] in try await daemonClient.remoteProviders() }
+    /// How `refreshRemote()` fetches the session mirror — injectable for the
+    /// same reason as `remoteProvidersFetcher`.
+    lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
+        { [daemonClient] in try await daemonClient.remoteSessions() }
+    /// How `pushRemoteRenameIfSupported` pushes a rename to the provider —
+    /// injectable for the same reason as `remoteProvidersFetcher` (`DaemonClient`
+    /// is concrete, no protocol), so tests can assert whether it fires per
+    /// capability without a real daemon.
+    lazy var remoteRenamePusher: @MainActor (String, String, String) async throws -> Void =
+        { [daemonClient] provider, sessionID, title in
+            try await daemonClient.remoteRename(provider: provider, sessionID: sessionID, title: title)
+        }
+    /// How `setRemoteBackendsEnabled` persists the remote-backends master
+    /// switch — injectable for the same reason as `controlModeSetter`
+    /// (`DaemonClient` is concrete, no protocol), so the Settings toggle
+    /// tests can exercise the success branch without a real daemon.
+    lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setRemoteBackends(enabled: enabled) }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from
@@ -754,6 +1054,7 @@ final class AppState: ObservableObject {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+    private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
@@ -767,6 +1068,7 @@ final class AppState: ObservableObject {
         self.userDefaults = userDefaults
         restoreLayouts()
         restorePaneHistories()
+        restoreRemoteSessionDisplayNames()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
@@ -965,6 +1267,60 @@ final class AppState: ObservableObject {
         // Corrupt/skewed persisted data with an out-of-range cursor would
         // crash entries[cursor] lookups in the pane header's view body.
         paneHistories = restored.filter { $0.value.isWellFormed }
+    }
+
+    private func persistRemoteSessionDisplayNames() {
+        guard let data = try? JSONEncoder().encode(remoteSessionDisplayNames) else { return }
+        userDefaults.set(data, forKey: Self.remoteSessionDisplayNamesKey)
+    }
+
+    private func restoreRemoteSessionDisplayNames() {
+        guard let data = userDefaults.data(forKey: Self.remoteSessionDisplayNamesKey),
+              let restored = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        remoteSessionDisplayNames = restored
+    }
+
+    /// Composite key into `remoteSessionDisplayNames`. `\u{0}` separates the
+    /// two components so a provider name/session id containing `::` (or any
+    /// other printable separator) can't collide two distinct sessions onto
+    /// the same key.
+    nonisolated static func remoteSessionKey(provider: String, sessionID: String) -> String {
+        "\(provider)\u{0}\(sessionID)"
+    }
+
+    /// The name a remote-session row should render: the local TBD-owned
+    /// override when the user has renamed it, else the provider's reported
+    /// `title`, else the raw session id. Mirrors `Worktree.displayName`
+    /// falling back to git-derived `name` — a TBD-owned name always wins
+    /// over an externally-sourced one.
+    func remoteSessionDisplayName(provider: String, sessionID: String, providerTitle: String?) -> String {
+        remoteSessionDisplayNames[Self.remoteSessionKey(provider: provider, sessionID: sessionID)]
+            ?? providerTitle ?? sessionID
+    }
+
+    /// Rename a remote session. TBD-owned: the local override below is
+    /// always the source of truth for this client, and is additionally
+    /// pushed to the provider when it declares the `rename` capability (see
+    /// `remoteSessionDisplayNames` doc comment and `pushRemoteRenameIfSupported`).
+    /// A blank name
+    /// (`RenameableLabel`'s `allowsEmptyCommit`) REMOVES the override rather
+    /// than storing an empty string, so `remoteSessionDisplayName` falls back
+    /// to the provider's `title` again — the same "clear to default"
+    /// affordance a blank tab rename has (`AppState+Tabs.renameTab`).
+    func renameRemoteSession(provider: String, sessionID: String, displayName: String) {
+        let key = Self.remoteSessionKey(provider: provider, sessionID: sessionID)
+        let trimmed = displayName.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            remoteSessionDisplayNames.removeValue(forKey: key)
+        } else {
+            remoteSessionDisplayNames[key] = trimmed
+        }
+        // Fire-and-forget: the local override above is already the source of
+        // truth for this client regardless of whether the provider push
+        // lands (see `pushRemoteRenameIfSupported`'s doc comment). Wrapped in
+        // a Task so the synchronous rename-commit path
+        // (`RenameableLabel.onCommit`) never blocks on network I/O.
+        Task { await pushRemoteRenameIfSupported(provider: provider, sessionID: sessionID, title: trimmed) }
     }
 
     /// Pushes the outgoing content of an in-place slot replacement onto that
@@ -1231,6 +1587,10 @@ final class AppState: ObservableObject {
             if let repoID = selectedRepoID {
                 Task { [weak self] in await self?.refreshReapRecords(repoID: repoID) }
             }
+        case .remoteSessionsChanged:
+            Task { [weak self] in await self?.refreshRemote() }
+        case .remoteSessionAttention(let d):
+            handleRemoteSessionAttentionDelta(d)
         default:
             break
         }
@@ -1642,6 +2002,7 @@ final class AppState: ObservableObject {
             }
             await loadModelProfiles()
             await loadHibernationConfig()
+            await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
@@ -2109,6 +2470,15 @@ final class AppState: ObservableObject {
     /// in the signature for API stability with the existing call site.
     nonisolated static func scratchSectionVisible(setting: Bool, spaces: [Worktree]) -> Bool {
         setting
+    }
+
+    /// Pure, testable mirror of the sidebar's Remote-section gate: shown only
+    /// when at least one provider is registered. Unlike Scratch, there's no
+    /// user-facing "create the first one" affordance to keep reachable — a
+    /// provider is registered out-of-band (config), not created from this
+    /// section — so an empty roster simply hides the section entirely.
+    nonisolated static func remoteSectionVisible(providers: [RemoteProviderStatus]) -> Bool {
+        !providers.isEmpty
     }
 
     /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:

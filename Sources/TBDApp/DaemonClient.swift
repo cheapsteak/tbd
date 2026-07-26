@@ -898,6 +898,81 @@ actor DaemonClient {
         )
     }
 
+    // MARK: - Remote agent backends
+
+    /// List every registered remote-agent provider's negotiated contract + current health.
+    func remoteProviders() async throws -> RemoteProvidersResult {
+        try await callNoParamsAsync(method: RPCMethod.remoteProviders, resultType: RemoteProvidersResult.self)
+    }
+
+    /// List the daemon's remote-session mirror across all providers.
+    func remoteSessions() async throws -> RemoteSessionsResult {
+        try await callNoParamsAsync(method: RPCMethod.remoteSessions, resultType: RemoteSessionsResult.self)
+    }
+
+    /// Create a new remote session via `provider`. `paramsJSON` is the raw JSON
+    /// object of create-form values, passed through to the provider verbatim.
+    func remoteCreate(provider: String, paramsJSON: String) async throws -> RemoteSessionPayload {
+        try await callAsync(
+            method: RPCMethod.remoteCreate,
+            params: RemoteCreateParams(provider: provider, paramsJSON: paramsJSON),
+            resultType: RemoteSessionPayload.self
+        )
+    }
+
+    /// Stop a remote session.
+    func remoteStop(provider: String, sessionID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteStop,
+            params: RemoteStopParams(provider: provider, sessionID: sessionID)
+        )
+    }
+
+    /// Send text input to a remote session.
+    func remoteSend(provider: String, sessionID: String, text: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteSend,
+            params: RemoteSendParams(provider: provider, sessionID: sessionID, text: text)
+        )
+    }
+
+    /// Fetch recent log lines for a remote session. `lines` nil == provider default.
+    func remoteLog(provider: String, sessionID: String, lines: Int? = nil) async throws -> RemoteLogResult {
+        try await callAsync(
+            method: RPCMethod.remoteLog,
+            params: RemoteLogParams(provider: provider, sessionID: sessionID, lines: lines),
+            resultType: RemoteLogResult.self
+        )
+    }
+
+    /// Push a display-name rename to a provider that declares the `rename`
+    /// capability (docs/remote-provider-contract.md § `rename`). Callers must
+    /// check the capability themselves (`AppState.pushRemoteRenameIfSupported`)
+    /// before calling — this method, like `remoteSend`/`remoteLog`, does not
+    /// re-check it.
+    func remoteRename(provider: String, sessionID: String, title: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteRename,
+            params: RemoteRenameParams(provider: provider, sessionID: sessionID, title: title)
+        )
+    }
+
+    /// Dismiss a gone/errored remote session from the mirror.
+    func remoteDismiss(provider: String, sessionID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteDismiss,
+            params: RemoteDismissParams(provider: provider, sessionID: sessionID)
+        )
+    }
+
+    /// Set the remote-agent-backends master switch.
+    func setRemoteBackends(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteBackends,
+            params: ConfigSetRemoteBackendsParams(enabled: enabled)
+        )
+    }
+
     /// Request a control-mode attach for one pane; the fd arrives separately
     /// on the sidecar (see `openAttach`).
     func attachRequest(

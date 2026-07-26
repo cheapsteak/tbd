@@ -28,6 +28,12 @@ struct SidebarView: View {
                     RepoSectionView(repo: repo)
                         .opacity(repo.hidden ? 0.55 : 1.0)
                 }
+                // Rendered below the repos, not above: remoteness shouldn't
+                // be positionally focal. Hidden entirely when no provider is
+                // registered.
+                if AppState.remoteSectionVisible(providers: appState.remoteProviders) {
+                    RemoteSectionView()
+                }
             }
             .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
                 guard let target else { return }

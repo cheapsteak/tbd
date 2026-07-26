@@ -217,6 +217,15 @@ public enum RPCMethod {
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
+    public static let remoteProviders = "remote.providers"
+    public static let remoteSessions = "remote.sessions"
+    public static let remoteCreate = "remote.create"
+    public static let remoteStop = "remote.stop"
+    public static let remoteSend = "remote.send"
+    public static let remoteLog = "remote.log"
+    public static let remoteRename = "remote.rename"
+    public static let remoteDismiss = "remote.dismiss"
+    public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
     public static let panelImportLegacy = "panel.importLegacy"
@@ -982,6 +991,139 @@ public struct GCSweepNowParams: Codable, Sendable {
     }
 }
 
+/// Result of `remote.providers` — every registered provider's negotiated
+/// contract + current health.
+public struct RemoteProvidersResult: Codable, Sendable {
+    public let providers: [RemoteProviderStatus]
+    public init(providers: [RemoteProviderStatus]) { self.providers = providers }
+}
+
+/// One row of the `remote.sessions` mirror — the provider-scoped payload
+/// plus the drift bookkeeping (`gone`/`dismissed`) the app needs to render
+/// (or hide) a stale session.
+public struct RemoteSessionInfo: Codable, Sendable, Identifiable {
+    /// Stable synthetic identity for this mirror row — see
+    /// `RemoteSessionIdentity`. ALWAYS recomputed from `provider`/
+    /// `payload.id` rather than trusted off the wire (see `init(from:)`):
+    /// since it's a pure function of those two fields, an older daemon that
+    /// never sent this key, or any future transport that drops it, still
+    /// produces an IDENTICAL id client-side — there is nothing to default or
+    /// version. It's still included on the wire (for other/non-Swift
+    /// consumers and debugging), just never trusted as the source of truth.
+    public let id: UUID
+    public let provider: String
+    public let payload: RemoteSessionPayload
+    public let gone: Bool
+    public let dismissed: Bool
+    public let lastSeen: Date
+    /// The local repo this session was resolved to, via `meta["repo"]`
+    /// (`docs/remote-provider-contract.md` § Session object) matched against
+    /// registered repos' `remoteURL` (`RemoteRepoMatching`). Pinned at first
+    /// sighting by the daemon (`RemoteSessionStore`) — nil means either "the
+    /// provider reported no repo" or "not resolved yet", and the daemon
+    /// keeps retrying resolution only while this stays nil. Once non-nil, it
+    /// never changes, even if the provider's reported meta later does.
+    public let resolvedRepoID: UUID?
+
+    public init(provider: String, payload: RemoteSessionPayload,
+                gone: Bool, dismissed: Bool, lastSeen: Date, resolvedRepoID: UUID? = nil) {
+        self.id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
+        self.provider = provider; self.payload = payload
+        self.gone = gone; self.dismissed = dismissed; self.lastSeen = lastSeen
+        self.resolvedRepoID = resolvedRepoID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, provider, payload, gone, dismissed, lastSeen, resolvedRepoID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        payload = try c.decode(RemoteSessionPayload.self, forKey: .payload)
+        gone = try c.decode(Bool.self, forKey: .gone)
+        dismissed = try c.decode(Bool.self, forKey: .dismissed)
+        lastSeen = try c.decode(Date.self, forKey: .lastSeen)
+        resolvedRepoID = try c.decodeIfPresent(UUID.self, forKey: .resolvedRepoID)
+        // See the `id` doc comment — deliberately recomputed, never decoded.
+        id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
+    }
+}
+
+public struct RemoteSessionsResult: Codable, Sendable {
+    public let sessions: [RemoteSessionInfo]
+    public init(sessions: [RemoteSessionInfo]) { self.sessions = sessions }
+}
+
+public struct RemoteCreateParams: Codable, Sendable {
+    public let provider: String
+    /// Raw JSON object of create-form values; passed to the provider verbatim
+    /// inside the contract's create request. Kept as a string so RPC stays
+    /// schema-free about provider-specific fields.
+    public let paramsJSON: String
+    public init(provider: String, paramsJSON: String) {
+        self.provider = provider; self.paramsJSON = paramsJSON
+    }
+}
+
+public struct RemoteStopParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+public struct RemoteSendParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let text: String
+    public init(provider: String, sessionID: String, text: String) {
+        self.provider = provider; self.sessionID = sessionID; self.text = text
+    }
+}
+
+public struct RemoteLogParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let lines: Int?
+    public init(provider: String, sessionID: String, lines: Int? = nil) {
+        self.provider = provider; self.sessionID = sessionID; self.lines = lines
+    }
+}
+
+public struct RemoteLogResult: Codable, Sendable {
+    public let text: String
+    public init(text: String) { self.text = text }
+}
+
+public struct RemoteDismissParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Params for `remote.rename` — pushes a display-name rename to a provider
+/// that declares the optional `rename` capability
+/// (`docs/remote-provider-contract.md` § `rename`). `title` rides as a
+/// single argv value (never shell-escaped — the daemon execs the provider
+/// directly, per contract).
+public struct RemoteRenameParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let title: String
+    public init(provider: String, sessionID: String, title: String) {
+        self.provider = provider; self.sessionID = sessionID; self.title = title
+    }
+}
+
+public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return
 /// type of `OrphanGC.sweep(dryRun:)` in TBDDaemon — one type, no daemon-side
 /// mirror.
@@ -1573,19 +1715,42 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// uses this to decide whether `panel.get`/`panel.apply` are live or the
     /// legacy client-owned layout path should still be used.
     public let panelSurfaceEnabled: Bool
+    /// Whether `config.remoteBackendsEnabled` is currently set. Default OFF
+    /// while the feature soaks (Task 7). The app can already read this off
+    /// `Config`, but this lets `remoteBackendsLive` sit next to it in one
+    /// payload — see that field's doc comment for why both are needed.
+    public let remoteBackendsEnabled: Bool
+    /// Whether the daemon actually constructed a `RemoteProviderManager` at
+    /// boot — `false` when the flag is off, AND when the flag is on but was
+    /// flipped on after the daemon last started (it only constructs the
+    /// manager at boot; see `Daemon.swift`). Lets the app distinguish "flag
+    /// on and live" from "flag on but needs a restart" without calling a
+    /// `remote.*` verb and parsing its error string.
+    ///
+    /// True from the moment the manager is *constructed*, not from when it
+    /// has finished describing providers — so during the brief boot window
+    /// before `remoteManager.start()` completes, `remoteBackendsLive` can be
+    /// true while the provider list is still empty. Fine for the
+    /// restart-required distinction this field exists for; just don't read
+    /// it as "at least one provider is up."
+    public let remoteBackendsLive: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
-                panelSurfaceEnabled: Bool = false) {
+                panelSurfaceEnabled: Bool = false,
+                remoteBackendsEnabled: Bool = false,
+                remoteBackendsLive: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.panelSurfaceEnabled = panelSurfaceEnabled
+        self.remoteBackendsEnabled = remoteBackendsEnabled
+        self.remoteBackendsLive = remoteBackendsLive
     }
 
     public init(from decoder: Decoder) throws {
@@ -1601,6 +1766,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
         panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
+        // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).
+        remoteBackendsEnabled = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsEnabled) ?? false
+        remoteBackendsLive = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsLive) ?? false
     }
 }
 
