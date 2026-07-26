@@ -118,9 +118,12 @@ struct WorktreeRowView: View {
 
     /// Whether the leading pin toggle is on screen right now. Read by both the
     /// pin overlay and the hierarchy-guide-line overlay, which has to break the
-    /// segment the button would otherwise be struck through by.
+    /// segment the button would otherwise be struck through by. A pinned
+    /// worktree keeps the (solid) pin visible even without hover, so pinned
+    /// state is persistent — only unpinned rows need the hover to reveal the
+    /// (hollow) affordance.
     private var showsPinToggle: Bool {
-        isRowHovered && !isMain && !worktree.isNightwatchDesk
+        (isRowHovered || worktree.pinnedAt != nil) && !isMain && !worktree.isNightwatchDesk
     }
 
     private func handleNestedPlus(repoID: UUID) {
