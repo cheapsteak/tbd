@@ -248,13 +248,20 @@ extension AppState {
     /// `markSelectedWorktreesAsRead`'s optimistic local clear-on-select — the
     /// daemon has no per-remote-session read-state to round-trip, so this is
     /// purely a local bookkeeping clear.
-    func selectRemoteSession(provider: String, sessionID: String) {
+    ///
+    /// - Parameter tab: an optional one-shot hint for which tab the detail
+    ///   view should land on (set by a context-menu action like "View Log"
+    ///   that jumps straight to a tab). `nil` (the default, used by a plain
+    ///   row click) means "default tab" — always overwrites any stale
+    ///   leftover hint from a previous selection.
+    func selectRemoteSession(provider: String, sessionID: String, tab: RemoteSessionDetailTab? = nil) {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil
         selectedScratchSection = false
         let selection = RemoteSessionSelection(provider: provider, sessionID: sessionID)
         selectedRemoteSession = selection
+        remoteSessionRequestedTab = tab
         unreadByRemoteSession[selection] = nil
     }
 }

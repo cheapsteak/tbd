@@ -272,6 +272,129 @@ struct RemoteAppStateTests {
         }
     }
 
+    // MARK: - Task 10: rename push (docs/remote-provider-contract.md § `rename`)
+
+    /// Pure gate — one test per branch, per repo policy for behavior-gating
+    /// conditionals.
+    @Test func supportsRenamePush_trueWhenCapabilityPresent() {
+        #expect(AppState.supportsRenamePush(capabilities: ["log", "rename", "send"]))
+    }
+
+    @Test func supportsRenamePush_falseWhenCapabilityAbsent() {
+        #expect(!AppState.supportsRenamePush(capabilities: ["log", "send"]))
+    }
+
+    @Test func supportsRenamePush_falseWhenCapabilitiesEmpty() {
+        #expect(!AppState.supportsRenamePush(capabilities: []))
+    }
+
+    /// Records calls without a real `DaemonClient` — same injection seam
+    /// style as `remoteProvidersFetcher`.
+    private final class RenamePushRecorder: @unchecked Sendable {
+        private(set) var calls: [(provider: String, sessionID: String, title: String)] = []
+        var shouldThrow = false
+        func record(_ provider: String, _ sessionID: String, _ title: String) throws {
+            calls.append((provider, sessionID, title))
+            if shouldThrow { throw DaemonClientError.connectionFailed("boom") }
+        }
+    }
+
+    @Test func pushRemoteRenameIfSupported_pushesWhenCapabilityPresent() async {
+        await withStateAsync { state in
+            let provider = RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
+                describe: ProviderDescribe(name: "acme", capabilities: ["rename"]),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+            state.remoteProviders = [provider]
+            let recorder = RenamePushRecorder()
+            state.remoteRenamePusher = { provider, sessionID, title in
+                try recorder.record(provider, sessionID, title)
+            }
+
+            await state.pushRemoteRenameIfSupported(provider: "acme", sessionID: "s1", title: "fix ci")
+
+            #expect(recorder.calls.count == 1)
+            #expect(recorder.calls.first?.provider == "acme")
+            #expect(recorder.calls.first?.sessionID == "s1")
+            #expect(recorder.calls.first?.title == "fix ci")
+        }
+    }
+
+    @Test func pushRemoteRenameIfSupported_doesNotPushWhenCapabilityAbsent() async {
+        await withStateAsync { state in
+            let provider = RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
+                describe: ProviderDescribe(name: "acme", capabilities: ["log", "send"]),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+            state.remoteProviders = [provider]
+            let recorder = RenamePushRecorder()
+            state.remoteRenamePusher = { provider, sessionID, title in
+                try recorder.record(provider, sessionID, title)
+            }
+
+            await state.pushRemoteRenameIfSupported(provider: "acme", sessionID: "s1", title: "fix ci")
+
+            #expect(recorder.calls.isEmpty)
+        }
+    }
+
+    @Test func pushRemoteRenameIfSupported_doesNotPushWhenProviderUnknown() async {
+        await withStateAsync { state in
+            // No providers loaded at all — must degrade to a no-op, not a crash.
+            let recorder = RenamePushRecorder()
+            state.remoteRenamePusher = { provider, sessionID, title in
+                try recorder.record(provider, sessionID, title)
+            }
+
+            await state.pushRemoteRenameIfSupported(provider: "acme", sessionID: "s1", title: "fix ci")
+
+            #expect(recorder.calls.isEmpty)
+        }
+    }
+
+    @Test func pushRemoteRenameIfSupported_doesNotPushAnEmptyTitleEvenWithCapability() async {
+        await withStateAsync { state in
+            let provider = RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
+                describe: ProviderDescribe(name: "acme", capabilities: ["rename"]),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+            state.remoteProviders = [provider]
+            let recorder = RenamePushRecorder()
+            state.remoteRenamePusher = { provider, sessionID, title in
+                try recorder.record(provider, sessionID, title)
+            }
+
+            // Empty title == clearing the local override back to the
+            // provider's own title — not a rename to push upstream.
+            await state.pushRemoteRenameIfSupported(provider: "acme", sessionID: "s1", title: "")
+
+            #expect(recorder.calls.isEmpty)
+        }
+    }
+
+    /// A failing push must be swallowed, not thrown — `renameRemoteSession`'s
+    /// synchronous local override is the source of truth regardless of
+    /// whether the provider push lands.
+    @Test func pushRemoteRenameIfSupported_swallowsPusherFailure() async {
+        await withStateAsync { state in
+            let provider = RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
+                describe: ProviderDescribe(name: "acme", capabilities: ["rename"]),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+            state.remoteProviders = [provider]
+            let recorder = RenamePushRecorder()
+            recorder.shouldThrow = true
+            state.remoteRenamePusher = { provider, sessionID, title in
+                try recorder.record(provider, sessionID, title)
+            }
+
+            // Must not throw/crash the test.
+            await state.pushRemoteRenameIfSupported(provider: "acme", sessionID: "s1", title: "fix ci")
+
+            #expect(recorder.calls.count == 1)
+        }
+    }
+
     // Helper: run an async body against a freshly-isolated AppState with
     // proper UserDefaults suite teardown (async variant of `withState`).
     private func withStateAsync(_ body: (AppState) async -> Void) async {

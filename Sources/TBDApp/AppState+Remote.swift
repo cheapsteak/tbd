@@ -167,4 +167,38 @@ extension AppState {
             unreadByRemoteSession[selection] = incoming
         }
     }
+
+    // MARK: - Rename push (docs/remote-provider-contract.md § `rename`)
+
+    /// Whether a provider's declared capability list includes the optional
+    /// `rename` verb. Pure gate extracted for direct testing — mirrors
+    /// `classifyRemoteRefreshFailure`.
+    nonisolated static func supportsRenamePush(capabilities: [String]) -> Bool {
+        capabilities.contains("rename")
+    }
+
+    /// Pushes a display-name rename to the provider when — and only when —
+    /// it declares the `rename` capability, so other clients of the same
+    /// backend (another machine, or the provider's own UI) see the new title
+    /// too. Best-effort: any failure is logged, never surfaced to the user —
+    /// `remoteSessionDisplayNames` is already the source of truth for THIS
+    /// client regardless of whether the push lands, and the contract
+    /// requires the verb to stay entirely optional (a provider without it —
+    /// or one that fails this call — must keep working with a local-only
+    /// name). Never invoked with an empty `title`: clearing a local override
+    /// back to the provider's own reported title isn't a rename to push
+    /// upstream. Exposed as a plain `async` function (not itself
+    /// `Task`-wrapped) so tests can await it deterministically —
+    /// `renameRemoteSession` is what wraps it in a fire-and-forget `Task`.
+    func pushRemoteRenameIfSupported(provider: String, sessionID: String, title: String) async {
+        guard !title.isEmpty else { return }
+        let capabilities = remoteProviders.first { $0.config.name == provider }?.describe?.capabilities ?? []
+        guard AppState.supportsRenamePush(capabilities: capabilities) else { return }
+        do {
+            try await remoteRenamePusher(provider, sessionID, title)
+        } catch {
+            remoteLogger.error(
+                "remoteRename push failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(error, privacy: .public)")
+        }
+    }
 }

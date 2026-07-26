@@ -245,6 +245,16 @@ final class AppState: ObservableObject {
     /// `AppState+Navigation.swift`); same documented scope cut — no
     /// `NavigationEntry` integration for v1.
     @Published var selectedRemoteSession: RemoteSessionSelection? = nil
+    /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
+    /// set when a sidebar context-menu action (e.g. "View Log") jumps
+    /// straight to a specific tab instead of the default. Consumed (read AND
+    /// cleared) by the detail view on appear/selection-change — mirrors the
+    /// reveal-nonce discipline documented for `RepoDetailView`'s persistent
+    /// `@State`: a reveal must be a one-shot consumed by the acting child,
+    /// checked in BOTH onAppear and onChange, or a stale hint replays on an
+    /// unrelated later selection. `selectRemoteSession(provider:sessionID:tab:)`
+    /// sets this alongside `selectedRemoteSession`; nil means "default tab".
+    @Published var remoteSessionRequestedTab: RemoteSessionDetailTab?
 
     // MARK: - Navigation history (back/forward)
 
@@ -836,6 +846,14 @@ final class AppState: ObservableObject {
     /// same reason as `remoteProvidersFetcher`.
     lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
         { [daemonClient] in try await daemonClient.remoteSessions() }
+    /// How `pushRemoteRenameIfSupported` pushes a rename to the provider —
+    /// injectable for the same reason as `remoteProvidersFetcher` (`DaemonClient`
+    /// is concrete, no protocol), so tests can assert whether it fires per
+    /// capability without a real daemon.
+    lazy var remoteRenamePusher: @MainActor (String, String, String) async throws -> Void =
+        { [daemonClient] provider, sessionID, title in
+            try await daemonClient.remoteRename(provider: provider, sessionID: sessionID, title: title)
+        }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from
@@ -1127,6 +1145,12 @@ final class AppState: ObservableObject {
         } else {
             remoteSessionDisplayNames[key] = trimmed
         }
+        // Fire-and-forget: the local override above is already the source of
+        // truth for this client regardless of whether the provider push
+        // lands (see `pushRemoteRenameIfSupported`'s doc comment). Wrapped in
+        // a Task so the synchronous rename-commit path
+        // (`RenameableLabel.onCommit`) never blocks on network I/O.
+        Task { await pushRemoteRenameIfSupported(provider: provider, sessionID: sessionID, title: trimmed) }
     }
 
     /// Pushes the outgoing content of an in-place slot replacement onto that

@@ -98,6 +98,36 @@ struct RemoteSessionSelectionTests {
         }
     }
 
+    // MARK: - Task 10: remoteSessionRequestedTab (context-menu tab-jump hint)
+
+    @Test func selectRemoteSessionDefaultsRequestedTabToNil() {
+        withState { state in
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.remoteSessionRequestedTab == nil)
+        }
+    }
+
+    @Test func selectRemoteSessionWithTabSetsRequestedTab() {
+        withState { state in
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", tab: .log)
+            #expect(state.remoteSessionRequestedTab == .log)
+        }
+    }
+
+    /// A later plain selection (no `tab:` argument) must overwrite a stale
+    /// hint from a previous context-menu jump — otherwise reselecting the
+    /// same row by a plain click could replay an old "jump to Log" request.
+    @Test func laterPlainSelectionOverwritesAStaleRequestedTab() {
+        withState { state in
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", tab: .log)
+            #expect(state.remoteSessionRequestedTab == .log)
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(state.remoteSessionRequestedTab == nil)
+        }
+    }
+
     @Test func selectingAnotherRemoteSessionReplacesThePreviousOne() {
         withState { state in
             state.selectRemoteSession(provider: "acme", sessionID: "s1")

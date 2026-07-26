@@ -112,6 +112,19 @@ public struct ProviderDescribe: Codable, Sendable {
         case createParams = "create_params"
     }
 
+    /// Memberwise init for constructing fixtures directly (tests, previews)
+    /// — the custom `init(from:)` below suppresses Swift's synthesized
+    /// memberwise init, so without this the only way to build one was a
+    /// round-trip through `JSONDecoder`.
+    public init(contractVersions: [Int] = [1], name: String, providerVersion: String? = nil,
+                capabilities: [String] = [], createParams: [ProviderCreateParamField] = []) {
+        self.contractVersions = contractVersions
+        self.name = name
+        self.providerVersion = providerVersion
+        self.capabilities = capabilities
+        self.createParams = createParams
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         contractVersions = try c.decode([Int].self, forKey: .contractVersions)
@@ -135,6 +148,19 @@ public struct ProviderCreateParamField: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case name, type, label, required, values
         case defaultValue = "default"
+    }
+
+    /// Memberwise init for constructing fixtures directly (tests, previews)
+    /// — see `ProviderDescribe`'s equivalent init for why this is needed
+    /// alongside a custom `init(from:)`.
+    public init(name: String, type: String, label: String? = nil, required: Bool = false,
+                defaultValue: String? = nil, values: [String]? = nil) {
+        self.name = name
+        self.type = type
+        self.label = label
+        self.required = required
+        self.defaultValue = defaultValue
+        self.values = values
     }
 
     public init(from decoder: Decoder) throws {
