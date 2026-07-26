@@ -270,7 +270,7 @@ struct PanePlaceholder: View {
     /// entry means no other place to jump to.
     private func historySearchButton(history: PaneHistory) -> some View {
         Button(action: { showHistoryPalette = true }) {
-            Image(systemName: "text.magnifyingglass")
+            Image(systemName: "line.3.horizontal")
                 .font(.system(size: 8, weight: .bold))
                 .frame(width: 16, height: 16)
                 .contentShape(Rectangle())

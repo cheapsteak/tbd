@@ -57,15 +57,9 @@ struct PaneHistoryPaletteFilterTests {
     }
 
     @Test func labelForCodeViewerIsBasenameOnly() {
+        // Row display drops the full path entirely (single-line, basename
+        // only) — this is the same helper the row view calls for its label.
         #expect(paneHistoryLabel(for: .codeViewer(id: UUID(), path: "/a/b/c.swift")) == "c.swift")
-    }
-
-    @Test func parentDirectoryIsNilForNonFileEntries() {
-        #expect(paneHistoryParentDirectory(for: .liveTranscript(id: UUID(), terminalID: UUID())) == nil)
-    }
-
-    @Test func parentDirectoryIsDimmedDirectoryForFileEntries() {
-        #expect(paneHistoryParentDirectory(for: .codeViewer(id: UUID(), path: "/a/b/c.swift")) == "/a/b")
     }
 }
 

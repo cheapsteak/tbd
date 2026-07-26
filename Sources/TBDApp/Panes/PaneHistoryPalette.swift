@@ -33,14 +33,6 @@ func paneHistorySearchText(for content: PaneContent) -> String {
     return paneHistoryLabel(for: content)
 }
 
-/// Parent directory shown dimmed under a file entry's basename; nil for
-/// every other pane type (and for a bare filename with no directory).
-func paneHistoryParentDirectory(for content: PaneContent) -> String? {
-    guard case .codeViewer(_, let path) = content else { return nil }
-    let dir = (path as NSString).deletingLastPathComponent
-    return dir.isEmpty ? nil : dir
-}
-
 /// Pure substring filter behind the palette's search field: case-insensitive,
 /// no fuzzy matching. Empty query matches everything, preserving MRU order.
 enum PaneHistoryPaletteFilter {
@@ -110,10 +102,11 @@ struct PaneHistoryPaletteView: View {
                         }
                     }
                 }
+                .padding(.vertical, 6)
             }
             .frame(maxHeight: 240)
         }
-        .frame(width: 280)
+        .frame(minWidth: 280, maxWidth: 460)
         .onAppear { searchFocused = true }
         .onChange(of: query) { _, _ in highlightedPosition = 0 }
     }
@@ -127,17 +120,9 @@ struct PaneHistoryPaletteView: View {
                 .opacity(entryIndex == history.cursor ? 1 : 0)
                 .frame(width: 12)
 
-            VStack(alignment: .leading, spacing: 0) {
-                Text(paneHistoryLabel(for: content))
-                    .font(.caption)
-                    .lineLimit(1)
-                if let parentDir = paneHistoryParentDirectory(for: content) {
-                    Text(parentDir)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
+            Text(paneHistoryLabel(for: content))
+                .font(.caption)
+                .lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
