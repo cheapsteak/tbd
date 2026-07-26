@@ -137,32 +137,60 @@ struct RemoteSessionSelectionTests {
         }
     }
 
-    /// Back/forward navigation entries never encode a remote-session
-    /// selection (documented scope cut, same as scratch), but applying a
-    /// `.repo` or `.worktrees` history entry must still clear a lingering
-    /// remote-session selection so it never survives navigating away.
-    @Test func navigatingBackToARepoEntryClearsRemoteSessionSelection() {
+    /// As of this task, a remote-session selection IS a first-class
+    /// navigation entry (unlike scratch spaces, which keep the documented
+    /// scope cut) — selecting one pushes its own history entry, so back
+    /// from it lands on whatever was selected immediately before, not on
+    /// whatever the remote session's OWN selection happened to have
+    /// clobbered in local state.
+    @Test func navigatingBackFromARemoteSessionLandsOnThePriorEntry() {
         withState { state in
             let repoID = UUID()
             let wtID = UUID()
             state.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "r", defaultBranch: "main")]
             state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
 
-            // History: [.repo(repoID)] (index 0), [.worktrees([wtID])] (index 1, current).
+            // History: [.repo(repoID)] (index 0), [.worktrees([wtID])] (index 1),
+            // [.remoteSession(...)] (index 2, current).
             state.selectRepo(id: repoID)
             state.selectedWorktreeIDs = [wtID]
-
-            // Remote-session selection is set without going through
-            // recordNavigation (documented scope cut) — history still points
-            // at index 1.
             state.selectRemoteSession(provider: "acme", sessionID: "s1")
             #expect(state.selectedRemoteSession != nil)
             #expect(state.canGoBack == true)
 
             state.navigateBack()
 
+            // Lands on the immediately-prior entry — the worktree selection —
+            // not all the way back at the repo.
             #expect(state.selectedRemoteSession == nil)
+            #expect(state.selectedWorktreeIDs == [wtID])
+            #expect(state.selectedRepoID == nil)
+
+            state.navigateBack()
+
             #expect(state.selectedRepoID == repoID)
+        }
+    }
+
+    /// Applying a `.repo`/`.worktrees` history entry (via back/forward, not
+    /// through a fresh remote selection) must still clear a lingering
+    /// remote-session selection so it never survives navigating away — this
+    /// is now exercised by ordinary back-navigation off a remote entry
+    /// rather than by a special case, since `.remoteSession` participates in
+    /// history like everything else.
+    @Test func navigatingBackToAWorktreeEntryClearsRemoteSessionSelection() {
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+
+            state.selectedWorktreeIDs = [wtID]
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            state.navigateBack()
+
+            #expect(state.selectedRemoteSession == nil)
+            #expect(state.selectedWorktreeIDs == [wtID])
         }
     }
 

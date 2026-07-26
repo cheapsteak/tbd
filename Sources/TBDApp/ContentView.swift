@@ -44,14 +44,16 @@ struct ContentView: View {
         } else if appState.selectedScratchSection {
             ScratchDetailView()
         } else if let remoteSelection = appState.selectedRemoteSession {
-            // Keyed by the selection itself so switching to a
-            // DIFFERENT remote session always starts fresh @State —
-            // never an attach process left running against, or a
-            // cached log for, the wrong session. Routed independently
-            // of `appState.repos.isEmpty`/`selectedWorktreeIDs`: a
-            // remote session has no local repo requirement.
+            // Deliberately NOT `.id(remoteSelection)`-keyed: `RemoteSessionDetailView`
+            // now hosts `RemoteAttachPager`, which keeps recently-viewed
+            // sessions' attach terminals alive across selection changes
+            // (bounded keep-alive) — `.id()`-ing this would tear the pager
+            // (and every live connection it holds) down on every switch.
+            // The view resets its own per-session-only `@State` itself via
+            // `.onChange(of: selection)`. Routed independently of
+            // `appState.repos.isEmpty`/`selectedWorktreeIDs`: a remote
+            // session has no local repo requirement.
             RemoteSessionDetailView(selection: remoteSelection)
-                .id(remoteSelection)
         } else if appState.repos.isEmpty {
             emptyStateView
         } else if let repoID = appState.selectedRepoID {

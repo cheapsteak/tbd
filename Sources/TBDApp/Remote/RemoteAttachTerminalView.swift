@@ -16,25 +16,25 @@ private let attachLogger = Logger(subsystem: "com.tbd.app", category: "remoteAtt
 ///
 /// Per the contract, pane exit means the viewer detached — it never means
 /// the remote session died (only `list`/`events` are authoritative about
-/// that). So this view always shows an overlay that keeps that framing
-/// ("the session keeps running remotely") regardless of exit code, with a
-/// Reattach action — session state continues to come from the poll/mirror
-/// exactly as it did before attach. The overlay's TITLE does distinguish a
-/// clean detach (exit 0) from the local `attach` process ending on its own
-/// (non-zero/unreadable exit — e.g. a bad credential or unreachable host
-/// that never actually connected), so a failed connection doesn't read as a
-/// successful detach; see `RemoteAttachTerminalView.isUnexpectedExit`.
+/// that). This view itself no longer renders the "Detached" overlay: since
+/// attach is now mounted across MULTIPLE sessions at once by
+/// `RemoteAttachPager` (bounded keep-alive, see `RemoteAttachLifecycle`),
+/// the decision of "should this still be mounted at all" has to survive
+/// this view's own instance being torn down and recreated (a detached
+/// session that ages out of the keep-alive cap gets a BRAND NEW instance
+/// when the user comes back to it) — so detach state lives on `AppState`
+/// instead (`AppState.explicitlyDetachedRemoteSessions`, written via
+/// `onDetached` below) and the overlay/Reattach UI is rendered by
+/// `RemoteSessionDetailView`, which persists across that churn. This view
+/// is now just the bare terminal host plus one pure classification helper.
 struct RemoteAttachTerminalView: View {
     let provider: RemoteProviderConfig
     let sessionID: String
+    /// Called once when the local attach process ends, for any reason
+    /// (clean exit, crash, unreachable host). Never implies the remote
+    /// session died — only that this local viewer process stopped.
+    let onDetached: (Int32?) -> Void
     @EnvironmentObject var appearance: AppearanceSettings
-
-    /// Bumped by Reattach to force `RemoteAttachTerminalRepresentable` (and
-    /// its `Coordinator`) to be recreated — starting a fresh `LocalProcess`
-    /// rather than trying to resume a torn-down one.
-    @State private var generation = 0
-    @State private var isDetached = false
-    @State private var detachExitCode: Int32?
 
     /// A non-zero (or unreadable) exit code means the local `attach` process
     /// ended on its own rather than the user cleanly detaching — e.g. a bad
@@ -42,69 +42,20 @@ struct RemoteAttachTerminalView: View {
     /// fail to even connect. `nil` (no exit code available) is treated as
     /// the non-alarming case: there's nothing here to confidently call a
     /// failure. Either way the session itself is unaffected — only the
-    /// framing (title/icon) changes, never the "keeps running remotely"
-    /// contract line.
-    private var isUnexpectedExit: Bool {
-        RemoteAttachTerminalView.isUnexpectedExit(exitCode: detachExitCode)
-    }
-
+    /// caller's framing (title/icon) should change, never the "keeps
+    /// running remotely" contract line.
     static func isUnexpectedExit(exitCode: Int32?) -> Bool {
         guard let exitCode else { return false }
         return exitCode != 0
     }
 
     var body: some View {
-        ZStack {
-            RemoteAttachTerminalRepresentable(
-                provider: provider,
-                sessionID: sessionID,
-                appearance: appearance,
-                onDetached: { exitCode in
-                    isDetached = true
-                    detachExitCode = exitCode
-                }
-            )
-            .id(generation)
-            .opacity(isDetached ? 0.35 : 1)
-            .allowsHitTesting(!isDetached)
-
-            if isDetached {
-                detachOverlay
-            }
-        }
-    }
-
-    private var detachOverlay: some View {
-        VStack(spacing: 10) {
-            Image(systemName: isUnexpectedExit
-                  ? "exclamationmark.triangle"
-                  : "antenna.radiowaves.left.and.right.slash")
-                .font(.system(size: 22))
-                .foregroundStyle(.secondary)
-            Text(isUnexpectedExit ? "Attach ended unexpectedly" : "Detached")
-                .font(.headline)
-            // Contract-correct framing kept regardless of exit code: only
-            // `list`/`events` are authoritative about the remote session's
-            // fate, never this local viewer process exiting.
-            Text("The session keeps running remotely.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            if let detachExitCode {
-                Text("exit code \(detachExitCode)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Button("Reattach") {
-                isDetached = false
-                detachExitCode = nil
-                generation += 1
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.top, 4)
-        }
-        .padding(24)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .shadow(radius: 8)
+        RemoteAttachTerminalRepresentable(
+            provider: provider,
+            sessionID: sessionID,
+            appearance: appearance,
+            onDetached: onDetached
+        )
     }
 }
 

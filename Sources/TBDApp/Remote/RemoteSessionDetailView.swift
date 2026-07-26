@@ -19,17 +19,19 @@ enum RemoteSessionDetailTab: String, CaseIterable, Equatable, Hashable {
 /// panel: those are local-worktree-only and simply aren't rendered here
 /// (spec non-goal for v1 remote sessions).
 ///
-/// The caller (`ContentView`) is expected to key this view with
-/// `.id(selection)` — a fresh `RemoteSessionDetailView` per distinct
-/// (provider, sessionID) pair, so switching to a DIFFERENT session always
-/// starts with fresh `@State` (never an attach process left running against
-/// the wrong session, never a previous session's cached log text).
+/// UNLIKE its earlier revision, the caller (`ContentView`) deliberately does
+/// NOT key this view with `.id(selection)` any more: this view now hosts
+/// `RemoteAttachPager`, which keeps recently-viewed sessions' attach
+/// terminals alive across selection changes (bounded keep-alive — see
+/// `RemoteAttachLifecycle`), and `.id()`-ing the parent would tear that
+/// pager down (and every live connection it holds) on every single session
+/// switch, defeating the whole point. Instead this view resets its own
+/// per-session-only `@State` explicitly via `.onChange(of: selection)`.
 struct RemoteSessionDetailView: View {
     let selection: RemoteSessionSelection
     @EnvironmentObject var appState: AppState
 
     @State private var selectedTab: RemoteSessionDetailTab = .attach
-    @State private var hasStartedAttach = false
     @State private var showStopConfirm = false
     @State private var logRefreshToken = 0
 
@@ -105,6 +107,7 @@ struct RemoteSessionDetailView: View {
             }
         }
         .onAppear { adoptPendingTab() }
+        .onChange(of: selection) { _, _ in resetForNewSelection() }
         .onChange(of: appState.remoteSessionRequestedTab) { _, _ in adoptPendingTab() }
         .onChange(of: availableTabs) { _, tabs in
             // Keeps `selectedTab` itself valid (not just what's rendered,
@@ -119,16 +122,50 @@ struct RemoteSessionDetailView: View {
         }
     }
 
-    /// Consumes (reads AND clears) the one-shot tab hint — checked in both
-    /// `onAppear` and `onChange` so it lands whether this view mounted after
-    /// the hint was set (normal case) or the hint arrives while already
-    /// mounted (reselecting the same tab-jump action twice in a row).
+    /// Resets per-session-ONLY local `@State` when `selection` changes.
+    /// Replaces what `.id(selection)` used to give for free (see this
+    /// view's doc comment for why it's no longer `.id()`-keyed) for
+    /// everything EXCEPT the attach terminal itself, which must NOT reset —
+    /// that state now lives in `RemoteAttachPager`/`AppState`, keyed by
+    /// selection, independent of this view's own lifecycle.
+    private func resetForNewSelection() {
+        showStopConfirm = false
+        sendText = ""
+        isSending = false
+        selectedTab = .attach
+        adoptPendingTab()
+    }
+
+    /// Consumes (reads AND clears) the one-shot tab hint — checked in
+    /// `onAppear` (first-ever mount), `onChange(of: selection)` (landing on
+    /// a DIFFERENT session), and `onChange(of: appState.remoteSessionRequestedTab)`
+    /// (a hint arriving while already on the same session, e.g. a second
+    /// "View Log" context-menu click) — three timings that between them
+    /// cover every way the hint can arrive relative to this view's mount.
     private func adoptPendingTab() {
         guard let requested = appState.remoteSessionRequestedTab else { return }
         if availableTabs.contains(requested) {
             selectedTab = requested
         }
         appState.remoteSessionRequestedTab = nil
+    }
+
+    /// Whether `selection`'s attach terminal currently has a live PTY
+    /// mounted in `RemoteAttachPager` — the only state that distinguishes
+    /// "render the pager slot" from "render the detached/reattach prompt"
+    /// for the Attach tab of the CURRENTLY viewed session (a session that's
+    /// eligible and selected but not in this set is, by construction,
+    /// explicitly detached — see `RemoteAttachLifecycle`).
+    private var isAttached: Bool {
+        appState.attachedRemoteSelections.contains(selection)
+    }
+
+    private var detachInfo: RemoteAttachDetachInfo? {
+        appState.explicitlyDetachedRemoteSessions[selection]
+    }
+
+    private var isUnexpectedDetach: Bool {
+        RemoteAttachTerminalView.isUnexpectedExit(exitCode: detachInfo?.exitCode)
     }
 
     // MARK: - Header
@@ -258,50 +295,78 @@ struct RemoteSessionDetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ZStack {
-                // The attach pane, once started, stays MOUNTED (just hidden)
-                // while another tab is showing — switching to Log must never
-                // tear down and respawn the live attach process. Log's own
-                // state is cheap to lose and refetch, so it mounts only
-                // on-demand instead.
-                if availableTabs.contains(.attach) {
-                    attachSection
-                        .opacity(effectiveTab == .attach ? 1 : 0)
-                        .allowsHitTesting(effectiveTab == .attach)
+                // `RemoteAttachPager` is mounted UNCONDITIONALLY here — never
+                // nested inside an `if availableTabs.contains(.attach)` (or
+                // any other check scoped to the CURRENT selection) — because
+                // it hosts every attached remote session, not just this one.
+                // Gating its existence on this session's own tab
+                // availability would tear down every OTHER (background,
+                // recently-viewed) session's live connection the moment the
+                // user merely LOOKS AT a log-only or gone session — exactly
+                // the kind of accidental mass-teardown this pager exists to
+                // prevent. Visibility (not existence) is controlled by
+                // opacity/hit-testing below, the same idiom the old
+                // intra-session Attach/Log toggle used.
+                RemoteAttachPager(
+                    selections: appState.attachedRemoteSelections,
+                    activeSelection: selection
+                )
+                .opacity(showsAttachSlot ? 1 : 0)
+                .allowsHitTesting(showsAttachSlot)
+
+                if effectiveTab == .attach, availableTabs.contains(.attach), !isAttached {
+                    detachedPrompt
                 }
                 if effectiveTab == .log, availableTabs.contains(.log) {
                     RemoteLogTabView(
                         provider: selection.provider, sessionID: selection.sessionID, refreshToken: logRefreshToken)
+                        .id(AppState.remoteSessionKey(provider: selection.provider, sessionID: selection.sessionID))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    @ViewBuilder
-    private var attachSection: some View {
-        if hasStartedAttach, let config = providerStatus?.config {
-            RemoteAttachTerminalView(provider: config, sessionID: selection.sessionID)
-        } else {
-            attachPrompt
-        }
+    /// Whether the pager's slot for THIS selection should be visually
+    /// foremost right now: the Attach tab is what's showing, this session
+    /// still declares/permits attach, and it's actually mounted (not
+    /// explicitly detached). Any other remote session the pager happens to
+    /// also be keeping warm in the background stays fully transparent and
+    /// non-hit-testable regardless of which of ITS tabs is internally
+    /// selected — this session's chrome is the only thing the user can see
+    /// or interact with.
+    private var showsAttachSlot: Bool {
+        effectiveTab == .attach && availableTabs.contains(.attach) && isAttached
     }
 
-    private var attachPrompt: some View {
+    /// Shown in place of the pager slot once `selection` has detached
+    /// (`AppState.explicitlyDetachedRemoteSessions`) — auto-attach means
+    /// there is no longer a "not yet attached, click to start" state for an
+    /// eligible session (selecting it already started that), only "live" vs
+    /// "detached, here's why, click to try again."
+    private var detachedPrompt: some View {
         VStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.system(size: 28))
+            Image(systemName: isUnexpectedDetach
+                  ? "exclamationmark.triangle"
+                  : "antenna.radiowaves.left.and.right.slash")
+                .font(.system(size: 22))
                 .foregroundStyle(.secondary)
-            Text("Not attached")
+            Text(isUnexpectedDetach ? "Attach ended unexpectedly" : "Detached")
                 .font(.headline)
-            Text("Attach opens a live terminal to this remote session.")
+            // Contract-correct framing kept regardless of exit code: only
+            // `list`/`events` are authoritative about the remote session's
+            // fate, never this local viewer process exiting.
+            Text("The session keeps running remotely.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            // Explicit user gesture only — selecting this row (or this tab)
-            // never spawns the attach process by itself.
-            Button("Attach") { hasStartedAttach = true }
+            if let exitCode = detachInfo?.exitCode {
+                Text("exit code \(exitCode)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Reattach") { appState.reattachRemoteSession(selection) }
                 .buttonStyle(.borderedProminent)
-                .disabled(providerStatus?.config == nil)
+                .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()

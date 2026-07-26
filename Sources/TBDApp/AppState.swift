@@ -654,6 +654,101 @@ final class AppState: ObservableObject {
 
     private let keepAliveLimit = 8
 
+    // MARK: - Remote attach lifecycle (see `AppState+RemoteAttach.swift`)
+
+    /// Raw most-recent-first log of recently-VIEWED remote sessions, the
+    /// recency input to `RemoteAttachLifecycle.attachedSelections`. Mirrors
+    /// `recentlyVisitedWorktreeIDs`'s split from the computed mount set —
+    /// `attachedRemoteSelections` re-merges the current selection (protected)
+    /// and eligibility/detach state on every read, so this log alone doesn't
+    /// say what's actually attached right now.
+    @Published private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
+
+    /// Sessions whose attach terminal ended (pty exit — clean or not; the
+    /// pane exiting never means the remote session died, only that the
+    /// LOCAL viewer process stopped) and must NOT be silently re-attached
+    /// merely by staying the current selection. Cleared only by an explicit
+    /// user gesture — see `activateRemoteSession`'s doc comment for exactly
+    /// which gestures qualify, and `reattachRemoteSession` for the Reattach
+    /// button's path. This is the state that makes "select = auto-attach"
+    /// safe: without it, a pty exiting while its row is still selected would
+    /// re-enter `attachedRemoteSelections` (still protected) and the pager
+    /// would spawn a fresh process every render, an unbounded respawn loop
+    /// against a resource this codebase must not spam (SSM/ssh concurrency
+    /// and cost — see `RemoteAttachLifecycle`'s doc comment).
+    @Published private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
+
+    /// Cap on how many remote sessions may have a live attach terminal at
+    /// once (the current selection plus warm background ones). Mirrors
+    /// `keepAliveLimit`'s cap verbatim (the same 8) rather than inventing a
+    /// separate number — deliberately NOT halved for remote's higher
+    /// per-connection cost/concurrency sensitivity (SSM/ssh), per this
+    /// task's explicit instruction to mirror the existing keep-alive
+    /// machinery's shape AND cap. Easy single-constant tuning point if the
+    /// maintainer wants it smaller after soaking.
+    let remoteAttachKeepAliveLimit = 8
+
+    /// Move `selection` to the front of the attach-recency log, trimming it
+    /// so it never grows unbounded over a long-running app session. Mirrors
+    /// `touchVisitedWorktree`'s shape; unlike that function this trim is
+    /// purely a bound on the stored log's length (there's no "working"-style
+    /// force-protection budget to interact with here — only the current
+    /// selection is ever force-protected by `RemoteAttachLifecycle`, and it
+    /// doesn't consume this log's slots any more than a worktree's
+    /// protection consumes `recentlyVisitedWorktreeIDs`'s).
+    func touchAttachedRemoteSession(_ selection: RemoteSessionSelection) {
+        recentlyAttachedRemoteSessions.removeAll { $0 == selection }
+        recentlyAttachedRemoteSessions.insert(selection, at: 0)
+        let cap = remoteAttachKeepAliveLimit + 1 // +1 headroom for "selected but not yet re-touched"
+        if recentlyAttachedRemoteSessions.count > cap {
+            recentlyAttachedRemoteSessions.removeLast(recentlyAttachedRemoteSessions.count - cap)
+        }
+    }
+
+    /// Records that `selection`'s attach terminal ended — called from the
+    /// pager's `onDetached` bridge. Per the contract
+    /// (`docs/remote-provider-contract.md` § `attach`), this NEVER means the
+    /// remote session died, only that the local viewer process stopped;
+    /// `remoteSessions`/`gone` remain the only authoritative source for the
+    /// session's actual fate. Excludes `selection` from
+    /// `attachedRemoteSelections` until an explicit gesture clears it (see
+    /// `activateRemoteSession` in `AppState+Navigation.swift`, and
+    /// `reattachRemoteSession` below) — the rule that prevents a respawn
+    /// loop while the row stays selected.
+    func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?) {
+        explicitlyDetachedRemoteSessions[selection] = RemoteAttachDetachInfo(exitCode: exitCode)
+    }
+
+    /// The explicit "Reattach" affordance shown by `RemoteSessionDetailView`
+    /// once a session has detached. Clears the flag AND re-touches recency
+    /// (so a session that had aged toward eviction gets a fresh position at
+    /// the front) — an unambiguous user gesture, always allowed to
+    /// re-attach regardless of the transition/`.attach`-tab rule
+    /// `activateRemoteSession` applies to selection itself.
+    func reattachRemoteSession(_ selection: RemoteSessionSelection) {
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+        touchAttachedRemoteSession(selection)
+    }
+
+    /// Clears a stale explicit-detach flag for `selection`, if present —
+    /// the narrow write `activateRemoteSession` (in
+    /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
+    /// rule, kept here (not duplicated) so `explicitlyDetachedRemoteSessions`
+    /// has exactly one file's worth of direct mutators.
+    func clearRemoteSessionDetachedFlag(_ selection: RemoteSessionSelection) {
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+    }
+
+    /// Drops attach-lifecycle bookkeeping for sessions the daemon no longer
+    /// reports — called from `pruneRemoteSessionState` alongside its other
+    /// maps, for the same reason: without this, `explicitlyDetachedRemoteSessions`
+    /// and `recentlyAttachedRemoteSessions` would accumulate dead entries for
+    /// the lifetime of the app.
+    func pruneRemoteAttachState(toKnownSelections selections: Set<RemoteSessionSelection>) {
+        explicitlyDetachedRemoteSessions = explicitlyDetachedRemoteSessions.filter { selections.contains($0.key) }
+        recentlyAttachedRemoteSessions = recentlyAttachedRemoteSessions.filter { selections.contains($0) }
+    }
+
     /// Move `id` to the front of `recentlyVisitedWorktreeIDs`, then trim the LRU
     /// so it never grows unbounded. Protected worktrees (`protectedWorktreeIDs`)
     /// are never evicted here — only the oldest NON-protected entries past

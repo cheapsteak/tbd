@@ -79,6 +79,7 @@ extension AppState {
         let keys = Set(sessions.map { AppState.remoteSessionKey(provider: $0.provider, sessionID: $0.payload.id) })
         unreadByRemoteSession = unreadByRemoteSession.filter { selections.contains($0.key) }
         remoteSessionDisplayNames = remoteSessionDisplayNames.filter { keys.contains($0.key) }
+        pruneRemoteAttachState(toKnownSelections: selections)
         if let selected = selectedRemoteSession, !selections.contains(selected) {
             selectedRemoteSession = nil
         }
