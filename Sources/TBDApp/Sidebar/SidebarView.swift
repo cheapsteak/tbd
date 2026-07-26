@@ -7,6 +7,11 @@ struct SidebarView: View {
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
+    /// Height of the scrolling repo list, measured by a `.background`
+    /// GeometryReader on that list. Feeds `PinnedDockMetrics`' 40% clamp.
+    /// Measured on the LIST, never on the dock — reading the dock's own
+    /// geometry would feed its height back into its own input.
+    @State private var sidebarHeight: CGFloat = 0
 
     var filteredRepos: [Repo] {
         let base: [Repo]
@@ -54,13 +59,37 @@ struct SidebarView: View {
                 }
                 .allowsHitTesting(false)
             }
+            .background {
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { sidebarHeight = geo.size.height }
+                        .onChange(of: geo.size.height) { _, h in sidebarHeight = h }
+                }
+            }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, 26)
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            let dockRows = PinnedDockContent.rows(
+                allWorktrees: appState.allWorktrees,
+                selectedIDs: appState.selectedWorktreeIDs,
+                children: appState.children(of:)
+            )
+            let desk = PinnedDockContent.deskRow(
+                allWorktrees: appState.allWorktrees,
+                mode: appState.nightwatchMode,
+                experimentalEnabled: nightwatchExperimental
+            )
             VStack(spacing: 0) {
+                // ONE divider, at the very top of the footer group. Verified
+                // live: a second Divider() below the dock made it read as part
+                // of the scrolling list above instead of part of the footer.
+                // Dock, desk slot, mode toggle and Add Repository share this
+                // VStack's `.background(.bar)` as a single visual group.
                 Divider()
+                PinnedDockView(rows: dockRows, availableHeight: sidebarHeight)
+                PinnedDockDeskSlot(desk: desk)
                 if nightwatchExperimental {
                     NightwatchModeToggle()
                         .padding(.horizontal, 12)

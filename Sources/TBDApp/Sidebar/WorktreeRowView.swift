@@ -80,6 +80,31 @@ struct WorktreeRowView: View {
         .padding(.trailing, 4)
     }
 
+    /// Hover-only pin toggle on the row's leading edge — the fast path for
+    /// pinning, mirroring the trailing nested-worktree `+`. Rendered as an
+    /// overlay so it floats above the row and consumes no layout width: row
+    /// content must not shift when the pointer enters the row.
+    ///
+    /// The glyph names the ACTION, not the state: `pin` when the worktree is
+    /// unpinned, `pin.slash` when it is already pinned. There is deliberately no
+    /// persistent pinned-state glyph elsewhere on the row — a pinned worktree is
+    /// by definition visible in the dock, so one would only cost row width.
+    @ViewBuilder
+    private func pinToggleButton() -> some View {
+        let isPinned = worktree.pinnedAt != nil
+        SectionHeaderPlusButton(
+            systemImage: isPinned ? "pin.slash" : "pin",
+            help: isPinned ? "Unpin from dock" : "Pin to dock",
+            action: {
+                let wtID = worktree.id
+                Task { await appState.setPinned(worktreeID: wtID, pinned: !isPinned) }
+            }
+        )
+        .accessibilityLabel(isPinned
+            ? "Unpin \(worktree.displayName) from dock"
+            : "Pin \(worktree.displayName) to dock")
+    }
+
     private func handleNestedPlus(repoID: UUID) {
         switch HoverMenuModel.plusOutcome(optionHeld: NSEvent.modifierFlags.contains(.option)) {
         case .openMenu:
@@ -295,6 +320,21 @@ struct WorktreeRowView: View {
                !isMain,
                let repoID = worktree.repoID {
                 nestedPlusButton(repoID: repoID)
+            }
+        }
+        .overlay(alignment: .leading) {
+            // The indent offset is required: `.padding(.leading, indentLevel * 16)`
+            // applies to the row's CONTENT, but this overlay anchors to the row's
+            // outer edge — without the offset the button floats left of the
+            // hierarchy guide lines on any nested row. The guide-line overlay
+            // above compensates the same way.
+            //
+            // While hovering, this covers `leadingIcon()` (PR status / pending
+            // spinner). That is the same trade the trailing `+` already makes,
+            // and is what buys zero layout impact.
+            if isRowHovered, !isMain, !worktree.isNightwatchDesk {
+                pinToggleButton()
+                    .offset(x: CGFloat(indentLevel) * 16)
             }
         }
         .onHover { isRowHovered = $0 }
