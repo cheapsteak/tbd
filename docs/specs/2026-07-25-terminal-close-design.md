@@ -453,3 +453,44 @@ pane is gone.
    flag; the second does not.
 4. Queue records (`acted.jsonl:32,57`, `judge-summary.txt:118-119`) memorialize
    the mismatch. Leave as-is — they are logs.
+
+## 10. Known interaction: desk nudge targeting (real, owned elsewhere)
+
+Shipping the relay does not make the desk's judge loop correct, and this section
+exists so nobody reads §8 as claiming otherwise.
+
+**The defect.** `DeskSessionManager.nudgeDeskSession` resolves "the" desk judge
+with `terminals.list(worktreeID:).first(where: { $0.label == TerminalLabel.claudeCode })`
+(`DeskSessionManager.swift:272`). `TerminalStore.list` orders `createdAt ASC`
+(`TerminalStore.swift:153`), so `.first` is the *oldest* match. A relay handoff
+spawns the successor as a new terminal in the **same worktree**, carrying the
+same `TerminalLabel.claudeCode` (`RPCRouter+TerminalHandlers.swift:267`), so
+while both rows exist the daemon keeps nudging the predecessor. And because
+`--close-predecessor` currently only kills the tmux window, the predecessor's
+row is *parked*, not deleted (§1.2) — so it persists and keeps winning.
+
+**Root cause is label-matching, not ordering.** The ordering story is the
+visible half and is not sufficient: the resume/fork path assigns a hardcoded
+lowercase `label = "claude"` (`RPCRouter+TerminalHandlers.swift:258`), which
+never equals `TerminalLabel.claudeCode` (`"Claude Code"`). A resumed or forked
+desk judge is therefore invisible to that selector with no relay involved at
+all. Fixing the ordering alone would leave that case broken.
+
+**This is not a new or unnoticed gap.** It bit on 2026-07-25 for ~4.5 hours
+(judge ticks delivered to a stale predecessor; the decision queue reached 134
+unprocessed lines) — before this branch existed, on the hand-created relay. The
+approved fix is a single derived selector — `kind == .claude`, parked excluded,
+`windowExists`-qualified, newest-first — used at all four `DeskSessionManager`
+call sites. An explicit `activeJudgeTerminalID` pointer was considered and
+rejected: its own repair fallback is "newest live candidate", so it buys a
+second source of truth, and a pointer the successor must claim reproduces the
+original failure (a relay step owned by a model is a step a human question
+preempts forever).
+
+**Ownership and sequencing.** That work is slices A/B of the
+`desk-relay-targeting` worktree, greenlit with no dependency on this branch, and
+already built there. It touches only `DeskSessionManager.swift`; this branch
+touches none of it. The two are independent and may merge in either order — this
+branch makes the relay *survive daemon restarts* (the compiled-skill ingest),
+that one makes the daemon *address the right judge*. Neither substitutes for the
+other, and the relay is not fully trustworthy until both have landed.
