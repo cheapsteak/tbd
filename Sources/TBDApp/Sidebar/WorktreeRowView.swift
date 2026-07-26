@@ -91,15 +91,20 @@ struct WorktreeRowView: View {
     /// an overlay so it floats above the row and consumes no layout width: row
     /// content must not shift when the pointer enters the row.
     ///
-    /// The glyph names the ACTION, not the state: `pin` when the worktree is
-    /// unpinned, `pin.slash` when it is already pinned. There is deliberately no
-    /// persistent pinned-state glyph elsewhere on the row — a pinned worktree is
-    /// by definition visible in the dock, so one would only cost row width.
+    /// The glyph reflects the STATE, not the action: hollow `pin` when
+    /// unpinned, solid `pin.fill` when pinned. The `.help` text still names
+    /// the action ("Pin to dock" / "Unpin from dock") so hovering resolves
+    /// any ambiguity about what clicking will do. An earlier build used
+    /// `pin` / `pin.slash` (action-shaped); the crossed-out slash read as
+    /// ugly and cluttered at caption size in a dense sidebar. There is
+    /// deliberately no persistent pinned-state glyph elsewhere on the row —
+    /// a pinned worktree is by definition visible in the dock, so one would
+    /// only cost row width.
     @ViewBuilder
     private func pinToggleButton() -> some View {
         let isPinned = worktree.pinnedAt != nil
         SectionHeaderPlusButton(
-            systemImage: isPinned ? "pin.slash" : "pin",
+            systemImage: isPinned ? "pin.fill" : "pin",
             help: isPinned ? "Unpin from dock" : "Pin to dock",
             action: {
                 let wtID = worktree.id

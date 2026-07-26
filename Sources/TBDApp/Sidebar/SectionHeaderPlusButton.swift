@@ -10,7 +10,7 @@ import SwiftUI
 /// instead of duplicating `HoverPressButtonStyle` + sizing at each call site.
 struct SectionHeaderPlusButton: View {
     /// SF Symbol drawn in the button. Defaults to the "+" every section header
-    /// uses; the pin toggle passes `pin` / `pin.slash`.
+    /// uses; the pin toggle passes `pin` / `pin.fill`.
     var systemImage: String = "plus"
     /// Tooltip text. Pass `nil` for buttons that open a hover menu — a
     /// tooltip would render on top of the menu.

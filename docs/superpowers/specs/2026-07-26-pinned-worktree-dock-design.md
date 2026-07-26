@@ -440,8 +440,13 @@ Three details it must respect:
 - **It covers `leadingIcon()` while hovering.** That slot holds the PR-status icon or the
   pending spinner. This is the same trade the trailing `+` already makes, and it is what
   "floating button" buys: zero layout impact, at the cost of occluding during hover only.
-- **The glyph reflects the action, not the state**: `pin` when unpinned, `pin.slash` when
-  pinned, with matching `.help` text.
+- **The glyph reflects the state, not the action**: hollow `pin` when unpinned, solid
+  `pin.fill` when pinned. The `.help` text still names the action ("Pin to dock" /
+  "Unpin from dock"), so hovering resolves any ambiguity about what clicking will do.
+
+  An earlier build used `pin` / `pin.slash`, encoding the *action* instead. The crossed-out
+  slash read as ugly and cluttered at caption size in a dense sidebar. Hollow-versus-filled is
+  the quieter signal and matches how the rest of the sidebar's indicators behave.
 
 **No persistent pinned-state glyph on the row.** An earlier draft put a trailing `pin.fill`
 there; it is dropped. It consumed row width — the opposite of the "don't push content right"
