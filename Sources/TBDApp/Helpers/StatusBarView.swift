@@ -55,6 +55,10 @@ struct StatusBarView: View {
             : nil
         let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {
+            // Nightwatch/daywatch mode indication lives here and nowhere else in
+            // the window — the chip self-hides when mode is .off or the
+            // experimental flag is unset.
+            NightwatchDeskStatusChip()
             Spacer()
             if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)

@@ -4,8 +4,8 @@ import SwiftUI
 @testable import TBDApp
 @testable import TBDShared
 
-@Suite("NightwatchDeskStatusBanner")
-struct NightwatchDeskStatusBannerTests {
+@Suite("NightwatchDeskStatusChip")
+struct NightwatchDeskStatusChipTests {
     @Test("nightwatchBannerContent for .off mode returns nil")
     func bannerContentOffMode() {
         let content = nightwatchBannerContent(for: .off)
@@ -18,7 +18,7 @@ struct NightwatchDeskStatusBannerTests {
         #expect(content != nil)
         if let content = content {
             #expect(content.glyph == "◐")
-            #expect(content.text == "Daywatch — desk session active")
+            #expect(content.text == "Daywatch desk")
         }
     }
 
@@ -28,7 +28,7 @@ struct NightwatchDeskStatusBannerTests {
         #expect(content != nil)
         if let content = content {
             #expect(content.glyph == "🌙")
-            #expect(content.text == "Nightwatch — desk session active")
+            #expect(content.text == "Nightwatch desk")
         }
     }
 
