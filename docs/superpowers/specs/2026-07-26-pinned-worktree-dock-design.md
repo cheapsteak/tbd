@@ -238,11 +238,23 @@ No SwiftUI, no `AppState` — takes values and one closure, returns values, full
 
 ```swift
 enum PinnedDockMetrics {
-    static let rowHeight: CGFloat = 26      // matches defaultMinListRowHeight in SidebarView
+    static let rowHeight: CGFloat = WorktreeRowView.rowHeight   // 28
     static let maxRows: Int = 5
     static func height(rowCount: Int, availableHeight: CGFloat) -> CGFloat
 }
 ```
+
+`rowHeight` must be **28**, sourced from a shared `WorktreeRowView.rowHeight` constant rather
+than written as a literal. Verified live: `WorktreeRowView` sets `.frame(height: 28)`, so three
+rows need exactly 84pt. `SidebarView`'s `.environment(\.defaultMinListRowHeight, 26)` is a red
+herring — it is a floor, and the row overrides it. A dock height computed from 26 clips the
+last row and shows a scrollbar at three pins. Hardcoding 84 would also mean a future change to
+the row's height silently breaks the dock with no compile error.
+
+Also verified: `.listStyle(.plain)` on macOS 26 already has zero vertical content margins here,
+so the height is exactly `rowCount × rowHeight` with no correction term. Do **not** add
+`.contentMargins(.vertical, 0, for: .scrollContent)` — measured to be inert, and it would imply
+margins are being managed when they are not.
 
 Returns `min(rowCount × rowHeight, maxRows × rowHeight, availableHeight × 0.4)`, and `0` for
 `rowCount == 0`. The view applies the number; the arithmetic is tested on its own.
@@ -353,13 +365,25 @@ and simply not respond to clicks. Adding `.onTapGesture` instead would kill its
 Both slot into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, in this order:
 
 ```
-Divider
+Divider               ← the ONLY divider; marks the top of the whole footer group
 PinnedDockView        ← scrolls, capped, absent when empty
-Divider               ← only when both the pinned area and the desk slot are present
 PinnedDockDeskSlot    ← fixed one row, absent when mode off
 NightwatchModeToggle  ← existing
 Add Repository + filter bar  ← existing
 ```
+
+**One divider, at the very top.** An earlier build put a second `Divider()` between the dock and
+the toggle, and it made the dock read as belonging to the scrolling list above rather than to
+the footer. Removing it merged dock, desk, toggle, and Add Repository into a single visual
+group, which is the intent.
+
+Worth knowing for anyone tempted to "fix" the footer's color: `.bar` renders **white** (255,255,255)
+in this window, not gray — measured. The sidebar list above is (234,234,234), and `.bar`
+composited over it lands at white. The dock, the toggle, and the Add Repository row all share
+that background and always did. `.scrollContentBackground(.hidden)` on the inner `List` is
+load-bearing and already correct (verified both directions: removing it makes the List paint
+opaque white over the material). If the footer should read gray, that is a background-material
+decision affecting the whole group — not something the dock's `List` can or should fix.
 
 `availableHeight` comes from a `GeometryReader` wrapping the sidebar's `List`, read once and
 passed down — the dock must not read geometry from inside its own frame, which would feed its
@@ -387,10 +411,45 @@ honest, rather than a row that appears and then vanishes.
 
 ### Section-row pin glyph
 
-A worktree with `pinnedAt != nil` shows a trailing `pin.fill` SF Symbol in its section row,
-`.caption` weight and `.secondary` foreground, alongside the existing trailing indicators — so
-the pinned state is discoverable from the place you pinned it. The desk does not get one; it
-is not a pin.
+Pinning is reachable two ways.
+
+**The row-action menu** carries Pin / Unpin, as described above — the discoverable, keyboard-
+and accessibility-friendly path.
+
+**A hover button on the leading edge of the row** is the fast path, mirroring the existing
+nested-worktree `+`. `WorktreeRowView` already renders that `+` as an
+`.overlay(alignment: .trailing)` gated on `isRowHovered`, so it floats above the row without
+consuming layout width. The pin button is the same construction at `.leading`:
+
+```swift
+.overlay(alignment: .leading) {
+    if isRowHovered, !isMain, !worktree.isNightwatchDesk {
+        SectionHeaderPlusButton(...)-shaped 20×20 button
+            .offset(x: CGFloat(indentLevel) * 16)
+    }
+}
+```
+
+Three details it must respect:
+
+- **The indent offset is required.** `.padding(.leading, CGFloat(indentLevel) * 16)` is applied
+  to the row's content, but an `.overlay(alignment: .leading)` anchors to the row's *outer*
+  edge — so without the offset the button floats left of the hierarchy guide lines on any
+  nested row. The guide-line overlay already compensates the same way
+  (`.offset(x: CGFloat(depth) * 16 + 8)`).
+- **It covers `leadingIcon()` while hovering.** That slot holds the PR-status icon or the
+  pending spinner. This is the same trade the trailing `+` already makes, and it is what
+  "floating button" buys: zero layout impact, at the cost of occluding during hover only.
+- **The glyph reflects the action, not the state**: `pin` when unpinned, `pin.slash` when
+  pinned, with matching `.help` text.
+
+**No persistent pinned-state glyph on the row.** An earlier draft put a trailing `pin.fill`
+there; it is dropped. It consumed row width — the opposite of the "don't push content right"
+requirement — and it is redundant: a pinned worktree is, by definition, visible in the dock.
+Hovering reveals the current state through the button's glyph.
+
+The Watch Desk gets no pin button, matching its suppressed menu items. Neither does a repo's
+main row.
 
 ## Feature flag
 
