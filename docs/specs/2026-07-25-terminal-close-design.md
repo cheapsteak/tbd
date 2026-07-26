@@ -71,6 +71,36 @@ tbd terminal close --terminal <uuid> [--force] [--json]
 One target, named explicitly. `--all`, `--except` and `--dry-run` are deferred —
 see §2.1 and §6 D2.
 
+### On the noun
+
+"Terminal" here means **the row**, not a live pane. The two come apart, and the
+semantics table below depends on the distinction:
+
+- A **parked** terminal has no tmux window at all. `hibernatedAt` and
+  `claudeSessionID` survive, the window is dead, and the row is wakeable on
+  demand (`HibernationCoordinator.wake`).
+- A **closed** terminal survives as a Closed Terminals history entry — captured
+  scrollback plus a session id, with nothing running.
+
+So "close a terminal whose window is already gone" is coherent, not a typo: the
+row is the thing being closed, and killing the (already dead) window is one
+best-effort step of that. Rows §3 covering parked and recovery-parked terminals
+read as category errors only if "terminal" is taken to mean "a live pane".
+
+`terminal` is also **not** the app's "tab". A tab is a container that may hold
+several terminals in a split layout (`AppState.terminalIDs(in:)` walks
+`layout.allTerminalIDs()`), and the app's "Close Tab" deletes every terminal in
+it (`AppState+Tabs.swift:186`). This command is the finer-grained operation.
+
+The noun is imprecise in exactly one direction — the row outlives the terminal —
+but every alternative is worse: `session` collides with three existing meanings
+(Claude session, tmux session `"main"`, session events / Session History),
+`pane` is a tmux detail whose ids collide across servers, `tab` is taken and
+means something coarser, and `agent` is wrong for shell rows. It is also
+load-bearing across the CLI, the `terminal.*` RPC namespace, the DB table, and
+`TBD_TERMINAL_ID` (read by hooks and by `handoff.py`). Keep it; know what it
+means.
+
 ```swift
 struct TerminalClose: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
