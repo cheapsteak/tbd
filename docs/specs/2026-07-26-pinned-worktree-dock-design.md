@@ -126,7 +126,9 @@ This mirrors terminal pinning exactly (`Terminal.pinnedAt`, `TerminalSetPinParam
 
 Three changes in **one commit**, per the migration rule in the root `CLAUDE.md`:
 
-1. `Sources/TBDDaemon/Database/Database.swift` — migration `v60_worktree_pinned_at`:
+1. `Sources/TBDDaemon/Database/Database.swift` — migration `v63_worktree_pinned_at`
+   (originally authored as `v60`; renumbered on rebase after main took v60–v62 first —
+   safe because the body uses the idempotent `addColumnIfMissing` helper):
    `ALTER TABLE worktree ADD COLUMN pinnedAt DATETIME`. Deliberately **no** `DEFAULT`: existing
    rows must land on `NULL` (= unpinned), which is what we want. The
    `ADD COLUMN ... DEFAULT` backfill trap documented in `CLAUDE.md` does not apply, because
@@ -523,7 +525,7 @@ Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
 - Desk worktree offers neither.
 
 **Daemon**
-- Migration `v60` adds the column; pre-existing rows read back `nil`.
+- Migration `v63` adds the column; pre-existing rows read back `nil`.
 - `WorktreeStore` round-trips a non-nil `pinnedAt` and a nil one.
 - `worktree.setPin` sets a timestamp on `pinned: true` and clears to `NULL` on `false`.
 
