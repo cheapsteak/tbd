@@ -28,6 +28,11 @@ This is a root-cause fix, TUI-agnostic, and empirically verified to submit large
 multi-line messages. Optionally layer a verify-and-retry step so the unattended
 (nightwatch) path can *detect* a non-submit rather than trust it blindly.
 
+For messages that must arrive without touching a user's in-progress composer,
+`terminal.send` is the wrong abstraction even when submission is reliable.
+Interactive Claude Code Channels preserved an unsent draft during testing; see
+[Claude Code Channels: draft-safe message injection](research/2026-07-26-claude-code-channels/findings.md).
+
 ## The mechanism (current code)
 
 `Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift:1324` —
