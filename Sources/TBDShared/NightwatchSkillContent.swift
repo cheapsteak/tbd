@@ -534,8 +534,8 @@ if __name__ == "__main__":
 """
 nightwatch tick — Tier-0 orchestrator. NO model in the hot path.
 
-Reads the whole TBD fleet across all tmux servers, the babysitter daemon health,
-and fleet-derived capacity, classifies every agent deterministically, and emits:
+Reads the whole TBD fleet across all tmux servers and fleet-derived capacity,
+classifies every agent deterministically, and emits:
   - a structured tick-report.json  (machine-readable)
   - a short human summary to stdout
   - queue/decisions.jsonl   (items that need Tier-2 / Opus judgment)
@@ -543,6 +543,7 @@ and fleet-derived capacity, classifies every agent deterministically, and emits:
 
 Exit code 0 = nothing needs Opus (silent-ok).  Exit code 10 = judgment items queued.
 Run with --prs to also gate open PRs (makes gh calls — skip during GitHub rate crunch).
+Run with --selftest for the offline classifier matrix (no DB, no tmux, no lock).
 """
 import subprocess, os, re, json, time, sys, fcntl
 
@@ -729,7 +730,94 @@ def fleet():
                     "ctx_pct": ctx_pct, "is_1m": is_1m, "burn_risk": burn})
     return out
 
+def _pane(*lines):
+    """Synthetic capture-pane output."""
+    return "\n".join(lines) + "\n"
+
+
+DIM, RESET = "\x1b[2m", "\x1b[0m"
+
+
+def selftest():
+    """Offline matrix for the composer ghost-guard. No DB, no tmux, no lock.
+
+    This guards the path that TYPES INTO LIVE PANES: whatever _composer()
+    returns is dispatched as though a human had written it, so every impostor
+    gets an explicit scenario rather than a string-presence check on the source.
+    Run from Swift by Tests/TBDDaemonTests/PluginDirWriterTests.swift.
+    """
+    n = 0
+
+    def check(label, got, want):
+        nonlocal n
+        assert got == want, f"{label}: got {got!r}, want {want!r}"
+        n += 1
+
+    def nonempty(text):
+        return [x for x in text.splitlines() if x.strip()]
+
+    def raws(text):
+        return [x for x in text.splitlines() if ANSI_RE.sub("", x).strip()]
+
+    # A genuinely typed line is the ONLY thing that may strand a pane.
+    typed = _pane("⏺ ran the build", "───────", "❯ please retry the deploy",
+                  "───────", "  bypass permissions on")
+    check("typed input strands", classify(typed, typed),
+          ("STRANDED", "please retry the deploy"))
+
+    # Claude Code's own suggestion: byte-identical to the above once ANSI is
+    # stripped. Dimness in the raw capture is the only thing telling them apart.
+    ghost_raw = _pane("⏺ ran the build", "───────",
+                      DIM + "❯ please retry the deploy" + RESET,
+                      "───────", "  bypass permissions on")
+    ghost = ANSI_RE.sub("", ghost_raw)
+    check("ghost text is not composer input",
+          _composer(nonempty(ghost), raws(ghost_raw)), "")
+    check("ghost text does not strand", classify(ghost, ghost_raw), ("IDLE", ""))
+
+    # An SGR mouse report from a stray click in the pane.
+    mouse = _pane("⏺ ran the build", "───────", "❯ <65;61;31M",
+                  "───────", "  bypass permissions on")
+    check("mouse report is not input", classify(mouse, mouse), ("IDLE", ""))
+
+    # Index alignment is load-bearing: raw_lines[j] must describe lines[j]. When
+    # the two filters disagree the lookup is abandoned rather than read off the
+    # wrong row — which FAILS OPEN (the ghost is treated as typed). Pinned here
+    # deliberately: a missed nudge costs a tick, but silently reading dimness
+    # from an unrelated row would suppress real input at random.
+    misaligned = ghost_raw + "an extra raw-only line\n"
+    check("misaligned raw capture is abandoned, not misread",
+          classify(ghost, misaligned)[0], "STRANDED")
+
+    # Same degrade when the caller passes no raw capture at all: the dim check
+    # is unavailable, but the mouse filter still holds.
+    check("no raw capture still filters mouse", classify(mouse)[0], "IDLE")
+    check("no raw capture cannot see dimness", classify(ghost)[0], "STRANDED")
+
+    # The TBD statusline is chrome, never a pane's last meaningful line.
+    check("statusline skipped",
+          _lastmeaning(["waiting on your call", "Opus 5(high)  494k/1000k  5h(65% →20:00)"]),
+          "waiting on your call")
+    check("bare prompt glyph skipped",
+          _lastmeaning(["waiting on your call", "❯"]), "waiting on your call")
+
+    # Precedence: an in-flight turn outranks whatever sits in the composer.
+    working = _pane("⏺ thinking", "❯ please retry the deploy",
+                    "  bypass permissions on", "esc to interrupt")
+    check("working outranks composer", classify(working, working)[0], "WORKING")
+    check("empty pane", classify("", ""), ("EMPTY", ""))
+
+    print(f"selftest: {n}/{n} composer ghost-guard scenarios passed")
+
+
 def main():
+    # --selftest must short-circuit BEFORE the machine-global lock below: a live
+    # tick holding it would otherwise make the selftest exit 0 silently, i.e.
+    # pass without running a single scenario.
+    if "--selftest" in sys.argv:
+        selftest()
+        return
+
     # Prevent concurrent tick runs across BOTH schedulers — the in-daemon DaywatchRunner
     # loop and the launchd scheduler.sh heartbeat. They execute DIFFERENT tick.py copies
     # from different install trees (AppSupport plugin dir vs ~/.claude), so a lock under
