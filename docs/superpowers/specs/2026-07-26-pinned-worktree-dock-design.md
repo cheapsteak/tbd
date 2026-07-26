@@ -1,0 +1,294 @@
+# Pinned worktrees: a fixed dock in the sidebar footer
+
+**Status:** design approved 2026-07-26, not yet implemented.
+**Branch:** `tbd/pinned-worktree-dock`, cut from `origin/main` at `6d283de3`.
+
+## Problem
+
+Reaching a worktree you use constantly means finding it in the scrolling repo list every
+time. Repos collapse, sections reorder, the list grows — the row moves. There is no surface
+that keeps a chosen worktree in the same place on screen.
+
+The Watch Desk has the same problem in a sharper form. When daywatch or nightwatch is on,
+the desk is the session you most want one click away, and today the only shortcut to it is a
+text label in the app's bottom status bar (`NightwatchDeskStatusLabel`, PR #507). That label
+is a one-off: it is not a worktree row, so it carries none of a row's status, PR, or
+context-menu affordances, and it lives nowhere near the other worktrees.
+
+## Solution
+
+A **pinned dock**: a fixed region at the bottom of the sidebar, directly above the
+`NightwatchModeToggle` and the "Add Repository" bar, holding worktree rows that never scroll
+away. Pinning is a per-worktree toggle in the row's right-click menu. When a watch mode is
+on, the Watch Desk occupies the first slot automatically.
+
+### Pinning is a mirror, not a move
+
+A pinned worktree keeps its row under its repo section **and** renders in the dock. Two rows,
+one worktree — like a Dock alias. The section row gains a pin glyph so the pinned state is
+visible from where you pinned it.
+
+This matters for selection: because both rows are tagged with the same `worktree.id` and both
+lists bind the same `appState.selectedWorktreeIDs`, selecting either copy highlights both.
+That is the correct reading of mirror semantics and it falls out of the design rather than
+needing code.
+
+### The dock row is a real worktree row
+
+`PinnedDockView` renders `WorktreeRowView` unmodified. Status indicator, working/parked
+glyphs, PR icon, unread bolding, inline rename, hover child-worktree menu, and the full
+right-click menu all behave exactly as they do in the list. **The only difference between a
+dock row and a section row is where it sits.** No compact variant, no second row
+implementation to drift out of sync.
+
+### The Watch Desk is mode-driven, not user-pinned
+
+When `nightwatchExperimental` is on and `nightwatchMode != .off`, the desk worktree occupies
+the first dock slot. It is not stored as a pin — its `pinnedAt` stays `nil` — and its
+right-click menu offers **neither** Pin nor Unpin. The Day/Night toggle sitting one row below
+is its control: turn mode off and the row leaves.
+
+The desk row shows the worktree's real display name, `"◐ Watch Desk"`, in every mode. The ◐
+is baked into `NightwatchDeskPrompts.deskDisplayName`, and swapping it to 🌙 in the dock would
+make the row disagree with its own mirror in the Scratch section. Mode is already legible
+from the toggle immediately below, so the glyph carries no load.
+
+### Growth is capped
+
+The dock grows one row per pin up to `min(5 rows, 40% of sidebar height)`, then scrolls
+internally. The list above therefore never loses more than 40% of its height, however many
+worktrees are pinned. At zero rows the dock is absent entirely — a user with no pins and mode
+off sees today's sidebar unchanged.
+
+## Removals
+
+The status-bar mode tint and desk label from PR #507 both go. Mode indication lives in the
+sidebar footer: the Day/Night toggle shows and sets the mode, and the desk row appears
+alongside it. The menu-bar `Nightwatch ◐/🌙` CommandMenu title stays — it is the only mode
+readout visible when TBD is unfocused.
+
+Delete:
+
+| File / symbol | Why |
+|---|---|
+| `StatusBarView.statusBarTint`, `.tintOpacity`, its `ZStack` background | Bar returns to plain `.background(.bar)` |
+| `Sources/TBDApp/Helpers/NightwatchDeskStatusLabel.swift` | Superseded by the dock row |
+| `Sources/TBDApp/Theme/NightwatchModeTheme.swift` | Contains only `tintColor(for:)`; with no tint anywhere it is dead |
+| `Tests/TBDAppTests/StatusBarViewTintTests.swift` | Tests deleted code |
+| `Tests/TBDAppTests/NightwatchDeskStatusLabelTests.swift` | Tests deleted code |
+| `Tests/TBDAppTests/NightwatchModeThemeTests.swift` | Tests deleted code |
+
+`NightwatchDeskStatusLabel()` was the first element of `StatusBarView`'s `HStack`. Removing it
+leaves the `Spacer()` as the first child, which is what the bar looked like before PR #507.
+
+## Architecture
+
+### Persistence — DB column
+
+`pinnedAt` is a nullable `DATETIME` on the `worktree` table. `NULL` means unpinned.
+
+This mirrors terminal pinning exactly (`Terminal.pinnedAt`, `TerminalSetPinParams`,
+`terminal.setPin`), keeps every per-worktree flag in one place next to `sortOrder` and
+`autoArchiveOnMerge`, survives a UserDefaults reset, and gives pin ordering for free.
+
+Three changes in **one commit**, per the migration rule in the root `CLAUDE.md`:
+
+1. `Sources/TBDDaemon/Database/Database.swift` — migration `v60_worktree_pinned_at`:
+   `ALTER TABLE worktree ADD COLUMN pinnedAt DATETIME`. Deliberately **no** `DEFAULT`: existing
+   rows must land on `NULL` (= unpinned), which is what we want. The
+   `ADD COLUMN ... DEFAULT` backfill trap documented in `CLAUDE.md` does not apply, because
+   there is no Swift-side default to flip later.
+2. `Sources/TBDDaemon/Database/WorktreeStore.swift` — `WorktreeRecord` gains
+   `var pinnedAt: Date?`, threaded through its `init(from:)` and its `Worktree` projection.
+3. `Sources/TBDShared/Models.swift` — `Worktree.pinnedAt: Date?`, optional so existing
+   persisted JSON and DB rows still decode.
+
+### RPC
+
+`worktree.setPin` with `WorktreeSetPinParams { worktreeID: UUID, pinned: Bool }`, in
+`Sources/TBDShared/RPCProtocol.swift` next to `TerminalSetPinParams`. The handler writes
+`Date()` or `NULL` and emits the existing worktree-changed delta, so the app refreshes through
+the path every other row action already uses.
+
+No CLI command in this change. The RPC makes `tbd worktree pin` trivial to add later if it
+turns out to be wanted; adding it now is speculative.
+
+### Shared desk predicate
+
+`NightwatchDeskStatusLabel` currently resolves the desk with
+`displayName == NightwatchDeskPrompts.deskDisplayName && isScratch`, written inline. That
+predicate is about to have two more callers (dock content, menu suppression), so it moves to
+`TBDShared`:
+
+```swift
+extension Worktree {
+    /// The mode-managed Watch Desk scratch worktree, identified by its fixed
+    /// display name. Not user-pinnable: the Day/Night toggle controls it.
+    public var isNightwatchDesk: Bool {
+        isScratch && displayName == NightwatchDeskPrompts.deskDisplayName
+    }
+}
+```
+
+One definition instead of three copies.
+
+### Dock contents — a pure function
+
+```swift
+enum PinnedDockContent {
+    static func rows(allWorktrees: [Worktree],
+                     mode: NightwatchMode,
+                     experimentalEnabled: Bool) -> [Worktree]
+}
+```
+
+Rules, in order:
+
+1. If `experimentalEnabled && mode != .off`, the worktree satisfying `isNightwatchDesk` comes
+   first. If no such worktree exists (mode was just turned on and the daemon has not created
+   the desk yet), the slot is simply absent — not an error, not a placeholder.
+2. Then every worktree with `pinnedAt != nil`, sorted ascending by `pinnedAt`. Oldest pin
+   first, so new pins append and existing rows never move.
+3. The desk is excluded from step 2 even if something set its `pinnedAt`, so it can never
+   appear twice.
+4. Archived worktrees are excluded. Their `pinnedAt` is left untouched, so reviving one
+   restores its pin.
+
+No SwiftUI, no `AppState` — takes values, returns values, fully unit-testable.
+
+### Dock height — a pure function
+
+```swift
+enum PinnedDockMetrics {
+    static let rowHeight: CGFloat = 26      // matches defaultMinListRowHeight in SidebarView
+    static let maxRows: Int = 5
+    static func height(rowCount: Int, availableHeight: CGFloat) -> CGFloat
+}
+```
+
+Returns `min(rowCount × rowHeight, maxRows × rowHeight, availableHeight × 0.4)`, and `0` for
+`rowCount == 0`. The view applies the number; the arithmetic is tested on its own.
+
+### View
+
+`Sources/TBDApp/Sidebar/PinnedDockView.swift`:
+
+```swift
+struct PinnedDockView: View {
+    let rows: [Worktree]          // from PinnedDockContent.rows(...)
+    let availableHeight: CGFloat  // sidebar height, from the GeometryReader below
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if !rows.isEmpty {        // empty dock renders nothing at all — no divider, no gap
+            List(selection: $appState.selectedWorktreeIDs) {
+                ForEach(rows) { wt in
+                    WorktreeRowView(worktree: wt)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .tag(wt.id)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .frame(height: PinnedDockMetrics.height(rowCount: rows.count,
+                                                    availableHeight: availableHeight))
+        }
+    }
+}
+```
+
+A second `List` bound to the same selection set is what buys full row fidelity: `.tag`,
+native selection highlight, native row metrics, and `.listRowInsets` all work verbatim, so
+`WorktreeRowView` is reused with no changes. The alternative — a `VStack` plus hand-rolled
+selection chrome — would mean reimplementing List's accent fill, rounded-rect inset, and
+inactive-window gray, three things that drift on every macOS release.
+
+Known cost: two `List`s means two keyboard-navigation islands. Arrow keys move within
+whichever list has focus rather than crossing between them. Accepted — the dock is a
+click target, and full row fidelity was the stated requirement.
+
+It slots into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, between the `Divider`
+and `NightwatchModeToggle`. `availableHeight` comes from a `GeometryReader` wrapping the
+sidebar's `List`, read once and passed down — the dock must not read geometry from inside its
+own frame, which would feed its height back into itself.
+
+### Menu
+
+`RowActionMenu` gains `.pin` and `.unpin`. `RowActionMenuActions` emits:
+
+- nothing, when `worktree.isNightwatchDesk`
+- `.unpin`, when `pinnedAt != nil`
+- `.pin`, otherwise
+
+That enum already has unit tests, so all three cases are covered without instantiating a view.
+
+### Data flow
+
+Right-click → `.pin` → `appState.setPin(worktreeID:pinned:)` → `worktree.setPin` RPC → daemon
+writes `pinnedAt` → worktree-changed delta → `appState.worktrees` updates →
+`PinnedDockContent.rows` recomputes → dock re-renders. Identical to every existing row action.
+
+There is no optimistic local update: the dock reflects daemon state. A failed RPC therefore
+leaves the dock unchanged and logs via `os.Logger` — the pin visibly does not take, which is
+honest, rather than a row that appears and then vanishes.
+
+### Section-row pin glyph
+
+A worktree with `pinnedAt != nil` shows a trailing `pin.fill` SF Symbol in its section row,
+`.caption` weight and `.secondary` foreground, alongside the existing trailing indicators — so
+the pinned state is discoverable from the place you pinned it. The desk does not get one; it
+is not a pin.
+
+## Feature flag
+
+**None.** The root `CLAUDE.md` requires a default-off flag for behavior that acts without a
+user gesture, kills processes or mutates persisted state, or wholesale-replaces a load-bearing
+path. This is additive UI plus a mirror render, driven entirely by an explicit user gesture,
+and it replaces nothing that carries load. It falls under the rule's "small additive UI"
+exemption. The dock is invisible until a user pins something.
+
+The desk row remains gated by the existing `nightwatchExperimental` opt-in, fail-closed —
+same gate as every other nightwatch surface.
+
+## Testing
+
+Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
+
+**`PinnedDockContentTests`**
+- Desk row present / absent across all four combinations of
+  `mode ∈ {off, daywatch, nightwatch}` × `experimentalEnabled ∈ {true, false}` — the desk
+  appears only when the flag is on and mode is not off.
+- Desk sorts first, ahead of an older pin.
+- Pins sort ascending by `pinnedAt`; a new pin appends rather than reordering.
+- `pinnedAt == nil` excluded.
+- Archived worktree with a non-nil `pinnedAt` excluded.
+- Mode on but no desk worktree exists → no desk row, no crash.
+- Desk carrying a stray `pinnedAt` appears exactly once.
+
+**`PinnedDockMetricsTests`**
+- Zero rows → height 0.
+- Below the cap → `rowCount × rowHeight`.
+- Above `maxRows` → clamped to `maxRows × rowHeight`.
+- Short sidebar → clamped to 40% of available height.
+
+**`RowActionMenuTests`** (extend existing)
+- Unpinned worktree offers `.pin`, not `.unpin`.
+- Pinned worktree offers `.unpin`, not `.pin`.
+- Desk worktree offers neither.
+
+**Daemon**
+- Migration `v60` adds the column; pre-existing rows read back `nil`.
+- `WorktreeStore` round-trips a non-nil `pinnedAt` and a nil one.
+- `worktree.setPin` sets a timestamp on `pinned: true` and clears to `NULL` on `false`.
+
+**Deletions:** the three test files listed under Removals.
+
+## Out of scope
+
+- CLI `tbd worktree pin` — the RPC exists; add it when wanted.
+- Drag-to-reorder within the dock. Pin order is by pin time.
+- Pinning repos or whole sections. Worktrees and scratch worktrees only.
+- Any mode tint. The window-wide wash was rejected in PR #507 and the status-bar tint is
+  removed here; mode is text and glyphs, not color.
