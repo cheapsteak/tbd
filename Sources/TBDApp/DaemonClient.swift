@@ -782,6 +782,14 @@ actor DaemonClient {
         )
     }
 
+    /// Pin or unpin a worktree for the sidebar dock.
+    func setWorktreePin(id: UUID, pinned: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetPin,
+            params: WorktreeSetPinParams(worktreeID: id, pinned: pinned)
+        )
+    }
+
     /// Set the global default for auto-hibernate-on-PR-merge.
     func setAutoHibernateOnMergeDefault(_ enabled: Bool) async throws {
         try await callVoidAsync(
