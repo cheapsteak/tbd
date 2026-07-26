@@ -32,6 +32,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var promotedToRepoID: String?  // set only on promoted scratch rows
     var pr_number: Int?  // number of the PR this worktree was created from, nil otherwise
     var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
+    var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -60,6 +61,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
         self.pr_number = wt.prNumber
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
+        self.pinnedAt = wt.pinnedAt
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -116,7 +118,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             autoHibernateOnMerge: autoHibernateOnMerge,
             promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
             prStatus: pr,
-            prNumber: pr_number
+            prNumber: pr_number,
+            pinnedAt: pinnedAt
         )
     }
 }
@@ -824,6 +827,17 @@ public struct WorktreeStore: Sendable {
             try db.execute(
                 sql: "UPDATE worktree SET autoHibernateOnMerge = ? WHERE id = ?",
                 arguments: [value, id.uuidString]
+            )
+        }
+    }
+
+    /// Pin or unpin a worktree for the sidebar dock. `nil` clears the pin.
+    /// Purely presentational — nothing in the daemon reads this value.
+    public func setPinned(id: UUID, pinnedAt: Date?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET pinnedAt = ? WHERE id = ?",
+                arguments: [pinnedAt, id.uuidString]
             )
         }
     }

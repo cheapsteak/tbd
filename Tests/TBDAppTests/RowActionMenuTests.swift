@@ -46,9 +46,9 @@ private func expectWellFormedDividers(_ items: [RowActionMenu.Item]) {
 @Suite("RowActionMenu — regular worktree")
 struct RowActionMenuRegularTests {
     @Test func fullShapeWithAllSectionsPresent() {
-        // Every conditional on: rename/archive | hibernation | fork/nested |
-        // maintenance | finder/copy — five sections, four dividers. A
-        // repo-backed row with no hook resolving offers Create.
+        // Every conditional on: rename/archive | pin | hibernation |
+        // fork/nested | maintenance | finder/copy — six sections, five
+        // dividers. A repo-backed row with no hook resolving offers Create.
         let s = session("Claude 1")
         let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
                                         hasHibernatedClaude: true,
@@ -61,6 +61,7 @@ struct RowActionMenuRegularTests {
         #expect(kinds(items) == [
             .rename,
             .archive,
+            .pin,
             .wakeHibernated,
             .hibernateNow,
             .toggleKeepWarm(enable: true),
@@ -74,21 +75,23 @@ struct RowActionMenuRegularTests {
             .copyLink,
             .copyBranch,
         ])
-        // Section boundaries: after archive, after the hibernation block,
-        // after the fork/nested block, and after the maintenance item.
-        #expect(dividerIndices(items) == [2, 7, 11, 13])
+        // Section boundaries: after archive, after pin, after the hibernation
+        // block, after the fork/nested block, and after the maintenance item.
+        #expect(dividerIndices(items) == [2, 4, 9, 13, 15])
         expectWellFormedDividers(items)
     }
 
     @Test func emptyHibernationSectionCollapses() {
         // No Claude sessions at all: the hibernation and fork sections are
-        // empty, so exactly three dividers remain — rename/archive | nested |
-        // maintenance | finder/copy — with no doubled or dangling dividers.
+        // empty, so exactly four dividers remain — rename/archive | pin |
+        // nested | maintenance | finder/copy — with no doubled or dangling
+        // dividers.
         let ctx = RowActionMenu.Context(hasRepoID: true, branch: "tbd/x")
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
             .rename,
             .archive,
+            .pin,
             .createNestedWorktree,
             .newWorktreeFromBranch,
             .createPreSessionHook,
@@ -97,17 +100,17 @@ struct RowActionMenuRegularTests {
             .copyLink,
             .copyBranch,
         ])
-        #expect(dividerIndices(items) == [2, 5, 7])
+        #expect(dividerIndices(items) == [2, 4, 7, 9])
         expectWellFormedDividers(items)
     }
 
     @Test func emptySpawningSectionCollapses() {
-        // No repo, no sessions, no hibernation: only the identity and
-        // filesystem sections remain, joined by a single divider.
+        // No repo, no sessions, no hibernation: only the identity, pin, and
+        // filesystem sections remain, joined by two dividers.
         let ctx = RowActionMenu.Context(hasRepoID: false, branch: "")
         let items = RowActionMenu.items(context: ctx)
-        #expect(kinds(items) == [.rename, .archive, .openInFinder, .copyPath, .copyLink])
-        #expect(dividerIndices(items) == [2])
+        #expect(kinds(items) == [.rename, .archive, .pin, .openInFinder, .copyPath, .copyLink])
+        #expect(dividerIndices(items) == [2, 4])
         expectWellFormedDividers(items)
     }
 
@@ -231,8 +234,8 @@ struct RowActionMenuRegularTests {
 @Suite("RowActionMenu — scratch")
 struct RowActionMenuScratchTests {
     @Test func fullShapeWithAllSectionsPresent() {
-        // Every conditional on: rename/archive | hibernation | fork |
-        // finder/copy | delete + promote hint — five sections, four dividers,
+        // Every conditional on: rename/archive | pin | hibernation | fork |
+        // finder/copy | delete + promote hint — six sections, five dividers,
         // Delete last among the actions and the caption at the very bottom.
         let s = session("Claude 1")
         let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
@@ -247,6 +250,7 @@ struct RowActionMenuScratchTests {
         #expect(kinds(items) == [
             .rename,
             .archiveScratch,
+            .pin,
             .wakeHibernated,
             .hibernateNow,
             .toggleKeepWarm(enable: true),
@@ -257,7 +261,7 @@ struct RowActionMenuScratchTests {
             .copyLink,
             .deleteScratch,
         ])
-        #expect(dividerIndices(items) == [2, 7, 9, 13])
+        #expect(dividerIndices(items) == [2, 4, 9, 11, 15])
         // Promote hint caption is the very last item, under Delete.
         #expect(items.last == .caption(RowActionMenu.promoteHint))
         #expect(kinds(items).last == .deleteScratch)
@@ -266,19 +270,20 @@ struct RowActionMenuScratchTests {
 
     @Test func emptyMiddleSectionsCollapse() {
         // No Claude sessions at all: hibernation and fork sections vanish, so
-        // the menu is rename/archive | finder/copy | delete(+caption) with
-        // exactly two dividers — never doubled.
+        // the menu is rename/archive | pin | finder/copy | delete(+caption)
+        // with exactly three dividers — never doubled.
         let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true, isPromoted: false)
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
             .rename,
             .archiveScratch,
+            .pin,
             .openInFinder,
             .copyPath,
             .copyLink,
             .deleteScratch,
         ])
-        #expect(dividerIndices(items) == [2, 6])
+        #expect(dividerIndices(items) == [2, 4, 8])
         #expect(items.last == .caption(RowActionMenu.promoteHint))
         expectWellFormedDividers(items)
     }
@@ -304,6 +309,7 @@ struct RowActionMenuScratchTests {
         #expect(kinds(items) == [
             .rename,
             .archiveScratch,
+            .pin,
             .forkSession(terminalID: s.terminalID, profileID: s.profileID),
             .openInFinder,
             .copyPath,
@@ -494,5 +500,40 @@ struct RowActionMenuCopyBranchTests {
 
         let main = RowActionMenu.Context(pathIsEmpty: false, status: .main, branch: "main")
         #expect(kinds(RowActionMenu.items(context: main)).contains(.copyBranch))
+    }
+}
+
+// MARK: - Pin/unpin
+
+@Suite("RowActionMenu — pin/unpin")
+struct RowActionMenuPinTests {
+    @Test("an unpinned regular row offers Pin, not Unpin")
+    func offersPin() {
+        let items = RowActionMenu.items(context: .init(isPinned: false))
+        #expect(items.contains(.action(.init(kind: .pin, title: RowActionMenu.pinLabel))))
+        #expect(!kinds(items).contains(.unpin))
+    }
+
+    @Test("a pinned regular row offers Unpin, not Pin")
+    func offersUnpin() {
+        let items = RowActionMenu.items(context: .init(isPinned: true))
+        #expect(items.contains(.action(.init(kind: .unpin, title: RowActionMenu.unpinLabel))))
+        #expect(!kinds(items).contains(.pin))
+    }
+
+    @Test("an unpinned scratch row offers Pin")
+    func scratchOffersPin() {
+        let items = RowActionMenu.items(context: .init(isScratch: true, isPinned: false))
+        #expect(kinds(items).contains(.pin))
+    }
+
+    @Test("the Watch Desk offers neither Pin nor Unpin")
+    func deskOffersNeither() {
+        // The desk is a scratch row, so this must be suppressed in the scratch
+        // branch — not only the regular one.
+        let items = RowActionMenu.items(
+            context: .init(isScratch: true, isPinned: false, isNightwatchDesk: true))
+        #expect(!kinds(items).contains(.pin))
+        #expect(!kinds(items).contains(.unpin))
     }
 }

@@ -328,4 +328,12 @@ extension RPCRouter {
         try await db.worktrees.setAutoHibernateOnMerge(id: params.worktreeID, value: params.enabled)
         return .ok()
     }
+
+    func handleWorktreeSetPin(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeSetPinParams.self, from: paramsData)
+        // Stamped daemon-side so pin order is consistent across clients.
+        try await db.worktrees.setPinned(id: params.worktreeID,
+                                         pinnedAt: params.pinned ? Date() : nil)
+        return .ok()
+    }
 }

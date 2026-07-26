@@ -1087,6 +1087,18 @@ public final class TBDDatabase: Sendable {
                 type: .text)
         }
 
+        // Pin a worktree to the sidebar dock. Nullable with NO default: existing
+        // rows must land on NULL (= unpinned), and there is no Swift-side default
+        // to flip later, so the `ADD COLUMN ... DEFAULT` backfill trap does not
+        // apply. Purely presentational — nothing in the daemon reads this value.
+        // (Renumbered v60→v63 on rebase: main took v60/v61/v62 first. Safe
+        // because the body uses the idempotent `addColumnIfMissing` helper —
+        // see Database/CLAUDE.md — so a DB that already ran this under the old
+        // identifier just no-ops.)
+        migrator.registerMigration("v63_worktree_pinned_at") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "pinnedAt", type: .datetime)
+        }
+
         return migrator
     }
 }

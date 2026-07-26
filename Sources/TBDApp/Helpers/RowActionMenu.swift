@@ -37,6 +37,10 @@ enum RowActionMenu {
         /// Create a child worktree based on THIS worktree's current branch.
         case newWorktreeFromBranch
         case archive
+        /// Pin this worktree to the sidebar dock.
+        case pin
+        /// Remove this worktree from the sidebar dock.
+        case unpin
         /// Re-run this worktree's `preSession` hook in a fresh, non-focused tab.
         case rerunPreSessionHook
         /// Reveal the repo's pre-session hook editor so the user can author one.
@@ -121,6 +125,11 @@ enum RowActionMenu {
         /// Backing repo present — nested-worktree creation is repo-only.
         var hasRepoID: Bool
         var isScratch: Bool
+        /// Already pinned to the sidebar dock — selects Unpin over Pin.
+        var isPinned: Bool
+        /// The mode-managed Watch Desk. Neither Pin nor Unpin is offered: the
+        /// sidebar's Day/Night toggle is what controls whether it is shown.
+        var isNightwatchDesk: Bool
         var status: WorktreeStatus
         /// Whether the scratch space has already been promoted (hides the
         /// promote-hint caption).
@@ -145,6 +154,8 @@ enum RowActionMenu {
              pathIsEmpty: Bool = false,
              hasRepoID: Bool = true,
              isScratch: Bool = false,
+             isPinned: Bool = false,
+             isNightwatchDesk: Bool = false,
              status: WorktreeStatus = .active,
              isPromoted: Bool = false,
              branch: String = "",
@@ -159,6 +170,8 @@ enum RowActionMenu {
             self.pathIsEmpty = pathIsEmpty
             self.hasRepoID = hasRepoID
             self.isScratch = isScratch
+            self.isPinned = isPinned
+            self.isNightwatchDesk = isNightwatchDesk
             self.status = status
             self.isPromoted = isPromoted
             self.branch = branch
@@ -183,6 +196,8 @@ enum RowActionMenu {
     static let keepWarmLabel = "Keep warm"
     static let allowHibernationLabel = "Allow hibernation"
     static let rerunPreSessionLabel = "Re-run pre-session hook"
+    static let pinLabel = "Pin to dock"
+    static let unpinLabel = "Unpin from dock"
     /// Trailing character is U+2026 HORIZONTAL ELLIPSIS — the macOS convention
     /// for an item that opens further UI rather than acting immediately.
     static let createPreSessionLabel = "Create pre-session hook…"
@@ -261,6 +276,16 @@ enum RowActionMenu {
         return [Action(kind: .createPreSessionHook, title: createPreSessionLabel)]
     }
 
+    /// Pin / unpin the sidebar-dock entry. Empty for the Watch Desk — it is
+    /// mode-driven, and `joined(...)` collapses the empty section so no dangling
+    /// divider appears.
+    static func pinActions(context: Context) -> [Action] {
+        guard !context.isNightwatchDesk else { return [] }
+        return [context.isPinned
+            ? Action(kind: .unpin, title: unpinLabel)
+            : Action(kind: .pin, title: pinLabel)]
+    }
+
     private static func forkActions(context: Context) -> [Action] {
         let multiple = context.claudeSessions.count > 1
         return context.claudeSessions.map { session in
@@ -310,6 +335,7 @@ enum RowActionMenu {
                 // folder on disk.
                 .action(Action(kind: .archiveScratch, title: "Archive", role: .destructive)),
             ],
+            pinActions(context: context).map(Item.action),
             hibernationActions(context: context).map(Item.action),
             // Scratch spaces host Claude sessions too — same fork entries as
             // the regular branch.
@@ -355,6 +381,7 @@ enum RowActionMenu {
                     disabledHelp: archiveBlocked ? archiveNeedsChildrenGoneHelp : nil
                 )),
             ],
+            pinActions(context: context).map(Item.action),
             hibernationActions(context: context).map(Item.action),
             spawning,
             maintenanceActions(context: context).map(Item.action),

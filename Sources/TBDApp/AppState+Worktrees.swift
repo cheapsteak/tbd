@@ -897,6 +897,22 @@ extension AppState {
         }
     }
 
+    /// Pin or unpin a worktree for the sidebar dock.
+    ///
+    /// No optimistic local update, deliberately: the dock reflects daemon state,
+    /// and the daemon stamps `pinnedAt` (so pin ORDER is server-assigned). A
+    /// guessed local timestamp could order the dock differently from the next
+    /// refresh. A failed pin therefore visibly does not take, which is honest.
+    func setPinned(worktreeID: UUID, pinned: Bool) async {
+        do {
+            try await daemonClient.setWorktreePin(id: worktreeID, pinned: pinned)
+            await refreshWorktrees()
+        } catch {
+            logger.error("Failed to set worktree pin: \(error, privacy: .public)")
+            showAlert("Couldn't update pin: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Resolve the effective auto-hibernate-on-merge setting for a worktree.
     /// Returns the per-worktree override when explicitly set; otherwise falls
     /// back to the global default (`autoHibernateOnMergeDefault`).

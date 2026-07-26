@@ -191,6 +191,7 @@ public enum RPCMethod {
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let worktreeSetAutoHibernate = "worktree.setAutoHibernate"
+    public static let worktreeSetPin = "worktree.setPin"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
     public static let configSetAutoHibernateOnMergeDefault = "config.setAutoHibernateOnMergeDefault"
@@ -1429,6 +1430,17 @@ public struct WorktreeSetAutoHibernateParams: Codable, Sendable {
     public let enabled: Bool
     public init(worktreeID: UUID, enabled: Bool) {
         self.worktreeID = worktreeID; self.enabled = enabled
+    }
+}
+
+/// Pin or unpin a worktree for the sidebar dock. The `pinnedAt` timestamp is
+/// stamped daemon-side, so pin ORDER is server-assigned and consistent across
+/// clients — the client only says whether it wants the pin on or off.
+public struct WorktreeSetPinParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let pinned: Bool
+    public init(worktreeID: UUID, pinned: Bool) {
+        self.worktreeID = worktreeID; self.pinned = pinned
     }
 }
 
