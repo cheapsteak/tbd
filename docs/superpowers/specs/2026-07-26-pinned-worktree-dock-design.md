@@ -55,10 +55,13 @@ from the toggle immediately below, so the glyph carries no load.
 
 ### Growth is capped
 
-The dock grows one row per pin up to `min(5 rows, 40% of sidebar height)`, then scrolls
-internally. The list above therefore never loses more than 40% of its height, however many
-worktrees are pinned. At zero rows the dock is absent entirely — a user with no pins and mode
-off sees today's sidebar unchanged.
+The dock grows one row per visible row — pins, the desk, and any expanded children — up to
+`min(5 rows, 40% of sidebar height)`, then scrolls internally. The list above therefore never
+loses more than 40% of its height, however many worktrees are pinned or expanded. At zero rows
+the dock is absent entirely: a user with no pins and mode off sees today's sidebar unchanged.
+
+Because an expansion can push the dock past the cap, the dock scrolls the selected row into
+view whenever selection changes to a row it contains.
 
 ## Removals
 
@@ -132,29 +135,64 @@ extension Worktree {
 
 One definition instead of three copies.
 
+### Selected dock rows expand their children
+
+A dock row whose subtree is selected expands to show its descendants, indented, exactly as
+`WorktreeSubtreeView` renders them in the list. Deselect and the subtree collapses again. This
+keeps the dock compact by default while making a pinned parent's children reachable without
+scrolling back up to the list.
+
+"Selected" means **the row itself or any descendant of it is selected**. Scoping it to the row
+alone would be self-defeating: you would click a child in the dock, selection would move off
+the parent, and the child you just clicked would vanish out from under the cursor.
+
+Expansion is transient view state derived from selection — it is never persisted, and it is
+not a disclosure triangle the user toggles.
+
 ### Dock contents — a pure function
 
 ```swift
+struct PinnedDockRow: Identifiable, Equatable {
+    let worktree: Worktree
+    let depth: Int              // 0 = pinned row or desk; 1+ = expanded descendant
+    let sectionRepoID: UUID?    // repoID of this row's top-level ancestor; nil at depth 0
+    var id: UUID { worktree.id }
+}
+
 enum PinnedDockContent {
     static func rows(allWorktrees: [Worktree],
                      mode: NightwatchMode,
-                     experimentalEnabled: Bool) -> [Worktree]
+                     experimentalEnabled: Bool,
+                     selectedIDs: Set<UUID>,
+                     children: (UUID) -> [Worktree]) -> [PinnedDockRow]
 }
 ```
 
+`children` is injected rather than recomputed so the dock and the list agree on what a child
+is: the view passes `appState.children(of:)`, which already filters to `.active`/`.creating`
+and sorts by `sortOrder`. Tests pass a stub. Duplicating that predicate here would let the two
+surfaces drift.
+
 Rules, in order:
 
-1. If `experimentalEnabled && mode != .off`, the worktree satisfying `isNightwatchDesk` comes
-   first. If no such worktree exists (mode was just turned on and the daemon has not created
-   the desk yet), the slot is simply absent — not an error, not a placeholder.
+1. If `experimentalEnabled && mode != .off`, the worktree satisfying `isNightwatchDesk` is the
+   first top-level row. If no such worktree exists — mode was just turned on and the daemon
+   has not created the desk yet — the slot is simply absent. Not an error, not a placeholder.
 2. Then every worktree with `pinnedAt != nil`, sorted ascending by `pinnedAt`. Oldest pin
    first, so new pins append and existing rows never move.
 3. The desk is excluded from step 2 even if something set its `pinnedAt`, so it can never
    appear twice.
-4. Archived worktrees are excluded. Their `pinnedAt` is left untouched, so reviving one
-   restores its pin.
+4. Archived worktrees are excluded as top-level rows. Their `pinnedAt` is left untouched, so
+   reviving one restores its pin. (`children` already excludes them from expansions.)
+5. Each top-level row expands its descendants, depth-first at `depth + 1`, **iff** its own id
+   or any descendant id is in `selectedIDs`. Otherwise it contributes one row.
+6. A worktree already emitted is never emitted again. A pinned worktree that is also a
+   descendant of another pinned worktree keeps its own top-level position and does not repeat
+   inside the expansion. This also makes a cyclic `parentWorktreeID` chain terminate, so the
+   dock needs no depth cap of its own — unlike `WorktreeSubtreeView`, whose recursion is
+   bounded by `kMaxSubtreeDepth` because it has no visited set.
 
-No SwiftUI, no `AppState` — takes values, returns values, fully unit-testable.
+No SwiftUI, no `AppState` — takes values and one closure, returns values, fully unit-testable.
 
 ### Dock height — a pure function
 
@@ -175,19 +213,30 @@ Returns `min(rowCount × rowHeight, maxRows × rowHeight, availableHeight × 0.4
 
 ```swift
 struct PinnedDockView: View {
-    let rows: [Worktree]          // from PinnedDockContent.rows(...)
+    let rows: [PinnedDockRow]     // from PinnedDockContent.rows(...)
     let availableHeight: CGFloat  // sidebar height, from the GeometryReader below
     @EnvironmentObject var appState: AppState
 
     var body: some View {
         if !rows.isEmpty {        // empty dock renders nothing at all — no divider, no gap
-            List(selection: $appState.selectedWorktreeIDs) {
-                ForEach(rows) { wt in
-                    WorktreeRowView(worktree: wt)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                        .tag(wt.id)
+            ScrollViewReader { proxy in
+                List(selection: $appState.selectedWorktreeIDs) {
+                    ForEach(rows) { row in
+                        WorktreeRowView(worktree: row.worktree,
+                                        indentLevel: row.depth,
+                                        sectionRepoID: row.sectionRepoID)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .tag(row.worktree.id)
+                    }
+                }
+                .onChange(of: appState.selectedWorktreeIDs) { _, ids in
+                    // An expansion can push the dock past its cap; keep the
+                    // selected row visible instead of scrolled out of sight.
+                    if let target = ids.first, rows.contains(where: { $0.id == target }) {
+                        withAnimation { proxy.scrollTo(target) }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -198,6 +247,18 @@ struct PinnedDockView: View {
     }
 }
 ```
+
+`indentLevel: row.depth` is the same parameter `WorktreeSubtreeView` uses for nesting, so
+expanded children indent identically to the list.
+
+`sectionRepoID` drives the muted `(repo-name)` suffix that `WorktreeRowView` shows when a row
+belongs to a different repo than the section containing it. In the dock:
+
+- **depth 0** — `nil`. A top-level dock row sits under no section, so a suffix there would be
+  labelling a section that does not exist.
+- **depth ≥ 1** — the top-level ancestor's `repoID`. The pinned parent *is* the section for
+  its expansion, so a child pulled in from another repo gets the same `(repo-name)` suffix it
+  carries in the list. That is what "behaviour exactly the same" requires.
 
 A second `List` bound to the same selection set is what buys full row fidelity: `.tag`,
 native selection highlight, native row metrics, and `.listRowInsets` all work verbatim, so
@@ -267,6 +328,19 @@ Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
 - Mode on but no desk worktree exists → no desk row, no crash.
 - Desk carrying a stray `pinnedAt` appears exactly once.
 
+**`PinnedDockContentTests` — expansion**
+- Nothing selected → every top-level row contributes exactly one row, no children.
+- Pinned parent selected → its children follow it at `depth 1`, in `children(of:)` order.
+- Grandchild selected → the whole chain expands; the parent stays visible (this is the case
+  that would break if "selected" meant the row itself only).
+- A sibling pin selected → the *other* pin stays collapsed.
+- Expanded child's `sectionRepoID` is the top-level ancestor's `repoID`; a depth-0 row's is
+  `nil`.
+- A worktree that is both pinned and a descendant of another pin appears exactly once, at its
+  top-level position.
+- Cyclic `parentWorktreeID` chain terminates and emits each worktree once.
+- `children` closure returning `[]` for everything → identical output to nothing selected.
+
 **`PinnedDockMetricsTests`**
 - Zero rows → height 0.
 - Below the cap → `rowCount × rowHeight`.
@@ -289,6 +363,8 @@ Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
 
 - CLI `tbd worktree pin` — the RPC exists; add it when wanted.
 - Drag-to-reorder within the dock. Pin order is by pin time.
+- A user-toggled disclosure triangle on dock rows. Expansion is derived from selection and
+  nothing else — there is no expanded/collapsed state to persist.
 - Pinning repos or whole sections. Worktrees and scratch worktrees only.
 - Any mode tint. The window-wide wash was rejected in PR #507 and the status-bar tint is
   removed here; mode is text and glyphs, not color.
