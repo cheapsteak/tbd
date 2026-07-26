@@ -134,3 +134,24 @@ enum PinnedDockContent {
         return Array(rows[start..<end])
     }
 }
+
+/// Index maths for a dock drag, split out from `AppState` so the stale-index
+/// guard is testable without a live app.
+enum PinnedDockReorder {
+    /// The new root order after a `.onMove`, or nil when the offsets are stale.
+    ///
+    /// `source`/`destination` are captured against the `ForEach`'s snapshot and
+    /// can outlive it — a pin can be removed by another surface mid-drag. The
+    /// existing `reorderTopLevelWorktrees` guards the same way; this is not
+    /// theoretical.
+    static func reordered(roots: [UUID],
+                          fromOffsets source: IndexSet,
+                          toOffset destination: Int) -> [UUID]? {
+        guard !roots.isEmpty,
+              !source.contains(where: { $0 >= roots.count }),
+              destination <= roots.count else { return nil }
+        var next = roots
+        next.move(fromOffsets: source, toOffset: destination)
+        return next
+    }
+}
