@@ -51,6 +51,7 @@ struct PanePlaceholder: View {
     @State private var isHeaderHovering = false
     @State private var showSourceCode = false
     @State private var hasRenderableContent = false
+    @State private var showHistoryPalette = false
     @StateObject private var webviewState = WebviewState()
     @State private var didCopyURL = false
     @AppStorage(AppState.enableTranscriptKey)
@@ -238,15 +239,22 @@ struct PanePlaceholder: View {
 
     // MARK: - Slot History Navigation
 
-    /// Back/forward chevrons for viewer-class slot panes. Left-click steps
-    /// one entry; right-click either chevron shows the SAME full MRU list
-    /// (newest first, checkmark on the current entry) for direct jumps.
+    /// Search icon + back/forward chevrons for viewer-class slot panes. The
+    /// search icon opens the MRU history palette (searchable replacement for
+    /// the old right-click dropdown — see `historySearchButton`); the
+    /// chevrons still left-click step one entry at a time.
     @ViewBuilder
     private var historyNavigation: some View {
-        let history = appState.paneHistories[content.paneID] ?? PaneHistory()
+        // A pane that hasn't navigated yet has no recorded history — but it
+        // always has its current content, so fall back to a single-entry
+        // history seeded with it rather than an empty one. Otherwise the
+        // search button would wrongly read as "nothing to show" for the
+        // common case of a freshly opened viewer slot.
+        let history = appState.paneHistories[content.paneID] ?? PaneHistory.seeded(with: content)
+
+        historySearchButton(history: history)
 
         historyButton(
-            history: history,
             icon: "chevron.left",
             help: "Back",
             action: { navigateHistory { $0.goBack() } }
@@ -254,7 +262,6 @@ struct PanePlaceholder: View {
         .disabled(!history.canGoBack)
 
         historyButton(
-            history: history,
             icon: "chevron.right",
             help: "Forward",
             action: { navigateHistory { $0.goForward() } }
@@ -262,11 +269,39 @@ struct PanePlaceholder: View {
         .disabled(!history.canGoForward)
     }
 
-    /// Plain Button + .contextMenu — NOT Menu(primaryAction:), whose label
-    /// right-click fell through to the header's context menu, and never
-    /// .onTapGesture, which blocks .contextMenu on macOS.
+    /// Search icon opening the searchable MRU-history palette (replaces the
+    /// former right-click dropdown on the chevrons, which was
+    /// undiscoverable). Always enabled for a live viewer slot — it always
+    /// has at least its current entry to show, checkmarked, even before any
+    /// navigation has happened. Disabled only at zero entries, which in
+    /// practice never happens here.
+    private func historySearchButton(history: PaneHistory) -> some View {
+        Button(action: { showHistoryPalette = true }) {
+            // A couple points larger and a lighter weight than the 8pt/bold
+            // chevrons/close glyph: at 8pt bold, "line.3.horizontal"'s three
+            // bars crowd into a smudge. Regular weight + a touch more size
+            // gives the bars air while still reading as the lightest glyph
+            // in the row (not heavier than its neighbors).
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10, weight: .regular))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help("Search pane history")
+        .disabled(!PaneHistoryPaletteButtonModel.isEnabled(entryCount: history.entries.count))
+        .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
+            PaneHistoryPaletteView(history: history) { index in
+                navigateHistory { $0.go(to: index) }
+            }
+        }
+    }
+
+    /// Plain Button — no `.contextMenu` (that dropdown is now the palette
+    /// above); never `.onTapGesture`, which blocks `.contextMenu` on macOS
+    /// (moot here since there's none left, but keeping the plain-Button
+    /// shape avoids reintroducing the trap).
     private func historyButton(
-        history: PaneHistory,
         icon: String,
         help: String,
         action: @escaping () -> Void
@@ -281,21 +316,6 @@ struct PanePlaceholder: View {
         }
         .buttonStyle(.borderless)
         .help(help)
-        .contextMenu {
-            ForEach(Array(history.entries.enumerated()), id: \.offset) { index, entry in
-                Button {
-                    navigateHistory { $0.go(to: index) }
-                } label: {
-                    // Explicit checkmark symbol on the cursor entry — renders
-                    // reliably in a .contextMenu, unlike Toggle state.
-                    if index == history.cursor {
-                        Label(historyEntryLabel(entry), systemImage: "checkmark")
-                    } else {
-                        Text(historyEntryLabel(entry))
-                    }
-                }
-            }
-        }
     }
 
     /// Applies a history navigation to this slot: mutate the slot's history,
@@ -309,21 +329,6 @@ struct PanePlaceholder: View {
         else { return }
         appState.paneHistories[content.paneID] = history
         layout = updated
-    }
-
-    private func historyEntryLabel(_ content: PaneContent) -> String {
-        switch content {
-        case .codeViewer(_, let path):
-            return URL(fileURLWithPath: path).lastPathComponent
-        case .webview(_, let url):
-            return (url.host ?? "") + url.path
-        case .liveTranscript:
-            return "Transcript"
-        case .terminal:
-            return "Terminal"
-        case .note:
-            return "Note"
-        }
     }
 
     // MARK: - Pane Body
