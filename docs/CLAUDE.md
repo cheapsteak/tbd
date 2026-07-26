@@ -15,3 +15,5 @@ When committing, do not stage plan files. If a plan's content is worth keeping, 
 This is enforced mechanically by the `pre-commit` git hook (`scripts/git-hooks/pre-commit`, installed via `scripts/install-hooks.sh`): it refuses to commit any newly-added file carrying the writing-plans header marker, no matter where it's placed. Rare intentional override: `ALLOW_PLAN_COMMIT=1 git commit ...`.
 
 Because that hook only runs when installed locally, the same policy is also enforced in CI by the `plans-guard` job (`scripts/check-no-committed-plans.sh`), which scans the whole tracked tree on every PR and push — so a plan can't slip in from an environment that never installed the hook.
+
+**Specs are the opposite of plans: they are meant to be committed.** Design specs live in `docs/specs/<date>-<topic>-design.md` and are durable, reviewable, and referenced by later work. The ban covers implementation plans and task checklists only. See the brainstorming rule in the root `CLAUDE.md`.

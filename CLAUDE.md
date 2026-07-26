@@ -32,6 +32,14 @@ Mechanics: daemon-side behavior gates on a `config` column added by migration (f
 
 Cautionary precedent: `auto_hibernate_enabled` shipped default-ON in `v39_session_hibernation` and had to be force-disabled in `v50` once the eat-typed-input risk was understood. Because `ADD COLUMN ... DEFAULT` backfills existing rows, flipping a default later needs a forcing `UPDATE` migration (a Swift-side default change alone is a no-op for existing installs) — and after the force-off, a user's deliberate opt-in is indistinguishable from the backfilled value, so it got reset too. Shipping default-OFF first avoids all of this. Good precedents: `control_mode_enabled`, `hibernate_input_veto_enabled` (v51).
 
+### Blast-radius work starts with a brainstormed spec
+
+Work that trips the triggers above — a new subsystem, a feature flag or `config` column, a database migration, a wholesale replacement of a load-bearing path — runs `/tbd-brainstorming` **before** implementation and commits the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
+
+**A human answers the brainstorming questions.** An agent may not answer its own. If no human is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
+
+Not required for bug fixes, small additive UI, or refactors. If a trigger fires but a brainstorm is genuinely unnecessary, say so in the PR description. This is convention, not a gate — no linter can see whether thinking happened. Use `/tbd-brainstorming`, not `superpowers:brainstorming`; a guardrail redirects the wrong one.
+
 ### Restart must use the worktree's own script
 Always run `scripts/restart.sh` (relative, from the worktree cwd), never an absolute path to the main project's copy. Using `/Users/chang/projects/tbd/scripts/restart.sh` builds and starts binaries from the main branch, leaving old worktree processes running and causing "Unknown method" RPC errors. After any restart, verify with:
 ```
