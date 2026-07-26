@@ -2255,6 +2255,14 @@ final class AppState: ObservableObject {
                     reconcileNoteTabs(worktreeID: wtID, notes: fetched)
                 }
             }
+
+            // Prune slot histories only after every visible worktree's tabs
+            // have been reconciled this cycle. Doing it inside the per-worktree
+            // `reconcileTabs` loop above would run against a partially-populated
+            // `tabs` on the first launch pass, deleting (and persisting as `[]`)
+            // histories for worktrees not yet loaded — the pane back/forward
+            // history was lost on every restart because of that.
+            prunePaneHistories()
         } catch {
             logger.error("Failed to list worktrees: \(error)")
             handleConnectionError(error)
@@ -2336,7 +2344,6 @@ final class AppState: ObservableObject {
 
         tabs[worktreeID] = currentTabs
         applyStoredOrder(worktreeID: worktreeID)
-        prunePaneHistories()
         if !alreadyLoadedOrder {
             Task { await loadTabStates(worktreeID: worktreeID) }
         }
