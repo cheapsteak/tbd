@@ -38,9 +38,10 @@ struct FileWatcherTests {
 
     /// Construct many watchers without ever calling `changes(for:)`.
     /// `FileWatcher` itself is a stateless factory, so this should be trivially
-    /// balanced — no streams alive.
+    /// balanced — no streams alive, and no FDs opened, hence none closed.
     @Test func factoryConstructionIsStateless() async {
         let baseline = FileWatcher.liveStreamCount
+        let fdBaseline = FileWatcher.closedFDCount
         do {
             var watchers: [FileWatcher] = []
             for _ in 0..<50 {
@@ -51,10 +52,10 @@ struct FileWatcherTests {
             watchers.removeAll()
         }
         // No wait between `removeAll()` and the re-assertion, deliberately:
-        // `changes(for:)` was never called, so no stream ever existed, and
-        // releasing watchers that started nothing has no asynchronous effect
+        // `changes(for:)` was never called, so no stream and no FD ever existed,
+        // and releasing watchers that started nothing has no asynchronous effect
         // to settle. The re-assertion still earns its place — it says releasing
-        // them must not move the counter.
+        // them must not move either counter.
         //
         // This used to be `await Task.yield()`, which was not merely redundant
         // but actively harmful: `yield()` keeps the calling task RUNNABLE and
@@ -63,17 +64,21 @@ struct FileWatcherTests {
         // `cancellingConsumingTaskTerminatesStream` documents. Measured under a
         // full-target run it cost this one test 22.4s.
         #expect(FileWatcher.liveStreamCount == baseline)
+        #expect(FileWatcher.closedFDCount == fdBaseline, "no FD was opened, so none may be closed")
     }
 
     /// Start a stream against a real temp file, drop the iterator, and confirm
-    /// the stream's `onTermination` ran (live count returns to baseline).
+    /// the stream's `onTermination` ran (live count returns to baseline) **and**
+    /// that the dispatch source's cancel handler closed the FD.
     ///
-    /// That is the whole extent of what this can currently observe:
-    /// `liveStreamCount` is decremented inside `onTermination` itself, on a line
-    /// independent of `box.terminate()`, so it says nothing about whether the
-    /// dispatch source was cancelled or its FD closed.
+    /// The second half is what the docstring used to claim without testing:
+    /// `liveStreamCount` only observes that `onTermination` fired — it is
+    /// decremented on a line independent of `box.terminate()`. `closedFDCount`
+    /// is incremented next to `close(fd)` inside the cancel handler, so it is
+    /// the only assertion here that a deleted `src?.cancel()` would break.
     @Test func liveStreamCountReturnsToBaselineAfterIteratorDrops() async {
         let baseline = FileWatcher.liveStreamCount
+        let fdBaseline = FileWatcher.closedFDCount
 
         let tmpURL = Self.makeTempFile()
         defer { try? FileManager.default.removeItem(at: tmpURL) }
@@ -89,13 +94,16 @@ struct FileWatcherTests {
 
         await Self.poll("liveStreamCount back to baseline \(baseline)",
                         observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+        await Self.poll("exactly one FD closed (baseline \(fdBaseline))",
+                        observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
     }
 
     /// Cancelling the consuming `Task` (the SwiftUI `.task` analogue) must also
-    /// drive the stream's onTermination — that's the most common real-world
-    /// cleanup path.
+    /// drive the stream's onTermination and close the FD — that's the most
+    /// common real-world cleanup path.
     @Test func cancellingConsumingTaskTerminatesStream() async {
         let baseline = FileWatcher.liveStreamCount
+        let fdBaseline = FileWatcher.closedFDCount
 
         let tmpURL = Self.makeTempFile()
         defer { try? FileManager.default.removeItem(at: tmpURL) }
@@ -123,12 +131,16 @@ struct FileWatcherTests {
 
         await Self.poll("liveStreamCount back to baseline \(baseline)",
                         observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+        await Self.poll("exactly one FD closed (baseline \(fdBaseline))",
+                        observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
     }
 
     /// Opening a non-existent path must finish the stream cleanly — no hang, no
-    /// leak. The for-await loop should exit immediately.
+    /// leak. The for-await loop should exit immediately, and since `open()`
+    /// never succeeded there is no FD to close.
     @Test func nonExistentPathFinishesStreamImmediately() async {
         let baseline = FileWatcher.liveStreamCount
+        let fdBaseline = FileWatcher.closedFDCount
         let w = FileWatcher()
         let bogus = "/definitely/does/not/exist/\(UUID().uuidString)"
 
@@ -140,6 +152,8 @@ struct FileWatcherTests {
 
         await Self.poll("liveStreamCount back to baseline \(baseline)",
                         observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+        #expect(FileWatcher.closedFDCount == fdBaseline,
+                "open() failed, so no dispatch source and no FD to close")
     }
 
     // MARK: - Debounce (tier 2: real FS event, virtual timer)
@@ -322,6 +336,7 @@ struct FileWatcherTests {
             await Self.poll("watcher is live before the rename",
                             observing: { f.yields.count }) { $0 == 1 }
 
+            let fdBaseline = FileWatcher.closedFDCount
             let replacement = Self.makeTempFile(contents: "replaced")
             defer { try? FileManager.default.removeItem(at: replacement) }
             // Hoisted out of `#expect` so the String-to-C-pointer conversion
@@ -335,6 +350,10 @@ struct FileWatcherTests {
             await f.clock.advance(by: .milliseconds(1))
             await Self.poll("re-open notified",
                             observing: { f.yields.count }) { $0 == 2 }
+            // The previous epoch's source is cancelled by the re-open, so its
+            // FD is closed — the "we never leak" half of the atomic-save story.
+            await Self.poll("the pre-rename FD was closed (baseline \(fdBaseline))",
+                            observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
 
             // Still live: a write to the re-opened inode still debounces.
             // `firstWriteAfterResume: true` because `performReopen()` built and
@@ -346,6 +365,39 @@ struct FileWatcherTests {
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
             await Self.poll("re-opened stream still debounces",
                             observing: { f.yields.count }) { $0 == 3 }
+        }
+    }
+
+    /// Tier 2. Teardown while a debounce timer is **armed and pending** must
+    /// still complete: `onTermination` runs (live count back to baseline) and
+    /// the dispatch source's cancel handler closes the FD. `closedFDCount` is
+    /// the load-bearing half — deleting `src?.cancel()` from `terminate()`
+    /// reddens it while leaving the live count green, since that counter is
+    /// decremented on a line independent of `box.terminate()`.
+    ///
+    /// What this deliberately does NOT cover: "a terminated stream must not
+    /// yield", i.e. the `terminated` re-check inside `yieldIfActive()`. That
+    /// invariant is unobservable from outside the box, because the only observer
+    /// of a yield is a consumer that by then no longer exists — cancelling it
+    /// and awaiting its value is precisely what guarantees its `for await` loop
+    /// has exited, so any notification counter is frozen before the assertion
+    /// runs and cannot distinguish a correct drop from a stale yield into the
+    /// void. Observing it would need a DEBUG counter at production's yield site,
+    /// which is out of scope here.
+    @Test func terminationWithAPendingDebounceStillClosesTheFD() async {
+        let baseline = FileWatcher.liveStreamCount
+        let fdBaseline = FileWatcher.closedFDCount
+
+        await Self.withWatchedFile { f in
+            await Self.writeUntilArmed(f, firstWriteAfterResume: true)
+
+            f.consumer.cancel()
+            _ = await f.consumer.value
+
+            await Self.poll("liveStreamCount back to baseline \(baseline)",
+                            observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+            await Self.poll("the watched FD was closed (baseline \(fdBaseline))",
+                            observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
         }
     }
 
@@ -471,6 +523,7 @@ struct FileWatcherTests {
         let clock = TestClock<Swift.Duration>()
         let armed = Counter()
         let yields = Counter()
+        let fdBaseline = FileWatcher.closedFDCount
         let watcher = FileWatcher(clock: RecordingClock(base: clock, armed: armed))
         // Built here, synchronously, and NOT inside the consuming Task:
         // `AsyncStream`'s build closure runs during `init`, so the FD is open
@@ -486,6 +539,28 @@ struct FileWatcherTests {
 
         consumer.cancel()
         _ = await consumer.value
+
+        // Cancelling the consumer only *issues* `src.cancel()`; `close(fd)` runs
+        // later, in the source's GCD cancel handler. Without waiting here every
+        // debounce test would return with a `closedFDCount` increment still in
+        // flight, and the lifecycle tests' strict `== fdBaseline + 1` assertions
+        // would be safe only because the serialized suite happens to run them
+        // first in source order — insert or reorder a test and a stray late
+        // close lands mid-assertion. Waiting for quiescence removes that
+        // ordering coupling.
+        //
+        // Quiescence, not an exact count: the number of FDs this fixture opened
+        // is 1 + however many times the body provoked a re-open, which is not
+        // observable from out here. So: at least one close, and the count
+        // unchanged across two probes.
+        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(4))
+        var previous = -1
+        while ContinuousClock.now < settleDeadline {
+            let current = FileWatcher.closedFDCount
+            if current == previous, current > fdBaseline { break }
+            previous = current
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     // MARK: - Helpers

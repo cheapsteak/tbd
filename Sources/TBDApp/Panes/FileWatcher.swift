@@ -108,6 +108,16 @@ final class FileWatcher: Sendable {
     #if DEBUG
     nonisolated private static let _liveStreamCountLock = OSAllocatedUnfairLock<Int>(initialState: 0)
     nonisolated static var liveStreamCount: Int { _liveStreamCountLock.withLock { $0 } }
+
+    /// DEBUG-only count of FDs actually closed, incremented inside the
+    /// dispatch source's cancel handler next to `close(fd)`. `liveStreamCount`
+    /// can only observe that `onTermination` *fired* — it is decremented on a
+    /// line independent of `box.terminate()`, so deleting `src?.cancel()` from
+    /// `terminate()` would leak every FD with the whole suite still green.
+    /// This is what makes lifecycle invariant #2 assertable.
+    /// `fileprivate` because the increment lives in `StreamState`.
+    nonisolated fileprivate static let _closedFDCountLock = OSAllocatedUnfairLock<Int>(initialState: 0)
+    nonisolated static var closedFDCount: Int { _closedFDCountLock.withLock { $0 } }
     #endif
 }
 
@@ -177,6 +187,9 @@ private final class StreamState: @unchecked Sendable {
             // cancellation (terminate / atomic-save reopen / stream
             // consumer dropping the iterator).
             close(fd)
+            #if DEBUG
+            FileWatcher._closedFDCountLock.withLock { $0 += 1 }
+            #endif
         }
 
         // Install the new source under the lock, returning either the
