@@ -28,7 +28,7 @@ struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        let knownRepoIDs = Set(appState.repos.map(\.id))
+        let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
         ForEach(
             appState.remoteProviders.filter {
                 RemoteSectionView.shouldShowHeader(provider: $0, sessions: appState.remoteSessions, knownRepoIDs: knownRepoIDs)
@@ -59,6 +59,44 @@ struct RemoteSectionView: View {
         provider: RemoteProviderStatus, sessions allSessions: [RemoteSessionInfo], knownRepoIDs: Set<UUID>
     ) -> Bool {
         provider.health != .ok || !sessions(in: allSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs).isEmpty
+    }
+
+    /// Repo ids treated as "has its own rendered section" when deciding
+    /// whether a MATCHED remote session (non-nil `resolvedRepoID`) has
+    /// somewhere else to render. `SidebarView` doesn't actually render
+    /// `appState.repos` — it renders `filteredRepos`, which narrows along
+    /// two INDEPENDENT axes: the "show hidden repos" toggle, and an active
+    /// `repoFilter`. A session whose `resolvedRepoID` names a repo excluded
+    /// by either axis has no `RepoSectionView` mounted for it — and, before
+    /// this function existed, was ALSO excluded from this section (because
+    /// its repo id was still counted "known"), so it rendered nowhere at
+    /// all.
+    ///
+    /// The two axes get a deliberately different answer here, reasoned
+    /// about separately (see `RemoteSectionViewTests` for both halves
+    /// pinned down):
+    ///
+    /// - A repo FILTER never narrows this set: only the filtered repo (if
+    ///   any) counts as "known", so every OTHER repo's matched sessions
+    ///   become "unmatched" for the duration of the filter and fall through
+    ///   to render in this section instead. A repo filter is transient view
+    ///   state — the sidebar's search-style "scope to one repo", not a
+    ///   durable "I don't want to see this" decision — so silently
+    ///   swallowing every other repo's remote sessions while it's active
+    ///   would be far harder to defend than showing them somewhere.
+    /// - Hidden repos are NOT excluded here (this function doesn't consult
+    ///   the "show hidden repos" toggle at all) — a hidden repo's id always
+    ///   counts as "known", so its matched sessions stay excluded from this
+    ///   section and render nowhere, by analogy with hidden WORKTREES,
+    ///   which already vanish from the sidebar entirely once their repo is
+    ///   hidden. Hiding a repo is a durable choice; its remote sessions
+    ///   disappearing along with it is the deliberate consequence, not a
+    ///   bug to route around.
+    nonisolated static func knownRepoIDs(repos: [Repo], repoFilter: UUID?) -> Set<UUID> {
+        if let repoFilter {
+            return [repoFilter]
+        }
+        return Set(repos.map(\.id))
     }
 
     /// UNMATCHED sessions belonging to one provider, with dismissed

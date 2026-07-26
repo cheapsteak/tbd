@@ -127,7 +127,15 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
             // does — the provider may itself exec tmux on the far side (e.g.
             // over SSM), and a nested-attach guard failure there is the same
             // failure mode a nested LOCAL tmux attach hits.
-            let env = TerminalPanelView.makeViewerEnvironment(base: ProcessInfo.processInfo.environment)
+            var env = TerminalPanelView.makeViewerEnvironment(base: ProcessInfo.processInfo.environment)
+            // `docs/remote-provider-contract.md` normatively requires this on
+            // EVERY invocation — `ProviderRunner` and `ProviderEventsSupervisor`
+            // both set it, and this is the third (and only app-side) spawn
+            // site. Without it, a provider that branches on the contract
+            // version (the document's own version-negotiation mechanism)
+            // would see a different answer for `attach` than for every other
+            // verb.
+            env["TBD_CONTRACT_VERSION"] = "1"
             let envPairs = env.map { "\($0.key)=\($0.value)" }
 
             let process = LocalProcess(delegate: self)

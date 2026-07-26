@@ -109,6 +109,76 @@ struct RemoteSectionViewTests {
         #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
     }
 
+    // MARK: - knownRepoIDs(repos:repoFilter:) — final review item 3
+
+    private func repo(id: UUID = UUID(), hidden: Bool = false) -> Repo {
+        Repo(id: id, path: "/tmp/\(id)", displayName: "repo", defaultBranch: "main", hidden: hidden)
+    }
+
+    /// No filter, no hidden repos: every repo is "known" — the pre-existing
+    /// behavior for the common case.
+    @Test func knownRepoIDs_noFilterIncludesAllRepos() {
+        let visible = repo()
+        let known = RemoteSectionView.knownRepoIDs(repos: [visible], repoFilter: nil)
+        #expect(known == [visible.id])
+    }
+
+    /// The hidden-repo half of the decision: a hidden repo's id counts as
+    /// "known" even though `SidebarView.filteredRepos` doesn't render a
+    /// section for it (when "show hidden repos" is off) — so a session
+    /// matched to it is excluded from THIS section too, by analogy with a
+    /// hidden repo's local worktrees vanishing from the sidebar entirely.
+    /// This function deliberately never consults the hidden flag: hiding a
+    /// repo hides its remote sessions along with it.
+    @Test func knownRepoIDs_hiddenRepoStillCountsAsKnown() {
+        let hiddenRepo = repo(hidden: true)
+        let known = RemoteSectionView.knownRepoIDs(repos: [hiddenRepo], repoFilter: nil)
+        #expect(known == [hiddenRepo.id], "a hidden repo must still count as known, not fall through to Remote")
+    }
+
+    /// The repo-filter half of the decision: with a filter active, only the
+    /// filtered repo counts as known — every OTHER repo (even though it's
+    /// still a normal, non-hidden repo in `appState.repos`) must NOT count
+    /// as known, so its matched sessions fall through to this section
+    /// instead of rendering nowhere while the filter narrows the sidebar to
+    /// one repo section.
+    @Test func knownRepoIDs_activeFilterExcludesEveryOtherRepo() {
+        let filtered = repo()
+        let other = repo()
+        let known = RemoteSectionView.knownRepoIDs(repos: [filtered, other], repoFilter: filtered.id)
+        #expect(known == [filtered.id])
+        #expect(!known.contains(other.id), "an unfiltered-out repo must not count as known while a filter is active")
+    }
+
+    /// End-to-end (via `sessions(in:forProvider:knownRepoIDs:)`): a session
+    /// matched to a repo excluded only by an active filter renders in the
+    /// Remote section rather than nowhere.
+    @Test func filteredOutRepoSessionFallsBackToRemoteSection() {
+        let filtered = repo()
+        let other = repo()
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: other.id),
+        ]
+        let known = RemoteSectionView.knownRepoIDs(repos: [filtered, other], repoFilter: filtered.id)
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: known)
+        #expect(result.map(\.payload.id) == ["s1"])
+    }
+
+    /// End-to-end: a session matched to a HIDDEN repo does not fall back to
+    /// the Remote section — the deliberate "hide sessions along with the
+    /// repo" choice, not a regression of the filtered-repo fix above.
+    @Test func hiddenRepoSessionDoesNotFallBackToRemoteSection() {
+        let hiddenRepo = repo(hidden: true)
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: hiddenRepo.id),
+        ]
+        let known = RemoteSectionView.knownRepoIDs(repos: [hiddenRepo], repoFilter: nil)
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: known)
+        #expect(result.isEmpty)
+    }
+
     // MARK: - shouldShowHeader(provider:sessions:knownRepoIDs:)
 
     private func status(name: String = "acme", health: ProviderHealth) -> RemoteProviderStatus {

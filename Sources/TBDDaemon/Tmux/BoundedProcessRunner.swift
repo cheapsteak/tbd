@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "BoundedProcessRunner")
 
 /// A single dedicated OS thread that fires subprocess deadlines.
 ///
@@ -273,7 +276,26 @@ func runBoundedProcess(
         }
 
         if let stdin, let stdinPipe {
-            stdinPipe.fileHandleForWriting.write(stdin)
+            // MUST be the throwing `write(contentsOf:)` overload, never the
+            // older non-throwing `write(_:)` — that one raises an
+            // Objective-C `NSFileHandleOperationException` on a write
+            // error, which Swift cannot catch, aborting the entire daemon
+            // process rather than failing this one call. This is reachable
+            // any time a child exits (or simply never reads stdin) before
+            // we finish writing — e.g. a bad verb, a missing interpreter, a
+            // `set -e` trip in a provider script — which turns into EPIPE
+            // because `main.swift` sets `signal(SIGPIPE, SIG_IGN)` (so a
+            // broken pipe becomes a write error instead of killing the
+            // process outright, which would be worse). A child that exited
+            // before reading its stdin is a normal condition, not an error
+            // worth propagating: the exit code and stderr already tell the
+            // real story, so a failed write here is swallowed (after being
+            // logged) rather than thrown.
+            do {
+                try stdinPipe.fileHandleForWriting.write(contentsOf: stdin)
+            } catch {
+                logger.debug("stdin write failed, child likely exited before reading: \(error, privacy: .public)")
+            }
             stdinPipe.fileHandleForWriting.closeFile()
         }
     }

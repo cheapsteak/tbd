@@ -321,12 +321,12 @@ final class AppState: ObservableObject {
     /// drift), so this lives client-side in UserDefaults instead of a new
     /// daemon column. Emoji has no separate field, same as `Worktree` — the
     /// user types `:emoji:` inline via `RenameableLabel` and it ends up as
-    /// plain leading characters in the stored string. Pushing a rename to a
-    /// provider that declares the `rename` capability (contract v1
-    /// amendment) is future work; this map is the seam that work will read
-    /// from — renames already funnel through `renameRemoteSession(provider:
-    /// sessionID:displayName:)` alone, so adding a push there later doesn't
-    /// require touching call sites.
+    /// plain leading characters in the stored string. This map is the
+    /// source of truth even for a provider that declares the `rename`
+    /// capability (contract v1 amendment): `renameRemoteSession(provider:
+    /// sessionID:displayName:)` writes here first, then fires the provider
+    /// push (`pushRemoteRenameIfSupported`) fire-and-forget, so a rename is
+    /// never gated on — or rolled back by — whether that push lands.
     @Published var remoteSessionDisplayNames: [String: String] = [:] {
         didSet { persistRemoteSessionDisplayNames() }
     }
@@ -697,20 +697,27 @@ final class AppState: ObservableObject {
     /// cap at once even with many pending entries at once.
     @Published private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
 
-    /// Cap on how many remote sessions may have a live attach terminal at
-    /// once (the current selection plus warm background ones). Deliberately
-    /// SMALLER than `keepAliveLimit` (the local worktree cap, 8) even though
-    /// both share the same protected-selection + capped-recency shape: a
-    /// warm LOCAL tmux attach is free (the daemon already keeps the tmux
-    /// session running regardless), but a warm REMOTE attach is a real,
-    /// live connection to another machine — for an SSM- or ssh-backed
-    /// provider, a billed and concurrency-limited resource — that buys
-    /// nothing the user can see, since awareness of a remote session's
-    /// state rides the provider's shared events/poll channel, not its
-    /// per-session attach. A smaller cap only costs reattach latency
-    /// (a fresh spawn instead of an already-warm one) when switching back
-    /// to a session evicted past the cap. Easy single-constant tuning point
-    /// if the maintainer wants it different after soaking.
+    /// Cap on how many WARM BACKGROUND remote sessions may keep a live
+    /// attach terminal around at once. The current selection is separately
+    /// force-protected (see `RemoteAttachLifecycle`) and does NOT consume
+    /// this budget, so the real ceiling on concurrent provider `attach`
+    /// processes is `remoteAttachKeepAliveLimit + 1` — 4 at the constant's
+    /// current value of 3 — which matters because this is exactly the
+    /// billed, concurrency-limited resource the rest of this comment is
+    /// about. Deliberately SMALLER than `keepAliveLimit` (the local
+    /// worktree cap, 8) even though both share the same protected-selection
+    /// + capped-recency shape: a warm LOCAL tmux attach is free (the daemon
+    /// already keeps the tmux session running regardless), but a warm
+    /// REMOTE attach is a real, live connection to another machine — for an
+    /// SSM- or ssh-backed provider, a billed and concurrency-limited
+    /// resource — that buys nothing the user can see, since awareness of a
+    /// remote session's state rides the provider's shared events/poll
+    /// channel, not its per-session attach. A smaller cap only costs
+    /// reattach latency (a fresh spawn instead of an already-warm one) when
+    /// switching back to a session evicted past the cap. Easy
+    /// single-constant tuning point if the maintainer wants it different
+    /// after soaking — but remember any change moves the REAL ceiling by
+    /// the same amount, one more than this constant's value.
     let remoteAttachKeepAliveLimit = 3
 
     /// Move `selection` to the front of the attach-recency log, trimming it
@@ -1289,9 +1296,11 @@ final class AppState: ObservableObject {
             ?? providerTitle ?? sessionID
     }
 
-    /// Rename a remote session. TBD-owned and local-only for now — pushing
-    /// this to a provider that declares the `rename` capability is future
-    /// work (see `remoteSessionDisplayNames` doc comment). A blank name
+    /// Rename a remote session. TBD-owned: the local override below is
+    /// always the source of truth for this client, and is additionally
+    /// pushed to the provider when it declares the `rename` capability (see
+    /// `remoteSessionDisplayNames` doc comment and `pushRemoteRenameIfSupported`).
+    /// A blank name
     /// (`RenameableLabel`'s `allowsEmptyCommit`) REMOVES the override rather
     /// than storing an empty string, so `remoteSessionDisplayName` falls back
     /// to the provider's `title` again — the same "clear to default"
