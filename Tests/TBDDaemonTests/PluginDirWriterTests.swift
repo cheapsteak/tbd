@@ -137,6 +137,28 @@ struct PluginDirWriterTests {
         #expect(output.contains("composer ghost-guard scenarios passed"), "unexpected output:\n\(output)")
     }
 
+    /// The relay decides whether a desk shift survives its context ceiling, so
+    /// its arithmetic and its fail-closed paths get executable coverage rather
+    /// than string-presence checks — same standard as `tick.py`/`wake.py`.
+    @Test("handoff.py --selftest passes: ceiling arithmetic + fail-closed paths")
+    func handoffPySelftest() throws {
+        let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tempRoot) }
+        try PluginDirWriter(applicationSupportRoot: tempRoot).writePlugin()
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["python3", tempRoot + "/TBD/plugin/skills/nightwatch/scripts/handoff.py", "--selftest"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try proc.run()
+        proc.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(proc.terminationStatus == 0, "handoff.py --selftest failed:\n\(output)")
+        #expect(output.contains("handoff ceiling scenarios passed"), "unexpected output:\n\(output)")
+    }
+
     @Test("handoff.py is installed alongside the other nightwatch scripts")
     func handoffPyInstalled() throws {
         let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"

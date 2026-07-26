@@ -631,6 +631,11 @@ DONE_PAT = re.compile(r"ready to archive|you're done|nothing (?:open|left)|windi
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 # Claude Code renders its OWN suggestions in the composer as dim (ESC[2m) ghost text.
+# KNOWN, ACCEPTED GAP: this requires `2` to be the LAST parameter of the SGR
+# sequence, so a compound escape like ESC[2;3m (dim+italic) would not match and
+# that ghost would be read as typed input. Not observed from Claude Code, and the
+# pattern was validated against the live fleet (STRANDED 14 -> 5, all five
+# survivors genuinely typed). Check here first if phantom strands ever return.
 DIM_RE = re.compile(r"\x1b\[(?:[0-9;]*;)?2m")
 # SGR mouse reports ("<65;61;31M") land in the composer on a stray click. Never input.
 MOUSE_RE = re.compile(r"^<\d+;\d+;\d+[Mm]$")
@@ -987,6 +992,7 @@ the SUCCESSOR closes the predecessor once it has actually read the handoff.
   handoff.py --check                      # exit 0 = under ceiling, 10 = over
   handoff.py --act --notes-file notes.md  # write handoff + spawn successor
   handoff.py --close-predecessor <tid>    # successor calls this when it's ready
+  handoff.py --selftest                   # offline ceiling / fail-closed test
 
 Ordering matters: the predecessor NEVER closes itself. If the spawn fails or the
 successor dies on boot, the old session is still there and the shift survives.
@@ -1065,11 +1071,24 @@ def resolve_self():
 
 
 def cmd_check(args):
+    """Exit 0 = under the ceiling · 10 = OVER (or unknowable).
+
+    FAILS CLOSED. An unreadable transcript, a `tbd terminal list` that errored,
+    or a row without a transcriptPath all report OVER. context_tokens() already
+    refuses to guess 0 because "a bogus low reading would silently disable the
+    ceiling" -- mapping its None to exit 0 here would have reinstated exactly
+    that, and the caller is told to trust "exit 0 = under the ceiling". The
+    asymmetry is decisive: a spurious handoff costs one relay cycle, a missed
+    one costs the shift to truncation, which is the failure this script exists
+    to prevent.
+    """
     *_, row = resolve_self()
-    used = context_tokens(row.get("transcriptPath", ""))
+    transcript = row.get("transcriptPath") or ""
+    used = context_tokens(transcript) if transcript else None
     if used is None:
-        print("context: UNKNOWN (transcript unreadable) — treating as under ceiling")
-        return 0
+        why = "no transcriptPath on the terminal row" if not transcript else "transcript unreadable"
+        print(f"context: UNKNOWN ({why}) — failing closed, treat as OVER")
+        return 10
     over = used >= args.threshold
     print(f"context: {used:,} / ceiling {args.threshold:,} — {'OVER' if over else 'ok'}")
     return 10 if over else 0
@@ -1159,12 +1178,16 @@ def cmd_close(args):
     """Close a predecessor terminal by killing its tmux window."""
     target = args.close_predecessor
     r = _run(["tbd", "terminal", "list", os.environ.get("TBD_WORKTREE_ID", ""), "--json"])
-    row = {}
-    if r.returncode == 0:
-        for candidate in json.loads(r.stdout or "[]"):
-            if candidate.get("id") == target:
-                row = candidate
-                break
+    # A FAILED lookup is not an absent terminal. Collapsing the two would report
+    # "already closed" for a predecessor that is still running and still holding
+    # the desk -- the same treat-unknown-as-benign shape as the old cmd_check.
+    if r.returncode != 0:
+        sys.exit(f"cannot verify terminal {target}: `tbd terminal list` failed: {r.stderr.strip()}")
+    try:
+        rows = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        sys.exit(f"cannot verify terminal {target}: unparseable `tbd terminal list` output")
+    row = next((c for c in rows if c.get("id") == target), {})
     if not row:
         print(f"terminal {target} not found — already closed, nothing to do")
         return 0
@@ -1182,12 +1205,76 @@ def cmd_close(args):
     return 0
 
 
+def selftest():
+    """Offline test of the ceiling arithmetic and the fail-closed paths.
+
+    No subprocesses, no tbd, no tmux, no transcript on disk. Covers the two
+    behaviours that decide whether a shift survives: context_tokens() picking
+    the largest usage record, and cmd_check refusing to report "under" when it
+    cannot actually tell.
+    """
+    import tempfile
+    n = 0
+
+    def check(label, got, want):
+        nonlocal n
+        assert got == want, f"{label}: got {got!r}, want {want!r}"
+        n += 1
+
+    class Args:
+        threshold = DEFAULT_THRESHOLD
+
+    def with_row(row):
+        """Run cmd_check against a fixed terminal row, no tbd/env involved."""
+        g = globals()
+        real = g["resolve_self"]
+        g["resolve_self"] = lambda: ("T", "W", row)
+        try:
+            return cmd_check(Args())
+        finally:
+            g["resolve_self"] = real
+
+    # context_tokens: the reported figure is input + BOTH cache buckets, and the
+    # largest record in the tail wins (the tail holds smaller earlier turns).
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        for total in (10_000, 250_000, 40_000):
+            fh.write(json.dumps({"message": {"usage": {
+                "input_tokens": total - 30, "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 10}}}) + "\n")
+        fh.write("not json at all\n")          # tolerated, not fatal
+        fh.write(json.dumps({"message": {}}) + "\n")   # no usage block
+        path = fh.name
+    check("largest usage record wins", context_tokens(path), 250_000)
+    check("over ceiling exits 10", with_row({"transcriptPath": path}), 10)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        fh.write(json.dumps({"message": {"usage": {"input_tokens": 1_000}}}) + "\n")
+        small = fh.name
+    check("under ceiling exits 0", with_row({"transcriptPath": small}), 0)
+
+    # FAIL CLOSED. Each of these once returned 0 ("under ceiling"), which is how
+    # a session runs past its ceiling with nobody ever telling it to hand off.
+    check("unreadable transcript fails closed",
+          with_row({"transcriptPath": "/nonexistent/transcript.jsonl"}), 10)
+    check("missing transcriptPath fails closed", with_row({}), 10)
+    check("empty transcriptPath fails closed", with_row({"transcriptPath": ""}), 10)
+    check("no usage records fails closed", context_tokens(os.devnull), None)
+
+    os.unlink(path)
+    os.unlink(small)
+    print(f"selftest: {n}/{n} handoff ceiling scenarios passed")
+
+
 def main():
+    if "--selftest" in sys.argv:
+        selftest()
+        return 0
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--check", action="store_true", help="report context vs ceiling (exit 10 = over)")
     g.add_argument("--act", action="store_true", help="write handoff + spawn successor")
     g.add_argument("--close-predecessor", metavar="TID", help="successor closes the old session")
+    g.add_argument("--selftest", action="store_true", help="offline ceiling/fail-closed test")
     p.add_argument("--notes-file", help="markdown file holding the handoff body (required with --act)")
     p.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
     args = p.parse_args()
