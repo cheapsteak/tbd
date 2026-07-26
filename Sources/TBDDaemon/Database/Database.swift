@@ -22,8 +22,6 @@ public final class TBDDatabase: Sendable {
     public let meta: TBDMetaStore
     public let tabs: TabStore
     public let forgottenWorktrees: ForgottenWorktreeStore
-    public let clearance: ClearanceStore
-    public let audit: AuditStore
     public let scheduledResumes: ScheduledResumeStore
     public let reapRecords: ReapRecordStore
     public let terminalHistory: TerminalHistoryStore
@@ -62,8 +60,6 @@ public final class TBDDatabase: Sendable {
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
-        self.clearance = ClearanceStore(writer: pool)
-        self.audit = AuditStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
         self.reapRecords = ReapRecordStore(writer: pool)
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
@@ -102,8 +98,6 @@ public final class TBDDatabase: Sendable {
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
-        self.clearance = ClearanceStore(writer: queue)
-        self.audit = AuditStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
         self.reapRecords = ReapRecordStore(writer: queue)
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
@@ -1032,6 +1026,22 @@ public final class TBDDatabase: Sendable {
                                       type: .boolean, defaults: false)
             try db.addColumnIfMissing(table: "worktree", column: "panel_surface_imported_at",
                                       type: .datetime)
+        }
+
+        // The compiled merge gate (MergeGate / NightwatchPolicy) and its two
+        // stores were deleted: the gate built its input from placeholder
+        // values (`headSHA: "unknown"`, `hasApprovedReview: false`), so every
+        // row it ever wrote recorded the same `escalate` decision, and the
+        // `clearance` table never had a production writer or reader at all.
+        // Nothing of value is lost by dropping them. Merge authorization is
+        // delegated to the forge (GitHub branch protection + auto-merge),
+        // which sits outside the trust boundary of the machine running the
+        // agents. v41/v42 stay registered and untouched — a fresh DB creates
+        // the tables and this migration drops them again, which is cheap and
+        // keeps the migration history append-only.
+        migrator.registerMigration("v60_drop_nightwatch_merge_gate_tables") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS clearance")
+            try db.execute(sql: "DROP TABLE IF EXISTS audit_log")
         }
 
         return migrator

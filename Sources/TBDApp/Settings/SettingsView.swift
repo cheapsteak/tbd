@@ -221,11 +221,12 @@ struct GeneralSettingsTab: View {
                     cheap local scripts and only paging a model for genuine judgment \
                     calls. Daywatch (◐) is a lighter pass for when you're at the \
                     keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
-                    you're away. Evaluate-only for now — it records what it would do \
-                    without acting, and its behavior and safety rules are still \
-                    changing. Turning this on reveals the mode controls (sidebar \
-                    footer and menu bar); off hides both. You still merge PRs and \
-                    make prod/access calls yourself.
+                    you're away. It acts on your live fleet — nudging stuck \
+                    sessions and dispatching work — and its behavior and safety \
+                    rules are still changing. Turning this \
+                    on reveals the mode controls (sidebar footer and menu bar); \
+                    off hides both. You still merge PRs and make prod/access \
+                    calls yourself.
                     """)
             }
 
