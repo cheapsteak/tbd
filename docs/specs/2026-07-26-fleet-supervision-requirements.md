@@ -1,0 +1,394 @@
+# Design brief: fleet supervision for TBD (blue-sky redesign of "Nightwatch")
+
+You are designing, from scratch, the fleet-supervision subsystem of TBD — a macOS tool for
+running many Claude Code agents in parallel. An implementation of this subsystem exists and
+works after a fashion; it has been mined for the requirements below, and those requirements
+are your starting point. The implementation itself is not — see the reading instructions.
+
+This is a reference design meant to be argued with, not adopted verbatim. Favour a strong,
+specific point of view over implementability compromises.
+
+## The substrate
+
+TBD's unit of work is a git worktree. Each worktree has one or more tmux panes; each pane
+runs an interactive coding agent as a full-screen TUI (usually Claude Code). A background
+daemon owns a SQLite database of worktrees, terminals, and sessions, and exposes RPC over a
+unix socket to a SwiftUI app and a CLI. The daemon spawns sessions, manages their lifecycle
+(including hibernating idle ones), tracks PR status, and can deliver text into any pane. A
+fleet is five to forty of these agents; overnight, nobody is watching them.
+
+## What the subsystem is
+
+**One supervising agent autonomously drives the other agents.** The supervisor is itself a
+reasoning agent — a full Claude Code session in its own dedicated worktree — not compiled
+logic. The daemon's job is to feed it, schedule it, bound it, and account for it. Take
+agent-as-supervisor as settled; do not design a purely-compiled alternative.
+
+It runs in two modes, and the distinction is the spine of the design:
+
+1. **Human-supervised mode** — a human is present. The supervisor observes, judges, and
+   proposes; a human stays in the loop on anything consequential.
+2. **Fully autonomous mode** — nobody is watching, typically overnight. The supervisor acts
+   on its own judgment.
+
+(The current code calls these "daywatch" and "nightwatch". Ignore those names; more
+importantly, ignore how the current code draws the distinction — see story P0-3.)
+
+## How to use the repo
+
+Repo root: `/Users/chang/tbd/worktrees/tbd/20260725-condemned-anteater`
+
+Read the repo to understand how TBD works generally — its data model, RPC surface, config
+precedence, hook system, terminal and session lifecycle, settings surfaces. Ground your
+design in those real mechanics. Particularly worth your time:
+
+- `Sources/TBDShared/HookResolver.swift` + `docs/worktree-hooks.md` — the existing
+  three-tier config precedence you are required to reuse
+- `Sources/TBDDaemon/Database/Database.swift` — schema and migration discipline
+- `Sources/TBDShared/Models.swift` — the shared data model
+- `Sources/TBDDaemon/Lifecycle/SystemPromptBuilder.swift` — how layered prompts already work
+- `Sources/TBDApp/Settings/RepoHooksSettingsView.swift` — how a file-backed per-repo setting
+  is surfaced to the operator
+
+Do NOT anchor on the existing Nightwatch implementation or its documentation. The
+requirements below are the useful residue of that implementation; start from them, not from
+its structure. Skip these files, and if you stumble into them, do not treat them as design
+input:
+
+```
+docs/nightwatch.md
+docs/specs/2026-07-03-nightwatch-daywatch-design.md
+Sources/TBDDaemon/Nightwatch/
+Sources/TBDDaemon/Server/RPCRouter+NightwatchHandlers.swift
+Sources/TBDDaemon/Database/{ClearanceStore,AuditStore}.swift
+Sources/TBDShared/{Models_Nightwatch,NightwatchDeskPrompts,NightwatchSkillContent}.swift
+Sources/TBDCLI/Commands/NightwatchCommand.swift
+Sources/TBDApp/**/Nightwatch*.swift
+```
+
+## Requirements
+
+Each story is tagged with the mode it applies to: **[S]** human-supervised, **[A]** fully
+autonomous, **[both]**. Stories marked *(implied, not yet implemented)* are clearly implied
+by the current system's intent but absent or broken in it; treat them as requirements all
+the same.
+
+### P0 — without these the subsystem has no point
+
+- **P0-1 [both]** As an operator, I want one supervising agent watching the whole fleet and
+  intervening on my behalf, so that a stuck or idle agent doesn't sit dead for hours because
+  nobody noticed.
+- **P0-2 [both]** As an operator, I want a single posture switch — off / human-supervised /
+  fully autonomous — persisted in the daemon and settable from the app and the CLI, so that
+  I can hand over or take back the fleet with one gesture, and a daemon restart resumes the
+  same posture without me.
+- **P0-3 [both]** As an operator, I want the two modes to differ *mechanically*, not merely
+  in prompt wording, so that the label's promise ("a human stays in the loop") is enforced
+  by the system rather than requested of the supervisor. *(implied, not yet implemented —
+  today the entire difference is one hint sentence in a prompt, and the conservative rule it
+  states references a field the data doesn't even carry.)*
+- **P0-4 [both]** As an operator, I want the supervisor to be a visible, first-class session
+  I can open, read, and type into at any time, so that supervision is inspectable and
+  steerable, never a black box running somewhere I can't see.
+- **P0-5 [both]** As the daemon, I want to answer what any managed agent is doing right now —
+  working, idle, awaiting input, rate-limited, gone — cheaply enough to ask about every agent
+  every cycle, and again a minute later, without a model call and without reading rendered
+  screen text. Where a state genuinely cannot be established from a machine interface, I want
+  that surfaced as not-known rather than approximated, so that the rest of supervision is built
+  on facts with known provenance.
+
+  This is the substrate the rest of the design stands on: P0-6 sweeps with it, P0-7 decides
+  intervention from it, P1-2 uses its work-state half to decide whether waking is warranted,
+  P1-6 asks again shortly after acting, and P2-4 watches it over time for agents looping
+  without progress. Note that it has two halves with different sources and different costs —
+  *session* state (working, idle, blocked, dead) and *work* state (branch, commits, request,
+  checks) — and that P1-6 in particular needs the first: an unchanged branch says nothing about
+  whether an agent moved past a confirmation prompt.
+- **P0-6 [both]** As an operator, I want fleet state checked on a regular cadence by cheap,
+  model-free mechanics, with the supervisor's (expensive) reasoning woken only when there is
+  a genuine judgment call, so that a night of supervision costs a fraction of my model quota
+  rather than consuming it on mechanical sweeps.
+- **P0-7 [A]** As an operator, I want stuck agents unstuck with a specific, context-aware
+  next step derived from the agent's actual conversation — never a generic "continue" — so
+  that interventions advance work instead of making agents re-idle.
+- **P0-8 [both]** As an operator, I want any dispatched message that asserts external state
+  ("your PR merged", "checks are failing") verified against live sources at send time, so
+  that agents are never handed stale premises. (Hard-won: hand-composed wakes and gate
+  notices have repeatedly described PRs that had merged days earlier.)
+- **P0-9 [both]** As an operator, I want a **live** account of the shift — open beside my work,
+  updating as things happen, showing what has been done, what is still open, and what needs me
+  — so that supervision is legible while it is running, not only after it has stopped. The
+  end-of-shift and morning accounts should then be views over that same running record, rather
+  than prose composed at the end from the supervisor's recollection.
+
+  *Surface note:* a side panel able to display a live-updating markdown document is being built
+  separately and does not exist yet. Assume it will; do not design the panel. What is yours to
+  decide is what the running record contains, who appends to it and when, and how the
+  end-of-shift views are derived from it.
+- **P0-10 [A]** As an operator, I want questions the supervisor cannot resolve escalated in
+  small, specific batches — exact item, exact proposed command, a recommendation — so that
+  the morning's decision queue is answerable in minutes, not an interrogation.
+
+### P1 — the difference between working and trustworthy
+
+- **P1-1 [A]** As an operator, I want the supervisor capacity-aware: when several agents are
+  rate-capped at once it holds interventions instead of piling on, and it never nudges an
+  individually rate-limited agent, so that a quota wall doesn't turn into a night of wasted
+  pokes. *(A stronger version exists in the current system — rebalancing stuck sessions onto
+  less-loaded accounts rather than passively freezing — motivated by one saturated account
+  stalling a whole fleet overnight. Treat that as conditional: it presumes an operator with
+  several accounts configured, which may be one person's topology rather than a general need.
+  Design the holding behaviour; argue for or against rebalancing.)*
+- **P1-2 [A]** As an operator, I want *whether* to wake a parked session decided from cheap
+  facts derived entirely outside it — branch, commits not yet on main, whether a pull request
+  exists and its state, whether checks fail — so that the supervisor never has to hold the arc
+  of anyone's work in its head, and sessions with nothing outstanding are not woken at all.
+  Waking is expensive; it should be the conclusion of a check, not the way the check is
+  performed. *(implied, partially broken today — the live check exists and works, but every
+  parked session is woken regardless of its verdict, including the ones just found complete.
+  On the night that motivated the check, all 24 were complete.)*
+- **P1-3 [both]** As an operator, I want to designate sessions the supervisor must never
+  touch and worktrees whose progress matters most, so that my own live session is never
+  poked and the important work is looked at first.
+- **P1-4 [both]** As a repo maintainer, I want my repo's supervision policy — what counts as
+  stuck, what interventions are appropriate, house rules the supervisor must follow —
+  authored as an artifact in or beside my repo and resolved through TBD's existing
+  three-tier precedence, so that process travels with the repo instead of living in one
+  operator's tool.
+
+  *Worked example, and the seam this requirement is really about.* Take the wake decision in
+  P1-2. Deriving the facts is app-global: whether a branch has commits not on main, whether a
+  request is open or merged, whether checks fail, whether any of that could not be established.
+  Those are properties of git and the forge, identical in every repo, and cheap. What those
+  facts **warrant** is not. Commits with no request means "wake and finish it" in one repo and
+  "leave it, that is how we park experiments" in another; an open request with failing checks
+  means "fix it" in one and "never touch a request without a human" in another; and what
+  *finished* should trigger — a closeout command, an archive, nothing — is purely local
+  vocabulary. State it as: **the check yields a verdict; the repo decides what the verdict
+  warrants.** The supervisor then needs neither the arc of the work nor the house rules in its
+  head — it reads facts it did not have to earn and a policy it did not have to invent.
+
+  The current system draws this line in the wrong place, and the damage is legible: its
+  verified wake messages hardcode one team's closeout command and one team's named review bot
+  as the definition of ready. Every other repo is told to run a command it does not have and
+  satisfy a reviewer it does not use.
+
+  Mode belongs on the same axis (see P0-3): one verdict can warrant escalate-to-human when
+  supervised and act-directly when autonomous, authored per repo rather than requested of the
+  agent in prose.
+- **P1-5 [both]** As an operator, I want decisions I have already made remembered durably
+  for the rest of the shift, so that I am never re-asked a question I answered an hour ago.
+- **P1-6 [A]** As an operator, I want the supervisor to re-check an agent shortly after
+  intervening (on the order of a minute, not the next full cycle), so that an agent that
+  advanced to a confirmation prompt doesn't hang there for fifteen minutes.
+- **P1-7 [both]** As an operator, I want every supervisor action recorded in a durable,
+  queryable ledger — what, to whom, why, when — written by the machinery that performed it,
+  so that the morning account is verifiable and not merely the supervisor's self-report.
+  *(implied, not yet implemented — today's action log is the agent's own notes file.)*
+
+### P2 — maturity
+
+- **P2-1 [both]** As the supervisor, I want standing rules I learn during operation ("this
+  repo rejects unsigned commits") recorded somewhere durable that the tool never clobbers,
+  so that each shift is smarter than the last.
+- **P2-2 [both]** As an operator, I want ending a shift to be a deliberate, clean handover —
+  summary posted, supervisor session disposed of or parked on purpose — so that watch-desk
+  worktrees don't silently accumulate forever.
+- **P2-3 [A]** As an operator, I want agents that stall on routine permission prompts
+  advanced past an operator-authored allowlist of safe approvals — and never past anything
+  else — so that a trivial "allow this read?" doesn't cost a night.
+- **P2-4 [A]** As an operator, I want runaway agents — looping, burning quota without
+  progress — detected and flagged (or paused, in autonomous mode), so that one wedged
+  session doesn't eat the shift's budget.
+
+### P3 — genuinely nice-to-have
+
+- **P3-1 [A]** As an operator, I want an optional heartbeat that survives the daemon being
+  down entirely, so the safety net doesn't share fate with the process it watches.
+
+### Behaviours of the current system that are accidents, not requirements
+
+Left out of the stories deliberately; do not design for them:
+
+- The merge-gate half — clearance ledger, audit-of-would-merge rows, compiled size ceilings.
+  Excluded by mandate below; being deleted, not replaced.
+- The specific tick protocol: a 15-minute interval, a subprocess exit code as the entire
+  signal channel, discarded stdout. Cadence is a requirement; this encoding is not.
+- Identifying the supervisor's worktree by its display string.
+- Classifying agent state by regexing captured pane text — this is the constraint below, not
+  a requirement; the current sweep does it and is marked as debt in the tree.
+- The one-shot "shift ending" prompt that is blind to which mode is ending, and the desk
+  worktree being left behind because its cleanup path has no caller.
+- Three divergent install trees for the supervisor's playbook and scripts, one of which the
+  tool never writes.
+- Everything organization-specific in the shipped playbook: a repo slug, a review-bot login,
+  a coworker's name, one machine's fleet snapshot. Data, not design.
+
+## A note on mechanism — material, not a mandate
+
+**A standing bias, stated so you can argue with it rather than absorb it silently.** Where a
+behaviour could either be compiled into the app or exposed as an extension point that someone
+authors outside it, prefer the extension point. The subsystem being replaced is the case
+against the alternative: it grew a large amount of bespoke compiled machinery to serve what was
+substantially one team's process, and the process ended up welded into a general-purpose tool
+where nobody else could change it and its own author could not edit it without being
+overwritten. Compiled code should earn its place by being genuinely universal — a fact everyone
+needs, a correctness property, a surface. Judgement should be authored. If you conclude some
+piece of judgement really does belong compiled, say why it is the exception.
+
+Where repo-authored policy (P1-4) physically lives is yours to decide, but decide it
+explicitly rather than by default. The relevant facts:
+
+TBD already has a hook system with exactly the three-tier precedence this brief requires, a
+timeout-bounded executor, a CLI, and a settings editor. It already gates: the setup hook blocks
+primary terminals from spawning until it finishes, and there is a pending state for that wait.
+So a blocking pre-wake hook would be a new *event*, not a new semantic.
+
+Two things complicate the obvious move of making everything a hook.
+
+**Hooks currently answer yes-or-no.** The executor surfaces an exit status and captures output,
+but no event consumes that output as data. A wake decision wants an answer *plus* a payload:
+which verdict, what to say, or escalate instead. That extension does not exist yet, and it is
+the same extension any richer event would need — worth designing once rather than per event.
+
+**Cadence.** Hooks fire today at rare moments: a worktree is created, a worktree is archived.
+Supervision is a recurring sweep. Forty parked sessions on a fifteen-minute cycle is forty
+subprocess spawns per cycle, all night, to answer what is usually a lookup — *this verdict, in
+this mode, warrants that*.
+
+That asymmetry suggests a split rather than a single mechanism: something declarative for the
+large majority that really is a mapping, with a hook as the escape hatch for what a table
+cannot express — do not wake anything during a deploy freeze, check whether I am on call, ask
+an internal system whether this ticket is still live. TBD already splits along a similar line
+elsewhere: structured settings the daemon resolves get a database column, user-authored blobs
+get a file. Argue for whatever you conclude, including that this split is wrong.
+
+## Delivery is assumed — but not as a single protocol
+
+Getting a message into a running agent session is out of scope; assume an adapter exists per
+agent kind. Two real mechanisms have been investigated, and they are worth knowing about
+because their differences are what you should design against.
+
+For Claude Code, the research-preview **Channels** interface: an MCP server bound to the session
+emits a notification, and Claude Code starts a turn from it. Crucially it does not write into
+the composer — in testing, a message arrived while an unsent human draft was present and the
+draft survived byte-for-byte. Findings, including the caveats:
+`https://github.com/cheapsteak/tbd/blob/b0e3ab35ef677fc6788920eef687d4df7f13257e/docs/research/2026-07-26-claude-code-channels/findings.md`
+and the upstream docs at `https://code.claude.com/docs/en/channels`.
+
+For Codex, the app-server protocol (`https://learn.chatgpt.com/docs/app-server`) instead exposes
+request-shaped operations: steer input into the active turn, start a turn when the thread is
+idle, and a completion notification to wait on. Steering carries an expected-turn identifier, so
+the request *fails* if the turn changed underneath it.
+
+**What you may rely on.** Delivery targets one specific session and does not disturb a human's
+unsent input. That property is what makes the interrupt-safety concerns excluded above genuinely
+excluded — the mechanism provides it, rather than your design having to earn it.
+
+**What you may not.** That the call itself tells you the message was received. One mechanism
+pushes without acknowledgement; the other is a request that can fail on a turn race; neither
+generalizes to the other. Acknowledgement is available — the delivered message becomes visible
+in the session's transcript, and agent-side hooks can signal receipt — but it is a *separate
+observation you choose to make*, not something the send hands back. If your design needs to know
+a message landed, say how it finds out.
+
+**And do not weld to either.** Two agent kinds already need two different adapters with
+different guarantees, and a third will differ again. Whatever supervision asks for should be
+expressible in terms of the properties above rather than any one protocol's verbs.
+
+## Hard constraints
+
+- **Never infer agent state by reading rendered terminal text.** Screen text is a display
+  surface, not an API — scraping breaks silently when the TUI changes and couples TBD to one
+  agent version. State comes from machine interfaces: Claude Code's lifecycle hooks, its
+  structured transcript on disk, tmux control-mode events, process exit codes, TBD's own DB.
+- **Nothing repo-specific may be compiled into the app.** TBD is general-purpose; the current
+  implementation's worst defect is one company's org policy, repo slug, review-bot name, and
+  a coworker's name shipped as string literals and rewritten over the operator's own edits on
+  every boot. Repo-specific process lives in artifacts the repo or operator authors, and the
+  tool must never clobber them.
+- **Reuse TBD's existing three-tier config precedence** — operator-local-per-repo, then
+  checked-into-the-repo, then app-global default; first match wins, no merging — rather than
+  inventing a new resolution scheme.
+- **Anything stateful must survive daemon restart** — the posture, decisions the operator has
+  already made, the action ledger, anything the account is later derived from. The daemon
+  restarts often, sometimes mid-shift; state held only in memory is state you do not have.
+- **Unknown state degrades to inaction plus a loud report**, never to a guess. This puts a
+  requirement on the vocabulary itself: whatever the app derives about a session must be able to
+  *express not-knowing* as a distinct outcome, not fold it into a confident one. That
+  distinction is app-side and not repo-authorable — a shared vocabulary is what lets anything
+  reason across repos or render a fleet at all. What a repo may decide is what not-knowing
+  *warrants* (do nothing, look again later, escalate) and what gets said about it. A repo can
+  have any behaviour it likes on uncertainty; it must not be able to make the app claim
+  certainty it never had.
+
+## Out of scope — design nothing for these
+
+- Whether a change may merge or ship. That authority is delegated to GitHub — branch
+  protection, required checks, auto-merge. The compiled merge-gate half of the current
+  implementation is being deleted outright.
+- Judging code or review quality.
+- Choosing what new work to start, or backlog prioritization.
+- Mutual exclusion or ownership arbitration between concurrent actors. Solved elsewhere.
+- Rate limiting and deduplication of interventions, and interrupt safety around them. Solved
+  elsewhere; assume an intervention is delivered once, at a safe moment.
+- How a mid-shift daemon restart appears to the supervisor. Deferred; assume a restart does not
+  disturb it.
+- Notifying the operator that something happened, on any channel — in-app, macOS, or reaching
+  them off-machine. Addable in isolation once the mechanism exists; assume a way to raise a
+  notification is available.
+- Which model runs which part of the work, and any cheaper triage tier beneath the supervisor.
+  Solved separately.
+- How the app's appearance reflects the posture, and the chrome showing posture and supervisor
+  liveness. Already built; assume both exist.
+- The default-off flag the subsystem ships behind. A house rule with a known shape; assume it is
+  in place.
+- Supervisor self-handoff when its own context nears its ceiling. Deferred; assume the supervisor
+  persists for the shift.
+- Proving destructive operations such as archival are safe.
+- The mechanics of delivering a message into a live agent session. Assume a delivery adapter
+  exists; see "Delivery is assumed" below for the two properties of it you may rely on and the
+  one you may not.
+
+## Deliverable
+
+Write a markdown design document to:
+
+```
+/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-20260725-condemned-anteater/485FD618-0F5B-4488-9741-9AE2A112DC68/scratchpad/fleet-supervision-design.md
+```
+
+Sections it needs:
+
+1. **The problem in your own terms** — including which part you judge actually hard.
+2. **Compiled Swift vs. the supervisor's own prompt and tools.** The supervisor is a
+   reasoning agent; every threshold, state derivation, cooldown, and policy rule could
+   plausibly live on either side. State the test you use to place each thing, and apply it
+   explicitly to at least: state derivation, intervention thresholds, cooldowns and dedup,
+   per-repo policy, mode enforcement (P0-3), and the shift/morning account. This section is
+   required regardless of your structure.
+3. **The state model** — what the daemon can actually know about each fleet agent from machine
+   interfaces, what it cannot know, and how the design behaves at the boundary. This is P0-5
+   worked out: name the interface each state comes from, and its cost, since the whole design's
+   affordability rests on the answer.
+4. **The two modes** — what mechanically differs, and how the human-in-the-loop promise of
+   supervised mode is enforced rather than requested.
+5. **Where policy lives** — who authors what, in what artifact, resolved through the
+   three-tier precedence; what the tool ships as its own default and how it seeds without
+   ever clobbering. Draw the fact-versus-warrant line explicitly (P1-4), and make the
+   mechanism choice from the note above an argued decision rather than an assumption.
+6. **Persistence and restart** — what state exists, where it lives, what a mid-shift daemon
+   restart looks like from the supervisor's chair.
+7. **The account** — the running record first: what it contains, who appends to it, at what
+   granularity, and what it is never allowed to claim. Then the shift wrap-up and morning
+   report as views derived from it. If your design has the supervisor writing the summary
+   rather than the record producing it, argue for that explicitly.
+8. **Operator surfaces** — posture control, visibility, escalation intake; sketch intent,
+   don't design screens.
+9. **What you deliberately did not build, and why.**
+10. **The strongest argument against your own design.**
+
+Aim for a document a senior engineer would argue with productively: decisive, specific,
+opinionated. Where a requirement above and your judgment conflict, say so and argue — the
+stories are extracted from a flawed system and are themselves open to challenge, but silence
+is not a challenge.
