@@ -341,4 +341,85 @@ struct RemoteSessionSelectionTests {
             #expect(state.remoteSessionDisplayNames[key] == nil)
         }
     }
+
+    // MARK: - Task 9d: selection unification (remote rows tagged into
+    // `selectedWorktreeIDs` for List-native keyboard nav / focus ring)
+
+    /// Simulates what happens when arrow-key navigation (not a click) lands
+    /// on a remote row: SwiftUI's `List(selection:)` writes the row's tag
+    /// directly into `selectedWorktreeIDs` — `RemoteSessionRowView.onTapGesture`
+    /// never fires for a keyboard-only move. The `didSet` must still route
+    /// this into `selectRemoteSession` so the row's own highlight and
+    /// `selectedRemoteSession` end up correct exactly as a click would.
+    @Test func remoteSessionTagEnteringSelectedWorktreeIDsRoutesThroughSelectRemoteSession() {
+        withState { state in
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+
+            // Simulate the List binding writing the tag straight in (what
+            // arrow-key traversal does), not `selectRemoteSession` itself.
+            state.selectedWorktreeIDs = [session.id]
+
+            #expect(state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+        }
+    }
+
+    /// The remote id must not linger in `selectedWorktreeIDs` at rest — every
+    /// other consumer of that set (keyboard shortcuts, jump menu, navigation
+    /// history, persisted restore) assumes every member is a real
+    /// `Worktree.id`.
+    @Test func remoteSessionTagIsStrippedBackOutOfSelectedWorktreeIDs() {
+        withState { state in
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+
+            state.selectedWorktreeIDs = [session.id]
+
+            #expect(state.selectedWorktreeIDs.isEmpty)
+        }
+    }
+
+    /// Landing on a remote row via the shared Set also clears repo/scratch
+    /// selection, exactly like `selectRemoteSession` called directly.
+    @Test func remoteSessionTagEnteringSelectedWorktreeIDsClearsRepoAndScratchSelection() {
+        withState { state in
+            let repoID = UUID()
+            state.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "r", defaultBranch: "main")]
+            state.selectRepo(id: repoID)
+            #expect(state.selectedRepoID == repoID)
+
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+            state.selectedWorktreeIDs = [session.id]
+
+            #expect(state.selectedRepoID == nil)
+        }
+    }
+
+    /// Regression guard: a plain worktree selection must behave EXACTLY as
+    /// before this feature, even with unrelated remote sessions loaded —
+    /// the new remote-tag branch in the `didSet` must never fire for a real
+    /// worktree id.
+    @Test func plainWorktreeSelectionIsUnaffectedByLoadedRemoteSessions() {
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+            state.remoteSessions = [RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())]
+
+            state.selectedWorktreeIDs = [wtID]
+
+            #expect(state.selectedWorktreeIDs == [wtID])
+            #expect(state.selectionOrder == [wtID])
+            #expect(state.selectedRemoteSession == nil)
+        }
+    }
 }

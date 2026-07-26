@@ -65,6 +65,65 @@ struct RemoteSectionViewTests {
         #expect(RemoteSectionView.sessions(in: sessions, forProvider: "acme").isEmpty)
     }
 
+    /// Task 9d: a session resolved to a local repo renders inside that
+    /// repo's section instead (`RepoSectionView.matchedRemoteSessions`) — it
+    /// must NOT also appear in the provider-named Remote section.
+    @Test func excludesSessionsResolvedToARepo() {
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: UUID()),
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s2", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: nil),
+        ]
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme")
+        #expect(result.map(\.payload.id) == ["s2"])
+    }
+
+    // MARK: - shouldShowHeader(provider:sessions:)
+
+    private func status(name: String = "acme", health: ProviderHealth) -> RemoteProviderStatus {
+        RemoteProviderStatus(
+            config: RemoteProviderConfig(name: name, exec: "/usr/bin/true"),
+            describe: nil, health: health,
+            errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+    }
+
+    @Test func shouldShowHeader_trueWhenHealthyWithUnmatchedSessions() {
+        let sessions = [session(provider: "acme", id: "s1")]
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions))
+    }
+
+    /// The case this feature exists to fix: every one of the provider's
+    /// sessions matched a repo, so there's nothing left to list here — but a
+    /// healthy provider with nothing to say renders no header at all.
+    @Test func shouldShowHeader_falseWhenHealthyAndFullyMatched() {
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: UUID()),
+        ]
+        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions))
+    }
+
+    /// The health-visibility guarantee: even with every session matched, an
+    /// UNHEALTHY provider still shows its bare header so the health glyph
+    /// (auth expired, stale, error) never goes dark just because grouping
+    /// absorbed every row.
+    @Test func shouldShowHeader_trueWhenUnhealthyEvenIfFullyMatched() {
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: UUID()),
+        ]
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .needsAuth), sessions: sessions))
+    }
+
+    @Test func shouldShowHeader_trueWhenUnhealthyWithNoSessionsAtAll() {
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .error), sessions: []))
+    }
+
+    @Test func shouldShowHeader_falseWhenHealthyWithNoSessionsAtAll() {
+        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: []))
+    }
+
     // MARK: - RowStatusIndicator.leading — `.remote` case + precedence
 
     @Test func leading_remoteWhenNeitherPendingNorPRStatus() {

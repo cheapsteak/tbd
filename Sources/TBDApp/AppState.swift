@@ -101,6 +101,30 @@ final class AppState: ObservableObject {
                 return
             }
 
+            // Remote session rows are tagged into this same List (and thus
+            // this same Set) purely so they're List-native keyboard
+            // reachable — arrow-key traversal and the focus ring — the same
+            // reason repo header tags are handled just above. UNLIKE the
+            // repo-header case, route the stripped id through
+            // `selectRemoteSession` (not just discard) so keyboard-only
+            // navigation — which never fires `RemoteSessionRowView`'s
+            // `.onTapGesture` — still ends up setting `selectedRemoteSession`
+            // and the row's own highlight engages. Every other consumer of
+            // `selectedWorktreeIDs` in this codebase assumes every member is
+            // a real `Worktree.id` (keyboard shortcuts, the jump menu,
+            // navigation history, persisted restore); stripping here before
+            // any of that runs keeps that invariant exactly as it was.
+            let remoteIDs = Set(remoteSessions.map(\.id))
+            let selectedRemoteIDs = selectedWorktreeIDs.intersection(remoteIDs)
+            if !selectedRemoteIDs.isEmpty {
+                selectedWorktreeIDs.subtract(selectedRemoteIDs)
+                if let remoteID = selectedRemoteIDs.first,
+                   let session = remoteSessions.first(where: { $0.id == remoteID }) {
+                    selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
+                }
+                return
+            }
+
             // Remove deselected items from order
             selectionOrder.removeAll { !selectedWorktreeIDs.contains($0) }
             // Append newly selected items (maintains insertion order for cmd+click)

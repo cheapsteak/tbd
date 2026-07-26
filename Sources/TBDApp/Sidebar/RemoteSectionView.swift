@@ -6,40 +6,69 @@ import os
 private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote")
 
 /// Sidebar section listing every registered remote-agent provider and its
-/// live sessions. Modeled on `ScratchSectionView`'s flat header+rows
-/// composition (no SwiftUI `Section` — this `List` doesn't use one anywhere
-/// else). Rendered below the repo `ForEach` in `SidebarView` (not above —
-/// position shouldn't make remoteness focal). Renders nothing when there are
-/// no registered providers: the daemon already returns an empty
-/// `remoteProviders` array whenever the `remote_backends_enabled` flag is
-/// off or no provider is registered (see `AppState.refreshRemote()`),
-/// mirrored by the pure `AppState.remoteSectionVisible(providers:)` gate
+/// UNMATCHED sessions — ones whose `meta["repo"]` didn't resolve to a
+/// locally registered repo (`RemoteSessionInfo.resolvedRepoID == nil`).
+/// Matched sessions instead render inside their repo's own `RepoSectionView`
+/// section, after its local worktrees (spec 2026-07-24: "daily-driving this
+/// is unusable with remote worktrees off in their own section").
+///
+/// Modeled on `ScratchSectionView`'s flat header+rows composition (no
+/// SwiftUI `Section` — this `List` doesn't use one anywhere else). Rendered
+/// below the repo `ForEach` in `SidebarView` (not above — position shouldn't
+/// make remoteness focal).
+///
+/// A provider's header (and rows) are hidden entirely when it has nothing
+/// left to show here — see `shouldShowHeader` for the one exception (an
+/// unhealthy provider stays visible even with zero unmatched rows, so its
+/// health glyph can't go dark just because grouping absorbed every session).
+/// The whole section renders nothing when there are no registered providers
+/// at all — see `AppState.remoteSectionVisible(providers:)`, which
 /// `SidebarView` checks before mounting this view.
 struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        ForEach(appState.remoteProviders, id: \.config.name) { provider in
+        ForEach(
+            appState.remoteProviders.filter {
+                RemoteSectionView.shouldShowHeader(provider: $0, sessions: appState.remoteSessions)
+            },
+            id: \.config.name
+        ) { provider in
             RemoteProviderHeaderRow(provider: provider)
-            ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name),
-                    id: \.payload.id) { session in
+            ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name)) { session in
                 RemoteSessionRowView(session: session)
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
+                    .tag(session.id)
             }
         }
     }
 
-    /// Sessions belonging to one provider, dismissed tombstones excluded.
-    /// Pure — split out from `body` so it's directly testable without
-    /// constructing a view hierarchy. `nonisolated` because `View.body`
-    /// being `@MainActor` otherwise infers whole-type MainActor isolation
-    /// onto every member (including this one) — calling that inferred
-    /// isolation from a plain (non-`@MainActor`) test context traps at
-    /// runtime instead of failing to compile.
+    /// Whether to show a provider's header+rows in this section: yes when it
+    /// has at least one unmatched session to list, OR its health isn't
+    /// `.ok`. An unhealthy provider (auth expired, unreachable, contract
+    /// error) must stay visible even when every one of its sessions happens
+    /// to be matched into a repo section — otherwise flipping every session
+    /// of a broken provider into "matched" would make its health banner
+    /// disappear at exactly the moment it matters most. A fully-matched,
+    /// fully-healthy provider has nothing left to say here, so it renders
+    /// nothing rather than an empty floating header.
+    nonisolated static func shouldShowHeader(provider: RemoteProviderStatus, sessions allSessions: [RemoteSessionInfo]) -> Bool {
+        provider.health != .ok || !sessions(in: allSessions, forProvider: provider.config.name).isEmpty
+    }
+
+    /// UNMATCHED sessions belonging to one provider — resolved
+    /// (`resolvedRepoID != nil`) sessions render inside their repo's section
+    /// instead (`RepoSectionView.matchedRemoteSessions`) — with dismissed
+    /// tombstones excluded. Pure — split out from `body` so it's directly
+    /// testable without constructing a view hierarchy. `nonisolated` because
+    /// `View.body` being `@MainActor` otherwise infers whole-type MainActor
+    /// isolation onto every member (including this one) — calling that
+    /// inferred isolation from a plain (non-`@MainActor`) test context traps
+    /// at runtime instead of failing to compile.
     nonisolated static func sessions(in all: [RemoteSessionInfo], forProvider provider: String) -> [RemoteSessionInfo] {
-        all.filter { $0.provider == provider && !$0.dismissed }
+        all.filter { $0.provider == provider && $0.resolvedRepoID == nil && !$0.dismissed }
     }
 }
 
@@ -111,10 +140,18 @@ struct RemoteProviderHeaderRow: View {
 /// advertise raw process liveness, and a colored dot / chip is exactly the
 /// foreign dialect that got rejected in review.
 ///
-/// Selection uses `.onTapGesture` + `.contextMenu` — the same ordering
-/// `ScratchSectionView`/`RepoSectionView` headers use in this codebase,
-/// since remote sessions have no UUID to key a `List` `.tag()`/`selection:`
-/// binding on.
+/// Selection: the row is `.tag(session.id)`'d into the sidebar's shared
+/// `List(selection: $appState.selectedWorktreeIDs)` — `session.id` is the
+/// deterministic per-(provider, sessionID) UUID from `RemoteSessionIdentity`
+/// — the same way `RepoSectionView`'s header row is tagged by `repo.id`.
+/// That tag exists purely so the row is List-native keyboard-reachable
+/// (arrow-key traversal, focus ring); like a repo header, a remote
+/// selection doesn't actually LIVE in `selectedWorktreeIDs` at rest — see
+/// `AppState.selectedWorktreeIDs`'s `didSet`, which strips a matched tag
+/// back out and routes it through `selectRemoteSession(provider:sessionID:)`
+/// instead, so `selectedRemoteSession` stays the single source of truth
+/// regardless of whether the row was reached by click (`.onTapGesture`
+/// below) or by keyboard.
 struct RemoteSessionRowView: View {
     let session: RemoteSessionInfo
     @EnvironmentObject var appState: AppState

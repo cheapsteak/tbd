@@ -64,6 +64,13 @@ struct RepoSectionView: View {
             .sorted { $0.sortOrder < $1.sortOrder }
     }
 
+    /// Remote sessions resolved to this repo (`RemoteSessionInfo.resolvedRepoID
+    /// == repo.id`), rendered after every local worktree. See
+    /// `RepoSectionView.matchedRemoteSessions` for the filter/sort rule.
+    var matchedRemoteSessions: [RemoteSessionInfo] {
+        RepoSectionView.matchedRemoteSessions(appState.remoteSessions, repoID: repo.id)
+    }
+
     private var activeWorktreeCount: Int {
         (appState.worktrees[repo.id] ?? [])
             .filter { $0.status == .active || $0.status == .creating }
@@ -233,7 +240,59 @@ struct RepoSectionView: View {
                     toOffset: destination
                 )
             }
+            // Matched remote sessions render AFTER local worktrees, never
+            // interleaved: local worktrees have a user-controlled sort order
+            // (`sortOrder`/drag reorder above) and remote ones have nothing
+            // comparable, so appending is predictable while interleaving
+            // would look arbitrary relative to a manual reorder the user set
+            // up on purpose.
+            ForEach(matchedRemoteSessions) { session in
+                RemoteSessionRowView(session: session)
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
+                    .onHover { onSectionHoverChange($0) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .tag(session.id)
+            }
         }
+    }
+
+    /// Sessions resolved to `repoID`, dismissed tombstones excluded, sorted
+    /// oldest-first by reported creation time. Pure — split out from the
+    /// computed `matchedRemoteSessions` property so it's directly testable
+    /// without an `AppState`/view hierarchy. `nonisolated` for the same
+    /// reason as `RemoteSectionView`'s pure helpers (see its doc comment).
+    nonisolated static func matchedRemoteSessions(_ all: [RemoteSessionInfo], repoID: UUID) -> [RemoteSessionInfo] {
+        all.filter { $0.resolvedRepoID == repoID && !$0.dismissed }
+            .sorted(by: RepoSectionView.isOrderedByCreation)
+    }
+
+    /// Ascending creation-time ordering for two remote sessions. A session
+    /// with a missing/unparseable `created_at` (allowed by the contract —
+    /// `docs/remote-provider-contract.md` doesn't require it) sorts after
+    /// every dated session; any remaining tie (including two undated
+    /// sessions) breaks on the row's own stable `id` so ordering is fully
+    /// deterministic across renders regardless of source-array order.
+    nonisolated static func isOrderedByCreation(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
+        let da = RepoSectionView.parsedCreatedAt(a.payload.createdAt)
+        let db = RepoSectionView.parsedCreatedAt(b.payload.createdAt)
+        switch (da, db) {
+        case let (x?, y?) where x != y: return x < y
+        case (nil, .some): return false
+        case (.some, nil): return true
+        default: return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    nonisolated static func parsedCreatedAt(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        // A fresh formatter per call (rather than a cached `static let`)
+        // sidesteps `RepoSectionView`'s inferred `@MainActor` isolation
+        // (from being a `View`) so this stays callable from a plain
+        // `nonisolated` test context — session counts are small enough that
+        // the allocation cost here is a non-issue.
+        return ISO8601DateFormatter().date(from: raw)
     }
 
     private func handlePlusButton() {
