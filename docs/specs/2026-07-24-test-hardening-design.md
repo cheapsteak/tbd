@@ -8,7 +8,7 @@
 
 The suite is healthy in the large (~3,100 tests, 15–20 s locally, strong seam culture), but CI flakes recur because three structural defects keep getting re-instantiated rather than fixed once:
 
-1. **No clock seam as a convention.** Production code stamps `Date()` and arms real timers internally, forcing tests into wall-clock assertions ("happened within 5 s") that measure elapsed time on a loaded runner, not behavior. Each instance gets patched ad hoc; any new `Task.sleep` mints the next flake. There are currently 64 raw `Task.sleep` call sites in `Sources/`.
+1. **No clock seam as a convention.** Production code stamps `Date()` and arms real timers internally, forcing tests into wall-clock assertions ("happened within 5 s") that measure elapsed time on a loaded runner, not behavior. Each instance gets patched ad hoc; any new `Task.sleep` mints the next flake. There are currently 60 raw `Task.sleep` call sites in `Sources/` (59 legacy + 1 sanctioned `PollerClock`; the "64" in earlier drafts was a naive grep that also counted `Task.sleep` mentions inside comments).
 2. **Deadline tests share a starved machine with heavyweight tests.** All test targets compile into one process and Swift Testing runs suites in parallel across all of them, so live-tmux suites, `ps` scans, and the replay firehose contend for the same 3–4 runner cores (at `-j 2`, the OOM floor) while timeout-sensitive tests tick. Nothing marks "needs real tmux and quiet CPU" vs "pure unit test", so CI cannot schedule them apart.
 3. **Assertions pin incidental facts.** `.last`-write ordering, exact counts, and freshness windows hold only when timing is quiet and were never guaranteed by the code under test.
 
@@ -68,11 +68,13 @@ Governing rule: **`Duration` is behavior, `Date` is data.**
   init(..., clock: any Clock<Duration> = ContinuousClock())
   ```
 
-  Tests inject `TestClock` from pointfree's `swift-clocks` (**test-target-only dependency**) and drive time with `await clock.advance(by:)` — no sleeping, no load sensitivity. A debounce test asserts *exact* virtual timings instead of tolerance windows.
+  Tests inject `TestClock` from pointfree's `swift-clocks` (**test-target-only dependency**) and drive time with `await clock.advance(by:)`. A debounce test asserts *exact* virtual timings instead of tolerance windows.
+
+  **Amended by slice C1 (measured):** "no sleeping, no load sensitivity" holds for the *behaviour under test*, not for the process. Observing that the code under test has reached its `sleep` is real task scheduling, so the shared `advanceWhenSuspended` helper polls with a real `Task.sleep` against a deadline; yield-spinning there provably does not converge (a budget of 5000 turned a 17 s run into 577 s and still failed). And because `TestClock.advance(to:)` calls `Task.megaYield()` twice per advance — 20 background-QoS tasks each — a large parallel population of clock-driven tests starves itself. Clock-driven suites are therefore load-**tolerant**, not load-**independent**; `@Suite(.serialized)` is the per-suite remedy. True independence would need a megaYield-free virtual clock replacing `TestClock`.
 - **Data** — timestamps that get persisted or compared (`lastUsedAt`, hibernation stamps): the existing lightweight seam, a defaulted `date: Date = Date()` / `now: @Sendable () -> Date` parameter (the `touchLastUsed(at:)` pattern). No clock object needed to stamp a row.
 - **`PollerClock` stays untouched** — chunked, suspend-aware wall-deadline sleeping is a genuinely different job (Darwin's `Task.sleep` uses the suspending clock; see its doc comment) — but it stops being the template. A doc comment points new code at the standard seam.
 
-**Enforcement is a ratchet, not a flag day.** A SwiftLint custom rule `no_raw_task_sleep` (same shape as `no_print_in_sources`) forbids `Task.sleep` in `Sources/`. The 64 existing sites get explicit per-line `swiftlint:disable:this` suppressions in the ratchet PR, so every legacy site is greppable and the count only goes down. New code cannot add an unseamed sleep without a visible suppression, which the PR review gate treats as a finding.
+**Enforcement is a ratchet, not a flag day.** A SwiftLint custom rule `no_raw_task_sleep` (same shape as `no_print_in_sources`) forbids `Task.sleep` in `Sources/`. The existing sites get explicit per-line `swiftlint:disable:next` suppressions in the ratchet PR, so every legacy site is greppable and the count only goes down. (`:next`, not `:this`, per the slicing doc's fixed contract; it also matches the house style of every pre-existing suppression in `Sources/`. The trailing prose must be separated by an ASCII `" - "`, not an em-dash: SwiftLint tokenizes everything after the rule name as further rule names unless it sees that separator, which trips `superfluous_disable_command` on every site.) New code cannot add an unseamed sleep without a visible suppression, which the PR review gate treats as a finding.
 
 **Migration order (by flake payoff):**
 
@@ -153,4 +155,4 @@ Each stage is independently shippable; order front-loads flake payoff per unit e
 - **Quiet pass silently runs nothing** → executed-test count guard in CI (§4).
 - **Quarantine landfill** → required issue numbers + nightly audit (§7).
 - **Harness becomes its own flake source** → hard dependency on virtual time (Stage 2 before Stage 4); PR CI runs only pinned seeds.
-- **Lint ratchet friction** → suppressions are pre-seeded on all 64 legacy sites in one mechanical PR; developers only encounter the rule on genuinely new sleeps.
+- **Lint ratchet friction** → suppressions are pre-seeded on all 59 legacy sites in one mechanical PR; developers only encounter the rule on genuinely new sleeps.

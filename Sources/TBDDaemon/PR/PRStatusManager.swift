@@ -33,8 +33,6 @@ public actor PRStatusManager {
 
     private var onStatusPersist: (@Sendable (UUID, PRStatus?) async -> Void)?
 
-    private var onPRStatusComputed: (@Sendable (UUID, PRStatus, String) async -> Void)?
-
     public init() {}
 
     // MARK: - Public interface
@@ -59,12 +57,6 @@ public actor PRStatusManager {
     /// next daemon start.
     public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus?) async -> Void) {
         self.onStatusPersist = cb
-    }
-
-    /// Register a callback fired whenever a PR status is computed (for nightwatch evaluation).
-    /// Passes (worktreeID, status, repoPath) so the callback can evaluate the PR.
-    public func setOnPRStatusComputed(_ cb: @escaping @Sendable (UUID, PRStatus, String) async -> Void) {
-        self.onPRStatusComputed = cb
     }
 
     /// Seed the cache from persisted DB state at startup. Writes directly (not via
@@ -124,10 +116,6 @@ public actor PRStatusManager {
         // directory for the viewer batch (gh auth is host-scoped, so any
         // checkout works); by-number lookups resolve each worktree's own repo.
         let repoPath = worktrees[0].worktreePath
-        // Each worktree's own path, for the nightwatch callback: its policy is
-        // loaded from (and its audit trail labeled with) the repo it belongs to.
-        let pathByID = Dictionary(worktrees.map { ($0.id, $0.worktreePath) },
-                                  uniquingKeysWith: { first, _ in first })
 
         // Worktrees created from a PR row carry its number; resolve those
         // directly (a fork PR's head never appears in the viewer-authored batch).
@@ -251,7 +239,6 @@ public actor PRStatusManager {
             let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
                                   mergeQueuePosition: match.node.mergeQueuePosition)
             await apply(status, for: match.worktreeID)
-            await onPRStatusComputed?(match.worktreeID, status, pathByID[match.worktreeID] ?? repoPath)
         }
     }
 
@@ -345,9 +332,9 @@ public actor PRStatusManager {
     }
 
     /// Compute check signals for a resolved PR node, map to a `PRStatus`, write it
-    /// to the cache via `apply`, mark the direct-update timestamp, and fire the
-    /// nightwatch callback. Shared by both refresh paths (by-number, by-branch) so
-    /// their signal/apply logic can't drift. When per-check signals are
+    /// to the cache via `apply`, and mark the direct-update timestamp. Shared by
+    /// both refresh paths (by-number, by-branch) so their signal/apply logic
+    /// can't drift. When per-check signals are
     /// unavailable it keeps the prior cached status (transient failure) or, with
     /// no cache to keep, bootstraps with no-signal state (the next poll corrects).
     private func applyRefreshedNode(
@@ -377,7 +364,6 @@ public actor PRStatusManager {
                               mergeQueuePosition: mergeQueuePosition)
         await apply(status, for: worktreeID)
         lastDirectUpdate[worktreeID] = Date()
-        await onPRStatusComputed?(worktreeID, status, repoPath)
         return status
     }
 

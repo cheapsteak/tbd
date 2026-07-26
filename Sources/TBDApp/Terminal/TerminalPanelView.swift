@@ -155,6 +155,7 @@ struct TerminalPanelView: View {
 
         didProbe = true   // gate further attempts only once we actually probe
 
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(nanoseconds: 500_000_000)
         let result = await appState.healthCheckProfile(baseURL: baseURL)
         if !result.reachable {
@@ -1026,6 +1027,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             resizeDebounceTask?.cancel()
             let daemonClient = appState?.daemonClient
             resizeDebounceTask = Task { [weak self] in
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled, let self else { return }
                 guard var size = self.resizeSerializer.sizeToSend(cols: cols, rows: rows) else {

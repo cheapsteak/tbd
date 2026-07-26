@@ -49,6 +49,11 @@ struct TmuxControlModeBridge: Sendable {
     /// this value struct, wired to `PaneFanout.onOverflowRepair` in this
     /// init; injectable seam like `inputRouter`/`resizeCoordinator`.
     let repairCoordinator: PaneRepairCoordinator
+    /// Clock behind every delay in the control-mode subsystem: the attach
+    /// ready-timer below and (threaded down) the repair coordinator's
+    /// reader-catch-up pacing. Defaulted, so no call site changes; tests pass
+    /// a `TestClock` and drive virtual time instead of sleeping.
+    let clock: any Clock<Duration>
 
     init(supervisor: TmuxControlSupervisor,
          tmuxVersion: TmuxVersion?,
@@ -59,8 +64,10 @@ struct TmuxControlModeBridge: Sendable {
          resizeCoordinator: ControlModeResizeCoordinator? = nil,
          persistedFlagProvider: @escaping @Sendable () async -> Bool = { false },
          commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil,
-         repairCoordinator: PaneRepairCoordinator? = nil) {
+         repairCoordinator: PaneRepairCoordinator? = nil,
+         clock: any Clock<Duration> = ContinuousClock()) {
         self.supervisor = supervisor
+        self.clock = clock
         self.tmuxVersion = tmuxVersion
         self.environment = environment
         self.fdVending = fdVending
@@ -90,8 +97,13 @@ struct TmuxControlModeBridge: Sendable {
         // Wire the M3 overflow-repair signal, also BEFORE any connection
         // starts (same startup guarantee as the layout filter): the very
         // first routed byte can already overflow a wedged pipe.
+        // Only the default-constructed coordinator inherits our clock; an
+        // injected one carries whatever clock it was built with. (No call
+        // site injects one today — tests that need a fake-clocked coordinator
+        // construct it directly rather than going through the bridge.)
         self.repairCoordinator = repairCoordinator
-            ?? PaneRepairCoordinator(supervisor: supervisor, commandProvider: self.commandProvider)
+            ?? PaneRepairCoordinator(
+                supervisor: supervisor, commandProvider: self.commandProvider, clock: clock)
         let repair = self.repairCoordinator
         supervisor.fanout.onOverflowRepair = { key, generation in
             Task { await repair.repairIfNeeded(key: key, generation: generation) }

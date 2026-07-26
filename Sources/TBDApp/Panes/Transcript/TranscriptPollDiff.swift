@@ -1,7 +1,7 @@
 import TBDShared
 
-/// Pure change-detection for the live-transcript poll loops
-/// (`LiveTranscriptPaneView` / `STTextViewTranscriptPaneView`).
+/// Pure change-detection for the live-transcript poll loop
+/// (`TableTranscriptPaneView`).
 ///
 /// The poll loops call `changed(prev:new:)` from a detached task so the deep
 /// array compare of a long transcript never burns main-thread time proving

@@ -1,33 +1,64 @@
+import Clocks
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 
 /// Exercises `GitManager`'s subprocess timeout/kill path (`GitTimeoutError`) via
 /// the package-internal `runForTimeoutTesting` seam driven against `/bin/sleep`.
-/// Asserts the OUTCOME (an error is thrown), never tight timing — CI runners
-/// can be pathologically slow, so wall-clock bounds appear only where the
-/// bound itself is the regression signal, and generously. A real git hang is
-/// not reproducible cross-environment (a post-checkout hook did not fire on CI),
-/// which is exactly why the deterministic seam exists.
+/// A real git hang is not reproducible cross-environment (a post-checkout hook
+/// did not fire on CI), which is exactly why the deterministic seam exists.
+///
+/// **Tier 3** — still spawns real children and drives the real SIGTERM→SIGKILL
+/// path; two tests deliberately orphan a backgrounded grandchild. Only the
+/// *deadline* is virtual.
+///
+/// The deadline runs on an injected `TestClock`, so no test here races a real
+/// timeout on a loaded runner:
+///
+/// - Happy-path tests never advance the clock, so the deadline **cannot** fire.
+///   Previously they asserted success against a real 3–30 s deadline while the
+///   completion path's authoritative `ContinuousClock` check reported `.timedOut`
+///   for any call the runner delayed past it — a flake that got wider, not
+///   rarer, as CI got busier.
+/// - Timeout-path tests advance virtual time at the assertion that needs it.
+///
+/// The production `SubprocessWatchdog` thread still arms the same deadline in
+/// parallel; a 600 s timeout is simply unreachable inside `.clockDriven`'s
+/// one-minute limit, so the injected clock is the only armer that can fire here.
+/// `SubprocessTimeoutStarvationTests` covers the watchdog on a real clock.
+@Suite(.clockDriven)
 struct GitManagerTimeoutTests {
+
+    /// Far enough out that the real watchdog cannot reach it inside the suite's
+    /// one-minute hang limit, so only the `TestClock` can fire the deadline.
+    private static let unreachableTimeout: Duration = .seconds(600)
+
+    private static var tmp: String { FileManager.default.temporaryDirectory.path }
+
     @Test func subprocessTimeoutThrowsGitTimeoutError() async {
-        let git = GitManager(subprocessTimeout: .milliseconds(100))
-        await #expect(throws: GitTimeoutError.self) {
-            _ = try await git.runForTimeoutTesting(
+        let clock = TestClock()
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: clock)
+        let call = Task {
+            try await git.runForTimeoutTesting(
                 executable: "/bin/sleep",
                 arguments: ["30"],
-                at: FileManager.default.temporaryDirectory.path
+                at: Self.tmp
             )
         }
+        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        await #expect(throws: GitTimeoutError.self) { try await call.value }
     }
 
     @Test func fastCommandSucceedsWithinTimeout() async throws {
-        // The timeout wrapper must not break the happy path.
-        let git = GitManager(subprocessTimeout: .seconds(30))
+        // The timeout wrapper must not break the happy path (regression guard
+        // for the kill/continuation plumbing). Clock never advances, so the
+        // deadline is unreachable no matter how slow the runner is.
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
         let out = try await git.runForTimeoutTesting(
             executable: "/bin/echo",
             arguments: ["ok"],
-            at: FileManager.default.temporaryDirectory.path
+            at: Self.tmp
         )
         #expect(out.contains("ok"))
     }
@@ -39,14 +70,15 @@ struct GitManagerTimeoutTests {
         // emitting more would block writing to the full pipe, never exit, and
         // surface as a spurious GitTimeoutError. `GitManager.run` drains
         // incrementally via readabilityHandler + PipeDataAccumulator; lock down
-        // that a 100KB emitter completes well within the timeout and returns
-        // its FULL output (no dropped trailing chunk).
+        // that a 100KB emitter completes and returns its FULL output (no dropped
+        // trailing chunk). A deadlocked drain now hangs into `.clockDriven`
+        // rather than being masked as a timeout.
         let bytes = 102_400
-        let git = GitManager(subprocessTimeout: .seconds(10))
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
         let out = try await git.runForTimeoutTesting(
             executable: "/bin/sh",
             arguments: ["-c", "yes x | head -c \(bytes)"],
-            at: FileManager.default.temporaryDirectory.path
+            at: Self.tmp
         )
         #expect(out.utf8.count == bytes)
     }
@@ -54,14 +86,14 @@ struct GitManagerTimeoutTests {
     @Test func runDrainsStderrLargerThanPipeBuffer() async throws {
         // Same deadlock class, stderr side: a failing command emitting >64KB of
         // diagnostics must exit and surface as GitError (with the full stderr),
-        // not wedge on a full pipe until the watchdog fires.
+        // not wedge on a full pipe until the deadline fires.
         let bytes = 102_400
-        let git = GitManager(subprocessTimeout: .seconds(10))
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
         do {
             _ = try await git.runForTimeoutTesting(
                 executable: "/bin/sh",
                 arguments: ["-c", "yes e | head -c \(bytes) >&2; exit 3"],
-                at: FileManager.default.temporaryDirectory.path
+                at: Self.tmp
             )
             Issue.record("expected GitError for non-zero exit")
         } catch let error as GitError {
@@ -71,55 +103,53 @@ struct GitManagerTimeoutTests {
     }
 
     @Test func timeoutThrowsPromptlyWhenGrandchildHoldsPipeOpen() async {
-        // Mirrors SubprocessTimeoutTests: the watchdog kills only the DIRECT
-        // child (SIGTERM→SIGKILL); a backgrounded grandchild inherits the pipe
-        // write ends and keeps them open for 120s, so EOF never arrives before
-        // it exits. The timer path must nil the readability handlers AND
-        // finish() both accumulators (closing the parent read ends) so nothing
-        // waits for — or stays open until — the grandchild's EOF. Shape:
-        // parent execs into a sleep the 1s timeout kills (the SIGKILLed direct
-        // child dies at ~timeout+500ms); grandchild sleeps 120s. The plain
-        // `sleep 120 &` grandchild is NOT killed and may linger up to 120s
-        // after the suite — harmless orphanage locally, irrelevant on
+        // The deadline kills only the DIRECT child (SIGTERM→SIGKILL); a
+        // backgrounded grandchild inherits the pipe write ends and keeps them
+        // open for 120s, so EOF never arrives before it exits. The timeout path
+        // must nil the readability handlers AND finish() both accumulators
+        // (closing the parent read ends) so nothing waits for — or stays open
+        // until — the grandchild's EOF.
+        //
+        // The promptness proof is now structural rather than a tolerance: the
+        // call resolves after 600 VIRTUAL seconds while the grandchild holds the
+        // pipe for 120 REAL ones, so returning at all proves nothing waited for
+        // EOF. A regressed EOF-waiting drain would block ~120 real seconds and
+        // trip `.clockDriven`'s 60 s limit. This replaces a wall-clock upper
+        // bound that had been RAISED TWICE after measured breaches
+        // (4s → 15s → 60s, the last at 19.4s on a 2-core runner) — tolerance
+        // widening is the flake shape hygiene rule 2 exists to forbid.
+        //
+        // The plain `sleep 120 &` grandchild is NOT killed and may linger up to
+        // 120s after the suite — harmless orphanage locally, irrelevant on
         // ephemeral CI runners.
-        let git = GitManager(subprocessTimeout: .seconds(1))
-        let start = ContinuousClock.now
-        do {
-            _ = try await git.runForTimeoutTesting(
+        let clock = TestClock()
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: clock)
+        let call = Task {
+            try await git.runForTimeoutTesting(
                 executable: "/bin/sh",
                 arguments: ["-c", "sleep 120 & exec sleep 120"],
-                at: FileManager.default.temporaryDirectory.path
+                at: Self.tmp
             )
-            Issue.record("expected runForTimeoutTesting to time out, but it returned")
-        } catch is GitTimeoutError {
-            // expected
-        } catch {
-            Issue.record("expected GitTimeoutError, got \(error)")
         }
-        // Generous bound (1s timeout vs 120s grandchild): finishing under 60s
-        // proves nothing waited for the grandchild to release the write end.
-        // Sized from measured breaches under contention: 4.676s locally (old
-        // 4s bound), then 19.446s on a 2-core CI runner under full-suite
-        // parallel load (old 15s bound). 60s gives ~3x headroom over the CI
-        // worst case, while a regressed EOF-waiting implementation would take
-        // the full 120s and fail unambiguously.
-        #expect(ContinuousClock.now - start < .seconds(60))
+        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        await #expect(throws: GitTimeoutError.self) { try await call.value }
     }
 
     @Test func returnsOutputWithoutWaitingForGrandchildEOF() async throws {
         // Termination-path variant: the direct child exits immediately and
         // successfully while its backgrounded grandchild holds the pipe write
         // end for 30s. The call must return the child's output right away — a
-        // drain that waits for pipe EOF stalls until the grandchild exits,
-        // which would surface as a spurious GitTimeoutError here (timeout 3s
-        // << grandchild 30s). Outcome-based: success discriminates old from
-        // new without asserting wall-clock timing. The `sleep 30 &` grandchild
-        // may linger up to 30s after the suite — tolerable orphanage.
-        let git = GitManager(subprocessTimeout: .seconds(3))
+        // drain that waits for pipe EOF stalls until the grandchild exits.
+        // Previously that surfaced as a spurious GitTimeoutError (timeout 3s <<
+        // grandchild 30s); with the deadline virtual and never advanced, a
+        // regression can only present as a hang caught by `.clockDriven`, and
+        // the 3 s margin that a loaded runner could blow is gone. The
+        // `sleep 30 &` grandchild may linger up to 30s — tolerable orphanage.
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
         let out = try await git.runForTimeoutTesting(
             executable: "/bin/sh",
             arguments: ["-c", "sleep 30 & echo hi"],
-            at: FileManager.default.temporaryDirectory.path
+            at: Self.tmp
         )
         #expect(out == "hi\n")
     }

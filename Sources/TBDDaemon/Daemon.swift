@@ -304,6 +304,7 @@ public final class Daemon: Sendable {
         // 4c. Start periodic SSH agent refresh (every 60s)
         self.sshRefreshTask = Task {
             while !Task.isCancelled {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: .seconds(60))
                 if !(await sshResolver.isValid()) {
                     if await sshResolver.resolve() {
@@ -431,62 +432,6 @@ public final class Daemon: Sendable {
         await prManager.hydrate(persistedPRStatuses)
         await prManager.setOnStatusPersist { worktreeID, status in
             try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
-        }
-
-        // Wire nightwatch evaluation: when a PR status is refreshed, evaluate it through
-        // the merge gate and log the decision to the audit store (evaluate-only, no merging).
-        await prManager.setOnPRStatusComputed { worktreeID, status, repoPath in
-            let config = try? await database.config.get()
-            guard let config, config.nightwatchMode != .off else { return }
-
-            // Load policy from .nightwatch/policy.json (conservative defaults if absent/malformed)
-            let policy = NightwatchPolicy.load(repoPath: repoPath)
-            let gate = MergeGate(policy: policy)
-
-            // Build gate input from PR status. For Phase 1, we make conservative assumptions:
-            // - hasApprovedReview = false (not fetched yet, Phase 1 is evaluate-only)
-            // - checksClean = false (not fetched yet)
-            // - files/commits/author = nil (not fetched yet)
-            // This ensures Phase 1 gates are conservative (most PRs will escalate).
-            let input = GateInput(
-                prNumber: status.number,
-                repo: repoPath,
-                headSHA: "unknown",  // Not available in PRStatus
-                isDraft: status.state == .draft,
-                hasApprovedReview: false,
-                checksClean: status.state == .mergeable || status.state == .merged,
-                files: nil,
-                commits: nil,
-                authorWorktreeID: nil,
-                approvedSHA: nil,
-                touchesCI: false
-            )
-
-            let decision = gate.evaluate(input: input)
-            let action: AuditAction
-            let details: String
-
-            switch decision {
-            case .wouldMerge(clearanceID: let cid):
-                action = .wouldMerge
-                details = "Phase 1: would-merge marker (\(cid))"
-            case .hold(let reason):
-                action = .hold
-                details = "Hold reason: \(reason)"
-            case .escalate(let reason):
-                action = .escalate
-                details = "Escalate reason: \(reason)"
-            }
-
-            let entry = AuditLogEntry(
-                action: action,
-                prNumber: status.number,
-                repo: repoPath,
-                headSHA: "unknown",
-                timestamp: Date(),
-                details: details
-            )
-            try? await database.audit.logAction(entry)
         }
 
         // 8. Initialize RPC router
@@ -623,6 +568,7 @@ public final class Daemon: Sendable {
                 // Sweep once immediately (cold recovery), then every 60s.
                 await reaper.sweep(servers: await ownedServers())
                 while !Task.isCancelled {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
                     await reaper.sweep(servers: await ownedServers())
@@ -640,6 +586,7 @@ public final class Daemon: Sendable {
                     // Sweep once immediately (cold recovery), then every hour.
                     _ = await orphanGC.sweep()
                     while !Task.isCancelled {
+                        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
                         _ = await orphanGC.sweep()
@@ -750,6 +697,7 @@ public final class Daemon: Sendable {
                 tmux: tmux,
                 inspector: ProductionPaneProcessInspector(),
                 readTranscript: { path in FileManager.default.contents(atPath: path) },
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 waiter: { duration in _ = try? await Task.sleep(for: duration) }
             )
             let resumeScheduler = LimitResumeScheduler(
@@ -844,6 +792,7 @@ public final class Daemon: Sendable {
             let hibernationCoordinator = rpcRouter.hibernationCoordinator
             self.hibernationSweepTask = Task {
                 while !Task.isCancelled {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(30))
                     guard !Task.isCancelled else { break }
                     await hibernationCoordinator.sweep()
@@ -866,6 +815,7 @@ public final class Daemon: Sendable {
     static func sleepThroughGatedInterval(_ interval: @Sendable () async -> Duration) async {
         var waited = Duration.zero
         while !Task.isCancelled {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: GitPollCadence.pollTick)
             waited += GitPollCadence.pollTick
             let due = await interval()

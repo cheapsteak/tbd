@@ -58,15 +58,26 @@ custom_rules:
     message: "Use os.Logger instead of print() in Sources/. See CLAUDE.md."
     severity: error
 
+  no_raw_task_sleep:
+    name: "No raw Task.sleep in Sources/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    regex: 'Task\.sleep\s*\('
+    match_kinds:
+      - identifier
+    message: "New delays/timers take an injected clock (`clock: any Clock<Duration> = ContinuousClock()`) — see Tests/CLAUDE.md \"Clock and date seams\" and docs/specs/2026-07-24-test-hardening-design.md §5."
+    severity: error
+
   no_scrollview_in_transcript_cards:
     name: "No direct ScrollView in transcript row cards"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
       - "Sources/TBDApp/Panes/Transcript/.*\\.swift"
     excluded:
-      # TranscriptOverlayView renders outside the LazyVStack — ScrollView is safe here (#129).
+      # TranscriptOverlayView renders outside the transcript list — ScrollView is safe here (#129).
       - "Sources/TBDApp/Panes/Transcript/TranscriptOverlayView\\.swift"
-      # OverlayFileView is the body of a file frame in the overlay — sibling of LazyVStack, real ScrollView is safe.
+      # OverlayFileView is the body of a file frame in the overlay — outside the transcript list, real ScrollView is safe.
       - "Sources/TBDApp/Panes/Transcript/OverlayFileView\\.swift"
     regex: '\bScrollView\b'
     match_kinds:

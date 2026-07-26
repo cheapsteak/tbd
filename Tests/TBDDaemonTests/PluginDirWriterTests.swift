@@ -108,6 +108,72 @@ struct PluginDirWriterTests {
         #expect(output.contains("scenarios passed"))
     }
 
+    /// Executable coverage for the composer ghost-guard, which sits on the path
+    /// that types text into live tmux panes across the fleet. String-presence
+    /// assertions on `tickPy` (in TBDSharedTests) prove the guard is *shipped*;
+    /// only running it proves the guard *works* — a regex or an index-alignment
+    /// edit could leave every pinned substring intact and still fire ghost
+    /// suggestions as if a human had typed them.
+    ///
+    /// `--selftest` short-circuits before tick.py's machine-global flock, so a
+    /// live tick running concurrently can't turn this into a silent exit 0.
+    /// The `scenarios passed` assertion is the backstop for that regardless.
+    @Test("tick.py --selftest passes: composer ghost-guard matrix (no DB/tmux invoked)")
+    func tickPySelftest() throws {
+        let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tempRoot) }
+        try PluginDirWriter(applicationSupportRoot: tempRoot).writePlugin()
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["python3", tempRoot + "/TBD/plugin/skills/nightwatch/scripts/tick.py", "--selftest"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try proc.run()
+        proc.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(proc.terminationStatus == 0, "tick.py --selftest failed:\n\(output)")
+        #expect(output.contains("composer ghost-guard scenarios passed"), "unexpected output:\n\(output)")
+    }
+
+    /// The relay decides whether a desk shift survives its context ceiling, so
+    /// its arithmetic and its fail-closed paths get executable coverage rather
+    /// than string-presence checks — same standard as `tick.py`/`wake.py`.
+    @Test("handoff.py --selftest passes: ceiling arithmetic + fail-closed paths")
+    func handoffPySelftest() throws {
+        let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tempRoot) }
+        try PluginDirWriter(applicationSupportRoot: tempRoot).writePlugin()
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["python3", tempRoot + "/TBD/plugin/skills/nightwatch/scripts/handoff.py", "--selftest"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try proc.run()
+        proc.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(proc.terminationStatus == 0, "handoff.py --selftest failed:\n\(output)")
+        #expect(output.contains("handoff ceiling scenarios passed"), "unexpected output:\n\(output)")
+    }
+
+    @Test("handoff.py is installed alongside the other nightwatch scripts")
+    func handoffPyInstalled() throws {
+        let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tempRoot) }
+        try PluginDirWriter(applicationSupportRoot: tempRoot).writePlugin()
+
+        let scripts = tempRoot + "/TBD/plugin/skills/nightwatch/scripts"
+        for entry in NightwatchSkillContent.scripts {
+            let path = scripts + "/" + entry.name
+            #expect(FileManager.default.fileExists(atPath: path), "\(entry.name) not installed")
+            #expect(try String(contentsOfFile: path, encoding: .utf8) == entry.body)
+        }
+        #expect(FileManager.default.fileExists(atPath: scripts + "/handoff.py"))
+    }
+
     @Test("nightwatch SKILL.md has a valid skill name in frontmatter")
     func nightwatchSkillNamed() {
         #expect(NightwatchSkillContent.skillMd.contains("name: nightwatch"))

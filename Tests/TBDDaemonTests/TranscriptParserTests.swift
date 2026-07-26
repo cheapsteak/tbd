@@ -87,7 +87,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1)
-        if case .systemReminder(_, let kind, _, _) = items[0] {
+        if case .systemReminder(_, let kind, _, _, _, _) = items[0] {
             #expect(kind == .toolReminder)
         } else {
             Issue.record("expected .systemReminder")
@@ -203,7 +203,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1)
-        if case .systemReminder(_, let kind, let text, _) = items[0] {
+        if case .systemReminder(_, let kind, let text, _, _, _) = items[0] {
             #expect(kind == .skillBody)
             #expect(text.hasPrefix("Base directory for this skill:"))
         } else {
@@ -243,7 +243,7 @@ struct TranscriptParserTests {
         // Exactly one .systemReminder with kind .taskNotification preserving the
         // full original notification text.
         let reminders = items.compactMap { item -> (SystemKind, String)? in
-            if case .systemReminder(_, let kind, let text, _) = item { return (kind, text) }
+            if case .systemReminder(_, let kind, let text, _, _, _) = item { return (kind, text) }
             return nil
         }
         #expect(reminders.count == 1)
@@ -412,7 +412,7 @@ struct TranscriptParserTests {
         case .userPrompt(let id, let t, _): return "userPrompt|\(id)|\(t)"
         case .assistantText(let id, let t, _, _): return "assistantText|\(id)|\(t)"
         case .thinking(let id, let t, _): return "thinking|\(id)|\(t)"
-        case .systemReminder(let id, let kind, let t, _): return "systemReminder|\(id)|\(kind)|\(t)"
+        case .systemReminder(let id, let kind, let t, _, _, _): return "systemReminder|\(id)|\(kind)|\(t)"
         case .toolCall(let id, let name, _, _, let result, _, _, _):
             return "toolCall|\(id)|\(name)|\(result?.text ?? "<nil>")"
         case .slashCommand(let id, let name, let args, _):
@@ -527,6 +527,559 @@ struct TranscriptParserTests {
         let tail = TranscriptParser.parseTail(filePath: tmp, limit: 5)
         #expect(tail.count == 5)
         #expect(full.suffix(5).map(signature) == tail.map(signature))
+    }
+
+    // MARK: - attachments (hook- and CLAUDE.md-injected context)
+    //
+    // Tier 1. Fixture rows mirror the real shapes observed in a live Claude
+    // Code session JSONL (an `attachment` row per flavor); paths and hook
+    // payloads are rewritten to acme placeholders and shortened, except where
+    // a test needs to cross the 2000-char truncation cap.
+
+    /// Builds one `type:"attachment"` JSONL line from an attachment dict.
+    private func attachmentLine(uuid: String, _ attachment: [String: Any]) throws -> String {
+        let row: [String: Any] = [
+            "type": "attachment",
+            "uuid": uuid,
+            "timestamp": "2026-07-24T10:00:00.000Z",
+            "attachment": attachment
+        ]
+        let data = try JSONSerialization.data(withJSONObject: row)
+        return try #require(String(bytes: data, encoding: .utf8))
+    }
+
+    private func reminders(_ items: [TranscriptItem]) -> [(id: String, kind: SystemKind, text: String, source: String?, truncatedTo: Int?)] {
+        items.compactMap {
+            if case .systemReminder(let id, let kind, let text, _, let source, let truncatedTo) = $0 {
+                return (id, kind, text, source, truncatedTo)
+            }
+            return nil
+        }
+    }
+
+    @Test func attachment_nestedMemory_unwraps_nested_content_dict() throws {
+        // `attachment.content` is an OBJECT here; the CLAUDE.md body sits at
+        // `content.content`. A naive `content as? String` drops it entirely.
+        let line = try attachmentLine(uuid: "att-mem", [
+            "type": "nested_memory",
+            "displayPath": ".github/CLAUDE.md",
+            "path": "/Users/dev/acme-prod/.github/CLAUDE.md",
+            "content": ["path": "/Users/dev/acme-prod/.github/CLAUDE.md",
+                        "type": "nested_memory",
+                        "content": "# acme-prod workflow rules"]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.count == 1)
+        let row = try #require(found.first)
+        #expect(row.id == "att-mem")
+        #expect(row.kind == .nestedMemory)
+        #expect(row.text == "# acme-prod workflow rules")
+        #expect(row.source == ".github/CLAUDE.md")
+        #expect(row.truncatedTo == nil)
+    }
+
+    @Test func attachment_nestedMemory_long_body_records_original_length() throws {
+        let body = String(repeating: "acme rule line\n", count: 400)  // > 2000 chars, > 20 lines
+        let line = try attachmentLine(uuid: "att-big", [
+            "type": "nested_memory",
+            "displayPath": "CLAUDE.md",
+            "content": ["content": body]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let row = try #require(reminders(TranscriptParser.parse(filePath: tmp)).first)
+        #expect(row.text.count < body.count, "body must be truncated for the collapsed row")
+        #expect(row.truncatedTo == body.count, "truncatedTo carries the ORIGINAL character count")
+
+        // The click-to-open overlay must be able to recover the whole thing —
+        // attachment rows carry no `message`, so this needs its own branch.
+        #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "att-big") == body)
+    }
+
+    @Test func attachment_file_unwraps_dict_in_dict_body() throws {
+        // An @-mentioned file: `attachment.content` is an object whose `file`
+        // sub-object holds the body — one level deeper than `nested_memory`.
+        let line = try attachmentLine(uuid: "att-file", [
+            "type": "file",
+            "displayPath": "src/acme/deploy.swift",
+            "filename": "deploy.swift",
+            "content": ["type": "text",
+                        "file": ["filePath": "/Users/dev/acme-prod/src/acme/deploy.swift",
+                                 "content": "func deployAcme() {}\n"]]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.count == 1)
+        let row = try #require(found.first)
+        #expect(row.id == "att-file")
+        #expect(row.kind == .nestedMemory)
+        #expect(row.text == "func deployAcme() {}\n")
+        #expect(row.source == "src/acme/deploy.swift")
+    }
+
+    @Test func attachment_hookAdditionalContext_unwraps_string_array_and_suffixes_ids() throws {
+        // `attachment.content` is an ARRAY of strings — one item per element.
+        let line = try attachmentLine(uuid: "att-hac", [
+            "type": "hook_additional_context",
+            "hookName": "SessionStart",
+            "content": ["first injected block", "second injected block"]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.map(\.id) == ["att-hac#0", "att-hac#1"])
+        #expect(found.map(\.text) == ["first injected block", "second injected block"])
+        #expect(found.allSatisfy { $0.kind == .hookOutput && $0.source == "SessionStart" })
+
+        #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "att-hac#1") == "second injected block")
+    }
+
+    @Test func attachment_hookSuccess_ignores_additionalContext_in_stdout() throws {
+        // A hook's stdout is what it EMITTED; `hook_additional_context` is what
+        // was actually INJECTED. Measured across 120+ real sessions, the latter
+        // covers 100% of the former — so the stdout path is pure redundancy and
+        // emits nothing. The hac twin is the row that renders.
+        let injected = "acme ADR applies here"
+        let stdout = #"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"\#(injected)"}}"#
+        let lines = [
+            try attachmentLine(uuid: "att-hs", [
+                "type": "hook_success",
+                "hookName": "PostToolUse:Read",
+                "content": "",
+                "stdout": stdout
+            ]),
+            try attachmentLine(uuid: "att-hac", [
+                "type": "hook_additional_context",
+                "hookName": "PostToolUse:Read",
+                "content": [injected]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.count == 1, "hook_success stdout must contribute nothing")
+        let row = try #require(found.first)
+        #expect(row.id == "att-hac")
+        #expect(row.kind == .hookOutput)
+        #expect(row.source == "PostToolUse:Read")
+        #expect(row.text == injected)
+    }
+
+    @Test func attachment_buildItems_is_window_independent_for_hookSuccess_pair() throws {
+        // `parseTail` hands `buildItems` only the lines inside its byte window.
+        // Any cross-row state (a dedup set, say) would make the same row parse
+        // differently depending on what preceded it — breaking parseTail's
+        // identical-bottom guarantee. Parse the pair, then parse the second row
+        // alone, and require the item to be identical.
+        let injected = "acme ADR applies here"
+        let stdout = #"{"hookSpecificOutput":{"additionalContext":"\#(injected)"}}"#
+        let hsLine = try attachmentLine(uuid: "att-hs", [
+            "type": "hook_success", "hookName": "SessionStart", "content": "", "stdout": stdout
+        ])
+        let hacLine = try attachmentLine(uuid: "att-hac", [
+            "type": "hook_additional_context", "hookName": "SessionStart", "content": [injected]
+        ])
+
+        let both = try writeTempJSONL([hsLine, hacLine].joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: both) }
+        let windowOnly = try writeTempJSONL(hacLine)
+        defer { try? FileManager.default.removeItem(atPath: windowOnly) }
+
+        let fullTail = try #require(TranscriptParser.parse(filePath: both).last)
+        let windowed = try #require(TranscriptParser.parse(filePath: windowOnly).last)
+        #expect(fullTail == windowed)
+    }
+
+    @Test func attachment_hookSuccess_plain_content_emits_once() throws {
+        // The plain-text branch survives — `hook_success.content` is never
+        // mirrored in a hook_additional_context row (221/221 unique across the
+        // corpus), so dropping it would lose the text entirely. `stdout` never
+        // contributes, JSON or not, so exactly one item comes out.
+        let line = try attachmentLine(uuid: "att-plain", [
+            "type": "hook_success",
+            "hookName": "SessionStart:startup",
+            "content": "Cleared: /tmp/acme-work-claimed",
+            "stdout": #"{"hookSpecificOutput":{"additionalContext":"something else entirely"}}"#
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.count == 1)
+        #expect(found.first?.text == "Cleared: /tmp/acme-work-claimed")
+        #expect(found.first?.source == "SessionStart:startup")
+    }
+
+    @Test func attachment_hookSuccess_empty_stdout_object_emits_nothing() throws {
+        // The overwhelmingly common case: `stdout` is literally "{}\n".
+        let line = try attachmentLine(uuid: "att-empty", [
+            "type": "hook_success", "hookName": "PostToolUse:Bash", "content": "", "stdout": "{}\n"
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(TranscriptParser.parse(filePath: tmp).isEmpty)
+    }
+
+    @Test func attachment_injected_context_comes_only_from_additionalContext_row() throws {
+        // The hook EMITS a payload (hook_success stdout), and what actually
+        // entered the context window lands in the hook_additional_context row —
+        // sometimes verbatim, sometimes as the `<persisted-output>` notice that
+        // REPLACED an oversized payload. Only the hac row renders; every item
+        // stays addressable by `lookupFullBody`.
+        let emitted = "acme skill rules apply"
+        let stdout = try String(
+            decoding: JSONSerialization.data(
+                withJSONObject: ["hookSpecificOutput": ["additionalContext": emitted]]),
+            as: UTF8.self)
+        let lines = [
+            try attachmentLine(uuid: "hs-1", [
+                "type": "hook_success", "hookName": "SessionStart", "content": "", "stdout": stdout
+            ]),
+            try attachmentLine(uuid: "hac-1", [
+                "type": "hook_additional_context",
+                "hookName": "SessionStart",
+                "content": [emitted, "<persisted-output>\nOutput too large (22.2KB).\n</persisted-output>"]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let found = reminders(TranscriptParser.parse(filePath: tmp))
+        #expect(found.map(\.text) == [emitted, "<persisted-output>\nOutput too large (22.2KB).\n</persisted-output>"])
+        #expect(found.map(\.id) == ["hac-1#0", "hac-1#1"])
+        #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "hac-1#1")?.hasPrefix("<persisted-output>") == true)
+    }
+
+    @Test func attachment_skillListing_emits_hookOutput_named_skills() throws {
+        let line = try attachmentLine(uuid: "att-skills", [
+            "type": "skill_listing", "skillCount": 2, "content": "acme-deploy, acme-review"
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let row = try #require(reminders(TranscriptParser.parse(filePath: tmp)).first)
+        #expect(row.kind == .hookOutput)
+        #expect(row.source == "skills")
+        #expect(row.text == "acme-deploy, acme-review")
+    }
+
+    @Test func attachment_payloadless_flavors_emit_nothing() throws {
+        let lines = [
+            try attachmentLine(uuid: "att-tr", ["type": "task_reminder", "content": [], "itemCount": 0]),
+            try attachmentLine(uuid: "att-cp", ["type": "command_permissions", "allowedTools": ["Bash"]]),
+            try attachmentLine(uuid: "att-qc", ["type": "queued_command", "prompt": "go"]),
+            try attachmentLine(uuid: "att-dd", ["type": "deferred_tools_delta", "addedNames": ["X"]])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(TranscriptParser.parse(filePath: tmp).isEmpty)
+    }
+
+    // MARK: - injected path normalization
+    //
+    // Tier 1. Claude Code writes `displayPath` relative to the cwd, so a file
+    // outside the repo arrives as `../../../../../../private/tmp/…` — useless
+    // once the row middle-truncates it.
+
+    @Test func injectedPath_in_repo_displayPath_is_used_verbatim() throws {
+        // The nicest form already: no `../`, no home prefix. Must not change.
+        let line = try attachmentLine(uuid: "att-inrepo", [
+            "type": "nested_memory",
+            "displayPath": ".github/CLAUDE.md",
+            "path": "\(NSHomeDirectory())/acme-prod/.github/CLAUDE.md",
+            "content": ["type": "Project", "content": "# acme rules"]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(reminders(TranscriptParser.parse(filePath: tmp)).first?.source == ".github/CLAUDE.md")
+    }
+
+    @Test func injectedPath_escaping_displayPath_falls_back_to_tilde_absolute() throws {
+        let absolute = "\(NSHomeDirectory())/scratch/acme/iam-pr-body.md"
+        let line = try attachmentLine(uuid: "att-escape", [
+            "type": "file",
+            "displayPath": "../../../../../../scratch/acme/iam-pr-body.md",
+            "filename": "iam-pr-body.md",
+            "content": ["type": "text", "file": ["filePath": absolute, "content": "body"]]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let source = try #require(reminders(TranscriptParser.parse(filePath: tmp)).first?.source)
+        #expect(source == "~/scratch/acme/iam-pr-body.md")
+        #expect(!source.hasPrefix("../"), "an escaping relative path must never reach the row")
+    }
+
+    @Test func injectedPath_missing_displayPath_uses_absolute_path() throws {
+        // No `displayPath` at all: `attachment.path` is the only absolute form.
+        let line = try attachmentLine(uuid: "att-nodp", [
+            "type": "nested_memory",
+            "path": "/opt/acme/CLAUDE.md",
+            "content": ["type": "Project", "content": "# acme rules"]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        // Outside $HOME, so no tilde to collapse — the absolute path stands.
+        #expect(reminders(TranscriptParser.parse(filePath: tmp)).first?.source == "/opt/acme/CLAUDE.md")
+    }
+
+    @Test func injectedPath_escaping_with_no_absolute_falls_back_to_filename() throws {
+        let line = try attachmentLine(uuid: "att-fname", [
+            "type": "file",
+            "displayPath": "../../../tmp/acme/notes.md",
+            "filename": "notes.md",
+            "content": ["type": "text", "file": ["content": "body"]]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(reminders(TranscriptParser.parse(filePath: tmp)).first?.source == "notes.md")
+    }
+
+    // The `~` abbreviation must match whole path components. A substring
+    // replace of `NSHomeDirectory()` mangled sibling and nested paths.
+    @Test func injectedPath_tilde_abbreviation_is_component_boundary_aware() {
+        let home = NSHomeDirectory()
+        let leaf = (home as NSString).lastPathComponent
+        let parent = (home as NSString).deletingLastPathComponent
+
+        // A genuine home-prefixed path abbreviates.
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: "\(home)/acme-prod/CLAUDE.md", filename: nil)
+            == "~/acme-prod/CLAUDE.md")
+
+        // A *sibling* directory whose name merely starts with the home leaf is
+        // a different directory and must be left alone.
+        let sibling = "\(parent)/\(leaf)log-archive/CLAUDE.md"
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: sibling, filename: nil) == sibling)
+
+        // Home appearing mid-path (an external volume) must not be spliced.
+        let onVolume = "/Volumes/T7\(home)/notes.md"
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: onVolume, filename: nil) == onVolume)
+    }
+
+    @Test func injectedPath_last_resort_is_the_display_paths_last_component() {
+        // Neither an absolute path nor a filename: strip the escape prefix
+        // rather than rendering `../../..`.
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: "../../../tmp/acme/notes.md", absolutePath: nil, filename: nil) == "notes.md")
+        #expect(TranscriptParser.injectedPathSource(
+            displayPath: nil, absolutePath: nil, filename: nil) == nil)
+    }
+
+    // MARK: - injection metadata (overlay round-trip payload)
+    //
+    // Tier 1. Metadata rides `lookupDetail` — the same round-trip the overlay
+    // already makes for a full body — so nothing is added to `TranscriptItem`.
+
+    /// One assistant line carrying a single `tool_use` block.
+    private func toolUseLine(uuid: String, id: String, name: String, input: [String: Any]) throws -> String {
+        let row: [String: Any] = [
+            "type": "assistant",
+            "uuid": uuid,
+            "timestamp": "2026-07-24T09:59:59.000Z",
+            "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": id, "name": name, "input": input]
+            ]]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: row)
+        return try #require(String(bytes: data, encoding: .utf8))
+    }
+
+    @Test func metadata_hookSuccess_carries_hook_command_exit_duration_stderr() throws {
+        let line = try attachmentLine(uuid: "att-hs", [
+            "type": "hook_success",
+            "hookName": "PostToolUse:Read",
+            "hookEvent": "PostToolUse",
+            "command": #"python3 "${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse.py""#,
+            "exitCode": 0,
+            "durationMs": 142,
+            "stderr": "acme: cache miss",
+            "content": "Injected acme guidance"
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let detail = TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-hs")
+        #expect(detail.text == "Injected acme guidance")
+        let m = try #require(detail.attachment)
+        #expect(m.hookName == "PostToolUse:Read")
+        #expect(m.hookEvent == "PostToolUse")
+        #expect(m.command == #"python3 "${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse.py""#)
+        #expect(m.exitCode == 0)
+        #expect(m.durationMs == 142)
+        #expect(m.stderr == "acme: cache miss")
+        #expect(m.memoryType == nil, "memory tier is meaningless for a hook row")
+    }
+
+    @Test func metadata_omits_blank_and_absent_fields() throws {
+        // Empty strings must read as absent so the overlay can omit the line
+        // instead of rendering an empty value.
+        let line = try attachmentLine(uuid: "att-blank", [
+            "type": "hook_additional_context",
+            "hookName": "SessionStart:compact",
+            "stderr": "   ",
+            "content": ["injected"]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let m = try #require(TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-blank").attachment)
+        #expect(m.hookName == "SessionStart:compact")
+        #expect(m.stderr == nil)
+        #expect(m.command == nil)
+        #expect(m.exitCode == nil)
+        #expect(m.path == nil)
+    }
+
+    @Test func metadata_nestedMemory_carries_tier_and_absolute_path() throws {
+        let absolute = "\(NSHomeDirectory())/acme-prod/.github/CLAUDE.md"
+        let line = try attachmentLine(uuid: "att-mem", [
+            "type": "nested_memory",
+            "displayPath": ".github/CLAUDE.md",
+            "path": absolute,
+            "content": ["path": absolute, "type": "Project", "content": "# acme rules"]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let m = try #require(TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-mem").attachment)
+        #expect(m.memoryType == "Project")
+        // The FULL absolute path — the overlay abbreviates for display and
+        // copies this verbatim.
+        #expect(m.path == absolute)
+        #expect(m.hookName == nil)
+    }
+
+    @Test func metadata_file_carries_path_but_no_memory_tier() throws {
+        let line = try attachmentLine(uuid: "att-file", [
+            "type": "file",
+            "displayPath": "src/acme/deploy.swift",
+            "filename": "deploy.swift",
+            "content": ["type": "text",
+                        "file": ["filePath": "/srv/acme-prod/src/acme/deploy.swift", "content": "func deployAcme() {}"]]
+        ])
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let m = try #require(TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-file").attachment)
+        #expect(m.path == "/srv/acme-prod/src/acme/deploy.swift")
+        #expect(m.memoryType == nil, "a file row's inner type is just \"text\", not a memory tier")
+    }
+
+    @Test func metadata_is_nil_for_non_attachment_rows() throws {
+        let lines = [
+            try toolUseLine(uuid: "a1", id: "toolu_1", name: "Read",
+                            input: ["file_path": "/srv/acme-prod/.github/workflows/ai-review-gate.yml"]),
+            #"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file body"}]}}"#
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let detail = TranscriptParser.lookupDetail(filePath: tmp, itemID: "toolu_1")
+        #expect(detail.text == "file body")
+        #expect(detail.attachment == nil)
+    }
+
+    // MARK: - hook attribution (attachment.toolUseID → triggering tool call)
+
+    @Test func attribution_resolves_toolUseID_to_tool_name_and_input_summary() throws {
+        let lines = [
+            try toolUseLine(uuid: "a1", id: "toolu_1", name: "Read",
+                            input: ["file_path": "/srv/acme-prod/.github/workflows/ai-review-gate.yml"]),
+            try attachmentLine(uuid: "att-hac", [
+                "type": "hook_additional_context",
+                "hookName": "PostToolUse:Read",
+                "toolUseID": "toolu_1",
+                "content": ["acme review gate applies"]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let m = try #require(TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-hac").attachment)
+        #expect(m.triggeredBy == "Read ai-review-gate.yml")
+    }
+
+    @Test func attribution_omitted_when_toolUseID_resolves_to_nothing() throws {
+        // ~3% of real hook rows name a tool_use that isn't in the file. Omit
+        // the line entirely — never "unknown", never a guess.
+        let lines = [
+            try toolUseLine(uuid: "a1", id: "toolu_1", name: "Read", input: ["file_path": "/srv/acme-prod/main.swift"]),
+            try attachmentLine(uuid: "att-orphan", [
+                "type": "hook_additional_context",
+                "hookName": "PostToolUse:Read",
+                "toolUseID": "toolu_missing",
+                "content": ["acme guidance"]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let m = try #require(TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-orphan").attachment)
+        #expect(m.triggeredBy == nil)
+        #expect(m.hookName == "PostToolUse:Read", "the rest of the metadata still lands")
+    }
+
+    @Test func attribution_absent_for_nestedMemory_and_file_rows() throws {
+        // Neither flavor carries a `toolUseID`, and NOTHING in the JSONL links a
+        // CLAUDE.md load to the Read that touched its directory. Inferring one
+        // from row position would be positional guesswork — attribution is
+        // simply absent, even with a tool_use sitting immediately above.
+        let lines = [
+            try toolUseLine(uuid: "a1", id: "toolu_1", name: "Read",
+                            input: ["file_path": "/srv/acme-prod/.github/deploy.yml"]),
+            try attachmentLine(uuid: "att-mem", [
+                "type": "nested_memory",
+                "displayPath": ".github/CLAUDE.md",
+                "path": "/srv/acme-prod/.github/CLAUDE.md",
+                "content": ["type": "Project", "content": "# acme rules"]
+            ]),
+            try attachmentLine(uuid: "att-file", [
+                "type": "file",
+                "displayPath": "src/acme/deploy.swift",
+                "content": ["type": "text", "file": ["filePath": "/srv/acme-prod/src/acme/deploy.swift",
+                                                     "content": "func deployAcme() {}"]]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        for itemID in ["att-mem", "att-file"] {
+            let m = try #require(TranscriptParser.lookupDetail(filePath: tmp, itemID: itemID).attachment)
+            #expect(m.triggeredBy == nil, "\(itemID) must carry no attribution")
+        }
+    }
+
+    @Test func attribution_summary_shapes_per_tool() {
+        #expect(TranscriptParser.toolInputSummary(
+            name: "Read", input: ["file_path": "/srv/acme-prod/Sources/Deploy.swift"]) == "Read Deploy.swift")
+        #expect(TranscriptParser.toolInputSummary(
+            name: "Bash", input: ["command": "swift build", "description": "Build acme"]) == "Bash Build acme")
+        #expect(TranscriptParser.toolInputSummary(
+            name: "Bash", input: ["command": "swift build"]) == "Bash swift build")
+        #expect(TranscriptParser.toolInputSummary(
+            name: "Grep", input: ["pattern": "TODO", "path": "Sources"]) == "Grep TODO")
+        #expect(TranscriptParser.toolInputSummary(name: "TodoWrite", input: [:]) == "TodoWrite")
+        // Long inputs are clipped, one line, with an ellipsis.
+        let summary = TranscriptParser.toolInputSummary(
+            name: "Bash", input: ["command": String(repeating: "acme ", count: 40)])
+        #expect(summary.count <= "Bash ".count + 41)
+        #expect(summary.hasSuffix("…"))
     }
 
     // MARK: - helpers

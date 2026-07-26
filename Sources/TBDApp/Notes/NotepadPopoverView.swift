@@ -106,6 +106,7 @@ struct NotepadPopoverView: View {
             loadedContent = disk
             loadedPath = path
             didLoad = true
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(200))
             editorFocused = true
         }
@@ -119,6 +120,7 @@ struct NotepadPopoverView: View {
     private func debounceSave(_ newValue: String) {
         saveTask?.cancel()
         saveTask = Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             flushSave()

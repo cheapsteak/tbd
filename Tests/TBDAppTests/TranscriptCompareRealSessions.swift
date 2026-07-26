@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Loads REAL Claude Code session JSONL files into `[TranscriptItem]` for the
-/// env-gated visual-comparison harness (`TranscriptVisualCompareHarness`).
+/// env-gated visual-comparison harness (`TableTranscriptHarness`).
 ///
 /// The production parser (`TranscriptParser`) lives in `TBDDaemonLib`, which the
 /// `TBDAppTests` target does NOT link (it depends only on `TBDApp`). So this is
@@ -286,7 +286,7 @@ enum TranscriptCompareRealSessions {
         case .userPrompt(_, let text, _),
              .assistantText(_, let text, _, _),
              .thinking(_, let text, _),
-             .systemReminder(_, _, let text, _):
+             .systemReminder(_, _, let text, _, _, _):
             return text
         case .toolCall(_, let name, let inputJSON, _, let result, _, _, _):
             return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"

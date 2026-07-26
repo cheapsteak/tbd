@@ -59,6 +59,8 @@ final class AppState: ObservableObject {
     }
     /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
     private var appearanceSubscription: AnyCancellable?
+    /// Owns the trailing-edge quiet window in front of that subscription.
+    private let appearanceDebouncer = AppearanceBroadcastDebouncer()
     /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
     private var themeStoreSubscription: AnyCancellable?
 
@@ -1198,24 +1200,24 @@ final class AppState: ObservableObject {
         // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
         // multiple RPCs into a single request. The 200ms window is long enough to capture
         // rapid picker changes but short enough to feel responsive.
-        appearanceSubscription = appearance.$schemeID
-            // `@Published` delivers the current value at subscription time. Without
-            // `dropFirst()`, broadcastAppearanceColorFgBg runs on app launch before
-            // the daemon connection is even established — the RPC fails, the error
-            // gets logged and swallowed. Drop that subscriber-time emission so we
-            // only react to actual user-driven scheme changes.
-            .dropFirst()
-            .removeDuplicates()
-            // `DispatchQueue.main` rather than `RunLoop.main`: Combine's RunLoop
-            // scheduler fires its debounce Timer in `.default` mode only, so while
-            // the user scrubs the scheme picker (run loop in `.eventTracking` mode)
-            // the trailing emission stalls until the drag ends. The dispatch
-            // scheduler delivers regardless of run-loop mode — and is reliably
-            // serviced under structured concurrency, which the unit test depends on.
-            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.broadcastAppearanceColorFgBg(appearance)
-            }
+        // The debounce lives in `AppearanceBroadcastDebouncer` rather than in a
+        // Combine `.debounce` operator: that operator takes a `Scheduler`, which
+        // cannot be an `any Clock<Duration>`, so the delay was untestable except
+        // by reconstructing the whole chain in the test and waiting on a real
+        // 200ms timer. The debouncer keeps `dropFirst()`/`removeDuplicates()`
+        // (pure, no time) in Combine and replaces only the timed stage with
+        // cancel-and-replace on the injected clock. Run-loop-mode independence
+        // is unchanged, not new: the operator being replaced was already
+        // `DispatchQueue.main` for exactly that reason (a picker scrub puts the
+        // run loop in `.eventTracking`, which stalls a `RunLoop.main` timer).
+        //
+        // Drop any fire still pending from a previous `appearance`: this runs
+        // from that property's `didSet`, and releasing the old subscription no
+        // longer kills an armed timer the way tearing down a Combine chain did.
+        appearanceDebouncer.cancel()
+        appearanceSubscription = appearanceDebouncer.start(observing: appearance) { [weak self] _ in
+            self?.broadcastAppearanceColorFgBg(appearance)
+        }
 
         // When the theme store reloads (external file add/delete/edit), reconcile
         // the active schemeID so a deleted theme falls back to the default rather
@@ -1693,7 +1695,7 @@ final class AppState: ObservableObject {
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)
-    /// directly to the in-memory Terminal so LiveTranscriptPaneView re-targets
+    /// directly to the in-memory Terminal so TableTranscriptPaneView re-targets
     /// without waiting for the next 2s `terminal.list` poll. Silently ignores
     /// terminals we don't know about — the next refresh will reconcile.
     private func applyTerminalSessionDelta(_ delta: TerminalSessionDelta) {
@@ -2111,6 +2113,7 @@ final class AppState: ObservableObject {
 
         // Wait for socket
         for _ in 0..<20 {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(200))
             if FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
                 break
@@ -2517,14 +2520,16 @@ final class AppState: ObservableObject {
     }
 
     /// UserDefaults key mirroring the `@AppStorage` toggle in
-    /// Settings → Experimental that gates the Nightwatch / Daywatch feature.
+    /// Settings → Fleet Automation that gates the Nightwatch / Daywatch feature.
     /// When off (the default), the sidebar mode control is hidden entirely —
-    /// the feature is unfinished and evaluate-only, so it stays opt-in.
+    /// the desk agent acts on the live fleet (nudging stuck sessions,
+    /// dispatching work) and its safety rules are still changing, so it
+    /// stays opt-in.
     static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
 
     /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails
     /// closed: defaults to false so the sidebar control only appears once the
-    /// user opts in from Settings → Experimental. Tests pass a private
+    /// user opts in from Settings → Fleet Automation. Tests pass a private
     /// `UserDefaults(suiteName:)` so they never touch live app preferences.
     static func nightwatchExperimentalEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: nightwatchExperimentalKey) as? Bool ?? false
@@ -2582,13 +2587,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// UserDefaults key for the `@AppStorage` toggle in the
-    /// Settings → Experimental section that gates the experimental live
-    /// transcript pane. The View layer (`PanePlaceholder`) reads it directly
-    /// via `@AppStorage`; `transcriptFeatureEnabled(defaults:)` exposes the
-    /// same fail-closed read for non-View callers. The feature can freeze the
-    /// UI on very large transcripts, so it is opt-in and fails closed.
+    /// UserDefaults key for the `@AppStorage` toggle in the Settings → Claude
+    /// section that gates the live transcript pane. The View layer
+    /// (`PanePlaceholder`) reads it directly via `@AppStorage`;
+    /// `transcriptFeatureEnabled(defaults:)` exposes the same read for non-View
+    /// callers. On by default — the toggle only exists so a user can turn the
+    /// pane off.
     static let enableTranscriptKey = "enableTranscript"
+
+    /// The one default for `enableTranscriptKey`. Every read site — this
+    /// helper and each View's `@AppStorage` — must spell the default with this
+    /// constant, never a bare literal: an `@AppStorage` default that disagrees
+    /// with the helper is invisible (both compile, both "work") and silently
+    /// makes the pane appear enabled to one caller and disabled to another.
+    static let enableTranscriptDefault = true
 
     /// UserDefaults key for the usage reset-time display preference
     /// (Settings → Claude → "Usage reset times"). Stores the raw value of
@@ -2599,43 +2611,11 @@ final class AppState: ObservableObject {
     /// values).
     static let usageResetTimeStyleKey = "usageResetTimeStyle"
 
-    /// Fail-closed read of the experimental live-transcript toggle for
-    /// non-View callers (the View layer uses `@AppStorage` directly).
-    /// Defaults to false when the user has never touched the toggle, matching
-    /// the `@AppStorage` default.
+    /// Read of the live-transcript toggle for non-View callers (the View layer
+    /// uses `@AppStorage` directly). Defaults to true when the user has never
+    /// touched the toggle, matching the `@AppStorage` default.
     static func transcriptFeatureEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key for the second-stage gate: when the experimental
-    /// transcript is enabled, this picks the TextKit 2 / STTextView renderer
-    /// over the SwiftUI `LiveTranscriptPaneView`. Defaults false. (#129)
-    static let useTextKitTranscriptKey = "useTextKitTranscript"
-
-    /// Fail-closed read of the TextKit 2 transcript toggle for non-View callers
-    /// (the View layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true.
-    static func useTextKitTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTextKitTranscriptKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key for the NSTableView-based transcript renderer. When the
-    /// experimental transcript is enabled, this gate takes precedence over the
-    /// TextKit 2 / STTextView renderer: the table pane reuses the existing
-    /// SwiftUI row views (`SelectableTranscriptRow`) hosted per-cell with an
-    /// explicit height cache, replacing the fragile single-document TextKit
-    /// approach. Defaults true — the table pane is the default renderer; the
-    /// Settings toggle can turn it off to fall back to the legacy SwiftUI pane
-    /// for comparison. (#129)
-    static let useTableViewTranscriptKey = "useTableViewTranscript"
-
-    /// Read of the NSTableView transcript toggle for non-View callers (the View
-    /// layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true. Defaults true (the table pane is
-    /// the default renderer); returns false only when the user explicitly turns
-    /// it off. Takes precedence over `useTextKitTranscript` when set.
-    static func useTableViewTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? true
+        defaults.object(forKey: enableTranscriptKey) as? Bool ?? enableTranscriptDefault
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
@@ -2723,6 +2703,7 @@ final class AppState: ObservableObject {
         // Skip noop broadcasts: same cell dims as the previous send.
         guard cols != lastBroadcastCols || rows != lastBroadcastRows else { return }
         mainAreaSizeBroadcastTask = Task { [weak self] in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
             guard !Task.isCancelled, let self else { return }
             do {

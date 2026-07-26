@@ -185,6 +185,7 @@ final class ActivityRowCellView: NSTableCellView {
             presentation.titleSegments, truncation: presentation.titleTruncation)
         titleField.lineBreakMode = presentation.titleTruncation
         titleField.cell?.lineBreakMode = presentation.titleTruncation
+        titleField.toolTip = presentation.titleTooltip
 
         rebuildBadges(presentation.badges)
 

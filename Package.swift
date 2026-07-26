@@ -34,7 +34,8 @@ let package = Package(
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
         .package(url: "https://github.com/LebJe/TOMLKit", from: "0.6.0"),
         .package(url: "https://github.com/apple/swift-markdown", from: "0.4.0"),
-        .package(url: "https://github.com/krzyzanowskim/STTextView", from: "2.3.8"),
+        // Test-only: `TestClock` for tier-1 virtual-time tests. No `Sources/` target links it.
+        .package(url: "https://github.com/pointfreeco/swift-clocks", from: "1.0.0"),
     ],
     targets: [
         .target(
@@ -103,7 +104,6 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Markdown", package: "swift-markdown"),
-                .product(name: "STTextView", package: "STTextView"),
             ],
             path: "Sources/TBDApp",
             resources: [.copy("Resources/Icons")],
@@ -117,6 +117,7 @@ let package = Package(
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                .product(name: "Clocks", package: "swift-clocks"),
             ],
             path: "Tests/TestSupport"
         ),
@@ -131,6 +132,7 @@ let package = Package(
                 "TBDShared",
                 "TestSupport",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Clocks", package: "swift-clocks"),
             ]
         ),
         // Tier 3 (docs/specs/2026-07-24-test-hardening-design.md §3): suites whose
@@ -141,7 +143,12 @@ let package = Package(
         // slows every PR; the bar is the §3 criterion, not "it feels slow".
         .testTarget(
             name: "TBDDaemonLiveTests",
-            dependencies: ["TBDDaemonLib", "TBDShared", "TestSupport"]
+            dependencies: [
+                "TBDDaemonLib",
+                "TBDShared",
+                "TestSupport",
+                .product(name: "Clocks", package: "swift-clocks"),
+            ]
         ),
         .testTarget(
             name: "TBDAppTests",
@@ -151,6 +158,8 @@ let package = Package(
                 // assembles replay bytes, the app's SwiftTerm consumes them,
                 // and only this test target links the SwiftTerm product.
                 "TBDDaemonLib",
+                "TestSupport",
+                .product(name: "Clocks", package: "swift-clocks"),
             ],
             resources: [
                 .copy("Fixtures")

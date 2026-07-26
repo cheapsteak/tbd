@@ -88,6 +88,10 @@ public enum RPCErrorCode: String, Sendable {
     /// refused. The app offers a default-account fallback retry
     /// (`TerminalWakeParams.fallbackToDefaultProfile`).
     case profileMissing
+    /// A `terminal.delete` with `respectActivityRails` was refused because the
+    /// terminal is mid-turn or holding a permission prompt AND its window is
+    /// still alive. The CLI maps this to exit 2; `--force` drops the rails.
+    case terminalBusy
 }
 
 // MARK: - RPC Method Names
@@ -205,7 +209,6 @@ public enum RPCMethod {
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
-    public static let nightwatchReport = "nightwatch.report"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
@@ -355,16 +358,6 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
 public struct NightwatchSetModeParams: Codable, Sendable {
     public let mode: NightwatchMode
     public init(mode: NightwatchMode) { self.mode = mode }
-}
-
-public struct NightwatchReportParams: Codable, Sendable {
-    public let since: Date?
-    public let action: AuditAction?
-
-    public init(since: Date? = nil, action: AuditAction? = nil) {
-        self.since = since
-        self.action = action
-    }
 }
 
 // MARK: - Terminal Swap Profile
@@ -873,7 +866,8 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// existing precedence-based resolution. Not persisted — creation-time only.
     /// Optional/defaulted for backward compatibility with older clients.
     public let profileID: UUID?
-    /// Explicit per-creation Claude model override (e.g. "claude-fable-5"),
+    /// Explicit per-creation Claude model override — either a Claude Code alias
+    /// ("opus", what the model rail sends) or an exact id ("claude-opus-5"),
     /// injected as ANTHROPIC_MODEL for the new worktree's INITIAL Claude spawn
     /// only — later respawns (hibernation wake, new sessions) fall back to the
     /// profile default. nil preserves the profile's own model. Optional/
@@ -1299,7 +1293,38 @@ public struct TerminalSendParams: Codable, Sendable {
 
 public struct TerminalDeleteParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// When true, refuse to close a terminal that is mid-turn or holding a
+    /// permission prompt, returning `RPCErrorCode.terminalBusy`. Optional and
+    /// defaulting to nil (= no rails) so the app's tab-close — a direct human
+    /// gesture on a visible tab — keeps its existing unconditional semantics,
+    /// and so older callers still decode.
+    ///
+    /// The CLI sets it; `--force` drops it. See `handleTerminalDelete` for why
+    /// the check is additionally qualified on the window being alive.
+    public let respectActivityRails: Bool?
+    public init(terminalID: UUID, respectActivityRails: Bool? = nil) {
+        self.terminalID = terminalID
+        self.respectActivityRails = respectActivityRails
+    }
+}
+
+/// Result for `terminal.delete`. Mirrors `TerminalWakeResult`'s shape: the call
+/// is idempotent, and the caller learns which of the two success paths it took.
+public struct TerminalDeleteResult: Codable, Sendable {
+    /// true — this call tore the terminal down; false — it was already gone.
+    public let closed: Bool
+    /// true when there was no such terminal row. Not an error: closing an
+    /// already-closed terminal is a no-op success, matching `terminal wake`.
+    public let alreadyGone: Bool
+    /// Echoed so an autonomous caller keeps a resume pointer after the row is
+    /// gone (the transcript survives on disk). nil for non-Claude terminals and
+    /// for the already-gone path.
+    public let claudeSessionID: String?
+    public init(closed: Bool, alreadyGone: Bool, claudeSessionID: String? = nil) {
+        self.closed = closed
+        self.alreadyGone = alreadyGone
+        self.claudeSessionID = claudeSessionID
+    }
 }
 
 /// Params for `terminalHistory.list` — closed-terminal capture metadata for a
@@ -1922,16 +1947,97 @@ public struct TerminalTranscriptResult: Codable, Sendable {
 public struct TerminalTranscriptItemFullBodyParams: Codable, Sendable {
     public let terminalID: UUID
     public let itemID: String
-    public init(terminalID: UUID, itemID: String) {
+    /// Whether the response carries the item's body text. `false` asks for the
+    /// injection metadata alone — the transcript opens *every* injected row on
+    /// appear just to read that metadata, and an injected CLAUDE.md body can be
+    /// tens of KB that the caller immediately discards.
+    ///
+    /// Defaults to `true`, and a payload that omits the key decodes as `true`,
+    /// so every existing caller and any older client keeps the body.
+    public let includeBody: Bool
+    public init(terminalID: UUID, itemID: String, includeBody: Bool = true) {
         self.terminalID = terminalID
         self.itemID = itemID
+        self.includeBody = includeBody
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case terminalID, itemID, includeBody
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        terminalID = try c.decode(UUID.self, forKey: .terminalID)
+        itemID = try c.decode(String.self, forKey: .itemID)
+        includeBody = try c.decodeIfPresent(Bool.self, forKey: .includeBody) ?? true
+    }
+}
+
+/// How one injected-context row got into the context window: the hook that ran
+/// (name, event, command, exit status, timing, stderr), the memory tier / path
+/// of a loaded file, and the tool call that triggered it.
+///
+/// Rides the `terminal.transcriptItemFullBody` round-trip rather than living on
+/// `TranscriptItem`: it is only read when a row is opened, and every extra
+/// associated value on `TranscriptItem.systemReminder` costs ~15 switch sites.
+/// Every field is optional — only what a row actually carries is populated, and
+/// the overlay omits the rest rather than rendering placeholders.
+public struct TranscriptAttachmentMetadata: Codable, Sendable, Equatable {
+    public let hookName: String?
+    public let hookEvent: String?
+    public let command: String?
+    public let exitCode: Int?
+    public let durationMs: Int?
+    public let stderr: String?
+    /// `nested_memory`'s inner `content.type` — the memory tier, e.g. "Project".
+    /// Passed through verbatim; the set of values is Claude Code's, not ours.
+    public let memoryType: String?
+    /// Absolute path of the loaded file, for display (tilde-abbreviated) and
+    /// copy (verbatim).
+    public let path: String?
+    /// Short summary of the `tool_use` named by `attachment.toolUseID`, e.g.
+    /// "Read ai-review-gate.yml". Nil when the row carries no `toolUseID` or
+    /// the id resolves to nothing — never guessed from row position.
+    public let triggeredBy: String?
+
+    public var isEmpty: Bool {
+        hookName == nil && hookEvent == nil && command == nil && exitCode == nil
+            && durationMs == nil && stderr == nil && memoryType == nil
+            && path == nil && triggeredBy == nil
+    }
+
+    public init(
+        hookName: String? = nil,
+        hookEvent: String? = nil,
+        command: String? = nil,
+        exitCode: Int? = nil,
+        durationMs: Int? = nil,
+        stderr: String? = nil,
+        memoryType: String? = nil,
+        path: String? = nil,
+        triggeredBy: String? = nil
+    ) {
+        self.hookName = hookName
+        self.hookEvent = hookEvent
+        self.command = command
+        self.exitCode = exitCode
+        self.durationMs = durationMs
+        self.stderr = stderr
+        self.memoryType = memoryType
+        self.path = path
+        self.triggeredBy = triggeredBy
     }
 }
 
 public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
+    /// The un-truncated body, or `""` when the request passed
+    /// `includeBody: false` (metadata-only fetch).
     public let text: String
-    public init(text: String) {
+    /// Present only for `attachment` rows (hook output, CLAUDE.md / file bodies).
+    public let attachment: TranscriptAttachmentMetadata?
+    public init(text: String, attachment: TranscriptAttachmentMetadata? = nil) {
         self.text = text
+        self.attachment = attachment
     }
 }
 

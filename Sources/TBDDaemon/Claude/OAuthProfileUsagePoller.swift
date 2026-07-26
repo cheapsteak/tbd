@@ -114,6 +114,7 @@ public actor OAuthProfileUsagePoller {
         self.configDirPath = configDirPath
         self.fetcher = fetcher
         self.broadcast = broadcast
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         self.sleeper = sleeper ?? { try await Task.sleep(for: .seconds($0)) }
         self.now = now ?? { Date() }
         // Default jitter: uniform in [0, span). Injectable for deterministic

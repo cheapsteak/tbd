@@ -2,9 +2,9 @@ import Foundation
 import Testing
 @testable import TBDApp
 
-/// Tests for the `enableTranscript` UserDefaults helper that gates the
-/// experimental live transcript pane. The live transcript feature can freeze
-/// the app UI on very large transcripts, so it is opt-in and fails closed.
+/// Tests for the `enableTranscript` UserDefaults helper that gates the live
+/// transcript pane. The pane is on by default; the toggle only exists so a
+/// user can turn it off.
 ///
 /// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home
@@ -48,10 +48,10 @@ struct TranscriptFeatureFlagTests {
         }
     }
 
-    @Test("defaults to false when the user has never touched the toggle — fail-closed")
-    func defaultsToFalseWhenUnset() {
+    @Test("defaults to true when the user has never touched the toggle")
+    func defaultsToTrueWhenUnset() {
         withIsolatedDefaults(seed: nil) { defaults in
-            #expect(AppState.transcriptFeatureEnabled(defaults: defaults) == false)
+            #expect(AppState.transcriptFeatureEnabled(defaults: defaults) == true)
         }
     }
 }

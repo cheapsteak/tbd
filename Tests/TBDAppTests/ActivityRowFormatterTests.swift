@@ -115,6 +115,88 @@ struct ActivityRowFormatterTests {
         #expect(p.openTargetID == "s1")
     }
 
+    @Test("Injected file body → 'file' badge + '<displayPath> · <original size>' title")
+    func nestedMemoryTitleCarriesSourceAndSize() throws {
+        // The size readout is the point: a collapsed row must show at a glance
+        // how much context a 15-line Read actually pulled in. `truncatedTo`
+        // holds the ORIGINAL length, so it wins over the capped `text`.
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "m1", kind: .nestedMemory, text: "# acme rules (truncated)",
+            source: ".github/CLAUDE.md", truncatedTo: 39_673)
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.badges == [ActivityRowBadge(text: "file", kind: .neutral)])
+        #expect(p.titleSegments.map(\.text).first == ".github/CLAUDE.md")
+        // Magnitude, not just "has a suffix": 39,673 chars → "39.7K chars".
+        #expect(titleText(p).contains("39.7K chars"), "got \(titleText(p))")
+        #expect(!titleText(p).contains("\(("# acme rules (truncated)").count)"),
+                "size must come from truncatedTo, not the capped text length")
+        #expect(p.openTargetID == "m1")
+    }
+
+    @Test("Injected file path gets a hover tooltip carrying the untruncated path")
+    func nestedMemoryTitleCarriesTooltip() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "m2", kind: .nestedMemory, text: "# acme rules",
+            source: "~/scratch/acme/very/deep/nesting/iam-pr-body.md")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        // Head truncation: the ellipsis eats the path PREFIX so the whole
+        // filename survives. Middle truncation kept a short tail that cut into
+        // the filename itself (`…pr-body.md` for `iam-pr-body.md`).
+        #expect(p.titleTruncation == .byTruncatingHead)
+        #expect(p.titleTooltip == "~/scratch/acme/very/deep/nesting/iam-pr-body.md")
+    }
+
+    @Test("Hook rows get no tooltip — a short hook name is fully visible")
+    func hookRowHasNoTooltip() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "h2", kind: .hookOutput, text: "injected", source: "PostToolUse:Read")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.titleTooltip == nil)
+        // NOT head-truncated: the informative front of `PostToolUse:Read` is
+        // exactly what head truncation would drop.
+        #expect(p.titleTruncation == .byTruncatingMiddle)
+    }
+
+    @Test("Injected hook context → 'hook' badge + '<hookName> · <size>' title")
+    func hookAdditionalContextTitleCarriesHookName() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "h1", kind: .hookOutput, text: String(repeating: "x", count: 300),
+            source: "PostToolUse:Read")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.badges == [ActivityRowBadge(text: "hook", kind: .neutral)])
+        #expect(p.titleSegments.map(\.text).first == "PostToolUse:Read")
+        // Untruncated: size falls back to the text length.
+        #expect(titleText(p).contains("300 chars"), "got \(titleText(p))")
+    }
+
+    @Test("Injected size counts CHARACTERS, not bytes")
+    func injectedSizeIsCharactersNotBytes() {
+        // `truncatedTo` / `String.count` are grapheme clusters. Em-dashes are
+        // 3 UTF-8 bytes each, so a byte formatter would have reported ~3x —
+        // the unit label must match the number actually being counted.
+        let emDashes = String(repeating: "—", count: 1500)
+        #expect(emDashes.utf8.count == 4500)
+        #expect(ActivityRowFormatter.injectedSize(text: emDashes, truncatedTo: nil) == "1.5K chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "abc", truncatedTo: nil) == "3 chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "short", truncatedTo: 44_312) == "44.3K chars")
+    }
+
+    @Test("Injected size rounding never rolls a mantissa past its own unit")
+    func injectedSizeRoundingDoesNotRollPastItsUnit() {
+        // K boundary: 999_950...999_999 round to a K-mantissa of 1000.0 and
+        // must bump to M instead of printing "1000.0K chars".
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_949) == "999.9K chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_950) == "1.0M chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_999) == "1.0M chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 1_000_000) == "1.0M chars")
+        // M boundary equivalent (same shape, x1000): must bump to G instead
+        // of printing "1000.0M chars".
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_949_000) == "999.9M chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_950_000) == "1.0G chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 999_999_950) == "1.0G chars")
+        #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 1_000_000_000) == "1.0G chars")
+    }
+
     @Test("Task notification → clock icon, 'Background · <summary>' title, status badge")
     func taskNotification() throws {
         let node = TranscriptRenderNode.makeSystemReminder(

@@ -1,4 +1,6 @@
+import Clocks
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
@@ -124,7 +126,14 @@ actor FakeDeskSessionManager: DeskSessionManaging {
 
 // MARK: - Tests
 
-struct DaywatchRunnerTests {
+/// Tier 1 — single-tick and mode-transition behavior. Every assertion here is
+/// on a synchronous effect of `apply()`/`runOnce()`; the tests that start the
+/// background loop never assert on anything its asynchronous ticks touch, so
+/// the loop parking on a real 1000 s sleep is inert. These deliberately pass
+/// **no** clock, so they also cover the production default-clock construction
+/// path.
+@Suite("DaywatchRunner single tick")
+struct DaywatchRunnerSingleTickTests {
 
     // MARK: - Test: runOnce() with exit code 0 does not wake judge
 
@@ -195,66 +204,6 @@ struct DaywatchRunnerTests {
         // No ticks should have been called
         #expect(await executor.tickCallCount == 0)
         #expect(await executor.judgeWakeCalls.isEmpty)
-    }
-
-    // MARK: - Test: apply(.daywatch) twice is idempotent (one loop)
-
-    @Test("apply(.daywatch) twice is idempotent (one loop)")
-    func testApplyIdempotency() async {
-        let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 1000)
-
-        // Apply daywatch twice — should not start two loops
-        await runner.apply(mode: .daywatch)
-        await runner.apply(mode: .daywatch)
-
-        // Give a tiny bit of time for the loop to run its first tick
-        try? await Task.sleep(for: .milliseconds(50))
-
-        // Should have exactly one tick from the initial immediate tick
-        let count = await executor.tickCallCount
-        #expect(count == 1)
-    }
-
-    // MARK: - Test: loop runs first tick immediately (no wait)
-
-    @Test("loop runs first tick immediately (no wait for full interval)")
-    func testLoopRunsFirstTickImmediately() async {
-        let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        // Use a large interval so we can be sure the immediate tick happens before the sleep
-        let runner = DaywatchRunner(executor: executor, interval: 1000)
-
-        await runner.apply(mode: .daywatch)
-
-        // Small sleep to let the loop start and run first tick
-        try? await Task.sleep(for: .milliseconds(100))
-
-        // First tick should have been called immediately
-        let count = await executor.tickCallCount
-        #expect(count >= 1)
-    }
-
-    // MARK: - Test: apply(.off) cancels the loop
-
-    @Test("apply(.off) cancels the loop")
-    func testApplyOffCancelsLoop() async {
-        let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 0.05)
-
-        // Start the loop
-        await runner.apply(mode: .daywatch)
-        try? await Task.sleep(for: .milliseconds(100))
-
-        let countBefore = await executor.tickCallCount
-        #expect(countBefore >= 1)
-
-        // Stop the loop
-        await runner.apply(mode: .off)
-        try? await Task.sleep(for: .milliseconds(50))
-
-        let countAfter = await executor.tickCallCount
-        // Should not have increased much (at most one more tick if one was in progress)
-        #expect(countAfter <= countBefore + 1)
     }
 
     // MARK: - Test: mode switching (daywatch → nightwatch)
@@ -403,11 +352,118 @@ struct DaywatchRunnerTests {
         #expect(wakeCalls[0].act == false, "fallback wakeJudge should have act=false")
     }
 
-    @Test("concurrent same-mode apply() calls: one transition, loop running, desk set")
+}
+
+// MARK: - Loop tests (virtual time)
+
+/// Tier 1 — the background loop, driven entirely by a `TestClock`. Virtual time
+/// makes the *production* interval free, so these run `defaultInterval` rather
+/// than a shrunken test pacing: the timings asserted are the shipped ones.
+@Suite("DaywatchRunner loop", .clockDriven)
+struct DaywatchRunnerLoopTests {
+
+    @Test("loop runs its first tick immediately, before any time passes")
+    func testFirstTickIsImmediate() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let clock = TestClock<Duration>()
+        let runner = DaywatchRunner(
+            executor: executor, interval: DaywatchRunner.defaultInterval, clock: clock)
+
+        await runner.apply(mode: .daywatch)
+
+        // The loop parking on the interval sleep proves — sequentially, since
+        // the tick precedes the sleep in runLoop() — that tick 1 completed.
+        // Zero advance is the claim: "immediately" means no time passed.
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 1)
+    }
+
+    @Test("loop ticks again at exactly the production interval")
+    func testSubsequentTicksAtInterval() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let clock = TestClock<Duration>()
+        let runner = DaywatchRunner(
+            executor: executor, interval: DaywatchRunner.defaultInterval, clock: clock)
+
+        await runner.apply(mode: .daywatch)
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 1)
+
+        // One millisecond short of the interval must not fire.
+        await clock.advance(by: .seconds(DaywatchRunner.defaultInterval) - .milliseconds(1))
+        #expect(await executor.tickCallCount == 1)
+
+        // The final millisecond does. Wait for the re-park: that is tick 2 done.
+        await clock.advanceWhenSuspended(by: .milliseconds(1))
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 2)
+
+        // And it keeps its cadence, not just the one extra tick.
+        await clock.advanceWhenSuspended(by: .seconds(DaywatchRunner.defaultInterval))
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 3)
+    }
+
+    @Test("duplicate same-mode apply starts exactly one loop")
+    func testDuplicateApplyStartsOneLoop() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let clock = TestClock<Duration>()
+        let runner = DaywatchRunner(
+            executor: executor, interval: DaywatchRunner.defaultInterval, clock: clock)
+
+        await runner.apply(mode: .daywatch)
+        await runner.apply(mode: .daywatch)
+
+        // Two loops would each tick immediately; exactly one tick means one loop —
+        // but the second loop's first tick is async and a count read can miss it,
+        // so the cadence below is the discriminating assertion: over one interval
+        // a single loop ticks exactly once more, while two loops would reach 4.
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 1)
+
+        await clock.advanceWhenSuspended(by: .seconds(DaywatchRunner.defaultInterval))
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 2)
+    }
+
+    @Test("apply(.off) cancels the loop: no sleeper remains, no further ticks")
+    func testApplyOffCancelsLoop() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let clock = TestClock<Duration>()
+        let runner = DaywatchRunner(
+            executor: executor, interval: DaywatchRunner.defaultInterval, clock: clock)
+
+        await runner.apply(mode: .daywatch)
+        await clock.advanceWhenSuspended(by: .seconds(DaywatchRunner.defaultInterval))
+        await clock.waitForSuspension()
+        #expect(await executor.tickCallCount == 2)
+
+        await runner.apply(mode: .off)
+
+        // `checkSuspension()` throws while a sleeper IS registered, so no error
+        // is the assertion: the loop's timer is gone. Cancelling resumes the
+        // sleeper, which deregisters itself in TestClock.sleep's cancellation
+        // path; checkSuspension's opening megaYield is what gives that
+        // resumption its turn. This stops holding if cancel() ever moves off
+        // the apply() path onto something apply() doesn't await. Recorded via
+        // #expect (not a bare `try`) so a starved megaYield under load cannot
+        // abort the test before the deterministic count assertion below.
+        await #expect(throws: Never.self) { try await clock.checkSuspension() }
+
+        // Bare advance on purpose: nothing may be sleeping, so
+        // advanceWhenSuspended would wait for a sleeper that must never come.
+        await clock.advance(by: .seconds(DaywatchRunner.defaultInterval * 3))
+        #expect(await executor.tickCallCount == 2)
+    }
+
+    @Test("concurrent same-mode apply: one transition, loop intact")
     func testConcurrentSameModeApply() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
         let desker = FakeDeskSessionManager()
-        let runner = DaywatchRunner(executor: executor, deskSessionManager: desker, interval: 1000)
+        let clock = TestClock<Duration>()
+        let runner = DaywatchRunner(
+            executor: executor, deskSessionManager: desker,
+            interval: DaywatchRunner.defaultInterval, clock: clock)
 
         // Two racing apply(.daywatch) from .off — the gate serializes them; the
         // second must be a genuine no-op, not a false supersession that closes
@@ -420,6 +476,11 @@ struct DaywatchRunnerTests {
         let closeCalls = await desker.closeCalls
         #expect(ensureCalls.count == 1, "duplicate same-mode apply must not re-ensure")
         #expect(closeCalls == 0, "no orphan-close on duplicate apply")
+
+        // Pin the loop's first tick (exit 0, no nudge) as *completed* before
+        // restubbing the exit code. Otherwise the async first tick can observe
+        // exit 10 and nudge, making the count below 2 instead of 1.
+        await clock.waitForSuspension()
 
         // The transition really completed: a tick with exit 10 nudges the desk.
         await executor.setTickExitCode(10)

@@ -22,8 +22,6 @@ public final class TBDDatabase: Sendable {
     public let meta: TBDMetaStore
     public let tabs: TabStore
     public let forgottenWorktrees: ForgottenWorktreeStore
-    public let clearance: ClearanceStore
-    public let audit: AuditStore
     public let scheduledResumes: ScheduledResumeStore
     public let reapRecords: ReapRecordStore
     public let terminalHistory: TerminalHistoryStore
@@ -63,8 +61,6 @@ public final class TBDDatabase: Sendable {
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
-        self.clearance = ClearanceStore(writer: pool)
-        self.audit = AuditStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
         self.reapRecords = ReapRecordStore(writer: pool)
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
@@ -104,8 +100,6 @@ public final class TBDDatabase: Sendable {
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
-        self.clearance = ClearanceStore(writer: queue)
-        self.audit = AuditStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
         self.reapRecords = ReapRecordStore(writer: queue)
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
@@ -1037,13 +1031,32 @@ public final class TBDDatabase: Sendable {
                                       type: .datetime)
         }
 
+        // The compiled merge gate (MergeGate / NightwatchPolicy) and its two
+        // stores were deleted: the gate built its input from placeholder
+        // values (`headSHA: "unknown"`, `hasApprovedReview: false`), so every
+        // row it ever wrote recorded the same `escalate` decision, and the
+        // `clearance` table never had a production writer or reader at all.
+        // Nothing of value is lost by dropping them. Merge authorization is
+        // delegated to the forge (GitHub branch protection + auto-merge),
+        // which sits outside the trust boundary of the machine running the
+        // agents. v41/v42 stay registered and untouched — a fresh DB creates
+        // the tables and this migration drops them again, which is cheap and
+        // keeps the migration history append-only.
+        migrator.registerMigration("v60_drop_nightwatch_merge_gate_tables") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS clearance")
+            try db.execute(sql: "DROP TABLE IF EXISTS audit_log")
+        }
+
         // Remote agent backends (spec 2026-07-24). Flag lands default-OFF per
         // the repo flag policy: the feature polls in the background, spawns
         // provider subprocesses, and can stop remote sessions. `remote_session`
         // mirrors provider-owned sessions keyed (provider, sessionID); the
         // provider is the source of truth — rows here are a cache with drift
         // bookkeeping (missingCount/gone per the two-absence rule).
-        migrator.registerMigration("v60_remote_backends") { db in
+        // (Renumbered v60→v61 on merge: main's #514-adjacent work took v60 as
+        // `v60_drop_nightwatch_merge_gate_tables`. Safe because the migration
+        // body uses the idempotent helpers — see Database/CLAUDE.md.)
+        migrator.registerMigration("v61_remote_backends") { db in
             try db.addColumnIfMissing(
                 table: "config", column: "remote_backends_enabled",
                 type: .boolean, defaults: false)
@@ -1063,11 +1076,12 @@ public final class TBDDatabase: Sendable {
         }
 
         // Pin remote sessions to a local repo (spec 2026-07-24, follow-up to
-        // v60): `resolvedRepoID` caches the outcome of matching a provider's
+        // v61): `resolvedRepoID` caches the outcome of matching a provider's
         // `meta["repo"]` against registered repos' `remoteURL`
         // (`RemoteRepoMatching`), computed once at first sighting and never
         // re-derived once non-null — see `RemoteSessionStore.upsert`.
-        migrator.registerMigration("v61_remote_session_resolved_repo") { db in
+        // (Renumbered v61→v62 on merge: see comment on v61_remote_backends above.)
+        migrator.registerMigration("v62_remote_session_resolved_repo") { db in
             try db.addColumnIfMissing(
                 table: "remote_session", column: "resolvedRepoID",
                 type: .text)

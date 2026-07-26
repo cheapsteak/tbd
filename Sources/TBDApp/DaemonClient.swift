@@ -109,6 +109,7 @@ actor DaemonClient {
 
             // Wait for daemon to start (up to 4 seconds, polling every 0.5s)
             for attempt in 1...8 {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
                 if tryConnect() {
                     daemonClientLogger.info("Connected to daemon after \(attempt) attempts")
@@ -1589,11 +1590,15 @@ actor DaemonClient {
     }
 
     /// Fetch the un-truncated body for a single transcript item (for
-    /// "Show full output" expansion).
-    func terminalTranscriptItemFullBody(terminalID: UUID, itemID: String) async throws -> TerminalTranscriptItemFullBodyResult {
+    /// "Show full output" expansion). Pass `includeBody: false` to fetch only
+    /// the injection metadata, leaving a potentially huge body off the wire.
+    func terminalTranscriptItemFullBody(
+        terminalID: UUID, itemID: String, includeBody: Bool = true
+    ) async throws -> TerminalTranscriptItemFullBodyResult {
         return try await callAsync(
             method: RPCMethod.terminalTranscriptItemFullBody,
-            params: TerminalTranscriptItemFullBodyParams(terminalID: terminalID, itemID: itemID),
+            params: TerminalTranscriptItemFullBodyParams(
+                terminalID: terminalID, itemID: itemID, includeBody: includeBody),
             resultType: TerminalTranscriptItemFullBodyResult.self
         )
     }

@@ -23,7 +23,7 @@ Slice IDs are stable handles (`A`, `B`, `C1`…) used in channels and branch nam
 | ID | Scope | Depends on | Module surface |
 |---|---|---|---|
 | **A** | Stage 0: `TBDDaemonLiveTests` target, live-suite move, CI two-step split, quiet-pass count guard, assertion-hygiene rules in `Tests/CLAUDE.md` | — | `Package.swift`, `.github/workflows/test.yml`, `Tests/` (moves), `Tests/CLAUDE.md` |
-| **B** | Ratchet: `swift-clocks` test-only dep, `no_raw_task_sleep` SwiftLint rule, 64 legacy suppressions, shared `TestSupport` clock helpers, clock-seam convention doc | A | `Package.swift`, `.swiftlint.yml`, all 64 sleep sites (one line each), `Tests/TestSupport/`, `docs/` |
+| **B** | Ratchet: `swift-clocks` test-only dep, `no_raw_task_sleep` SwiftLint rule, 59 legacy suppressions, shared `TestSupport` clock helpers, clock-seam convention doc | A | `Package.swift`, `.swiftlint.yml`, all 60 sleep sites (one line each), `Tests/TestSupport/`, `docs/` |
 | **C1** | Clock-seam migration: appearance debounce | B | `Sources/TBDApp` (appearance/settings) + its tests |
 | **C2** | Clock-seam migration: `DaywatchRunner` | B | `Sources/TBDDaemon/Nightwatch/` + its tests |
 | **C3** | Clock-seam migration: `GitManager` / subprocess timeout machinery | B | `Sources/TBDDaemon/Git/GitManager.swift`, subprocess timeout paths + their tests |
@@ -45,7 +45,7 @@ Wave 3:  F │ G                              (2-wide)
 Wave 4:  H  →  I                            (sequential)
 ```
 
-**Waves 0 and 1 are deliberately solo.** Both touch `Package.swift`, and B rewrites one line in 64 files across both modules — any concurrent slice would spend more time rebasing than working.
+**Waves 0 and 1 are deliberately solo.** Both touch `Package.swift`, and B rewrites one line in 35 files across both modules — any concurrent slice would spend more time rebasing than working.
 
 **Wave 2 is the parallelization payoff.** Six slices, mutually file-disjoint: C1/C4 are `TBDApp`, C2/C3/D are `TBDDaemon`, E is test-infrastructure only. Each removes only the suppressions inside files it already owns.
 
@@ -86,8 +86,13 @@ These exist so six agents produce one coherent codebase instead of six dialects.
 3. **Test clock helpers live in `Tests/TestSupport/`**, added by B. No slice rolls its own `TestClock` wrapper, advance helper, or `.timeLimit` default.
 4. **Suppression comment format** — exact and greppable, so F's burn-down is mechanical:
    ```swift
-   // swiftlint:disable:next no_raw_task_sleep — legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+   // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
    ```
+   The separator is an ASCII `" - "`, amended from the em-dash originally specced here.
+   SwiftLint tokenizes everything after the rule name as further rule names unless it
+   sees that exact separator, so the em-dash form raised `superfluous_disable_command`
+   on every site (verified: 304 violations). `PollerClock`'s single sanctioned sleep
+   carries `- sanctioned: …` instead, keeping it linted but outside F's burn-down grep.
 5. **Names are fixed:** target `TBDDaemonLiveTests`; lint rule `no_raw_task_sleep`; trait `.flaky(issue:)` taking a required `Int`.
 6. **`PollerClock` is not touched** by any slice. It stays for suspend-aware wall-deadline chunking; B adds a doc comment pointing new code at the standard seam.
 

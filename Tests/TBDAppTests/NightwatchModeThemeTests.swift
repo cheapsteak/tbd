@@ -49,34 +49,4 @@ struct NightwatchModeThemeTests {
         let nightwatchColor = tintColor(for: .nightwatch)
         #expect(daywatchColor != nightwatchColor)
     }
-
-    @Test("resolvedTint returns color when experimental is enabled and mode has tint")
-    func resolvedTintReturnsColorWhenExperimentalEnabled() {
-        let tint = NightwatchModeTintModifier.resolvedTint(mode: .daywatch, experimentalEnabled: true)
-        #expect(tint != nil)
-
-        let nightwatchTint = NightwatchModeTintModifier.resolvedTint(mode: .nightwatch, experimentalEnabled: true)
-        #expect(nightwatchTint != nil)
-    }
-
-    @Test("resolvedTint returns nil when experimental is disabled")
-    func resolvedTintReturnsNilWhenExperimentalDisabled() {
-        let offTint = NightwatchModeTintModifier.resolvedTint(mode: .off, experimentalEnabled: false)
-        #expect(offTint == nil)
-
-        let daywatchTint = NightwatchModeTintModifier.resolvedTint(mode: .daywatch, experimentalEnabled: false)
-        #expect(daywatchTint == nil)
-
-        let nightwatchTint = NightwatchModeTintModifier.resolvedTint(mode: .nightwatch, experimentalEnabled: false)
-        #expect(nightwatchTint == nil)
-    }
-
-    @Test("resolvedTint returns nil for .off mode regardless of experimental flag")
-    func resolvedTintReturnsNilForOffMode() {
-        let offTintEnabled = NightwatchModeTintModifier.resolvedTint(mode: .off, experimentalEnabled: true)
-        #expect(offTintEnabled == nil)
-
-        let offTintDisabled = NightwatchModeTintModifier.resolvedTint(mode: .off, experimentalEnabled: false)
-        #expect(offTintDisabled == nil)
-    }
 }
