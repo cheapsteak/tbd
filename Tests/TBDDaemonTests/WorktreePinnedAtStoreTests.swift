@@ -57,7 +57,7 @@ import TBDShared
         #expect(try await db.worktrees.get(id: made[0].id)?.pinSortOrder == 2)
     }
 
-    @Test("a worktree absent from the list is pushed after the ordered ones")
+    @Test("a PIN absent from the list is pushed after the ordered ones")
     func reorderPinsPushesAbsentRows() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/r", displayName: "r", defaultBranch: "main")
@@ -65,10 +65,35 @@ import TBDShared
                                               branch: "b", path: "/tmp/a", tmuxServer: "s")
         let outsider = try await db.worktrees.create(repoID: repo.id, name: "z", displayName: "z",
                                                      branch: "b", path: "/tmp/z", tmuxServer: "s")
+        // The sweep only reaches PINNED rows, so the outsider must actually be a
+        // pin — it stands in for one created by another client mid-drag.
+        try await db.worktrees.setPinned(id: outsider.id, pinnedAt: Date())
         try await db.worktrees.reorderPins(worktreeIDs: [a.id])
         #expect(try await db.worktrees.get(id: a.id)?.pinSortOrder == 0)
         let outsiderOrder = try #require(await db.worktrees.get(id: outsider.id)?.pinSortOrder)
         #expect(outsiderOrder >= 1)   // after the single ordered row at index 0
+    }
+
+    /// Regression guard: `reorderPins` must NOT stamp unpinned worktrees. A
+    /// non-NULL `pinSortOrder` has to mean "this pin was explicitly ordered",
+    /// because the dock's fallback sort reads NULL as "never ordered, use
+    /// pinnedAt". `ModelProfileStore.reorder` sweeps its whole table — every row
+    /// there is a profile — and re-syncing this method with it would silently
+    /// reintroduce the spillover.
+    @Test("reordering pins leaves unpinned worktrees NULL")
+    func reorderPinsLeavesUnpinnedRowsNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/r", displayName: "r", defaultBranch: "main")
+        let pinned = try await db.worktrees.create(repoID: repo.id, name: "p", displayName: "p",
+                                                   branch: "b", path: "/tmp/p", tmuxServer: "s")
+        let unpinned = try await db.worktrees.create(repoID: repo.id, name: "u", displayName: "u",
+                                                     branch: "b", path: "/tmp/u", tmuxServer: "s")
+        try await db.worktrees.setPinned(id: pinned.id, pinnedAt: Date())
+
+        try await db.worktrees.reorderPins(worktreeIDs: [pinned.id])
+
+        #expect(try await db.worktrees.get(id: pinned.id)?.pinSortOrder == 0)
+        #expect(try await db.worktrees.get(id: unpinned.id)?.pinSortOrder == nil)
     }
 
     @Test("nextPinSortOrder returns one past the current maximum")

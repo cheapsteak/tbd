@@ -850,9 +850,9 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Reorder the sidebar dock's pinned worktrees. Only affects the worktrees
-    /// in the provided list; any other worktree is pushed to values after the
-    /// reordered ones. Mirrors `ModelProfileStore.reorder` — the dock is one
-    /// flat cross-repo list, so there is no repo scoping.
+    /// in the provided list; any other PINNED worktree is pushed to values after
+    /// the reordered ones. Modelled on `ModelProfileStore.reorder` — the dock is
+    /// one flat cross-repo list, so there is no repo scoping.
     public func reorderPins(worktreeIDs: [UUID]) async throws {
         try await writer.write { db in
             for (index, worktreeID) in worktreeIDs.enumerated() {
@@ -861,15 +861,24 @@ public struct WorktreeStore: Sendable {
                     arguments: [index, worktreeID.uuidString]
                 )
             }
-            // Push any worktree not in the list to after the reordered ones, so
-            // rows the client did not know about never collide at one value.
+            // Push any PIN not in the list to after the reordered ones, so pins
+            // the client did not know about never collide at one value.
+            //
+            // The `pinnedAt IS NOT NULL` scoping is where this deliberately
+            // diverges from `ModelProfileStore.reorder`, which sweeps its whole
+            // table: every row in `model_profiles` IS a profile, but most rows in
+            // `worktree` are not pins. Sweeping unconditionally would stamp an
+            // order onto unpinned rows and destroy the invariant the no-backfill
+            // design rests on — `pinSortOrder IS NULL` means "never explicitly
+            // ordered", which is exactly what the dock's fallback sort reads.
+            // Do not "re-sync" this clause with the profile version.
             let idStrings = worktreeIDs.map(\.uuidString)
             let placeholders = idStrings.map { _ in "?" }.joined(separator: ",")
             let args: [any DatabaseValueConvertible] = [worktreeIDs.count] + idStrings
             try db.execute(
                 sql: """
                     UPDATE worktree SET pinSortOrder = ? + rowid
-                    WHERE id NOT IN (\(placeholders))
+                    WHERE pinnedAt IS NOT NULL AND id NOT IN (\(placeholders))
                     """,
                 arguments: StatementArguments(args)
             )
@@ -879,6 +888,10 @@ public struct WorktreeStore: Sendable {
     /// One past the highest assigned `pinSortOrder`, so a new pin appends to the
     /// end of the dock and never disturbs a curated order. Returns 0 when
     /// nothing has one yet.
+    ///
+    /// Only pins ever carry a non-NULL `pinSortOrder` (`reorderPins` scopes its
+    /// sweep, `setPinned` clears the field on unpin), so this MAX really is the
+    /// last pin's position rather than a number derived from unrelated rows.
     public func nextPinSortOrder() async throws -> Int {
         try await writer.read { db in
             let maxOrder = try Int.fetchOne(db, sql: "SELECT MAX(pinSortOrder) FROM worktree")
