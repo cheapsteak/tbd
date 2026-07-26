@@ -1099,6 +1099,16 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "worktree", column: "pinnedAt", type: .datetime)
         }
 
+        // Custom ordering for the sidebar's pinned dock. Nullable with NO
+        // default and NO backfill: `PinnedDockContent` falls back to `pinnedAt`
+        // order for rows that are still NULL, so existing pins keep their
+        // current visual order the moment this lands and the first drag assigns
+        // real values. Separate from `sortOrder`, which drives repo-section tree
+        // ordering — writing pin order there would scramble the sidebar.
+        migrator.registerMigration("v64_worktree_pin_sort_order") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "pinSortOrder", type: .integer)
+        }
+
         return migrator
     }
 }

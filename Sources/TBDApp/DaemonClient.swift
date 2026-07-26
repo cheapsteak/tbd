@@ -790,6 +790,14 @@ actor DaemonClient {
         )
     }
 
+    /// Persist a new order for the sidebar dock's pinned worktrees.
+    func reorderPinnedWorktrees(worktreeIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeReorderPins,
+            params: WorktreeReorderPinsParams(worktreeIDs: worktreeIDs)
+        )
+    }
+
     /// Set the global default for auto-hibernate-on-PR-merge.
     func setAutoHibernateOnMergeDefault(_ enabled: Bool) async throws {
         try await callVoidAsync(

@@ -356,6 +356,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeSetAutoHibernate(request.paramsData)
             case RPCMethod.worktreeSetPin:
                 return try await handleWorktreeSetPin(request.paramsData)
+            case RPCMethod.worktreeReorderPins:
+                return try await handleWorktreeReorderPins(request.paramsData)
             case RPCMethod.configGet:
                 return try await handleConfigGet()
             case RPCMethod.configSetAutoArchiveOnMergeDefault:

@@ -192,6 +192,7 @@ public enum RPCMethod {
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let worktreeSetAutoHibernate = "worktree.setAutoHibernate"
     public static let worktreeSetPin = "worktree.setPin"
+    public static let worktreeReorderPins = "worktree.reorderPins"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
     public static let configSetAutoHibernateOnMergeDefault = "config.setAutoHibernateOnMergeDefault"
@@ -1441,6 +1442,15 @@ public struct WorktreeSetPinParams: Codable, Sendable {
     public let pinned: Bool
     public init(worktreeID: UUID, pinned: Bool) {
         self.worktreeID = worktreeID; self.pinned = pinned
+    }
+}
+
+/// Params for `worktree.reorderPins`. The dock is one flat cross-repo list, so
+/// there is no repoID scoping (unlike `WorktreeReorderParams`).
+public struct WorktreeReorderPinsParams: Codable, Sendable {
+    public let worktreeIDs: [UUID]
+    public init(worktreeIDs: [UUID]) {
+        self.worktreeIDs = worktreeIDs
     }
 }
 

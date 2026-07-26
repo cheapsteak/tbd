@@ -163,6 +163,11 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Ordering in the dock is ascending by this timestamp, so new pins append.
     public var pinnedAt: Date?
 
+    /// Position in the sidebar dock's pinned list, ascending. `nil` = never
+    /// explicitly ordered, in which case the dock falls back to `pinnedAt`
+    /// order — which is what lets the column ship with no backfill.
+    public var pinSortOrder: Int?
+
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
 
@@ -193,7 +198,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 promotedToRepoID: UUID? = nil,
                 prStatus: PRStatus? = nil,
                 prNumber: Int? = nil,
-                pinnedAt: Date? = nil) {
+                pinnedAt: Date? = nil,
+                pinSortOrder: Int? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -216,6 +222,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.prStatus = prStatus
         self.prNumber = prNumber
         self.pinnedAt = pinnedAt
+        self.pinSortOrder = pinSortOrder
     }
 
     enum CodingKeys: String, CodingKey {
@@ -224,7 +231,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
-        case promotedToRepoID, prStatus, prNumber, pinnedAt
+        case promotedToRepoID, prStatus, prNumber, pinnedAt, pinSortOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -251,6 +258,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
         prNumber = try c.decodeIfPresent(Int.self, forKey: .prNumber)
         pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        pinSortOrder = try c.decodeIfPresent(Int.self, forKey: .pinSortOrder)
     }
 }
 

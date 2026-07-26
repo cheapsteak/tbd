@@ -913,6 +913,66 @@ extension AppState {
         }
     }
 
+    /// Reorder the sidebar dock's pinned worktrees, triggered by SwiftUI
+    /// `.onMove` whose indices address the dock's PINNED ROOTS (the outer
+    /// ForEach), not the flattened row list.
+    ///
+    /// Optimistic, unlike `setPinned`: the client knows the entire resulting
+    /// order rather than depending on a daemon-assigned timestamp, so the row
+    /// can land under the cursor immediately and roll back if the RPC fails.
+    func reorderPins(fromOffsets source: IndexSet, toOffset destination: Int) {
+        // Snapshot BOTH collections — pinned worktrees span repo-keyed
+        // `worktrees` and repo-less `scratchWorktrees`, so a rollback that
+        // restored only one would leave the other half mutated.
+        let previousWorktrees = worktrees
+        let previousScratch = scratchWorktrees
+
+        // `children: { _ in [] }` collapses every subtree, which is exactly the
+        // root list the outer ForEach renders — so the indices line up by
+        // construction.
+        let currentRoots = PinnedDockContent
+            .rows(allWorktrees: allWorktrees, selectedIDs: [], children: { _ in [] })
+            .map(\.worktree.id)
+
+        guard let newOrder = PinnedDockReorder.reordered(
+            roots: currentRoots, fromOffsets: source, toOffset: destination) else {
+            logger.warning("reorderPins skipped: stale indices (roots=\(currentRoots.count, privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public))")
+            return
+        }
+
+        // Optimistic local update: assign contiguous orders in the new sequence.
+        for (index, id) in newOrder.enumerated() {
+            applyPinSortOrder(index, to: id)
+        }
+
+        Task {
+            do {
+                try await daemonClient.reorderPinnedWorktrees(worktreeIDs: newOrder)
+            } catch {
+                logger.error("reorderPins RPC failed: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run {
+                    self.worktrees = previousWorktrees
+                    self.scratchWorktrees = previousScratch
+                }
+            }
+        }
+    }
+
+    /// Write `pinSortOrder` into whichever collection holds this worktree:
+    /// a pinned worktree can be a repo-keyed row or a repo-less scratch space,
+    /// and only one of the two ever holds it.
+    private func applyPinSortOrder(_ order: Int, to id: UUID) {
+        for (key, list) in worktrees {
+            if let idx = list.firstIndex(where: { $0.id == id }) {
+                worktrees[key]?[idx].pinSortOrder = order
+                return
+            }
+        }
+        if let idx = scratchWorktrees.firstIndex(where: { $0.id == id }) {
+            scratchWorktrees[idx].pinSortOrder = order
+        }
+    }
+
     /// Resolve the effective auto-hibernate-on-merge setting for a worktree.
     /// Returns the per-worktree override when explicitly set; otherwise falls
     /// back to the global default (`autoHibernateOnMergeDefault`).
