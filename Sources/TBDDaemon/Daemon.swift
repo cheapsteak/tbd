@@ -839,6 +839,28 @@ public final class Daemon: Sendable {
             await resumeScheduler.stop()
         }
 
+        // Cancel the deferred remote-backends boot task BEFORE tearing down
+        // the manager, and AWAIT it here rather than merely signalling it
+        // (see the old bug this replaces, on `remoteStartTask?.cancel()`
+        // further down): `start()` runs `loadRegistryAndDescribe()` then
+        // `spawnPollLoops()` in sequence, and a SIGTERM landing in the first
+        // few seconds of boot can catch it mid `describe` — before
+        // `spawnPollLoops()` has ever run, `remoteManager.shutdown()` alone
+        // tears down loops/supervisors that don't exist yet and does
+        // nothing for the in-flight child. `runBoundedProcess` now wires
+        // outer-task cancellation into its own deadline (`CancellationRelay`
+        // in `BoundedProcessRunner.swift`), so `cancel()` here interrupts an
+        // in-flight `describe` immediately rather than only being observed
+        // between providers in `loadRegistryAndDescribe`'s loop — but that
+        // interruption still runs ON this task, so it needs the daemon
+        // process (and the `SubprocessWatchdog` thread that reaps the killed
+        // child) to still be alive to finish unwinding. Awaiting `.value`
+        // here, before `Foundation.exit(0)` below, is what guarantees that;
+        // without it the process could tear down mid-unwind and orphan the
+        // child exactly as before.
+        remoteStartTask?.cancel()
+        await remoteStartTask?.value
+
         // Stop remote-backends poll loops / events supervisors. Required,
         // not optional: the events supervisor's supervision task retains
         // the manager strongly, so without this call the manager and its
@@ -860,14 +882,15 @@ public final class Daemon: Sendable {
         // Stop the FD-vending sidecar (closes the listener + any client).
         await fdVendingServer.stop()
 
-        // Cancel background tasks
+        // Cancel background tasks. `remoteStartTask` is cancelled (and
+        // awaited) earlier, above — see that comment for why it can't wait
+        // until here.
         sshRefreshTask?.cancel()
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
-        remoteStartTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {
