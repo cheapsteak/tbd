@@ -11,6 +11,12 @@ struct WorktreeRowView: View {
     /// `PinnedDockMetrics` cannot reference from a nonisolated context.
     nonisolated static let rowHeight: CGFloat = 28
 
+    /// How far LEFT of the row's own leading edge the hover pin button is
+    /// pushed, so it lands in the gutter rather than on the row's content.
+    /// Matches the button's 20x20 hit target (`SectionHeaderPlusButton`): a
+    /// full button width clears `leadingIcon()` exactly.
+    private static let pinButtonGutter: CGFloat = 20
+
     let worktree: Worktree
     var isMain: Bool = false
     var indentLevel: Int = 0
@@ -80,9 +86,9 @@ struct WorktreeRowView: View {
         .padding(.trailing, 4)
     }
 
-    /// Hover-only pin toggle on the row's leading edge — the fast path for
-    /// pinning, mirroring the trailing nested-worktree `+`. Rendered as an
-    /// overlay so it floats above the row and consumes no layout width: row
+    /// Hover-only pin toggle in the gutter left of the row's content — the fast
+    /// path for pinning, mirroring the trailing nested-worktree `+`. Rendered as
+    /// an overlay so it floats above the row and consumes no layout width: row
     /// content must not shift when the pointer enters the row.
     ///
     /// The glyph names the ACTION, not the state: `pin` when the worktree is
@@ -103,6 +109,13 @@ struct WorktreeRowView: View {
         .accessibilityLabel(isPinned
             ? "Unpin \(worktree.displayName) from dock"
             : "Pin \(worktree.displayName) to dock")
+    }
+
+    /// Whether the leading pin toggle is on screen right now. Read by both the
+    /// pin overlay and the hierarchy-guide-line overlay, which has to break the
+    /// segment the button would otherwise be struck through by.
+    private var showsPinToggle: Bool {
+        isRowHovered && !isMain && !worktree.isNightwatchDesk
     }
 
     private func handleNestedPlus(repoID: UUID) {
@@ -306,10 +319,19 @@ struct WorktreeRowView: View {
             if indentLevel > 0 {
                 ZStack(alignment: .leading) {
                     ForEach(0..<indentLevel, id: \.self) { depth in
-                        Rectangle()
-                            .fill(Color.secondary.opacity(0.25))
-                            .frame(width: 1)
-                            .offset(x: CGFloat(depth) * 16 + 8)
+                        // The hovered pin button lands in this row's own indent
+                        // gutter, which is exactly where the NEAREST ancestor's
+                        // thread runs — drawing both put a line straight through
+                        // the glyph. Break that one segment for the hovered row
+                        // instead; the thread reads as interrupted by the
+                        // control, not crossed out by it. Deeper ancestors sit
+                        // further left and are untouched.
+                        if !(showsPinToggle && depth == indentLevel - 1) {
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.25))
+                                .frame(width: 1)
+                                .offset(x: CGFloat(depth) * 16 + 8)
+                        }
                     }
                 }
                 .allowsHitTesting(false)
@@ -323,18 +345,24 @@ struct WorktreeRowView: View {
             }
         }
         .overlay(alignment: .leading) {
-            // The indent offset is required: `.padding(.leading, indentLevel * 16)`
+            // The indent term is required: `.padding(.leading, indentLevel * 16)`
             // applies to the row's CONTENT, but this overlay anchors to the row's
-            // outer edge — without the offset the button floats left of the
-            // hierarchy guide lines on any nested row. The guide-line overlay
-            // above compensates the same way.
+            // outer edge — without it the button would sit at the same absolute x
+            // on every row instead of tracking its own row's leading edge. The
+            // guide-line overlay above compensates the same way.
             //
-            // While hovering, this covers `leadingIcon()` (PR status / pending
-            // spinner). That is the same trade the trailing `+` already makes,
-            // and is what buys zero layout impact.
-            if isRowHovered, !isMain, !worktree.isNightwatchDesk {
+            // `-pinButtonGutter` then pushes the button OUT of the row content
+            // into the gutter every sidebar/dock row reserves via
+            // `.listRowInsets(leading: 12)`, so it never draws on top of
+            // `leadingIcon()` (PR status / pending spinner) or the name — an
+            // overlap the first cut shipped and that read as broken. The
+            // overlay still consumes no layout width, so row content does not
+            // shift when the pointer enters the row. Verified live that the List
+            // does NOT clip here and the button stays hit-testable, at indent 0
+            // and nested, in both the sidebar and the pinned dock.
+            if showsPinToggle {
                 pinToggleButton()
-                    .offset(x: CGFloat(indentLevel) * 16)
+                    .offset(x: CGFloat(indentLevel) * 16 - Self.pinButtonGutter)
             }
         }
         .onHover { isRowHovered = $0 }
