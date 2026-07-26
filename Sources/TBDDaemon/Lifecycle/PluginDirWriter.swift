@@ -100,11 +100,7 @@ struct PluginDirWriter {
         // Scripts ship executable. NOTE: the scheduler (scheduler.sh / tick-cron.sh)
         // is installed but NEVER auto-loaded — durable scheduling is opt-in via
         // `scheduler.sh enable`.
-        for (name, body) in [("tick.py", NightwatchSkillContent.tickPy),
-                             ("wake.py", NightwatchSkillContent.wakePy),
-                             ("judge.py", NightwatchSkillContent.judgePy),
-                             ("tick-cron.sh", NightwatchSkillContent.tickCronSh),
-                             ("scheduler.sh", NightwatchSkillContent.schedulerSh)] {
+        for (name, body) in NightwatchSkillContent.scripts {
             let path = scripts + "/" + name
             try body.write(toFile: path, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
