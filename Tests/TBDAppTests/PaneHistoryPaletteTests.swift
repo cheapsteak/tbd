@@ -9,11 +9,12 @@ import TBDShared
 // The palette's popover, auto-focus, and keyboard navigation are SwiftUI/
 // AppKit interaction and are NOT exercised here — they need LIVE
 // verification (restart the app and check: icon appears left of the
-// chevrons and is disabled at ≤1 history entry, popover opens with the
-// search field focused, ↑/↓ move the highlight, Enter navigates + closes,
-// Esc closes without navigating, and a mouse click on a row does the same
-// as Enter). What IS covered below is the pure logic: substring filtering
-// (including full-path matching for file entries), the disabled-when-≤1
+// chevrons and is enabled whenever there's at least one entry (always true
+// for a live viewer slot), popover opens with the search field focused,
+// ↑/↓ move the highlight, Enter navigates + closes, Esc closes without
+// navigating, and a mouse click on a row does the same as Enter). What IS
+// covered below is the pure logic: substring filtering (including
+// full-path matching for file entries), the disabled-at-zero-entries
 // gate, and that a filtered row's index still drives the same MRU
 // `go(to:)` cursor-jump the old right-click dropdown used.
 
@@ -65,12 +66,12 @@ struct PaneHistoryPaletteFilterTests {
 
 @Suite("PaneHistoryPaletteButtonModel")
 struct PaneHistoryPaletteButtonModelTests {
-    @Test func disabledWithZeroOrOneEntry() {
+    @Test func disabledWithZeroEntries() {
         #expect(PaneHistoryPaletteButtonModel.isEnabled(entryCount: 0) == false)
-        #expect(PaneHistoryPaletteButtonModel.isEnabled(entryCount: 1) == false)
     }
 
-    @Test func enabledWithTwoOrMoreEntries() {
+    @Test func enabledWithOneOrMoreEntries() {
+        #expect(PaneHistoryPaletteButtonModel.isEnabled(entryCount: 1) == true)
         #expect(PaneHistoryPaletteButtonModel.isEnabled(entryCount: 2) == true)
         #expect(PaneHistoryPaletteButtonModel.isEnabled(entryCount: 10) == true)
     }

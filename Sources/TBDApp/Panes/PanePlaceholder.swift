@@ -245,7 +245,12 @@ struct PanePlaceholder: View {
     /// chevrons still left-click step one entry at a time.
     @ViewBuilder
     private var historyNavigation: some View {
-        let history = appState.paneHistories[content.paneID] ?? PaneHistory()
+        // A pane that hasn't navigated yet has no recorded history — but it
+        // always has its current content, so fall back to a single-entry
+        // history seeded with it rather than an empty one. Otherwise the
+        // search button would wrongly read as "nothing to show" for the
+        // common case of a freshly opened viewer slot.
+        let history = appState.paneHistories[content.paneID] ?? PaneHistory.seeded(with: content)
 
         historySearchButton(history: history)
 
@@ -266,12 +271,19 @@ struct PanePlaceholder: View {
 
     /// Search icon opening the searchable MRU-history palette (replaces the
     /// former right-click dropdown on the chevrons, which was
-    /// undiscoverable). Disabled when there's nothing to browse — a single
-    /// entry means no other place to jump to.
+    /// undiscoverable). Always enabled for a live viewer slot — it always
+    /// has at least its current entry to show, checkmarked, even before any
+    /// navigation has happened. Disabled only at zero entries, which in
+    /// practice never happens here.
     private func historySearchButton(history: PaneHistory) -> some View {
         Button(action: { showHistoryPalette = true }) {
+            // A couple points larger and a lighter weight than the 8pt/bold
+            // chevrons/close glyph: at 8pt bold, "line.3.horizontal"'s three
+            // bars crowd into a smudge. Regular weight + a touch more size
+            // gives the bars air while still reading as the lightest glyph
+            // in the row (not heavier than its neighbors).
             Image(systemName: "line.3.horizontal")
-                .font(.system(size: 8, weight: .bold))
+                .font(.system(size: 10, weight: .regular))
                 .frame(width: 16, height: 16)
                 .contentShape(Rectangle())
         }

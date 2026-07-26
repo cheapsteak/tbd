@@ -45,12 +45,13 @@ enum PaneHistoryPaletteFilter {
     }
 }
 
-/// Pure gate behind the search icon: disabled when there's one entry or
-/// fewer — nothing else to jump to. Extracted from the view so it's
-/// unit-testable without SwiftUI (same pattern as `ParkedPaneWakeModel`).
+/// Pure gate behind the search icon: disabled only at zero entries — a live
+/// viewer slot always has at least its current content, so in practice this
+/// button is always enabled. Extracted from the view so it's unit-testable
+/// without SwiftUI (same pattern as `ParkedPaneWakeModel`).
 enum PaneHistoryPaletteButtonModel {
     static func isEnabled(entryCount: Int) -> Bool {
-        entryCount > 1
+        entryCount > 0
     }
 }
 
@@ -79,7 +80,9 @@ struct PaneHistoryPaletteView: View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Search history", text: $query)
                 .textFieldStyle(.plain)
-                .padding(8)
+                .padding(.horizontal, 8)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
                 .focused($searchFocused)
                 .onKeyPress(.downArrow) { move(by: 1); return .handled }
                 .onKeyPress(.upArrow) { move(by: -1); return .handled }
@@ -102,7 +105,7 @@ struct PaneHistoryPaletteView: View {
                         }
                     }
                 }
-                .padding(.vertical, 6)
+                .padding(.bottom, 6)
             }
             .frame(maxHeight: 240)
         }
