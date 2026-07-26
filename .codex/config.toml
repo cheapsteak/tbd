@@ -1,0 +1,8 @@
+# TBD spawns Codex sessions alongside Claude Code ones. Codex looks for AGENTS.md
+# as its project doc; this repo keeps its instructions in CLAUDE.md, so point the
+# fallback there rather than maintaining two copies.
+#
+# Verified against codex-cli 0.145.0: `project_doc_fallback_filenames` is a real
+# ConfigToml field, and project-level `.codex/config.toml` is supported for
+# trusted repos. Note a sibling `project_doc_max_bytes` can truncate a large doc.
+project_doc_fallback_filenames = ["CLAUDE.md"]
