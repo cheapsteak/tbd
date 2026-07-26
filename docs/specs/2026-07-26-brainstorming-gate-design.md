@@ -103,10 +103,25 @@ Required edits:
 - **TBD context added**: the triggers above, the default-off-flag rule, and the
   migrations-update-the-shared-model rule.
 - **Drift header**, matching the shape already used in `tbd-project/SKILL.md`:
-  `<!-- vendored from obra/superpowers v6.1.1 @ <sha>, MIT (c) 2025 Jesse Vincent -->` plus a
-  next-maintainer diff command. The local install records
-  `gitCommitSha: 8ea39819eed74fe2a0338e71789f06b30e953041`, but that is the marketplace-side pin —
-  verify it resolves in `obra/superpowers` itself before writing it into the header.
+  `<!-- vendored from obra/superpowers v6.1.1 @ 5a0f8953, MIT (c) 2025 Jesse Vincent -->` plus a
+  next-maintainer diff command.
+
+  **Use `5a0f8953`, not the sha the install records.** `installed_plugins.json` pins
+  `8ea39819eed74fe2a0338e71789f06b30e953041`. That sha does resolve in `obra/superpowers`, but it is
+  from 2026-03-19 ("Add issue templates and disable blank issues") and its `brainstorming/SKILL.md`
+  differs materially from the installed 6.1.1 copy — at that sha, step 7 still dispatches a
+  `spec-document-reviewer` subagent, where 6.1.1 replaced it with an inline self-review. That is why
+  `spec-document-reviewer-prompt.md` is orphaned in the installed plugin. Writing the recorded sha
+  into the header would make a future maintainer "fix" changes we already have.
+
+  `5a0f8953` (2026-06-09, "offer the visual companion just-in-time; harden lifecycle guidance") is
+  the commit whose blob hashes identical to the installed file (`b0d52b25`), found by walking
+  upstream history for an exact content match.
+
+  **Known drift at time of writing:** upstream `05d90ac` (2026-07-05, "fold brainstorming Key
+  Principles into points of use", +1/−9) already lands after our pin. Upstream HEAD is `3dcbd5c4`
+  (2026-07-23). Vendoring `5a0f8953` content is correct — it is what was reviewed here — but the
+  first drift check will surface `05d90ac` immediately.
 
 ### Naming
 
