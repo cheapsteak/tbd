@@ -336,4 +336,10 @@ extension RPCRouter {
                                          pinnedAt: params.pinned ? Date() : nil)
         return .ok()
     }
+
+    func handleWorktreeReorderPins(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeReorderPinsParams.self, from: paramsData)
+        try await db.worktrees.reorderPins(worktreeIDs: params.worktreeIDs)
+        return .ok()
+    }
 }

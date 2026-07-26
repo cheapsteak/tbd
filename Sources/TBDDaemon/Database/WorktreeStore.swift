@@ -33,6 +33,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var pr_number: Int?  // number of the PR this worktree was created from, nil otherwise
     var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
     var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
+    var pinSortOrder: Int?  // sidebar dock ordering; nil = falls back to pinnedAt
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -62,6 +63,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.pr_number = wt.prNumber
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
         self.pinnedAt = wt.pinnedAt
+        self.pinSortOrder = wt.pinSortOrder
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -119,7 +121,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
             prStatus: pr,
             prNumber: pr_number,
-            pinnedAt: pinnedAt
+            pinnedAt: pinnedAt,
+            pinSortOrder: pinSortOrder
         )
     }
 }
@@ -833,12 +836,53 @@ public struct WorktreeStore: Sendable {
 
     /// Pin or unpin a worktree for the sidebar dock. `nil` clears the pin.
     /// Purely presentational — nothing in the daemon reads this value.
+    ///
+    /// Pinning appends to the end of the dock; unpinning clears both fields so a
+    /// re-pin appends again rather than reclaiming its old slot.
     public func setPinned(id: UUID, pinnedAt: Date?) async throws {
+        let order: Int? = pinnedAt == nil ? nil : try await nextPinSortOrder()
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE worktree SET pinnedAt = ? WHERE id = ?",
-                arguments: [pinnedAt, id.uuidString]
+                sql: "UPDATE worktree SET pinnedAt = ?, pinSortOrder = ? WHERE id = ?",
+                arguments: [pinnedAt, order, id.uuidString]
             )
+        }
+    }
+
+    /// Reorder the sidebar dock's pinned worktrees. Only affects the worktrees
+    /// in the provided list; any other worktree is pushed to values after the
+    /// reordered ones. Mirrors `ModelProfileStore.reorder` — the dock is one
+    /// flat cross-repo list, so there is no repo scoping.
+    public func reorderPins(worktreeIDs: [UUID]) async throws {
+        try await writer.write { db in
+            for (index, worktreeID) in worktreeIDs.enumerated() {
+                try db.execute(
+                    sql: "UPDATE worktree SET pinSortOrder = ? WHERE id = ?",
+                    arguments: [index, worktreeID.uuidString]
+                )
+            }
+            // Push any worktree not in the list to after the reordered ones, so
+            // rows the client did not know about never collide at one value.
+            let idStrings = worktreeIDs.map(\.uuidString)
+            let placeholders = idStrings.map { _ in "?" }.joined(separator: ",")
+            let args: [any DatabaseValueConvertible] = [worktreeIDs.count] + idStrings
+            try db.execute(
+                sql: """
+                    UPDATE worktree SET pinSortOrder = ? + rowid
+                    WHERE id NOT IN (\(placeholders))
+                    """,
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    /// One past the highest assigned `pinSortOrder`, so a new pin appends to the
+    /// end of the dock and never disturbs a curated order. Returns 0 when
+    /// nothing has one yet.
+    public func nextPinSortOrder() async throws -> Int {
+        try await writer.read { db in
+            let maxOrder = try Int.fetchOne(db, sql: "SELECT MAX(pinSortOrder) FROM worktree")
+            return (maxOrder ?? -1) + 1
         }
     }
 
