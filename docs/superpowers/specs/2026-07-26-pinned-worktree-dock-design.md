@@ -448,10 +448,24 @@ Three details it must respect:
   slash read as ugly and cluttered at caption size in a dense sidebar. Hollow-versus-filled is
   the quieter signal and matches how the rest of the sidebar's indicators behave.
 
-**No persistent pinned-state glyph on the row.** An earlier draft put a trailing `pin.fill`
-there; it is dropped. It consumed row width — the opposite of the "don't push content right"
-requirement — and it is redundant: a pinned worktree is, by definition, visible in the dock.
-Hovering reveals the current state through the button's glyph.
+**A pinned row shows its solid pin persistently, not only on hover.** The gutter button is
+visible when `isRowHovered || pinnedAt != nil`, so:
+
+| | not hovered | hovered |
+|---|---|---|
+| **unpinned** | nothing | hollow `pin` |
+| **pinned** | solid `pin.fill` | solid `pin.fill` |
+
+It stays a live button in the persistent case — clicking a visible solid pin unpins. There is
+no separate non-interactive indicator variant.
+
+A previous draft rejected a persistent glyph, but that draft placed it *trailing*, where it
+consumed row width and fought the "don't push content right" requirement. In the leading
+gutter it is free: the overlay costs no layout at either state, so the objection does not
+apply and pinned rows become identifiable at a glance without hovering each one.
+
+Whatever gates the button must also gate the hierarchy-guide-line break that keeps the thread
+from striking through it — the two conditions are the same condition.
 
 The Watch Desk gets no pin button, matching its suppressed menu items. Neither does a repo's
 main row.
