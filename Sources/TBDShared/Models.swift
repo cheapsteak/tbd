@@ -158,8 +158,21 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// local branch) get tracked.
     public var prNumber: Int?
 
+    /// When this worktree was pinned to the sidebar dock; `nil` = unpinned.
+    /// Purely a UI affordance — the daemon stores it but never acts on it.
+    /// Ordering in the dock is ascending by this timestamp, so new pins append.
+    public var pinnedAt: Date?
+
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
+
+    /// The mode-managed Watch Desk scratch worktree, identified by its fixed
+    /// display name. Not user-pinnable — the sidebar's Day/Night toggle controls
+    /// whether it is shown. Single definition shared by the dock's desk slot and
+    /// the row-action menu's pin suppression, so the two cannot drift.
+    public var isNightwatchDesk: Bool {
+        isScratch && displayName == NightwatchDeskPrompts.deskDisplayName
+    }
 
     /// True when `displayName` has never been customized away from the
     /// auto-generated `name`. Single source of truth for "still default"
@@ -179,7 +192,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 autoHibernateOnMerge: Bool? = nil,
                 promotedToRepoID: UUID? = nil,
                 prStatus: PRStatus? = nil,
-                prNumber: Int? = nil) {
+                prNumber: Int? = nil,
+                pinnedAt: Date? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -201,6 +215,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.promotedToRepoID = promotedToRepoID
         self.prStatus = prStatus
         self.prNumber = prNumber
+        self.pinnedAt = pinnedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -209,7 +224,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
-        case promotedToRepoID, prStatus, prNumber
+        case promotedToRepoID, prStatus, prNumber, pinnedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -235,6 +250,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         promotedToRepoID = try c.decodeIfPresent(UUID.self, forKey: .promotedToRepoID)
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
         prNumber = try c.decodeIfPresent(Int.self, forKey: .prNumber)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
     }
 }
 
