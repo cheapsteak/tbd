@@ -84,10 +84,42 @@ struct TranscriptItemTests {
         let original: TranscriptItem = .systemReminder(id: "s1", kind: .toolReminder, text: "hi", timestamp: nil)
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .systemReminder(_, let kind, _, _) = decoded else {
+        guard case .systemReminder(_, let kind, _, _, let source, let truncatedTo) = decoded else {
             Issue.record("expected .systemReminder"); return
         }
         #expect(kind == .toolReminder)
+        #expect(source == nil)
+        #expect(truncatedTo == nil)
+    }
+
+    @Test func roundtrip_systemReminder_nestedMemory_withSourceAndTruncation() throws {
+        let original: TranscriptItem = .systemReminder(
+            id: "s2", kind: .nestedMemory, text: "# acme rules", timestamp: nil,
+            source: ".github/CLAUDE.md", truncatedTo: 39_673)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
+        guard case .systemReminder(let id, let kind, let text, _, let source, let truncatedTo) = decoded else {
+            Issue.record("expected .systemReminder"); return
+        }
+        #expect(id == "s2")
+        #expect(kind == .nestedMemory)
+        #expect(text == "# acme rules")
+        #expect(source == ".github/CLAUDE.md")
+        #expect(truncatedTo == 39_673)
+    }
+
+    /// An OLD binary decoding a NEW daemon's payload must not throw on a
+    /// SystemKind case it has never heard of — it degrades to `.other`.
+    @Test func systemKind_unknownRawValue_decodesToOther() throws {
+        let data = Data(#""someFutureKind""#.utf8)
+        let decoded = try JSONDecoder().decode(SystemKind.self, from: data)
+        #expect(decoded == .other)
+    }
+
+    @Test func systemKind_knownRawValue_stillRoundtrips() throws {
+        let data = try JSONEncoder().encode(SystemKind.nestedMemory)
+        #expect(String(bytes: data, encoding: .utf8) == #""nestedMemory""#)
+        #expect(try JSONDecoder().decode(SystemKind.self, from: data) == .nestedMemory)
     }
 
     @Test func roundtrip_slashCommand() throws {

@@ -2154,9 +2154,14 @@ extension RPCRouter {
             }
             primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         }
-        let text = TranscriptParser.lookupFullBody(filePath: primaryPath, itemID: params.itemID)
-            ?? "Output no longer available."
+        let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
 
-        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))
+        // `includeBody: false` only keeps the body off the wire: the body string
+        // falls out of the very same single JSONL pass that produces the
+        // metadata (an attachment row's payloads must be extracted just to
+        // recognize it as one), so there is no parser work to skip.
+        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(
+            text: params.includeBody ? (detail.text ?? "Output no longer available.") : "",
+            attachment: detail.attachment))
     }
 }

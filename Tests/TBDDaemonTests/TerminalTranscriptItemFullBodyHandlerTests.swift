@@ -157,4 +157,113 @@ struct TerminalTranscriptItemFullBodyHandlerTests {
         #expect(result.text.count == 5000)
         #expect(result.text == bigPayload)
     }
+
+    // MARK: - includeBody
+
+    /// Plants a single-line JSONL fixture in the only place
+    /// `ClaudeProjectDirectory` looks (`~/.claude/projects/<encoded>/`) and
+    /// registers a terminal pointing at it. The caller removes `projectDir`.
+    private func plantFixture(line: [String: Any]) async throws -> (terminalID: UUID, projectDir: URL) {
+        let projectsBase = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".claude/projects")
+        try FileManager.default.createDirectory(at: projectsBase, withIntermediateDirectories: true)
+
+        let wtPath = "/private/tmp/tbd-fullbody-\(UUID().uuidString)"
+        let encoded = wtPath.map { "/.".contains($0) ? "-" : String($0) }.joined()
+        let projectDir = projectsBase.appendingPathComponent(encoded)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let sessionID = UUID().uuidString
+        let lineData = try JSONSerialization.data(withJSONObject: line)
+        let lineStr = try #require(String(data: lineData, encoding: .utf8))
+        try (lineStr + "\n").write(
+            toFile: projectDir.appendingPathComponent("\(sessionID).jsonl").path,
+            atomically: true, encoding: .utf8)
+        ClaudeProjectDirectory.clearCache()
+
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: wtPath, tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@mock-0", tmuxPaneID: "%mock-0",
+            claudeSessionID: sessionID)
+        return (terminal.id, projectDir)
+    }
+
+    /// A `nested_memory` attachment row: a large injected CLAUDE.md body plus
+    /// the injection metadata the overlay renders.
+    private func injectedMemoryLine(body: String, path: String) -> [String: Any] {
+        [
+            "type": "attachment",
+            "uuid": "att-acme",
+            "timestamp": "2026-07-24T10:00:00.000Z",
+            "attachment": [
+                "type": "nested_memory",
+                "displayPath": ".github/CLAUDE.md",
+                "path": path,
+                "content": ["path": path, "type": "Project", "content": body],
+            ],
+        ]
+    }
+
+    @Test("includeBody: false returns the metadata with no body text")
+    func metadataOnlyOmitsBody() async throws {
+        let body = String(repeating: "z", count: 43_000)
+        let planted = try await plantFixture(
+            line: injectedMemoryLine(body: body, path: "/srv/acme-prod/.github/CLAUDE.md"))
+        defer { try? FileManager.default.removeItem(at: planted.projectDir) }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalTranscriptItemFullBody,
+            params: TerminalTranscriptItemFullBodyParams(
+                terminalID: planted.terminalID, itemID: "att-acme", includeBody: false)))
+
+        #expect(response.success)
+        let result = try response.decodeResult(TerminalTranscriptItemFullBodyResult.self)
+        #expect(result.text.isEmpty, "the 43 KB body must not cross the wire")
+        let attachment = try #require(result.attachment)
+        #expect(attachment.memoryType == "Project")
+        #expect(attachment.path == "/srv/acme-prod/.github/CLAUDE.md")
+    }
+
+    @Test("default (includeBody: true) still returns the body alongside the metadata")
+    func defaultIncludesBody() async throws {
+        let body = String(repeating: "z", count: 43_000)
+        let planted = try await plantFixture(
+            line: injectedMemoryLine(body: body, path: "/srv/acme-prod/.github/CLAUDE.md"))
+        defer { try? FileManager.default.removeItem(at: planted.projectDir) }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalTranscriptItemFullBody,
+            params: TerminalTranscriptItemFullBodyParams(
+                terminalID: planted.terminalID, itemID: "att-acme")))
+
+        #expect(response.success)
+        let result = try response.decodeResult(TerminalTranscriptItemFullBodyResult.self)
+        #expect(result.text == body)
+        #expect(result.attachment?.memoryType == "Project")
+    }
+
+    /// Wire back-compat: params encoded by a client predating `includeBody`
+    /// (key absent) must still get the body.
+    @Test("params without includeBody behave as includeBody: true")
+    func legacyParamsIncludeBody() async throws {
+        let body = "acme guidance"
+        let planted = try await plantFixture(
+            line: injectedMemoryLine(body: body, path: "/srv/acme-prod/.github/CLAUDE.md"))
+        defer { try? FileManager.default.removeItem(at: planted.projectDir) }
+
+        let legacyParams = #"{"terminalID":"\#(planted.terminalID.uuidString)","itemID":"att-acme"}"#
+        let response = await router.handle(RPCRequest(
+            method: RPCMethod.terminalTranscriptItemFullBody, params: legacyParams))
+
+        #expect(response.success)
+        let result = try response.decodeResult(TerminalTranscriptItemFullBodyResult.self)
+        #expect(result.text == body)
+    }
 }

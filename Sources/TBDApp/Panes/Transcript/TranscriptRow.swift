@@ -77,8 +77,9 @@ struct TranscriptRow: View {
         switch node.kind {
         case .chatBubble(let item):
             ChatBubbleView(item: item)
-        case .systemReminder(let id, let kind, let text, let ts):
-            SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
+        case .systemReminder(let id, let kind, let text, let ts, let source, let truncatedTo):
+            SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts,
+                              source: source, truncatedTo: truncatedTo)
         case .skillBody(let id, let text, let ts):
             SkillBodyRow(id: id, text: text, timestamp: ts)
         case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let ts):
