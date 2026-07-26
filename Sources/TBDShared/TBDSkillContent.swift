@@ -29,7 +29,7 @@ TBD is a macOS app that manages git worktrees and terminal tabs (Claude Code, Co
 
 ## Discovering current commands
 
-Always run `tbd <subcommand> --help` for current flags — flag detail is not duplicated here. Top-level commands: `tbd worktree`, `tbd terminal`, `tbd link`, `tbd notify`.
+Always run `tbd <subcommand> --help` for current flags — flag detail is not duplicated here. Top-level commands: `tbd worktree`, `tbd terminal`, `tbd panel`, `tbd link`, `tbd notify`.
 
 ## Common workflows
 
@@ -141,6 +141,28 @@ tbd notify --type {response_complete|error|task_complete|attention_needed} --mes
 ```bash
 tbd link [<worktree>]   # no arg = current
 ```
+
+## Panels
+
+Each worktree tab has a **primary** anchor (its terminal, or a file/web/note/transcript) plus an optional layout tree of **viewer panels** beside it.
+
+### See
+
+```bash
+tbd panel list "$TBD_WORKTREE_ID"
+```
+
+Read-only and always available regardless of gating. Prints each tab's primary content plus its layout tree, including the **panelID**/**splitID** of every node — these are the handles Arrange commands target. Add `--tab <id>` to inspect one tab, `--json` for the raw result.
+
+### Arrange
+
+`open`, `navigate`, `close`, `move`, `resize`, `back`, `forward`, `jump`, `select-tab` rearrange panels in your own worktree — split a file open beside the terminal, swap what a panel shows, step through a panel's history, or switch the active tab. Run `tbd panel <verb> --help` for flags; most target a `--tab` plus a `--panel` or `--split` ID from `tbd panel list`.
+
+Terminals are **never** viewer panels — they only ever appear as a tab's primary anchor, so `open`/`navigate` content is always file, web, transcript, or note.
+
+### Gating
+
+Arrange requires the daemon's panel-surface flags, which default OFF during the current soak. If disabled, the command prints the daemon's error naming the flag and exits non-zero — ask the user to enable it rather than retrying. `list` works regardless.
 
 ## Scratch spaces & promotion
 
