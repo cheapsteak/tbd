@@ -13,6 +13,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guardrails/dispatch.py\""
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guardrails/dispatch.py\""
+          }
+        ]
       }
     ]
   }

@@ -97,6 +97,11 @@ class Rule:
 
 **Do NOT edit `settings.json`.** The registry auto-discovers the new module.
 
+   **Exception:** adding a rule for a tool that has no `PreToolUse` matcher yet (as
+   `brainstorming-skill` did for `Skill`) does require one new matcher entry in
+   `settings.json` pointing at the same `dispatch.py`. Rules for already-matched
+   tools still need no settings change.
+
 ## Deny / allow contract (Claude Code hook protocol)
 
 - Hook reads JSON on **stdin**:
