@@ -1007,6 +1007,12 @@ final class AppState: ObservableObject {
         { [daemonClient] provider, sessionID, title in
             try await daemonClient.remoteRename(provider: provider, sessionID: sessionID, title: title)
         }
+    /// How `setRemoteBackendsEnabled` persists the remote-backends master
+    /// switch — injectable for the same reason as `controlModeSetter`
+    /// (`DaemonClient` is concrete, no protocol), so the Settings toggle
+    /// tests can exercise the success branch without a real daemon.
+    lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setRemoteBackends(enabled: enabled) }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from

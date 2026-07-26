@@ -395,6 +395,65 @@ struct RemoteAppStateTests {
         }
     }
 
+    // MARK: - Task 11: Settings toggle — remoteBackendsStatusCaption (pure, one case per branch)
+
+    @Test func remoteBackendsStatusCaption_offAndNeverLive() {
+        #expect(AppState.remoteBackendsStatusCaption(enabled: false, live: false)
+                == "Off. Turning this on requires a daemon restart before polling starts.")
+    }
+
+    @Test func remoteBackendsStatusCaption_onButNotYetRestarted() {
+        #expect(AppState.remoteBackendsStatusCaption(enabled: true, live: false)
+                == "On, but restart the daemon to start polling.")
+    }
+
+    @Test func remoteBackendsStatusCaption_onAndLive() {
+        #expect(AppState.remoteBackendsStatusCaption(enabled: true, live: true)
+                == "On and running — polling registered providers.")
+    }
+
+    /// Flag flipped off after the manager was already live — the daemon
+    /// never tears `remoteManager` down on disable (only on process exit),
+    /// so a poller from before the change keeps running until the next
+    /// restart even though every `remote.*` RPC is now gated off. A real
+    /// reachable state, not a theoretical one — see `Daemon.swift`'s
+    /// `remoteManager` assignment and `RPCRouter+RemoteHandlers.remoteGate()`.
+    @Test func remoteBackendsStatusCaption_offButStillLiveFromBeforeTheChange() {
+        #expect(AppState.remoteBackendsStatusCaption(enabled: false, live: true)
+                == "Off, but a poller from before this change is still running in the daemon — restart to fully stop it.")
+    }
+
+    // MARK: - Task 11: Settings toggle — setRemoteBackendsEnabled (mirrors setControlModeEnabled, R8-M1)
+
+    @Test func setRemoteBackendsEnabled_refreshesCapabilitiesOnSuccess() async {
+        await withStateAsync { state in
+            state.remoteBackendsSetter = { _ in }  // set RPC succeeds
+            state.daemonCapabilitiesFetcher = {
+                DaemonCapabilitiesResult(controlModeEnabled: false, remoteBackendsEnabled: true, remoteBackendsLive: false)
+            }
+            #expect(state.daemonCapabilities == nil)
+
+            await state.setRemoteBackendsEnabled(true)
+
+            #expect(state.daemonCapabilities?.remoteBackendsEnabled == true,
+                    "a successful toggle must re-fetch the daemon's effective flag")
+        }
+    }
+
+    @Test func setRemoteBackendsEnabled_keepsLastKnownCapabilitiesOnRefreshFailure() async {
+        await withStateAsync { state in
+            state.remoteBackendsSetter = { _ in }  // set RPC succeeds...
+            state.daemonCapabilitiesFetcher = { nil }  // ...but the re-fetch transiently fails
+            state.daemonCapabilities = DaemonCapabilitiesResult(
+                controlModeEnabled: false, remoteBackendsEnabled: true, remoteBackendsLive: true)
+
+            await state.setRemoteBackendsEnabled(true)
+
+            #expect(state.daemonCapabilities?.remoteBackendsEnabled == true,
+                    "a transient refresh failure after a successful set must not snap the toggle off")
+        }
+    }
+
     // Helper: run an async body against a freshly-isolated AppState with
     // proper UserDefaults suite teardown (async variant of `withState`).
     private func withStateAsync(_ body: (AppState) async -> Void) async {

@@ -202,4 +202,51 @@ extension AppState {
                 "remoteRename push failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(error, privacy: .public)")
         }
     }
+
+    // MARK: - Settings toggle (Task 11)
+
+    /// Persist the remote-backends master switch, then re-fetch capabilities
+    /// so the Settings toggle reflects the daemon's persisted state — mirrors
+    /// `setControlModeEnabled`'s keep-last-known-value refresh (R8-M1): a
+    /// transient RPC failure right after a successful set must not snap the
+    /// toggle back off. The daemon only constructs its `RemoteProviderManager`
+    /// at boot (`RPCRouter+RemoteHandlers.swift`), so a successful set here
+    /// does NOT itself start polling — `remoteBackendsLive` in the refreshed
+    /// capabilities is what tells the Settings view whether a restart has
+    /// happened yet (see `remoteBackendsStatusCaption`).
+    func setRemoteBackendsEnabled(_ enabled: Bool) async {
+        do {
+            try await remoteBackendsSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            remoteLogger.error("Failed to set remote backends: \(error, privacy: .public)")
+            showAlert("Failed to set remote backends: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Caption for the Remote Sessions toggle, telling the user which of the
+    /// four `(remoteBackendsEnabled, remoteBackendsLive)` states they're
+    /// actually in. The daemon only builds its `RemoteProviderManager` at
+    /// boot, so the persisted flag and the live manager can disagree in
+    /// BOTH directions:
+    /// - `(true, false)`: the flag was flipped on since the daemon last
+    ///   booted — polling has not started yet.
+    /// - `(false, true)`: the flag was flipped off after the manager was
+    ///   already live — the daemon never tears the manager down on disable
+    ///   (only on process exit), so a poller from before this change keeps
+    ///   running even though every `remote.*` RPC is now gated off.
+    /// Pure mapping, directly testable without a daemon — mirrors
+    /// `classifyRemoteRefreshFailure`.
+    nonisolated static func remoteBackendsStatusCaption(enabled: Bool, live: Bool) -> String {
+        switch (enabled, live) {
+        case (false, false):
+            return "Off. Turning this on requires a daemon restart before polling starts."
+        case (true, false):
+            return "On, but restart the daemon to start polling."
+        case (true, true):
+            return "On and running — polling registered providers."
+        case (false, true):
+            return "Off, but a poller from before this change is still running in the daemon — restart to fully stop it."
+        }
+    }
 }
