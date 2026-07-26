@@ -66,8 +66,10 @@ it parks it into the wakeable state described above.
 
 ```
 tbd terminal close --terminal <uuid> [--force] [--json]
-tbd terminal close <worktree> --all [--force] [--dry-run] [--json]
 ```
+
+One target, named explicitly. `--all`, `--except` and `--dry-run` are deferred —
+see §2.1 and §6 D2.
 
 ```swift
 struct TerminalClose: AsyncParsableCommand {
@@ -88,49 +90,35 @@ struct TerminalClose: AsyncParsableCommand {
             A terminal cannot close itself. Spawn a successor and have it close
             you (see the nightwatch handoff relay).
 
-            `<worktree> --all` closes every terminal in ONE worktree; the
-            calling terminal is excluded and reported as skipped. This does NOT
-            archive the worktree — a worktree with zero terminals stays active.
-            Use `tbd worktree archive` for that.
+            Closing a worktree's last terminal does NOT archive it — the
+            worktree stays active with zero terminals. Use `tbd worktree
+            archive` for that.
             """
     )
 
-    @Argument(help: "Worktree name or ID (required with --all, forbidden otherwise)")
-    var worktree: String?
-
     @Option(name: .long, help: "Terminal ID to close")
-    var terminal: String?
+    var terminal: String
 
-    @Flag(name: .long, help: "Close ALL terminals in <worktree> (the calling terminal is excluded)")
-    var all = false
-
-    @Flag(name: .long, help: "Also close terminals that are mid-turn or waiting on a permission prompt")
+    @Flag(name: .long, help: "Also close a terminal that is mid-turn or waiting on a permission prompt")
     var force = false
-
-    @Flag(name: .long, help: "List what would be closed without closing anything (--all only)")
-    var dryRun = false
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
 }
 ```
 
-`validate()` enforces exactly one of `--terminal` XOR (`worktree` + `--all`). A
-bare positional worktree with no `--all` is a `ValidationError` — a typo'd
-positional must never silently mean "close everything".
-
-`--terminal` is an `@Option`, matching the newer house pattern (`send`, `wake`,
-`focus`, `swap-profile` — `TerminalCommands.swift:122,161,207,391`) and freeing
-the positional for the worktree, matching `terminal list <worktree>`.
+`--terminal` is a required `@Option`, matching the newer house pattern (`send`,
+`wake`, `focus`, `swap-profile` — `TerminalCommands.swift:122,161,207,391`).
+There is no positional form: a bare `tbd terminal close` must not be one typo
+away from meaning anything at all.
 
 There is **no** `TBD_TERMINAL_ID` default for `--terminal`. Other commands
 default to it (`NotifyCommand.swift:64-69`, `FakeRateLimitCommand.swift:31`), but
 here it would make a bare `tbd terminal close` mean "close myself" — the one
 thing this command refuses.
 
-### JSON schemas
+### JSON schema
 
-Single:
 ```json
 {"terminalID": "…", "closed": true, "alreadyGone": false, "claudeSessionID": "…|null"}
 ```
@@ -138,27 +126,60 @@ Single:
 `claudeSessionID` is echoed so an autonomous caller retains a resume pointer
 after the row is gone.
 
-Bulk:
-```json
-{"worktreeID": "…",
- "closed":  [{"terminalID": "…", "claudeSessionID": "…|null"}],
- "skipped": [{"terminalID": "…", "reason": "self|working|waiting_for_user"}],
- "failed":  [{"terminalID": "…", "error": "…"}]}
-```
+## 2.1 Why `close --all` can never be a self-recycle remedy
 
-`--dry-run` emits the same shape with `wouldClose` in place of `closed`.
+Recorded at length because this was the *documented* remedy for five days, and
+the reason it can't work is structural rather than a missing feature. Anyone
+reading the nightwatch history will otherwise propose it again.
+
+The instruction shipped in `NightwatchDeskPrompts.swift` was:
+
+> Remedy: call `tbd terminal close --all` on the desk, let daemon respawn fresh
+
+It had **three** independent defects, and fixing any one of them leaves the
+other two:
+
+1. **The command did not exist.** No `close` subcommand of any shape.
+2. **Nothing respawns a desk session.** There is no babysitter daemon — see the
+   retraction in `NightwatchSkillContent.skillMd`.
+3. **Even a working `--all` does the opposite of what was intended.** This is
+   the interesting one.
+
+The intent was "this session is past its context ceiling; recycle it." But a
+process cannot close its own terminal: killing the tmux window SIGHUPs the
+calling shell, so `tbd` dies mid-`recv` and can never report a result, and the
+agent's turn is severed mid-tool-call. Any sane `--all` therefore excludes the
+caller (see §4). Which means, run by the tired desk session on its own worktree,
+`close --all` kills the desk's *other* panes and leaves the one session you
+wanted gone alive and still tired. **The remedy is precisely inverted.**
+
+The general principle: **"close everything here" is never a self-replacement
+primitive.** Self-replacement needs a second actor that outlives the first, so
+the ordering is necessarily
+*write handoff → spawn successor → successor closes predecessor*, and it must be
+that order — a predecessor that closes itself first leaves the desk unwatched if
+the spawn failed. That is exactly the shape of
+`NightwatchSkillContent.handoffPy`, and it is why the relay is the remedy rather
+than any flag on this command.
+
+Corollary for the flag design: `--all`'s only documented consumer was this
+incoherent instruction. Auditing what actually remains (§6 D2) left a need too
+narrow to justify a flag whose name lies whenever the caller is inside the
+target set — which is exactly when an autonomous caller would reach for it.
 
 ### Deliberately excluded
 
-- **Fleet-wide `--all`.** ~40 worktrees / ~93 panes. A shell-history replay would
-  decapitate the fleet. Anyone who genuinely wants it can loop
+- **`--all` (worktree-wide).** Deferred — §6 D2. Note that fleet-wide `--all`
+  is refused outright regardless: ~40 worktrees / ~93 panes, and a shell-history
+  replay would decapitate the fleet. Anyone who truly wants that can loop
   `tbd worktree list --json`, which at least forces them to write the loop.
+- **`--except <id>` and `--dry-run`.** Both existed only to make `--all` safe;
+  they leave with it.
 - **`--graceful` / typed `/exit`.** Knowing the composer is idle and empty
   requires reading rendered screen text — banned by the no-TUI-scraping rule.
   The hibernation subsystem already demonstrates that process-kill plus
   `claude --resume` is lossless for a Claude session.
 - **A self-close override.** See §4.
-- **`--except <id>`.** See §6, D2 — deferred, not rejected.
 - **`--no-capture`.** Capture is already best-effort and cheap.
 - **A `delete` alias.** One user-facing verb: "close" (matching the app's "Close
   Tab" and "Closed Terminals"). The RPC keeps its `terminal.delete` name.
@@ -171,22 +192,22 @@ Bulk:
 
 ## 3. Semantics
 
-| Terminal state | default | `--force` | under `--all` | under `--all --force` |
-| --- | --- | --- | --- | --- |
-| Idle Claude/Codex (`.idle`/`.unknown`) | closed | closed | closed | closed |
-| Working (`.working`), window alive | **refused**, exit 2 | closed | skipped, reported | closed |
-| Waiting on permission (`.waitingForUser`), window alive | **refused**, exit 2 | closed | skipped, reported | closed |
-| `.working`/`.waitingForUser` but **window dead** | closed (rail is liveness-qualified — see §6 D1) | closed | closed | closed |
-| Plain shell (`activityState` is agent-fed; shells stay `.unknown`) | closed | closed | closed | closed |
-| Hibernated-parked, window alive | closed; resumes cancelled; scrollback captured | same | closed | closed |
-| Recovery-parked, window already dead | closed; **capture stores nothing** (dead pane); session becomes unreachable from TBD, transcript survives on disk | same | closed | closed |
-| `keepWarm: true` | closed — keepWarm exempts from *auto-hibernation* only (`Models.swift:309-312`), it is not close protection | same | closed | closed |
-| Pinned (`pinnedAt`) | closed — pin is a dock affordance; the app closes pinned tabs too | same | closed | closed |
-| Pending scheduled resume | closed; resume cancelled (`RPCRouter+TerminalHandlers.swift:452-455`) | same | closed | closed |
-| Already gone (no DB row) | **no-op success**, exit 0, `alreadyGone: true` | same | n/a | n/a |
-| Self (`--terminal` == `$TBD_TERMINAL_ID`) | **refused**, exit 2 | **still refused** | skipped, `reason: "self"` | skipped |
-| Mid-`terminal send` race | close wins; a send arriving after row deletion errors "Terminal not found"; a send already in flight lands in a dying pane and is lost | same | same | same |
-| Scratch-worktree terminal | identical — the daemon reads `worktree.tmuxServer` from the row, satisfying the pane-ids-collide rule by construction | same | same | same |
+| Terminal state | default | `--force` |
+| --- | --- | --- |
+| Idle Claude/Codex (`.idle`/`.unknown`) | closed | closed |
+| Working (`.working`), window alive | **refused**, exit 2 | closed |
+| Waiting on permission (`.waitingForUser`), window alive | **refused**, exit 2 | closed |
+| `.working`/`.waitingForUser` but **window dead** | closed (rail is liveness-qualified — see §6 D1) | closed |
+| Plain shell (`activityState` is agent-fed; shells stay `.unknown`) | closed | closed |
+| Hibernated-parked, window alive | closed; resumes cancelled; scrollback captured | same |
+| Recovery-parked, window already dead | closed; **capture stores nothing** (dead pane); session becomes unreachable from TBD, transcript survives on disk | same |
+| `keepWarm: true` | closed — keepWarm exempts from *auto-hibernation* only (`Models.swift:309-312`), it is not close protection | same |
+| Pinned (`pinnedAt`) | closed — pin is a dock affordance; the app closes pinned tabs too | same |
+| Pending scheduled resume | closed; resume cancelled (`RPCRouter+TerminalHandlers.swift:452-455`) | same |
+| Already gone (no DB row) | **no-op success**, exit 0, `alreadyGone: true` | same |
+| Self (`--terminal` == `$TBD_TERMINAL_ID`) | **refused**, exit 2 | **still refused** |
+| Mid-`terminal send` race | close wins; a send arriving after row deletion errors "Terminal not found"; a send already in flight lands in a dying pane and is lost | same |
+| Scratch-worktree terminal | identical — the daemon reads `worktree.tmuxServer` from the row, satisfying the pane-ids-collide rule by construction | same |
 
 **Closing the last terminal is explicitly permitted and is not an archive.** The
 app already closes the last tab with no guard — `AppState+Tabs.swift:148-200`
@@ -203,8 +224,7 @@ All to stderr.
 | --- | --- | --- |
 | Self-close | `Refusing to close the calling terminal (<uuid>). A terminal cannot close itself — spawn a successor and have it close this one.` | 2 |
 | Busy, no `--force` | `Terminal <uuid> is <mid-turn\|waiting on a permission prompt> (activityState=<working\|waiting_for_user>). Closing now would kill in-flight work. Pass --force to close anyway.` | 2 |
-| Bare worktree, no `--all` | `To close every terminal in a worktree, pass --all explicitly.` | 64 |
-| `--terminal` with `--all` | `Specify either --terminal <id> or <worktree> --all, not both.` | 64 |
+| Missing `--terminal` | ArgumentParser's standard missing-required-option error | 64 |
 | Invalid UUID | `Invalid terminal ID: <s>` (matches `TerminalCommands.swift:136`) | 1 |
 
 `ExitCode(2)` has house precedent (`DoctorCommand.swift:34,39`).
@@ -219,16 +239,17 @@ availability reason (if the spawn failed, the predecessor is the only thing stil
 watching the desk), and successor-closes-predecessor is the documented standing
 rule. Build the deferral when a real consumer appears.
 
-Under `--all` the caller is excluded and **reported** as `reason: "self"` in both
-JSON and text — never silently dropped.
+Self-close is refused rather than silently skipped precisely because there is
+only one target: skipping it would exit 0 having done nothing, and an autonomous
+caller that doesn't inspect the payload would read that as success. §2.1 is the
+longer form of why no flag on this command can be a self-replacement primitive.
 
 ## 5. Failure modes
 
 | Situation | Exit |
 | --- | --- |
-| Success / already gone / dry-run / bulk with only skips | 0 |
+| Success / already gone | 0 |
 | Daemon not running (`SocketClient.swift:19-21`) | 1 |
-| Bulk with any `failed` entries (partial results still printed) | 1 |
 | Refused (self, busy) | 2 |
 | Usage error | 64 |
 
@@ -246,8 +267,8 @@ Best-effort, inherited from the daemon handler and acceptable:
   `killWindowAndReap` that reconcile uses (`WorktreeLifecycle.swift:164-171`).
   This is a pre-existing gap shared with the app's tab-close, not something this
   command introduces. Recommended as a separate follow-up PR.
-- **TOCTOU under `--all`**: a terminal closed between the list and the delete
-  resolves as `alreadyGone`. Harmless once idempotency lands.
+- **A terminal closed by someone else between the caller's `terminal list` and
+  this call** resolves as `alreadyGone`, exit 0. Harmless once idempotency lands.
 
 ## 6. Reconciled disagreements
 
@@ -268,12 +289,31 @@ state is busy **and** `tmux.windowExists` confirms a live window. A dead-window
 row cannot be mid-turn — and that is precisely the zombified-predecessor state
 `handoff.py` creates today, which must remain closeable without `--force`.
 
-**D2 — `--except` deferred, not shipped.** The relay's real shape is "close
-everything but me", and self is already auto-excluded. The remaining
-justification (recycle a desk, keep the fresh session) is real but is expressible
-as N single-target closes, and the successor in the relay is spawned *after* the
-close decision. Ship the smaller surface; add `--except` when a second consumer
-appears.
+**D2 — `--all` and `--except` both deferred, not shipped.** The independent
+design kept a worktree-scoped `--all` with the caller auto-excluded. Revised
+after review (Chang, 2026-07-25) to drop it, on the argument in §2.1: the flag's
+only documented consumer was an instruction that a working `--all` would have
+served *backwards*. Auditing the remainder:
+
+| Claimed need | Actually served by |
+| --- | --- |
+| Recycle a tired desk session | the handoff relay (§2.1) — `--all` cannot, by construction |
+| Retire the predecessor in a relay | single-target `--terminal` |
+| Clear a whole worktree | `tbd worktree archive`, which already capture-then-kills every terminal (`WorktreeLifecycle+Archive.swift:117-128`) |
+| Close every pane fleet-wide | refused outright; loop `tbd worktree list --json` |
+
+What survives is only "close every pane in this worktree but keep the worktree
+alive" — real, but rare, and not worth a flag whose name is false whenever the
+caller sits inside the target set. That is exactly the case an autonomous caller
+hits, and the failure is quiet: it exits 0 having left one terminal (its own)
+running, which a caller that doesn't inspect `skipped` reads as a clean sweep.
+
+The rejected alternative was keeping `--all` but refusing when the caller is in
+the target worktree. That is worse: it breaks the one legitimate use (sweeping a
+worktree you are *not* sitting in) while still not enabling self-recycling.
+
+`--except` and `--dry-run` existed only to make `--all` safe and leave with it.
+Add all three together if a second real consumer appears.
 
 **D3 — self-close framing.** Both refuse it; recorded above with the deferral
 door explicitly left open rather than as a claim that it cannot be built.
@@ -358,18 +398,22 @@ pane is gone.
 
 ## 9. Doc/reality mismatches found
 
-1. **`Sources/TBDShared/NightwatchDeskPrompts.swift:112`** — compiled-in desk
-   prompt instructs `tbd terminal close --all`, a command that does not exist,
-   and claims "let daemon respawn fresh", which the daemon does not do. Must be
-   rewritten to the handoff relay. Note that even after this ships the old text
-   stays wrong: `close --all` on the desk's own worktree excludes the caller by
-   design, so it would never recycle the desk session that ran it.
+1. **`Sources/TBDShared/NightwatchDeskPrompts.swift`** (at `33494d80:112`) —
+   compiled-in desk prompt instructing `tbd terminal close --all` on the desk.
+   Three independent defects, dissected in §2.1: the command never existed, no
+   daemon respawns a desk session, and a working `--all` would have inverted the
+   remedy. Fixed in this branch by pointing at the handoff relay. **Nothing this
+   design ships would have made the original sentence correct** — that is the
+   whole reason §2.1 exists.
 2. **`docs/superpowers/specs/2026-05-09-pending-askuserquestion-rendering-design.md:228`**
    — cites "`tbd terminal close` / explicit terminal close" as an existing CLI
    trigger. The RPC half was real; the CLI half never existed.
-3. **nightwatch `SKILL.md:91-92`** — currently correct ("that command does not
-   exist"), becomes stale the moment this ships. Update in the same change that
-   migrates `handoff.py`, keeping the handoff relay as the documented
-   context-ceiling remedy; `close --all` was never the right tool for it.
+3. **nightwatch `SKILL.md`, "Standing rules"** — says "that command does not
+   exist", correct today and stale the moment this ships. Update in the same
+   change that migrates `handoff.py`. Keep the relay as the documented
+   context-ceiling remedy and re-state the reason in the new terms: not "the
+   command doesn't exist" but "no close command can recycle the session that
+   invokes it" (§2.1). The first framing invites someone to fix it by adding the
+   flag; the second does not.
 4. Queue records (`acted.jsonl:32,57`, `judge-summary.txt:118-119`) memorialize
    the mismatch. Leave as-is — they are logs.
