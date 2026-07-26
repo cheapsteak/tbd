@@ -98,22 +98,26 @@ element renders a whole subtree via `WorktreeSubtreeView`, so move indices line 
 `PinnedDockView` adopts the same shape:
 
 ```swift
-ForEach(pinnedRoots) { root in
-    ForEach(PinnedDockContent.subtree(of: root, in: rows)) { row in
-        WorktreeRowView(worktree: row.worktree,
-                        indentLevel: row.depth,
-                        sectionRepoID: row.sectionRepoID)
-            .tag(row.worktree.id)
-    }
+ForEach(roots) { root in
+    dockRow(root)                                  // emitted DIRECTLY
+    ForEach(descendants(of: root)) { dockRow($0) } // descendants follow
 }
 .onMove { source, destination in
     appState.reorderPins(fromOffsets: source, toOffset: destination)
 }
 ```
 
-The outer `ForEach` carries `.onMove`; the inner emits the root plus its expanded descendants.
-`PinnedDockContent` keeps returning its flat `[PinnedDockRow]` — its existing tests stay valid —
-and gains a `subtree(of:in:)` helper that slices the contiguous run belonging to one root.
+The outer `ForEach` carries `.onMove`; each element emits its root row plus that root's expanded
+descendants. `PinnedDockContent` keeps returning its flat `[PinnedDockRow]` — its existing tests
+stay valid — and gains a `subtree(of:in:)` helper slicing the contiguous run belonging to one
+root.
+
+**The root row must be emitted directly, not wrapped in a `ForEach` of its own.** Verified live,
+the hard way: if the outer element's content is a *bare* `ForEach`, AppKit never starts a drag
+session and `.onMove` silently never fires — no reorder, no error, no log. The working shape is
+exactly `WorktreeSubtreeView`'s: one row, then a `ForEach` for the children. Symptom to
+recognise if this regresses: dragging appears to do nothing at all, rather than doing the wrong
+thing.
 
 ### App state
 
