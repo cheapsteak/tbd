@@ -1,36 +1,38 @@
 import SwiftUI
 import TBDShared
 
-/// Content displayed in the nightwatch desk status chip.
-struct NightwatchBannerContent: Equatable {
+/// Content displayed in the nightwatch desk status label.
+struct NightwatchDeskStatusContent: Equatable {
     let glyph: String
     let text: String
 }
 
-/// Computes the chip content (glyph and text) for a given nightwatch mode.
-/// - .off: returns nil (chip hidden)
+/// Computes the desk status content (glyph and text) for a given nightwatch mode.
+/// - .off: returns nil (label hidden)
 /// - .daywatch: returns content with "◐" glyph and "Daywatch desk" text
 /// - .nightwatch: returns content with "🌙" glyph and "Nightwatch desk" text
-func nightwatchBannerContent(for mode: NightwatchMode) -> NightwatchBannerContent? {
+func nightwatchDeskStatusContent(for mode: NightwatchMode) -> NightwatchDeskStatusContent? {
     switch mode {
     case .off:
         return nil
     case .daywatch:
-        return NightwatchBannerContent(glyph: "◐", text: "Daywatch desk")
+        return NightwatchDeskStatusContent(glyph: "◐", text: "Daywatch desk")
     case .nightwatch:
-        return NightwatchBannerContent(glyph: "🌙", text: "Nightwatch desk")
+        return NightwatchDeskStatusContent(glyph: "🌙", text: "Nightwatch desk")
     }
 }
 
-/// Compact status-bar chip showing the active nightwatch desk session when mode != .off.
+/// Plain status-bar text naming the active nightwatch desk session when mode != .off.
 /// Clicking it focuses the Watch Desk scratch worktree.
 ///
-/// Mode indication is deliberately confined to the status bar. An earlier
+/// The mode *tint* is deliberately confined to the status bar — the sidebar's
+/// `NightwatchModeToggle` still shows and changes the active mode. An earlier
 /// iteration washed the whole window with `tintColor(for:)` at 5% opacity, which
 /// bled through every pane that paints no background of its own (the transcript
-/// most visibly). This chip is the only in-window surface that carries the mode
-/// tint.
-struct NightwatchDeskStatusChip: View {
+/// most visibly). The bar itself now carries the mode tint —
+/// `StatusBarView.statusBarTint(mode:experimentalEnabled:)` owns it — which is
+/// why this label paints no background or border of its own.
+struct NightwatchDeskStatusLabel: View {
     @EnvironmentObject var appState: AppState
 
     /// Same experimental opt-in that gates every other nightwatch surface.
@@ -49,8 +51,7 @@ struct NightwatchDeskStatusChip: View {
 
     var body: some View {
         if nightwatchExperimental,
-           let content = nightwatchBannerContent(for: appState.nightwatchMode) {
-            let tint = tintColor(for: appState.nightwatchMode) ?? .gray
+           let content = nightwatchDeskStatusContent(for: appState.nightwatchMode) {
             Button(action: focusDeskSession) {
                 HStack(spacing: 4) {
                     Text(content.glyph)
@@ -59,16 +60,6 @@ struct NightwatchDeskStatusChip: View {
                         .font(.system(size: 8))
                 }
                 .font(.caption)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(tint.opacity(0.15))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .strokeBorder(tint.opacity(0.3), lineWidth: 1)
-                )
             }
             .buttonStyle(.plain)
             .pointerStyle(.link)
