@@ -445,8 +445,38 @@ extension RPCRouter {
     func handleTerminalDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalDeleteParams.self, from: paramsData)
 
+        // Closing an already-closed terminal is a no-op SUCCESS, not an error —
+        // same contract as `terminal.wake`. Autonomous callers retry and race
+        // each other; making the second one fail would push every caller into
+        // string-matching this message to tell "already done" from "broken".
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
-            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+            return try RPCResponse(result: TerminalDeleteResult(closed: false, alreadyGone: true))
+        }
+
+        // Optional rails (CLI sets them; --force drops them; the app never
+        // does). Refuse to kill an in-flight turn or a raised permission hand,
+        // matching `isManuallyHibernatable`'s rails.
+        //
+        // Qualified on the window actually being ALIVE. `activityState` is
+        // hook-fed and carries no timestamp, so a session that died mid-turn
+        // (crash, OOM, killed pane) stays `.working` forever. An unqualified
+        // rail would then refuse forever on exactly the wedged terminal a
+        // caller most needs to close — turning the safety rail into a trap for
+        // this command's primary cleanup use case. A dead-window row cannot be
+        // mid-turn, so it stays closeable without --force.
+        if params.respectActivityRails == true,
+           terminal.activityState == .working || terminal.activityState == .waitingForUser,
+           let worktree = try await db.worktrees.get(id: terminal.worktreeID),
+           await tmux.windowExists(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID) {
+            let what = terminal.activityState == .working
+                ? "mid-turn"
+                : "waiting on a permission prompt"
+            return RPCResponse(
+                error: "Terminal \(params.terminalID) is \(what) "
+                    + "(activityState=\(terminal.activityState.rawValue)). "
+                    + "Closing now would kill in-flight work. Pass --force to close anyway.",
+                code: RPCErrorCode.terminalBusy.rawValue
+            )
         }
 
         // Terminal close cancels any pending auto-resume (spec §Cancellation).
@@ -481,7 +511,11 @@ extension RPCRouter {
             terminalID: terminal.id
         )))
 
-        return .ok()
+        return try RPCResponse(result: TerminalDeleteResult(
+            closed: true,
+            alreadyGone: false,
+            claudeSessionID: terminal.claudeSessionID
+        ))
     }
 
     /// Closed-terminal capture metadata for a worktree, newest first. Content

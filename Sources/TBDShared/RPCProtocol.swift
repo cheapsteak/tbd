@@ -88,6 +88,10 @@ public enum RPCErrorCode: String, Sendable {
     /// refused. The app offers a default-account fallback retry
     /// (`TerminalWakeParams.fallbackToDefaultProfile`).
     case profileMissing
+    /// A `terminal.delete` with `respectActivityRails` was refused because the
+    /// terminal is mid-turn or holding a permission prompt AND its window is
+    /// still alive. The CLI maps this to exit 2; `--force` drops the rails.
+    case terminalBusy
 }
 
 // MARK: - RPC Method Names
@@ -1158,7 +1162,38 @@ public struct TerminalSendParams: Codable, Sendable {
 
 public struct TerminalDeleteParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// When true, refuse to close a terminal that is mid-turn or holding a
+    /// permission prompt, returning `RPCErrorCode.terminalBusy`. Optional and
+    /// defaulting to nil (= no rails) so the app's tab-close — a direct human
+    /// gesture on a visible tab — keeps its existing unconditional semantics,
+    /// and so older callers still decode.
+    ///
+    /// The CLI sets it; `--force` drops it. See `handleTerminalDelete` for why
+    /// the check is additionally qualified on the window being alive.
+    public let respectActivityRails: Bool?
+    public init(terminalID: UUID, respectActivityRails: Bool? = nil) {
+        self.terminalID = terminalID
+        self.respectActivityRails = respectActivityRails
+    }
+}
+
+/// Result for `terminal.delete`. Mirrors `TerminalWakeResult`'s shape: the call
+/// is idempotent, and the caller learns which of the two success paths it took.
+public struct TerminalDeleteResult: Codable, Sendable {
+    /// true — this call tore the terminal down; false — it was already gone.
+    public let closed: Bool
+    /// true when there was no such terminal row. Not an error: closing an
+    /// already-closed terminal is a no-op success, matching `terminal wake`.
+    public let alreadyGone: Bool
+    /// Echoed so an autonomous caller keeps a resume pointer after the row is
+    /// gone (the transcript survives on disk). nil for non-Claude terminals and
+    /// for the already-gone path.
+    public let claudeSessionID: String?
+    public init(closed: Bool, alreadyGone: Bool, claudeSessionID: String? = nil) {
+        self.closed = closed
+        self.alreadyGone = alreadyGone
+        self.claudeSessionID = claudeSessionID
+    }
 }
 
 /// Params for `terminalHistory.list` — closed-terminal capture metadata for a
