@@ -55,6 +55,46 @@ Other fields:
 
 The condition worth notifying a human about is an **edge** in `agent_state` — a transition into `waiting_input` or `exited` — not the value in isolation.
 
+### Pending question (optional)
+
+A provider MAY include a `pending_question` field on the Session object describing a structured choice the agent is currently blocked on — for example, a multiple-choice prompt the agent's own tooling surfaced, which a calling application would otherwise only see as `agent_state: "waiting_input"` with no further detail.
+
+```json
+{
+  "pending_question": {
+    "id": "q-4f2a1c",
+    "questions": [
+      {
+        "prompt": "Which environment should this change deploy to?",
+        "label": "Environment",
+        "multi": false,
+        "options": [
+          {"label": "staging", "description": "Deploy to the staging cluster"},
+          {"label": "production", "description": "Deploy to the production cluster; requires a follow-up approval"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `id` — a stable identifier for this question, opaque to the caller. It stays the same while the same question is still pending and changes when the agent asks a new one, so a caller can tell "still waiting on the same thing" apart from "a new question just appeared" without diffing question text.
+- `questions` — one or more question objects presented together (an agent MAY ask more than one structured question in a single blocking turn). Each has:
+  - `prompt` (required) — the question text.
+  - `label` (optional) — a short label for compact rendering (a tab title, a form field caption) where the full `prompt` doesn't fit.
+  - `multi` (optional, default `false`) — whether more than one option may be selected.
+  - `options` (required, one or more) — each an object with `label` (required, the option's display text) and `description` (optional, supporting detail).
+
+**Lifecycle.** `pending_question` is present only while the agent is blocked on this specific question; it MUST be absent once the question is answered or abandoned (for example, because the session was stopped, or the agent moved on some other way).
+
+Its presence is display detail layered on top of `agent_state`, never a substitute for it. A provider that reports `pending_question` MUST keep it consistent with `agent_state` — report `agent_state: "waiting_input"` for exactly as long as `pending_question` is present, and clear both together — and a caller MUST NOT infer that a session is blocked solely from `pending_question`'s presence; blocking is still read off `agent_state`, same as every other session.
+
+**Optionality and degradation.** This field is entirely optional. A provider with no way to surface structured question data — including one with no concept of structured questions at all — simply never sets it and remains fully conformant; it MUST NOT fabricate a single-option question just to answer the general `waiting_input` case. A caller renders a session with `agent_state: "waiting_input"` and no `pending_question` exactly as it always has (a generic "needs input" state), and renders one with `pending_question` present with the richer card. No capability gates this field: it rides on the Session object returned by verbs (`create`, `list`, `stop`, `events`) that already exist, rather than introducing a new verb, so it follows the same rule as `meta`'s well-known keys above — a provider either populates it or doesn't, and a caller that doesn't recognize it ignores it per the response-field forward-compatibility rule in Versioning below.
+
+**Answering.** `pending_question` is display data only — it does not add a way to answer. Answering a pending question uses the mechanisms this contract already has: attach interactively and answer the prompt directly through the terminal (`attach`), or deliver the chosen option's text as input (`send`). No dedicated "answer" verb is introduced in v1. A future answer verb, if one is ever added, would need to solve two things this field alone does not: submitting a choice when no terminal is attached (so `send`'s raw-keystroke delivery isn't available), and confirming which specific `pending_question.id` the answer was directed at (`send` has no notion of a question at all, so it can't tell the provider which pending question the bytes are meant to resolve).
+
+**Machine-interface rule.** The same normative rule that governs `agent_state` applies here without exception: `pending_question` MUST be derived from the agent's own machine interface — its lifecycle hooks or structured tool output — and MUST NEVER be constructed by parsing rendered terminal output, including the bytes `log` returns. A provider that cannot source it this way MUST simply omit the field, exactly as it MUST report `agent_state: "unknown"` rather than guess.
+
 ## Profile object
 
 A **profile** selects an agent's identity and routing: which credential it authenticates with, and which model or endpoint it talks to. Profile and location are orthogonal — this object never says *where* a session runs (that's a property of which provider, if any, a session belongs to), only *who* it runs as.
@@ -224,6 +264,14 @@ A long-running NDJSON stream: one JSON object per line, connection held open ind
 - The provider MUST emit `ping` at least every 30 seconds while otherwise idle. A caller that sees 90 seconds of silence should treat the stream as dead, terminate the process, and reconnect.
 - If the stream capability is absent, or a stream repeatedly fails to stay up, the caller falls back to polling `list` on an interval (on the order of 60s). Every provider gets at least this floor of freshness for free, whether or not it implements `events`.
 
+## Channel granularity
+
+`events` is a **provider-level** stream, not a per-session one: a provider runs exactly one `events` connection that carries state for every session it knows about, and every `snapshot`/`session`/`removed` event on that single stream can reference any session the provider has. A caller opens one `events` connection per provider, full stop — never one per session.
+
+`attach`, by contrast, is inherently **per-session**: one connection per session, opened only while a viewer pane is actually looking at that session, and closed the moment the viewer detaches.
+
+The two verbs differ in granularity because what they carry differs in shape. A provider's aggregate session state — the kind of thing `list` and `events` report — is comparatively small and shared: one connection is enough to keep every session's state current, because that state is a summary. An interactive terminal is the opposite: a live, two-way byte stream tied to one human looking at one session, with no meaningful way to multiplex two people's keystrokes for two different sessions over a single channel. Opening one `events` stream per session — rather than the one-per-provider this contract specifies — multiplies connection count by session count for no benefit, which matters against transports with per-account connection limits and non-trivial per-connection cost.
+
 ## Error model
 
 Every verb signals failure through its process exit code:
@@ -272,7 +320,7 @@ The contract version is a single integer major, exposed on every invocation as t
 
 At registration, the caller invokes `describe`, intersects its own supported major versions with the provider's `contract_versions`, and picks the highest common value. If the intersection is empty, the caller refuses to use the provider and shows a clear error. Whatever major is chosen is what rides on every subsequent invocation via `TBD_CONTRACT_VERSION`.
 
-Within a major version: providers may add new response fields at any time, and callers MUST ignore fields they don't recognize. This is symmetric: callers may send new optional fields in structured stdin (for example, `profile` on `create`) that an older provider doesn't recognize, and **providers MUST likewise ignore fields they don't recognize in structured stdin** rather than fail on them — the same forward-compatibility contract applies in both directions. Removing or renaming a field, or changing the semantics of a verb, requires a new major version. Adding a new optional verb — gated behind a new entry in `capabilities`, as `rename` and `set-profile` were — is likewise additive within a major version: a caller that doesn't recognize the capability string simply never invokes the verb, so no version bump is needed for it either.
+Within a major version: providers may add new response fields at any time — a scalar or a structured object alike, such as `pending_question` on the Session object — and callers MUST ignore fields they don't recognize. This is symmetric: callers may send new optional fields in structured stdin (for example, `profile` on `create`) that an older provider doesn't recognize, and **providers MUST likewise ignore fields they don't recognize in structured stdin** rather than fail on them — the same forward-compatibility contract applies in both directions. Removing or renaming a field, or changing the semantics of a verb, requires a new major version. Adding a new optional verb — gated behind a new entry in `capabilities`, as `rename` and `set-profile` were — is likewise additive within a major version: a caller that doesn't recognize the capability string simply never invokes the verb, so no version bump is needed for it either.
 
 ## Identity & drift
 
