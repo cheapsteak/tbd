@@ -34,7 +34,7 @@ Cautionary precedent: `auto_hibernate_enabled` shipped default-ON in `v39_sessio
 
 ### Blast-radius work starts with a brainstormed spec
 
-Work that trips the triggers above — a new subsystem, a feature flag or `config` column, a database migration, a wholesale replacement of a load-bearing path — runs `/tbd-brainstorming` **before** implementation and commits the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
+Work that trips the triggers above — a new subsystem, adding or changing a feature flag or `config` column, a database migration, a wholesale replacement of a load-bearing path — runs `/tbd-brainstorming` **before** implementation and commits the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
 
 **A human answers the brainstorming questions.** An agent may not answer its own. If no human is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
 

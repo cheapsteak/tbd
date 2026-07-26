@@ -23,7 +23,7 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 
 Run this before implementing work that:
 - adds a new subsystem — a new directory under `Sources/`, or a new actor/service that owns state
-- adds a feature flag or `config` column
+- adds or changes a feature flag or `config` column
 - adds a database migration
 - wholesale-replaces a load-bearing path (rendering, input routing, persistence)
 

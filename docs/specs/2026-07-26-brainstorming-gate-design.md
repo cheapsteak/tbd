@@ -24,7 +24,7 @@ Proposed `CLAUDE.md` section, in house voice. Target ≤12 lines; trim on first 
 ```markdown
 ### Blast-radius work starts with a brainstormed spec
 
-Work that adds a subsystem, a feature flag or `config` column, a database migration, or that
+Work that adds a subsystem, adds or changes a feature flag or `config` column, a database migration, or that
 wholesale-replaces a load-bearing path (rendering, input routing, persistence) runs
 `/tbd-brainstorming` **before** implementation and commits the spec to
 `docs/specs/<date>-<topic>-design.md`. Same triggers as the default-off-flag rule above: if it
@@ -44,6 +44,10 @@ lint rule, because "was this brainstormed?" is not a property a linter can see. 
 
 - **Trigger is blast-radius, not feature-vs-bugfix.** Deliberately mirrors the existing
   default-off-flag rule so there is one judgement call, not two.
+- **Trigger covers changing a flag or column, not just adding one.** A default flip changes
+  behavior without adding anything, so "adds" alone would let it slip through — that is exactly
+  what happened with `auto_hibernate_enabled`, whose default flip needed a forcing `UPDATE`
+  migration (see the cautionary precedent in the default-off-flag rule).
 - **This exempts the incident that motivated it.** The desk-relay bug touched no subsystem, flag,
   migration, or load-bearing path. Accepted knowingly: the rule targets the class of work where
   design debt compounds, not every case where a spec would have been nice.
