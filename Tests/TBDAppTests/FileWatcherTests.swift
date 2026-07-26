@@ -30,9 +30,74 @@ import TestSupport
 /// per advance, so clock-driven tests are their own contention source and
 /// starve each other when run in parallel. `.clockDriven` is the hang guard for
 /// the known virtual-time failure mode (a sleep nobody advances hangs forever).
+///
+/// ## Deadline budget
+///
+/// Every wait here is a **hang guard**, never a tolerance window: the healthy
+/// path exits on its first probe (whole suite: ~0.6 s locally), and only a
+/// genuinely broken watcher pays a deadline. A hang guard being *slow to fire*
+/// is the property that distinguishes it from a wall-clock tolerance window,
+/// which assertion-hygiene rule 2 forbids. Two tiers:
+///
+/// | Guard | Value | What it waits on |
+/// |---|---|---|
+/// | `poll` / `writeUntilArmed` default | 8 s | task scheduling, `AsyncStream` delivery, `clock.sleep` entry |
+/// | `fdCloseTimeout` | 25 s | `close(fd)` in a GCD **cancel handler on a utility-QoS global queue** |
+/// | `withWatchedFile` FD quiescence | 12 s | same cancel handler, but not an assertion |
+/// | `advanceWhenSuspended` | 15 s | fixed by `ClockTestSupport`, not ours to set |
+///
+/// **The criterion these are sized against** is: the FIRST guard to fire must
+/// get its named diagnostic out inside `.clockDriven`'s 60 s per-test limit,
+/// otherwise the limit kills the test and reports an unnamed "wedged" instead
+/// of observed state (rule 4). Healthy prefix ~0.6 s + the largest single
+/// deadline (25 s) = well under half the limit, for every test here.
+///
+/// It is deliberately *not* "the sum of every deadline in a test stays under
+/// 60 s", because for three tests that is unachievable at any non-thin value —
+/// `ClockTestSupport`'s fixed 15 s handshake guard is used 2–3× per test, and
+/// its own docstring only budgets for a test that waits **twice**:
+///
+/// | Test | Worst-case cascade (all guards fire) |
+/// |---|---|
+/// | `liveStreamCountReturnsToBaselineAfterIteratorDrops` | 8 + 25 = 33 s |
+/// | `cancellingConsumingTaskTerminatesStream` | 2×8 + 25 = 41 s |
+/// | `nonExistentPathFinishesStreamImmediately` | 8 s |
+/// | `writesWithinOneWindowCollapseToOneNotification` | 3×8 + 15 + 8 + 12 = 59 s |
+/// | `nothingFiresUntilTheFullIntervalElapsed` | 8 + 15 + 8 + 12 = 43 s |
+/// | `lateWriteRestartsTheWindow` | 2×8 + **2×15** + 8 + 12 = 66 s |
+/// | `separatedWritesNotifyTwice` | 2×8 + **2×15** + 2×8 + 12 = 74 s |
+/// | `atomicSaveReopensAndKeepsStreamLive` | 2×8 + **3×15** + 3×8 + 25 + 12 = 122 s |
+/// | `terminationWithAPendingDebounceStillClosesTheFD` | 8 + 8 + 25 + 12 = 53 s |
+/// | `defaultClockDeliversOneRealDebouncedNotification` | ~1.8 + 8 = 10 s |
+///
+/// The three over-limit rows are dominated by the bolded fixed term (30 s,
+/// 30 s, 45 s) — `atomicSaveReopensAndKeepsStreamLive` cleared 60 s even at the
+/// thin 4 s deadlines this budget replaced (73 s then). Cutting the guards is
+/// therefore not what buys the property; only the first-diagnostic criterion
+/// above is actually satisfiable, and it is satisfied with room to spare. The
+/// remaining lever, if a full cascade ever needs to fit, is the suite's time
+/// limit, not the guards.
 @MainActor
 @Suite("FileWatcher", .clockDriven, .serialized)
 struct FileWatcherTests {
+
+    /// Deadline for any poll that waits on `close(fd)`.
+    ///
+    /// The invariant asserted at these sites ("exactly one FD closed") is
+    /// exact. *When* it becomes observable is not: `close(fd)` runs in the
+    /// dispatch source's **cancel handler**, which GCD submits to
+    /// `DispatchQueue.global(qos: .utility)` (`startWatching()`). Utility QoS
+    /// is the first thing macOS starves on a saturated runner, so these
+    /// assertions are load-**tolerant**, not load-**independent**.
+    ///
+    /// 25 s is that tolerance, and it is derived, not tuned to green: the
+    /// tightest test carrying one of these polls
+    /// (`terminationWithAPendingDebounceStillClosesTheFD`) spends 8 + 8 + 12 s
+    /// on its other guards, leaving 32 s under the 60 s limit — 25 s takes it
+    /// to 53 s. It also clears the observed contention magnitude: in the CI run
+    /// that reddened this suite at a 4 s deadline, sibling tests that are
+    /// normally sub-second took 22.9 s each.
+    private static let fdCloseTimeout: Duration = .seconds(25)
 
     // MARK: - Lifecycle (tier 2, DEFAULT clock — but they never reach the sleep; see the suite header)
 
@@ -94,7 +159,12 @@ struct FileWatcherTests {
 
         await Self.poll("liveStreamCount back to baseline \(baseline)",
                         observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+        // The live count reaching baseline proves only that `onTermination` ran
+        // and `terminate()` issued `src.cancel()`; the FD is closed later still,
+        // in the source's cancel handler on a utility-QoS queue. Hence the
+        // longer, load-tolerant deadline — a hang guard, not a latency budget.
         await Self.poll("exactly one FD closed (baseline \(fdBaseline))",
+                        timeout: Self.fdCloseTimeout,
                         observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
     }
 
@@ -131,7 +201,14 @@ struct FileWatcherTests {
 
         await Self.poll("liveStreamCount back to baseline \(baseline)",
                         observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+        // Utility-QoS cancel handler again — see the sibling test above. This
+        // deadline also protects the PRECEDING test's assertion transitively:
+        // the baseline read at the top of this test is only clean if the
+        // previous test's close had already landed, so a deadline too thin to
+        // outlast the starvation reddens twice — once as a missing close here,
+        // once as a doubled count in the next test to capture a baseline.
         await Self.poll("exactly one FD closed (baseline \(fdBaseline))",
+                        timeout: Self.fdCloseTimeout,
                         observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
     }
 
@@ -352,7 +429,10 @@ struct FileWatcherTests {
                             observing: { f.yields.count }) { $0 == 2 }
             // The previous epoch's source is cancelled by the re-open, so its
             // FD is closed — the "we never leak" half of the atomic-save story.
+            // Utility-QoS cancel handler, so the long deadline: load-tolerant,
+            // not load-independent.
             await Self.poll("the pre-rename FD was closed (baseline \(fdBaseline))",
+                            timeout: Self.fdCloseTimeout,
                             observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
 
             // Still live: a write to the re-opened inode still debounces.
@@ -396,7 +476,10 @@ struct FileWatcherTests {
 
             await Self.poll("liveStreamCount back to baseline \(baseline)",
                             observing: { FileWatcher.liveStreamCount }) { $0 == baseline }
+            // Utility-QoS cancel handler, so the long deadline: the invariant is
+            // exact, its observability is load-tolerant.
             await Self.poll("the watched FD was closed (baseline \(fdBaseline))",
+                            timeout: Self.fdCloseTimeout,
                             observing: { FileWatcher.closedFDCount }) { $0 == fdBaseline + 1 }
         }
     }
@@ -413,9 +496,10 @@ struct FileWatcherTests {
     /// tests never write, and the debounce tests inject their own clock. This is
     /// the only assertion that fails in either case. The wait is bounded polling
     /// for an event that MUST occur (assertion-hygiene rule 3), not a timing
-    /// tolerance, and the deadlines below are hang guards sized generously
-    /// because real GCD delivery plus a real debounce is the thing being waited
-    /// on.
+    /// tolerance: the retry loop below is bounded by the production debounce
+    /// itself, and the poll after it takes the suite's 8 s fast-tier hang guard
+    /// — ~53× the 150 ms it is waiting on, and the cheapest budget in the suite
+    /// (nothing else in this test can pay a deadline).
     @Test func defaultClockDeliversOneRealDebouncedNotification() async {
         let url = Self.makeTempFile()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -442,7 +526,6 @@ struct FileWatcherTests {
         }
 
         await Self.poll("the real 150 ms debounce delivered exactly one notification",
-                        timeout: .seconds(10),
                         observing: { yields.count }) { $0 == 1 }
 
         consumer.cancel()
@@ -553,7 +636,17 @@ struct FileWatcherTests {
         // is 1 + however many times the body provoked a re-open, which is not
         // observable from out here. So: at least one close, and the count
         // unchanged across two probes.
-        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(4))
+        //
+        // 12s, not 4s: this waits on the same utility-QoS cancel handler as the
+        // `fdCloseTimeout` polls, so a deadline that expires under contention
+        // hands the NEXT test a baseline with a close still in flight — which
+        // then reddens as a doubled count there rather than as anything about
+        // this test. Not `fdCloseTimeout` itself, because this is not an
+        // assertion and it has to share a 60s test with the guards that are;
+        // 12s is what `writesWithinOneWindowCollapseToOneNotification` (3 armed
+        // writes + a 15s handshake + a poll = 47s) leaves under the limit.
+        // Costs ~20ms on the healthy path either way.
+        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(12))
         var previous = -1
         while ContinuousClock.now < settleDeadline {
             let current = FileWatcher.closedFDCount
@@ -609,23 +702,26 @@ struct FileWatcherTests {
     ///   strict reading so a new call site does not silently paper over one.
     private static func writeUntilArmed(_ f: Fixture,
                                         firstWriteAfterResume: Bool = false,
-                                        // 4s, not 12s: `.clockDriven` kills the test at 60s, and
-                                        // `atomicSaveReopensAndKeepsStreamLive` chains 2 of these,
-                                        // 4 polls, and 3 fixed 15s `advanceWhenSuspended` waits. At
-                                        // 12s each, a single stuck helper could sit past the suite
-                                        // limit and its named diagnostic below would never print —
-                                        // the uninformative "wedged" outcome `ClockTestSupport` warns
-                                        // about. 4s keeps the first stuck helper's report well inside
-                                        // the limit, and the healthy path never pays it.
-                                        timeout: Duration = .seconds(4),
+                                        // 8s, matching `poll`'s default: the arm this waits for is
+                                        // recorded by a `Task` that the dispatch source's event
+                                        // handler creates, so it inherits utility QoS and is starved
+                                        // by the same CI contention. Sized against the tightest test
+                                        // that chains three of these — see the suite header.
+                                        timeout: Duration = .seconds(8),
                                         pollInterval: Duration = .milliseconds(25),
                                         sourceLocation: SourceLocation = #_sourceLocation) async {
         let before = f.armed.count
         let deadline = ContinuousClock.now.advanced(by: timeout)
-        // Per-write settling window: generous next to real GCD delivery (low
-        // single-digit milliseconds here) yet small enough that `timeout` still
-        // affords a retry or two before the hang guard fires.
-        let attemptWindow: Duration = .milliseconds(250)
+        // Per-write settling window, and the load-sensitive number in this
+        // helper: exceeding it does not just cost a retry, it *records the
+        // event-loss Issue below*. At 250 ms that made it a wall-clock tolerance
+        // window on real GCD delivery (assertion-hygiene rule 2) — healthy
+        // delivery is low single-digit milliseconds, but the CI contention that
+        // reddened this suite inflated sub-second siblings to 22.9 s, so a merely
+        // slow delivery would have been reported as production event loss. 4 s
+        // is a threshold for "the event is gone", not a latency budget, and still
+        // affords a second attempt inside `timeout`.
+        let attemptWindow: Duration = .seconds(4)
         var writes = 0
         repeat {
             appendByte(to: f.path, sourceLocation: sourceLocation)
@@ -647,21 +743,21 @@ struct FileWatcherTests {
                 // loop still retries, so the test fails here with a diagnosis
                 // instead of wedging on the next `advanceWhenSuspended`.
                 Issue.record(
-                    """
-                    FileWatcher missed a write against an already-registered dispatch source \
-                    (\(f.path)) within \(attemptWindow): armed count is still \(before). \
-                    Retrying, but this is event loss, not the resume() registration race.
-                    """,
+                    Failure("""
+                        FileWatcher missed a write against an already-registered dispatch source \
+                        (\(f.path)) within \(attemptWindow): armed count is still \(before). \
+                        Retrying, but this is event loss, not the resume() registration race.
+                        """),
                     sourceLocation: sourceLocation
                 )
             }
         } while ContinuousClock.now < deadline
         Issue.record(
-            """
-            FileWatcher armed no new timer within \(timeout): armed count is \
-            \(f.armed.count), was \(before) before \(writes) write(s) to \(f.path). \
-            The dispatch source never delivered the write event.
-            """,
+            Failure("""
+                FileWatcher armed no new timer within \(timeout): armed count is \
+                \(f.armed.count), was \(before) before \(writes) write(s) to \(f.path). \
+                The dispatch source never delivered the write event.
+                """),
             sourceLocation: sourceLocation
         )
     }
@@ -684,16 +780,28 @@ struct FileWatcherTests {
     /// exits on the first probe, and only genuinely broken teardown ever pays
     /// the full deadline. The loops this replaces polled `10 × 20 ms = 200 ms`,
     /// which *was* a tolerance window — thin enough to lose under CI load
-    /// (assertion-hygiene rule 2). Failure reports the OBSERVED value, not just
-    /// the expectation (rule 4).
+    /// (assertion-hygiene rule 2).
     ///
-    /// 4s rather than 12s for the same reason as `writeUntilArmed`: a test that
-    /// chains several of these plus a few fixed 15s `advanceWhenSuspended` waits
-    /// must get the first stuck helper's diagnostic out well inside
-    /// `.clockDriven`'s 60s limit, or the suite limit fires first and reports an
-    /// uninformative "wedged" instead.
+    /// The 8 s default covers the fast counters, whose producer is the consuming
+    /// `Task` and the `AsyncStream` machinery. Callers waiting on `close(fd)`
+    /// pass `fdCloseTimeout` instead — that one runs on a utility-QoS queue and
+    /// is starved an order of magnitude harder. Both values, and the per-test
+    /// arithmetic they come from, are in the suite header.
+    ///
+    /// Failure is recorded as an **error**, not as `#expect(cond, "…")` and not
+    /// as `Issue.record("…")`: both of those render their message on a separate
+    /// `↳` continuation line, and CI summaries quote only the primary line. That
+    /// is why the real CI failure this budget was written for read
+    ///
+    ///     Expectation failed: condition(value → 0)
+    ///
+    /// which carries the observed value but names neither the counter nor what
+    /// it was waiting for — two adjacent polls in the same test are then
+    /// distinguishable only by column number. `Issue.record(_: some Error)`
+    /// renders as `Caught error: <description>`, so description *and* observed
+    /// value land in the primary line (rule 4, the `fileBytesUnmatched` shape).
     private static func poll(_ description: String,
-                             timeout: Duration = .seconds(4),
+                             timeout: Duration = .seconds(8),
                              pollInterval: Duration = .milliseconds(25),
                              sourceLocation: SourceLocation = #_sourceLocation,
                              observing observed: () -> Int,
@@ -704,8 +812,18 @@ struct FileWatcherTests {
             try? await Task.sleep(for: pollInterval)
             value = observed()
         }
-        #expect(condition(value),
-                "\(description): observed \(value) after polling up to \(timeout)",
-                sourceLocation: sourceLocation)
+        guard !condition(value) else { return }
+        Issue.record(
+            Failure("FileWatcher: \(description) — observed \(value) after polling up to \(timeout)"),
+            sourceLocation: sourceLocation
+        )
+    }
+
+    /// Failure payload for `Issue.record(_: some Error)`, whose primary console
+    /// line is `Caught error: <description>`. See `poll` for why the message
+    /// has to travel as an error rather than as a comment.
+    private struct Failure: Error, CustomStringConvertible {
+        let description: String
+        init(_ description: String) { self.description = description }
     }
 }
