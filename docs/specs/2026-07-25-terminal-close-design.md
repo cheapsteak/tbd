@@ -348,15 +348,21 @@ Add all three together if a second real consumer appears.
 **D3 — self-close framing.** Both refuse it; recorded above with the deferral
 door explicitly left open rather than as a claim that it cannot be built.
 
-**D4 — the change is four pieces, not three.** `SocketClient` does not surface
-`errorCode` to CLI callers today (no references in `Sources/TBDCLI/`), so
-branching on `terminalBusy` requires a small addition there alongside the three
-daemon changes in §7.
+**D4 — ~~the change is four pieces, not three~~. Withdrawn: it is three.**
+This section claimed `SocketClient` needed a change to surface `errorCode`,
+inferred from there being no references to it in `Sources/TBDCLI/`. That
+inference was wrong. `SocketClient.send()` already returns the whole
+`RPCResponse`, `errorCode` included, and `CleanupCommand` already calls `send`
+directly for exactly that kind of access — the absence of references meant
+nobody had needed the field yet, not that it was unreachable. Verified while
+implementing: the command branches on `response.errorCode` with no change to
+`SocketClient`. Kept rather than deleted because "no references, therefore not
+available" is a tempting and wrong move to make twice.
 
 ## 7. Required changes
 
-Not pure CLI. Three daemon changes plus one CLI plumbing change, all additive and
-decode-compatible.
+Not pure CLI. Three daemon changes, all additive and decode-compatible. (No CLI
+plumbing change — see §6 D4, withdrawn.)
 
 1. **Idempotent not-found.** `handleTerminalDelete` currently returns
    `RPCResponse(error: "Terminal not found: …")`
@@ -378,8 +384,8 @@ decode-compatible.
 3. **Structured error code.** Add `case terminalBusy` to `RPCErrorCode`
    (`RPCProtocol.swift:86-91`, currently a single `profileMissing` case).
    `RPCResponse(error:code:)` already carries it (`RPCProtocol.swift:50-55`).
-4. **CLI plumbing.** Surface `errorCode` through `SocketClient` so the command
-   maps `terminalBusy` → exit 2 without parsing prose.
+   The CLI reads `response.errorCode` off `SocketClient.send()` and maps
+   `terminalBusy` → exit 2 without parsing prose. No `SocketClient` change.
 
 Result type: `TerminalDeleteResult(closed: Bool, alreadyGone: Bool,
 claudeSessionID: String?)`, mirroring wake's `{"woken": bool}` precedent.
