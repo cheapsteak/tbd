@@ -20,7 +20,7 @@ context-menu affordances, and it lives nowhere near the other worktrees.
 A **pinned dock**: a fixed region at the bottom of the sidebar, directly above the
 `NightwatchModeToggle` and the "Add Repository" bar, holding worktree rows that never scroll
 away. Pinning is a per-worktree toggle in the row's right-click menu. When a watch mode is
-on, the Watch Desk occupies the first slot automatically.
+on, the Watch Desk occupies a fixed slot of its own at the bottom of that region.
 
 ### Pinning is a mirror, not a move
 
@@ -41,12 +41,40 @@ right-click menu all behave exactly as they do in the list. **The only differenc
 dock row and a section row is where it sits.** No compact variant, no second row
 implementation to drift out of sync.
 
-### The Watch Desk is mode-driven, not user-pinned
+### The Watch Desk has its own fixed slot
 
-When `nightwatchExperimental` is on and `nightwatchMode != .off`, the desk worktree occupies
-the first dock slot. It is not stored as a pin — its `pinnedAt` stays `nil` — and its
-right-click menu offers **neither** Pin nor Unpin. The Day/Night toggle sitting one row below
-is its control: turn mode off and the row leaves.
+When `nightwatchExperimental` is on and `nightwatchMode != .off`, the desk worktree renders in
+a dedicated slot **below** the scrollable pinned area and **directly above** the Day/Night
+toggle. It is not a member of the pinned list, so no amount of scrolling in that list can move
+it off screen — the desk and its toggle stay adjacent and always visible.
+
+```
+┌──────────────────────┐
+│ ▾ tbd                │
+│    main              │   scrolling repo list
+│    daemon-storm      │
+├──────────────────────┤
+│ ● nightwatch-tint  ▕│▖
+│ ○ deeplink         ▕│█  pinned area — scrolls, capped
+│ ● testing-slice-e  ▕│▌
+├──────────────────────┤
+│ ◐ Watch Desk         │  fixed slot — never scrolls
+├──────────────────────┤
+│ Off │ ◐ Day │🌙 Night│
+├──────────────────────┤
+│ + Add Repository   ⌄ │
+└──────────────────────┘
+```
+
+The desk is not stored as a pin — its `pinnedAt` stays `nil` — and its right-click menu offers
+**neither** Pin nor Unpin. The Day/Night toggle immediately below is its control: turn mode
+off and the slot disappears.
+
+The slot is **exactly one row** and does not expand children, unlike pinned rows. That is what
+makes "always directly above the toggle" a guarantee rather than a usual case. It costs
+nothing in practice: the desk is a scratch worktree, and `children(of:)` only ever returns
+repo worktrees, so a desk with children is hypothetical. If one ever has them, they remain
+reachable in the Scratch section.
 
 The desk row shows the worktree's real display name, `"◐ Watch Desk"`, in every mode. The ◐
 is baked into `NightwatchDeskPrompts.deskDisplayName`, and swapping it to 🌙 in the dock would
@@ -55,13 +83,15 @@ from the toggle immediately below, so the glyph carries no load.
 
 ### Growth is capped
 
-The dock grows one row per visible row — pins, the desk, and any expanded children — up to
-`min(5 rows, 40% of sidebar height)`, then scrolls internally. The list above therefore never
-loses more than 40% of its height, however many worktrees are pinned or expanded. At zero rows
-the dock is absent entirely: a user with no pins and mode off sees today's sidebar unchanged.
+The **pinned area** grows one row per visible row — pins plus any expanded children — up to
+`min(5 rows, 40% of sidebar height)`, then scrolls internally. The repo list above therefore
+never loses more than 40% of its height plus the one-row desk slot, however many worktrees are
+pinned or expanded. With no pins and mode off, the whole footer addition is absent and the
+sidebar looks exactly as it does today.
 
-Because an expansion can push the dock past the cap, the dock scrolls the selected row into
-view whenever selection changes to a row it contains.
+Because an expansion can push the pinned area past its cap, that area scrolls the selected row
+into view whenever selection changes to a row it contains. The desk slot never scrolls, so it
+is exempt.
 
 ## Removals
 
@@ -154,39 +184,49 @@ not a disclosure triangle the user toggles.
 ```swift
 struct PinnedDockRow: Identifiable, Equatable {
     let worktree: Worktree
-    let depth: Int              // 0 = pinned row or desk; 1+ = expanded descendant
+    let depth: Int              // 0 = pinned row; 1+ = expanded descendant
     let sectionRepoID: UUID?    // repoID of this row's top-level ancestor; nil at depth 0
     var id: UUID { worktree.id }
 }
 
 enum PinnedDockContent {
+    /// Scrollable pinned area. Never contains the desk.
     static func rows(allWorktrees: [Worktree],
-                     mode: NightwatchMode,
-                     experimentalEnabled: Bool,
                      selectedIDs: Set<UUID>,
                      children: (UUID) -> [Worktree]) -> [PinnedDockRow]
+
+    /// The fixed desk slot, or nil when it should not render.
+    static func deskRow(allWorktrees: [Worktree],
+                        mode: NightwatchMode,
+                        experimentalEnabled: Bool) -> Worktree?
 }
 ```
+
+The two are separate functions because they render into separate containers with different
+scroll behaviour. `rows` no longer takes `mode` or `experimentalEnabled` at all — the pinned
+area is entirely mode-independent, which is a nice simplification of the original design.
 
 `children` is injected rather than recomputed so the dock and the list agree on what a child
 is: the view passes `appState.children(of:)`, which already filters to `.active`/`.creating`
 and sorts by `sortOrder`. Tests pass a stub. Duplicating that predicate here would let the two
 surfaces drift.
 
-Rules, in order:
+`deskRow` returns the worktree satisfying `isNightwatchDesk` when
+`experimentalEnabled && mode != .off`, and `nil` otherwise. It also returns `nil` when mode is
+on but no such worktree exists — mode was just turned on and the daemon has not created the
+desk yet. That is not an error and gets no placeholder row.
 
-1. If `experimentalEnabled && mode != .off`, the worktree satisfying `isNightwatchDesk` is the
-   first top-level row. If no such worktree exists — mode was just turned on and the daemon
-   has not created the desk yet — the slot is simply absent. Not an error, not a placeholder.
-2. Then every worktree with `pinnedAt != nil`, sorted ascending by `pinnedAt`. Oldest pin
-   first, so new pins append and existing rows never move.
-3. The desk is excluded from step 2 even if something set its `pinnedAt`, so it can never
-   appear twice.
-4. Archived worktrees are excluded as top-level rows. Their `pinnedAt` is left untouched, so
+`rows` rules, in order:
+
+1. Every worktree with `pinnedAt != nil`, sorted ascending by `pinnedAt`. Oldest pin first, so
+   new pins append and existing rows never move.
+2. The desk is excluded even if something set its `pinnedAt`, so it can never appear both in
+   the pinned area and in its own slot.
+3. Archived worktrees are excluded as top-level rows. Their `pinnedAt` is left untouched, so
    reviving one restores its pin. (`children` already excludes them from expansions.)
-5. Each top-level row expands its descendants, depth-first at `depth + 1`, **iff** its own id
+4. Each top-level row expands its descendants, depth-first at `depth + 1`, **iff** its own id
    or any descendant id is in `selectedIDs`. Otherwise it contributes one row.
-6. A worktree already emitted is never emitted again. A pinned worktree that is also a
+5. A worktree already emitted is never emitted again. A pinned worktree that is also a
    descendant of another pinned worktree keeps its own top-level position and does not repeat
    inside the expansion. This also makes a cyclic `parentWorktreeID` chain terminate, so the
    dock needs no depth cap of its own — unlike `WorktreeSubtreeView`, whose recursion is
@@ -270,10 +310,50 @@ Known cost: two `List`s means two keyboard-navigation islands. Arrow keys move w
 whichever list has focus rather than crossing between them. Accepted — the dock is a
 click target, and full row fidelity was the stated requirement.
 
-It slots into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, between the `Divider`
-and `NightwatchModeToggle`. `availableHeight` comes from a `GeometryReader` wrapping the
-sidebar's `List`, read once and passed down — the dock must not read geometry from inside its
-own frame, which would feed its height back into itself.
+The desk slot is a sibling view, `PinnedDockDeskSlot`, built the same way — a single-row
+`List(selection:)` at a fixed `PinnedDockMetrics.rowHeight`:
+
+```swift
+struct PinnedDockDeskSlot: View {
+    let desk: Worktree?           // from PinnedDockContent.deskRow(...)
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if let desk {
+            List(selection: $appState.selectedWorktreeIDs) {
+                WorktreeRowView(worktree: desk)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .tag(desk.id)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .scrollDisabled(true)
+            .frame(height: PinnedDockMetrics.rowHeight)
+        }
+    }
+}
+```
+
+Using a `List` here rather than a bare `WorktreeRowView` is not ceremony — it is what gives
+the desk row the same native selection highlight and row metrics as every other row. A bare
+row would need hand-rolled selection chrome, which is the thing this design rejects.
+
+Both slot into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, in this order:
+
+```
+Divider
+PinnedDockView        ← scrolls, capped, absent when empty
+Divider               ← only when both the pinned area and the desk slot are present
+PinnedDockDeskSlot    ← fixed one row, absent when mode off
+NightwatchModeToggle  ← existing
+Add Repository + filter bar  ← existing
+```
+
+`availableHeight` comes from a `GeometryReader` wrapping the sidebar's `List`, read once and
+passed down — the dock must not read geometry from inside its own frame, which would feed its
+height back into itself.
 
 ### Menu
 
@@ -317,16 +397,18 @@ same gate as every other nightwatch surface.
 
 Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
 
-**`PinnedDockContentTests`**
-- Desk row present / absent across all four combinations of
-  `mode ∈ {off, daywatch, nightwatch}` × `experimentalEnabled ∈ {true, false}` — the desk
-  appears only when the flag is on and mode is not off.
-- Desk sorts first, ahead of an older pin.
+**`PinnedDockContentTests` — `deskRow`**
+- Present / absent across all six combinations of `mode ∈ {off, daywatch, nightwatch}` ×
+  `experimentalEnabled ∈ {true, false}` — the desk resolves only when the flag is on and mode
+  is not off. This is the `CLAUDE.md` branch-coverage requirement for the gate.
+- Mode on but no desk worktree exists → `nil`, no crash.
+
+**`PinnedDockContentTests` — `rows`**
 - Pins sort ascending by `pinnedAt`; a new pin appends rather than reordering.
 - `pinnedAt == nil` excluded.
 - Archived worktree with a non-nil `pinnedAt` excluded.
-- Mode on but no desk worktree exists → no desk row, no crash.
-- Desk carrying a stray `pinnedAt` appears exactly once.
+- Desk carrying a stray `pinnedAt` is excluded from `rows` — it must never appear both in the
+  scrolling area and in its fixed slot.
 
 **`PinnedDockContentTests` — expansion**
 - Nothing selected → every top-level row contributes exactly one row, no children.
