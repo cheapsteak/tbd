@@ -1,6 +1,6 @@
 # Brainstorming gate: qualifying work starts with a checked-in spec
 
-**Status:** adopted, not yet implemented
+**Status:** implemented on `tbd/brainstorm-gate` (2459991f, 163900c5, cf497a94, f4bb0859, c14d4ee4, 31b3e4b7); nightwatch desk-prompt follow-up still outstanding, see Sequencing
 **Date:** 2026-07-26
 
 ## Why

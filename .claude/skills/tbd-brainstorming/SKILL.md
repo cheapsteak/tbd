@@ -1,6 +1,6 @@
 ---
 name: tbd-brainstorming
-description: REQUIRED before implementing blast-radius work in TBD — anything adding a subsystem, a feature flag or config column, a database migration, or replacing a load-bearing path. Explores intent, constraints, and alternatives with a human, then writes a spec to docs/specs/. Use instead of superpowers:brainstorming in this repo.
+description: REQUIRED before implementing blast-radius work in TBD — anything adding a subsystem, adding or changing a feature flag or config column, a database migration, or replacing a load-bearing path. Explores intent, constraints, and alternatives with a human, then writes a spec to docs/specs/. Use instead of superpowers:brainstorming in this repo.
 ---
 
 <!-- vendored from obra/superpowers v6.1.1 @ 5a0f8953, MIT (c) 2025 Jesse Vincent -->
