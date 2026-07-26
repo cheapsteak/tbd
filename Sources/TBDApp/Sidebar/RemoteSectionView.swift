@@ -28,14 +28,15 @@ struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
+        let knownRepoIDs = Set(appState.repos.map(\.id))
         ForEach(
             appState.remoteProviders.filter {
-                RemoteSectionView.shouldShowHeader(provider: $0, sessions: appState.remoteSessions)
+                RemoteSectionView.shouldShowHeader(provider: $0, sessions: appState.remoteSessions, knownRepoIDs: knownRepoIDs)
             },
             id: \.config.name
         ) { provider in
             RemoteProviderHeaderRow(provider: provider)
-            ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name)) { session in
+            ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs)) { session in
                 RemoteSessionRowView(session: session)
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
@@ -54,21 +55,39 @@ struct RemoteSectionView: View {
     /// disappear at exactly the moment it matters most. A fully-matched,
     /// fully-healthy provider has nothing left to say here, so it renders
     /// nothing rather than an empty floating header.
-    nonisolated static func shouldShowHeader(provider: RemoteProviderStatus, sessions allSessions: [RemoteSessionInfo]) -> Bool {
-        provider.health != .ok || !sessions(in: allSessions, forProvider: provider.config.name).isEmpty
+    nonisolated static func shouldShowHeader(
+        provider: RemoteProviderStatus, sessions allSessions: [RemoteSessionInfo], knownRepoIDs: Set<UUID>
+    ) -> Bool {
+        provider.health != .ok || !sessions(in: allSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs).isEmpty
     }
 
-    /// UNMATCHED sessions belonging to one provider — resolved
-    /// (`resolvedRepoID != nil`) sessions render inside their repo's section
-    /// instead (`RepoSectionView.matchedRemoteSessions`) — with dismissed
-    /// tombstones excluded. Pure — split out from `body` so it's directly
-    /// testable without constructing a view hierarchy. `nonisolated` because
-    /// `View.body` being `@MainActor` otherwise infers whole-type MainActor
-    /// isolation onto every member (including this one) — calling that
-    /// inferred isolation from a plain (non-`@MainActor`) test context traps
-    /// at runtime instead of failing to compile.
-    nonisolated static func sessions(in all: [RemoteSessionInfo], forProvider provider: String) -> [RemoteSessionInfo] {
-        all.filter { $0.provider == provider && $0.resolvedRepoID == nil && !$0.dismissed }
+    /// UNMATCHED sessions belonging to one provider, with dismissed
+    /// tombstones excluded. "Unmatched" is `resolvedRepoID == nil` (never
+    /// pinned) OR a `resolvedRepoID` that no longer names any repo in
+    /// `knownRepoIDs` — `resolvedRepoID` is a plain pinned value the daemon
+    /// never re-resolves or clears once a repo is removed from TBD (see
+    /// `RemoteSessionStore.upsert`'s pinning doc comment), so without this
+    /// second condition a pinned row whose repo is later removed would
+    /// render NOWHERE: excluded here because the column is non-nil, and
+    /// excluded from `RepoSectionView` because that repo's section no longer
+    /// exists. Re-checking membership every render (rather than trusting the
+    /// stored value) also means this self-heals for free the moment the repo
+    /// reappears in `knownRepoIDs` — no new pinning event required. Resolved
+    /// (matched-to-a-known-repo) sessions render inside their repo's section
+    /// instead (`RepoSectionView.matchedRemoteSessions`). Pure — split out
+    /// from `body` so it's directly testable without constructing a view
+    /// hierarchy. `nonisolated` because `View.body` being `@MainActor`
+    /// otherwise infers whole-type MainActor isolation onto every member
+    /// (including this one) — calling that inferred isolation from a plain
+    /// (non-`@MainActor`) test context traps at runtime instead of failing
+    /// to compile.
+    nonisolated static func sessions(
+        in all: [RemoteSessionInfo], forProvider provider: String, knownRepoIDs: Set<UUID>
+    ) -> [RemoteSessionInfo] {
+        all.filter {
+            $0.provider == provider && !$0.dismissed
+                && ($0.resolvedRepoID == nil || !knownRepoIDs.contains($0.resolvedRepoID!))
+        }
     }
 }
 

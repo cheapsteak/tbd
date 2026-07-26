@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
 import TBDShared
+import os
+
+private let remoteSessionStoreLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
 /// GRDB row for the `remote_session` mirror table. The provider is the
 /// source of truth; this table is a cache with drift bookkeeping
@@ -41,6 +44,40 @@ public struct SnapshotOutcome: Sendable {
     public let attention: [RemoteSessionPayload]
 }
 
+/// Lazily-fetched, per-transaction cache of every registered repo, used to
+/// resolve `meta["repo"]` for unresolved sessions. Without this, `upsert`
+/// fetching the full repo table inline costs one `RepoRecord.fetchAll` PER
+/// unresolvable session on every single poll (N sessions × every poll,
+/// forever, since resolution keeps retrying while `resolvedRepoID` is null —
+/// see the pinning doc comment below). A `final class` (not a `struct`)
+/// because it needs reference semantics: `applySnapshot`'s loop shares one
+/// instance across every `upsert` call in the transaction, and each call
+/// must see the SAME cached fetch (or lack thereof) as the ones before it.
+/// Not `Sendable` on purpose — never crosses an await boundary or escapes
+/// the single synchronous `writer.write { db in ... }` closure it's created
+/// inside.
+private final class RepoCache {
+    private let db: Database
+    private var cached: [Repo]?
+
+    init(db: Database) {
+        self.db = db
+    }
+
+    /// Fetches on first call, then returns the same array for the rest of
+    /// this cache's lifetime (one `write` transaction). Safe even if this
+    /// transaction inserted/removed repos earlier in the SAME transaction
+    /// (won't happen in practice — repo mutation and remote-session
+    /// resolution never share a transaction — but if it did, GRDB
+    /// transaction isolation means this fetch already reflects it).
+    func get() throws -> [Repo] {
+        if let cached { return cached }
+        let fetched = try RepoRecord.fetchAll(db).compactMap { $0.toModel() }
+        cached = fetched
+        return fetched
+    }
+}
+
 /// Provider-scoped mirror of `RemoteSessionPayload` rows (Task 2 wire types).
 /// Task 5's daemon manager drives `applySnapshot` on each poll and turns its
 /// `SnapshotOutcome` into UI deltas / notifications.
@@ -60,7 +97,7 @@ public struct RemoteSessionStore: Sendable {
     /// full snapshot.
     private func upsert(
         _ session: RemoteSessionPayload, provider: String, existing: RemoteSessionRow?,
-        now: Date, encoder: JSONEncoder, db: Database
+        now: Date, encoder: JSONEncoder, db: Database, repoCache: RepoCache
     ) throws -> (changed: Bool, attention: RemoteSessionPayload?) {
         let payloadString = String(data: try encoder.encode(session), encoding: .utf8) ?? "{}"
         if var row = existing {
@@ -78,7 +115,7 @@ public struct RemoteSessionStore: Sendable {
             // never migrate this row to a different repo section underneath
             // the user. See `RemoteSessionInfo.resolvedRepoID`'s doc comment.
             if row.resolvedRepoID == nil,
-               let resolved = try self.resolveRepoID(metaRepo: session.meta?["repo"], db: db) {
+               let resolved = try self.resolveRepoID(metaRepo: session.meta?["repo"], repoCache: repoCache) {
                 row.resolvedRepoID = resolved.uuidString
                 changed = true
             }
@@ -93,7 +130,7 @@ public struct RemoteSessionStore: Sendable {
         } else {
             // First sighting never notifies — otherwise the daemon would
             // fire a banner storm for every pre-existing session on startup.
-            let resolvedRepoID = try self.resolveRepoID(metaRepo: session.meta?["repo"], db: db)
+            let resolvedRepoID = try self.resolveRepoID(metaRepo: session.meta?["repo"], repoCache: repoCache)
             try RemoteSessionRow(
                 provider: provider, sessionID: session.id,
                 payload: payloadString, state: session.state.rawValue,
@@ -106,15 +143,22 @@ public struct RemoteSessionStore: Sendable {
         }
     }
 
-    /// Resolves `metaRepo` against the repos currently registered in the
-    /// SAME transaction `upsert` runs in — reading `repo` directly here
-    /// (rather than threading a `[Repo]` snapshot in from the caller) keeps
-    /// the read and the write consistent and avoids a repo query at all for
-    /// the common case (an already-resolved row, or no `meta["repo"]`).
-    private func resolveRepoID(metaRepo: String?, db: Database) throws -> UUID? {
-        guard metaRepo != nil else { return nil }
-        let repos = try RepoRecord.fetchAll(db).compactMap { $0.toModel() }
-        return RemoteRepoMatching.resolveRepoID(metaRepo: metaRepo, repos: repos)
+    /// Resolves `metaRepo` against `repoCache` — lazily fetched at most once
+    /// per transaction (see `RepoCache`'s doc comment) rather than once per
+    /// unresolved session. Logs at `.debug` when `metaRepo` is present but
+    /// matched no local repo — the only way to answer "why isn't my session
+    /// in my repo's section" without attaching a debugger, since a miss here
+    /// otherwise leaves no trace anywhere.
+    private func resolveRepoID(metaRepo: String?, repoCache: RepoCache) throws -> UUID? {
+        guard let metaRepo else { return nil }
+        let repos = try repoCache.get()
+        let resolved = RemoteRepoMatching.resolveRepoID(metaRepo: metaRepo, repos: repos)
+        if resolved == nil {
+            let normalizedKey = RemoteRepoMatching.normalizedKey(metaRepo)
+            remoteSessionStoreLogger.debug(
+                "remote session meta[repo]=\(metaRepo, privacy: .public) (normalized: \(normalizedKey ?? "unparseable", privacy: .public)) matched no local repo")
+        }
+        return resolved
     }
 
     /// Reconcile one provider's full session list against the mirror table.
@@ -133,12 +177,16 @@ public struct RemoteSessionStore: Sendable {
             var byID = Dictionary(uniqueKeysWithValues: existing.map { ($0.sessionID, $0) })
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]   // stable payload string for change detection
+            // Shared across every session in this snapshot so an unresolved
+            // repo lookup costs at most one `RepoRecord.fetchAll` for the
+            // WHOLE poll, not one per unresolved session.
+            let repoCache = RepoCache(db: db)
 
             for session in sessions {
                 let existingRow = byID.removeValue(forKey: session.id)
                 let outcome = try self.upsert(
                     session, provider: provider, existing: existingRow,
-                    now: now, encoder: encoder, db: db)
+                    now: now, encoder: encoder, db: db, repoCache: repoCache)
                 if outcome.changed { changed = true }
                 if let attentionSession = outcome.attention { attention.append(attentionSession) }
             }
@@ -172,7 +220,7 @@ public struct RemoteSessionStore: Sendable {
             encoder.outputFormatting = [.sortedKeys]
             let outcome = try self.upsert(
                 session, provider: provider, existing: existing,
-                now: now, encoder: encoder, db: db)
+                now: now, encoder: encoder, db: db, repoCache: RepoCache(db: db))
             return SnapshotOutcome(
                 changed: outcome.changed,
                 attention: outcome.attention.map { [$0] } ?? [])

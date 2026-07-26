@@ -105,7 +105,8 @@ final class AppState: ObservableObject {
             // this same Set) purely so they're List-native keyboard
             // reachable — arrow-key traversal and the focus ring — the same
             // reason repo header tags are handled just above. UNLIKE the
-            // repo-header case, route the stripped id through
+            // repo-header case, a PURE remote selection (the remote tag(s)
+            // were the entire selection) routes the stripped id through
             // `selectRemoteSession` (not just discard) so keyboard-only
             // navigation — which never fires `RemoteSessionRowView`'s
             // `.onTapGesture` — still ends up setting `selectedRemoteSession`
@@ -114,11 +115,51 @@ final class AppState: ObservableObject {
             // a real `Worktree.id` (keyboard shortcuts, the jump menu,
             // navigation history, persisted restore); stripping here before
             // any of that runs keeps that invariant exactly as it was.
+            //
+            // A MIXED selection (real worktree ids survive after stripping
+            // the remote tag(s) — e.g. shift+↓ extending from a local
+            // worktree row onto a remote row, or a shift-range crossing a
+            // repo section's appended remote rows) must NOT route through
+            // `selectRemoteSession`: that call unconditionally sets
+            // `selectedWorktreeIDs = []`, which would silently wipe every
+            // local id this same gesture just selected. The `subtract` call
+            // below is itself an assignment to `selectedWorktreeIDs`, so it
+            // re-invokes this same `didSet` (nested, synchronously, before
+            // `subtract` returns) with the remote tag(s) already gone — that
+            // nested invocation runs the ordinary worktree-selection
+            // bookkeeping below for whatever local ids survived (or, if
+            // none survived, is a no-op, since the bottom bookkeeping is
+            // itself gated on `!selectedWorktreeIDs.isEmpty`). This
+            // invocation must therefore `return` unconditionally right
+            // after, exactly like the repo-header branch above — falling
+            // through here as well would re-run that bookkeeping a SECOND
+            // time (double `recordNavigation`/`recentWorktreeIDs` entries).
+            //
+            // Known cost of stripping the remote tag back out rather than
+            // letting it live in the set at rest: the AppKit table backing
+            // this List has no selection anchor on a remote row once this
+            // `didSet` returns, since the row's tag no longer appears in the
+            // bound Set. Arrow-key traversal starting FROM a remote row, and
+            // the List-native focus ring, are therefore not guaranteed to
+            // work — only the row's own highlight (driven by
+            // `selectedRemoteSession`/`unreadByRemoteSession`) is guaranteed
+            // to reflect the selection correctly. See the Task 9d fix-pass
+            // report for why letting the tag persist at rest was rejected
+            // (multiple consumers of `selectedWorktreeIDs` — e.g.
+            // `newTerminalTab()` — read `.first` unguarded and would act on
+            // a non-worktree id; `ContentView`'s detail-pane routing checks
+            // `selectedWorktreeIDs.isEmpty` to decide whether to show the
+            // empty state).
             let remoteIDs = Set(remoteSessions.map(\.id))
             let selectedRemoteIDs = selectedWorktreeIDs.intersection(remoteIDs)
             if !selectedRemoteIDs.isEmpty {
                 selectedWorktreeIDs.subtract(selectedRemoteIDs)
-                if let remoteID = selectedRemoteIDs.first,
+                // Only a PURE remote selection (nothing local survived the
+                // subtract) routes through `selectRemoteSession` — a mixed
+                // selection already got its local-id bookkeeping from the
+                // nested `didSet` triggered by the subtract above.
+                if selectedWorktreeIDs.isEmpty,
+                   let remoteID = selectedRemoteIDs.first,
                    let session = remoteSessions.first(where: { $0.id == remoteID }) {
                     selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
                 }

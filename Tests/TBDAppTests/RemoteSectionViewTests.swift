@@ -39,7 +39,7 @@ struct RemoteSectionViewTests {
             session(provider: "acme", id: "s1"),
             session(provider: "other", id: "s2"),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme")
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
@@ -48,7 +48,7 @@ struct RemoteSectionViewTests {
             session(provider: "acme", id: "s1", dismissed: true),
             session(provider: "acme", id: "s2", dismissed: false),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme")
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s2"])
     }
 
@@ -56,30 +56,60 @@ struct RemoteSectionViewTests {
         // `gone` sessions still render (dimmed, with a Dismiss action) —
         // only `dismissed` (the user's tombstone action) removes a row.
         let sessions = [session(provider: "acme", id: "s1", gone: true, dismissed: false)]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme")
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
     @Test func emptyWhenNoSessionsMatchProvider() {
         let sessions = [session(provider: "other", id: "s1")]
-        #expect(RemoteSectionView.sessions(in: sessions, forProvider: "acme").isEmpty)
+        #expect(RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: []).isEmpty)
     }
 
     /// Task 9d: a session resolved to a local repo renders inside that
     /// repo's section instead (`RepoSectionView.matchedRemoteSessions`) — it
     /// must NOT also appear in the provider-named Remote section.
     @Test func excludesSessionsResolvedToARepo() {
+        let repoID = UUID()
         let sessions = [
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: UUID()),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID),
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s2", state: .running),
                               gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: nil),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme")
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [repoID])
         #expect(result.map(\.payload.id) == ["s2"])
     }
 
-    // MARK: - shouldShowHeader(provider:sessions:)
+    /// Fix pass 1, item 1: a row pinned to a repo that has since been
+    /// removed from TBD must fall back into the provider section instead of
+    /// rendering nowhere — `resolvedRepoID` is a plain, un-cascaded value
+    /// the daemon never clears, so the app must independently notice the id
+    /// no longer names a repo it knows about.
+    @Test func aSessionResolvedToARepoThatNoLongerExistsFallsBackToTheProviderSection() {
+        let removedRepoID = UUID()
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: removedRepoID),
+        ]
+        // knownRepoIDs deliberately does NOT contain removedRepoID — the
+        // repo was removed after the row was pinned.
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        #expect(result.map(\.payload.id) == ["s1"])
+    }
+
+    /// The same repo-removed scenario must not silently hide a provider's
+    /// header either — a provider whose only session is pinned to a
+    /// now-missing repo still has something to say here.
+    @Test func shouldShowHeader_trueWhenOnlySessionIsResolvedToARemovedRepo() {
+        let removedRepoID = UUID()
+        let sessions = [
+            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: removedRepoID),
+        ]
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
+    }
+
+    // MARK: - shouldShowHeader(provider:sessions:knownRepoIDs:)
 
     private func status(name: String = "acme", health: ProviderHealth) -> RemoteProviderStatus {
         RemoteProviderStatus(
@@ -90,18 +120,19 @@ struct RemoteSectionViewTests {
 
     @Test func shouldShowHeader_trueWhenHealthyWithUnmatchedSessions() {
         let sessions = [session(provider: "acme", id: "s1")]
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions))
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
     }
 
     /// The case this feature exists to fix: every one of the provider's
     /// sessions matched a repo, so there's nothing left to list here — but a
     /// healthy provider with nothing to say renders no header at all.
     @Test func shouldShowHeader_falseWhenHealthyAndFullyMatched() {
+        let repoID = UUID()
         let sessions = [
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: UUID()),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID),
         ]
-        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions))
+        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: [repoID]))
     }
 
     /// The health-visibility guarantee: even with every session matched, an
@@ -109,19 +140,20 @@ struct RemoteSectionViewTests {
     /// (auth expired, stale, error) never goes dark just because grouping
     /// absorbed every row.
     @Test func shouldShowHeader_trueWhenUnhealthyEvenIfFullyMatched() {
+        let repoID = UUID()
         let sessions = [
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: UUID()),
+                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID),
         ]
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .needsAuth), sessions: sessions))
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .needsAuth), sessions: sessions, knownRepoIDs: [repoID]))
     }
 
     @Test func shouldShowHeader_trueWhenUnhealthyWithNoSessionsAtAll() {
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .error), sessions: []))
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .error), sessions: [], knownRepoIDs: []))
     }
 
     @Test func shouldShowHeader_falseWhenHealthyWithNoSessionsAtAll() {
-        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: []))
+        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: [], knownRepoIDs: []))
     }
 
     // MARK: - RowStatusIndicator.leading — `.remote` case + precedence

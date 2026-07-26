@@ -292,6 +292,18 @@ struct RepoSectionView: View {
         // (from being a `View`) so this stays callable from a plain
         // `nonisolated` test context — session counts are small enough that
         // the allocation cost here is a non-issue.
+        //
+        // `docs/remote-provider-contract.md` shows a whole-second
+        // `created_at` example but never pins a profile, so a conforming
+        // provider can legally emit fractional seconds
+        // (`2026-07-24T18:02:11.123Z`) — a default-options formatter rejects
+        // those outright, sorting every such row as undated. Try
+        // `.withFractionalSeconds` first, then fall back to the plain
+        // whole-second profile — `ISO8601DateFormatter` does not accept both
+        // in one `formatOptions` value.
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: raw) { return date }
         return ISO8601DateFormatter().date(from: raw)
     }
 

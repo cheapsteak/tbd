@@ -106,4 +106,24 @@ struct RepoSectionRemoteSessionsTests {
     @Test func parsedCreatedAt_validISO8601Parses() {
         #expect(RepoSectionView.parsedCreatedAt("2026-07-24T18:00:00Z") != nil)
     }
+
+    /// The contract's example is whole-second, but doesn't pin a profile — a
+    /// conforming provider may emit fractional seconds. A default-options
+    /// `ISO8601DateFormatter` rejects this shape outright.
+    @Test func parsedCreatedAt_fractionalSecondsParses() {
+        #expect(RepoSectionView.parsedCreatedAt("2026-07-24T18:02:11.123Z") != nil)
+    }
+
+    /// Both shapes must parse to sensible, comparable dates — a
+    /// fractional-second row must not sort as "undated" (last) relative to a
+    /// whole-second row from the same moment.
+    @Test func parsedCreatedAt_fractionalAndWholeSecondSortCorrectly() {
+        let repoID = UUID()
+        let sessions = [
+            session(id: "fractional", resolvedRepoID: repoID, createdAt: "2026-07-24T18:10:00.500Z"),
+            session(id: "whole", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
+        ]
+        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID)
+        #expect(result.map(\.payload.id) == ["whole", "fractional"])
+    }
 }

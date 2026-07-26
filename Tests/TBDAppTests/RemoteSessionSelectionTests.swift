@@ -422,4 +422,110 @@ struct RemoteSessionSelectionTests {
             #expect(state.selectedRemoteSession == nil)
         }
     }
+
+    // MARK: - Fix pass 1, item 2: mixed local+remote selection must not
+    // wipe local ids
+
+    /// The bug: `List(selection:)` writing a shift-extended range that spans
+    /// a local worktree row AND a remote row lands both tags in
+    /// `selectedWorktreeIDs` in one assignment. Before this fix, the
+    /// remote-tag branch unconditionally routed through
+    /// `selectRemoteSession`, whose `selectedWorktreeIDs = []` wiped the
+    /// local id out from under the very selection that just set it — a
+    /// regression `.tag()`-ing remote rows into the shared Set made
+    /// possible for the first time (previously remote rows had no tag at
+    /// all). Local ids must survive; `selectedRemoteSession` must NOT be set
+    /// (this is a local selection, not a remote one).
+    @Test func mixedLocalAndRemoteSelectionPreservesTheLocalID() {
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+
+            // Simulates a shift+↓ range extending FROM the local worktree
+            // row ONTO the remote row: the List binding writes both tags in
+            // a single assignment.
+            state.selectedWorktreeIDs = [wtID, session.id]
+
+            #expect(state.selectedWorktreeIDs == [wtID],
+                     "the remote tag must be stripped but the local id must survive")
+            #expect(state.selectedRemoteSession == nil,
+                     "a mixed selection is a local selection, not a remote one")
+        }
+    }
+
+    /// Same bug, opposite gesture direction: a range that starts on a remote
+    /// row and extends onto a local worktree row must land in exactly the
+    /// same place — local id preserved, no remote selection recorded.
+    /// (`selectedWorktreeIDs` is a Set, so the two directions produce an
+    /// identical Set value at the `didSet` boundary — this test exists to
+    /// document that the fix is direction-agnostic, per the review's
+    /// explicit ask to test both directions, not because the code could
+    /// plausibly special-case order.)
+    @Test func mixedRemoteAndLocalSelectionPreservesTheLocalID() {
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+
+            // Simulates a shift+↑ range extending FROM the remote row ONTO
+            // the local worktree row.
+            state.selectedWorktreeIDs = [session.id, wtID]
+
+            #expect(state.selectedWorktreeIDs == [wtID],
+                     "the remote tag must be stripped but the local id must survive")
+            #expect(state.selectedRemoteSession == nil,
+                     "a mixed selection is a local selection, not a remote one")
+        }
+    }
+
+    /// A mixed selection must still run the ordinary worktree-selection
+    /// bookkeeping (`selectionOrder`, navigation history) for the surviving
+    /// local id — exactly once, not skipped and not duplicated by the
+    /// nested `didSet` invocation the internal `subtract` triggers.
+    @Test func mixedSelectionRunsWorktreeBookkeepingExactlyOnceForTheSurvivingLocalID() {
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+
+            state.selectedWorktreeIDs = [wtID, session.id]
+
+            #expect(state.selectionOrder == [wtID])
+            #expect(state.canGoBack == false, "exactly one navigation entry recorded, nothing to go back to")
+        }
+    }
+
+    /// A mixed selection that also includes a repo header tag must strip
+    /// BOTH foreign tags down to the surviving local worktree id, not just
+    /// the remote one — the two special-case branches in the `didSet` must
+    /// compose.
+    @Test func mixedSelectionAlsoStripsARepoHeaderTag() {
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "r", defaultBranch: "main")]
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+            let session = RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date())
+            state.remoteSessions = [session]
+
+            state.selectedWorktreeIDs = [wtID, repoID, session.id]
+
+            #expect(state.selectedWorktreeIDs == [wtID])
+        }
+    }
 }
