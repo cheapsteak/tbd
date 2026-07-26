@@ -30,6 +30,11 @@ enum RemoteSessionDetailTab: String, CaseIterable, Equatable, Hashable {
 struct RemoteSessionDetailView: View {
     let selection: RemoteSessionSelection
     @EnvironmentObject var appState: AppState
+    /// Behavior seam for `performSend`'s post-send delay (CLAUDE.md "New
+    /// delays and timers take an injected clock"). Last property with a
+    /// default so the synthesized memberwise init needs no call-site
+    /// changes.
+    var clock: any Clock<Duration> = ContinuousClock()
 
     @State private var selectedTab: RemoteSessionDetailTab = .attach
     @State private var showStopConfirm = false
@@ -416,7 +421,7 @@ struct RemoteSessionDetailView: View {
                 // scrollback — `send`'s exit 0 only means the bytes reached
                 // the transport, not that the agent has acted on them yet
                 // (docs/remote-provider-contract.md § `send`).
-                try? await Task.sleep(for: .seconds(1))
+                try? await clock.sleep(for: .seconds(1))
                 logRefreshToken += 1
             } catch {
                 detailLogger.error(
