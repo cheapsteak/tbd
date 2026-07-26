@@ -118,4 +118,55 @@ struct RemoteProviderTests {
         let path = TBDConstants.agentProvidersPath(environment: ["TBD_HOME": "/tmp/tbd-test-home"])
         #expect(path == "/tmp/tbd-test-home/agent-providers.json")
     }
+
+    // MARK: - RemoteSessionInfo — id derivation + resolvedRepoID wire defaults
+
+    @Test func sessionInfoIDMatchesDeterministicDerivation() {
+        let info = RemoteSessionInfo(
+            provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+            gone: false, dismissed: false, lastSeen: Date())
+        #expect(info.id == RemoteSessionIdentity.uuid(provider: "acme", sessionID: "s1"))
+    }
+
+    /// A payload from an OLDER daemon that never sent `id`/`resolvedRepoID`
+    /// on the wire must still decode: `id` is recomputed (never trusted off
+    /// the wire regardless), and `resolvedRepoID` defaults to nil.
+    @Test func sessionInfoDecodesWhenIDAndResolvedRepoIDAreAbsent() throws {
+        let json = """
+        {"provider": "acme", "payload": {"id": "s1", "state": "running"},
+         "gone": false, "dismissed": false, "lastSeen": \(Date().timeIntervalSinceReferenceDate)}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+        let info = try decoder.decode(RemoteSessionInfo.self, from: json)
+        #expect(info.id == RemoteSessionIdentity.uuid(provider: "acme", sessionID: "s1"))
+        #expect(info.resolvedRepoID == nil)
+    }
+
+    /// A mismatched `id` on the wire (e.g. a future/foreign producer) must
+    /// be ignored — the type always recomputes rather than trusting it, so
+    /// Swift-side correctness never depends on the wire's `id` field.
+    @Test func sessionInfoIgnoresAWireIDThatDisagreesWithDerivation() throws {
+        let bogus = UUID().uuidString
+        let json = """
+        {"id": "\(bogus)", "provider": "acme", "payload": {"id": "s1", "state": "running"},
+         "gone": false, "dismissed": false, "lastSeen": \(Date().timeIntervalSinceReferenceDate)}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+        let info = try decoder.decode(RemoteSessionInfo.self, from: json)
+        #expect(info.id.uuidString != bogus)
+        #expect(info.id == RemoteSessionIdentity.uuid(provider: "acme", sessionID: "s1"))
+    }
+
+    @Test func sessionInfoRoundTripsResolvedRepoID() throws {
+        let repoID = UUID()
+        let info = RemoteSessionInfo(
+            provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+            gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID)
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(RemoteSessionInfo.self, from: try encoder.encode(info))
+        #expect(decoded.resolvedRepoID == repoID)
+    }
 }

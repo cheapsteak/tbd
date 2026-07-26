@@ -1062,6 +1062,17 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        // Pin remote sessions to a local repo (spec 2026-07-24, follow-up to
+        // v60): `resolvedRepoID` caches the outcome of matching a provider's
+        // `meta["repo"]` against registered repos' `remoteURL`
+        // (`RemoteRepoMatching`), computed once at first sighting and never
+        // re-derived once non-null — see `RemoteSessionStore.upsert`.
+        migrator.registerMigration("v61_remote_session_resolved_repo") { db in
+            try db.addColumnIfMissing(
+                table: "remote_session", column: "resolvedRepoID",
+                type: .text)
+        }
+
         return migrator
     }
 }

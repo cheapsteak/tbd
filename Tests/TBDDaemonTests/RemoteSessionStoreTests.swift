@@ -126,4 +126,95 @@ struct RemoteSessionStoreTests {
         let updated = try await db.config.get()
         #expect(updated.remoteBackendsEnabled == true)
     }
+
+    // MARK: - resolvedRepoID: matching, pinning, late resolution
+
+    private func metaPayload(_ id: String, repo: String?,
+                             state: RemoteProcessState = .running) -> RemoteSessionPayload {
+        RemoteSessionPayload(id: id, state: state, meta: repo.map { ["repo": $0] })
+    }
+
+    @Test func firstSightingResolvesAgainstAnAlreadyRegisteredRepo() async throws {
+        let repo = try await db.repos.create(path: "/tmp/api", displayName: "api",
+                                             defaultBranch: "main", remoteURL: "https://github.com/acme/api")
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == repo.id)
+    }
+
+    @Test func noMetaRepoLeavesResolvedRepoIDNil() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: nil)], now: Date())
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == nil)
+    }
+
+    @Test func noMatchingLocalRepoLeavesResolvedRepoIDNil() async throws {
+        _ = try await db.repos.create(path: "/tmp/other", displayName: "other",
+                                      defaultBranch: "main", remoteURL: "https://github.com/acme/other")
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == nil)
+    }
+
+    /// Pinning: once resolved, a later poll reporting a DIFFERENT
+    /// `meta["repo"]` must not move the row to a different repo.
+    @Test func resolvedRepoIDIsPinnedAndSurvivesAChangedMetaRepo() async throws {
+        let first = try await db.repos.create(path: "/tmp/api", displayName: "api",
+                                              defaultBranch: "main", remoteURL: "https://github.com/acme/api")
+        _ = try await db.repos.create(path: "/tmp/other", displayName: "other",
+                                      defaultBranch: "main", remoteURL: "https://github.com/acme/other")
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        var rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == first.id)
+
+        // Provider now reports a different repo for the same session id.
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/other")], now: Date())
+        rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == first.id,
+                "an already-pinned row must never migrate to a different repo")
+    }
+
+    /// Late resolution: a session first seen before its repo was registered
+    /// in TBD resolves on a LATER poll, once the repo shows up — because the
+    /// stored value stays null until resolution succeeds.
+    @Test func lateResolutionSucceedsOnceTheRepoIsRegistered() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        var rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == nil)
+
+        let repo = try await db.repos.create(path: "/tmp/api", displayName: "api",
+                                             defaultBranch: "main", remoteURL: "https://github.com/acme/api")
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == repo.id)
+    }
+
+    /// Resolving on a later poll (not just first sighting) must report
+    /// `changed == true` so the daemon broadcasts and the sidebar re-renders
+    /// the row into its new repo section.
+    @Test func lateResolutionReportsChangedForBroadcast() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        _ = try await db.repos.create(path: "/tmp/api", displayName: "api",
+                                      defaultBranch: "main", remoteURL: "https://github.com/acme/api")
+        let outcome = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [metaPayload("a", repo: "acme/api")], now: Date())
+        #expect(outcome.changed, "late resolution must report a change so the UI broadcast fires")
+    }
+
+    @Test func upsertOneAlsoResolvesAndPinsRepo() async throws {
+        let repo = try await db.repos.create(path: "/tmp/api", displayName: "api",
+                                             defaultBranch: "main", remoteURL: "https://github.com/acme/api")
+        _ = try await db.remoteSessions.upsertOne(
+            provider: "p", session: metaPayload("a", repo: "acme/api"), now: Date())
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first?.resolvedRepoIDUUID == repo.id)
+    }
 }

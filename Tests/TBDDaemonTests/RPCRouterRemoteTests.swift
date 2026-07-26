@@ -117,6 +117,41 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(result.sessions.map(\.payload.id) == ["a"])
     }
 
+    /// `remote.sessions` must surface the daemon's pinned repo resolution on
+    /// the wire, and the returned `id` must match the deterministic
+    /// derivation the app keys sidebar rows by.
+    @Test func sessionsResultCarriesResolvedRepoIDAndDeterministicID() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let repo = try await db.repos.create(
+            path: "/tmp/api", displayName: "api", defaultBranch: "main",
+            remoteURL: "https://github.com/acme/api")
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running, meta: ["repo": "acme/api"])],
+            now: Date())
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let response = await call(r, "remote.sessions")
+        #expect(response.success)
+        let result = try response.decodeResult(RemoteSessionsResult.self)
+        let session = try #require(result.sessions.first)
+        #expect(session.resolvedRepoID == repo.id)
+        #expect(session.id == RemoteSessionIdentity.uuid(provider: "fake", sessionID: "a"))
+    }
+
+    /// Unmatched sessions (no `meta["repo"]`, or no local repo matches) must
+    /// still round-trip with `resolvedRepoID == nil` — the unmatched path
+    /// keeps working exactly as before this feature.
+    @Test func sessionsResultLeavesResolvedRepoIDNilWhenUnmatched() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)], now: Date())
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let response = await call(r, "remote.sessions")
+        let result = try response.decodeResult(RemoteSessionsResult.self)
+        #expect(result.sessions.first?.resolvedRepoID == nil)
+    }
+
     @Test func createPassesParamsThroughAndReturnsSession() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [

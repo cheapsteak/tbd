@@ -18,9 +18,18 @@ public struct RemoteSessionRow: Codable, FetchableRecord, PersistableRecord, Sen
     public var missingCount: Int
     public var gone: Bool
     public var dismissed: Bool
+    /// Pinned repo resolution — see `RemoteSessionInfo.resolvedRepoID`'s doc
+    /// comment for the full pinning contract. Stored as the UUID string
+    /// (matching `RepoRecord.id`'s convention) rather than a GRDB-native UUID
+    /// type.
+    public var resolvedRepoID: String?
 
     public var decodedPayload: RemoteSessionPayload? {
         payload.data(using: .utf8).flatMap { try? JSONDecoder().decode(RemoteSessionPayload.self, from: $0) }
+    }
+
+    public var resolvedRepoIDUUID: UUID? {
+        resolvedRepoID.flatMap(UUID.init(uuidString:))
     }
 }
 
@@ -56,11 +65,22 @@ public struct RemoteSessionStore: Sendable {
         let payloadString = String(data: try encoder.encode(session), encoding: .utf8) ?? "{}"
         if var row = existing {
             let previousAgentState = row.agentState
-            let changed = row.payload != payloadString || row.missingCount != 0 || row.gone
+            var changed = row.payload != payloadString || row.missingCount != 0 || row.gone
             var attention: RemoteSessionPayload?
             if previousAgentState != session.agentState.rawValue,
                session.agentState == .waitingInput || session.agentState == .exited {
                 attention = session
+            }
+            // Pin the repo association at first sighting: only attempt (or
+            // re-attempt) resolution while the stored value is still null —
+            // e.g. the repo hasn't been added to TBD yet. Once set, a
+            // provider that later changes its reported `meta["repo"]` can
+            // never migrate this row to a different repo section underneath
+            // the user. See `RemoteSessionInfo.resolvedRepoID`'s doc comment.
+            if row.resolvedRepoID == nil,
+               let resolved = try self.resolveRepoID(metaRepo: session.meta?["repo"], db: db) {
+                row.resolvedRepoID = resolved.uuidString
+                changed = true
             }
             row.payload = payloadString
             row.state = session.state.rawValue
@@ -73,15 +93,28 @@ public struct RemoteSessionStore: Sendable {
         } else {
             // First sighting never notifies — otherwise the daemon would
             // fire a banner storm for every pre-existing session on startup.
+            let resolvedRepoID = try self.resolveRepoID(metaRepo: session.meta?["repo"], db: db)
             try RemoteSessionRow(
                 provider: provider, sessionID: session.id,
                 payload: payloadString, state: session.state.rawValue,
                 agentState: session.agentState.rawValue,
                 firstSeen: now, lastSeen: now,
-                missingCount: 0, gone: false, dismissed: false
+                missingCount: 0, gone: false, dismissed: false,
+                resolvedRepoID: resolvedRepoID?.uuidString
             ).insert(db)
             return (true, nil)
         }
+    }
+
+    /// Resolves `metaRepo` against the repos currently registered in the
+    /// SAME transaction `upsert` runs in — reading `repo` directly here
+    /// (rather than threading a `[Repo]` snapshot in from the caller) keeps
+    /// the read and the write consistent and avoids a repo query at all for
+    /// the common case (an already-resolved row, or no `meta["repo"]`).
+    private func resolveRepoID(metaRepo: String?, db: Database) throws -> UUID? {
+        guard metaRepo != nil else { return nil }
+        let repos = try RepoRecord.fetchAll(db).compactMap { $0.toModel() }
+        return RemoteRepoMatching.resolveRepoID(metaRepo: metaRepo, repos: repos)
     }
 
     /// Reconcile one provider's full session list against the mirror table.

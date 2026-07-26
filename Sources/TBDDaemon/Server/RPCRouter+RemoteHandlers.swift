@@ -66,7 +66,7 @@ extension RPCRouter {
             guard let payload = row.decodedPayload else { return nil }
             return RemoteSessionInfo(provider: row.provider, payload: payload,
                                      gone: row.gone, dismissed: row.dismissed,
-                                     lastSeen: row.lastSeen)
+                                     lastSeen: row.lastSeen, resolvedRepoID: row.resolvedRepoIDUUID)
         }
         return try RPCResponse(result: RemoteSessionsResult(sessions: sessions))
     }

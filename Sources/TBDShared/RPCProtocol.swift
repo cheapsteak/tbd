@@ -1006,16 +1006,52 @@ public struct RemoteProvidersResult: Codable, Sendable {
 /// One row of the `remote.sessions` mirror — the provider-scoped payload
 /// plus the drift bookkeeping (`gone`/`dismissed`) the app needs to render
 /// (or hide) a stale session.
-public struct RemoteSessionInfo: Codable, Sendable {
+public struct RemoteSessionInfo: Codable, Sendable, Identifiable {
+    /// Stable synthetic identity for this mirror row — see
+    /// `RemoteSessionIdentity`. ALWAYS recomputed from `provider`/
+    /// `payload.id` rather than trusted off the wire (see `init(from:)`):
+    /// since it's a pure function of those two fields, an older daemon that
+    /// never sent this key, or any future transport that drops it, still
+    /// produces an IDENTICAL id client-side — there is nothing to default or
+    /// version. It's still included on the wire (for other/non-Swift
+    /// consumers and debugging), just never trusted as the source of truth.
+    public let id: UUID
     public let provider: String
     public let payload: RemoteSessionPayload
     public let gone: Bool
     public let dismissed: Bool
     public let lastSeen: Date
+    /// The local repo this session was resolved to, via `meta["repo"]`
+    /// (`docs/remote-provider-contract.md` § Session object) matched against
+    /// registered repos' `remoteURL` (`RemoteRepoMatching`). Pinned at first
+    /// sighting by the daemon (`RemoteSessionStore`) — nil means either "the
+    /// provider reported no repo" or "not resolved yet", and the daemon
+    /// keeps retrying resolution only while this stays nil. Once non-nil, it
+    /// never changes, even if the provider's reported meta later does.
+    public let resolvedRepoID: UUID?
+
     public init(provider: String, payload: RemoteSessionPayload,
-                gone: Bool, dismissed: Bool, lastSeen: Date) {
+                gone: Bool, dismissed: Bool, lastSeen: Date, resolvedRepoID: UUID? = nil) {
+        self.id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
         self.provider = provider; self.payload = payload
         self.gone = gone; self.dismissed = dismissed; self.lastSeen = lastSeen
+        self.resolvedRepoID = resolvedRepoID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, provider, payload, gone, dismissed, lastSeen, resolvedRepoID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        payload = try c.decode(RemoteSessionPayload.self, forKey: .payload)
+        gone = try c.decode(Bool.self, forKey: .gone)
+        dismissed = try c.decode(Bool.self, forKey: .dismissed)
+        lastSeen = try c.decode(Date.self, forKey: .lastSeen)
+        resolvedRepoID = try c.decodeIfPresent(UUID.self, forKey: .resolvedRepoID)
+        // See the `id` doc comment — deliberately recomputed, never decoded.
+        id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
     }
 }
 
