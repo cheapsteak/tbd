@@ -50,6 +50,24 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "fileWatcher")
 ///    and any in-flight handler call becomes a no-op.
 final class FileWatcher: Sendable {
 
+    /// Trailing-edge debounce window for `.write` / `.extend` events.
+    /// Internal (not private) so tests assert against the production value
+    /// instead of duplicating the literal.
+    static let debounceInterval: Duration = .milliseconds(150)
+
+    /// Delay before re-opening the watched path after an atomic save
+    /// (`.delete` / `.rename` / `.revoke` on the watched inode).
+    static let reopenDelay: Duration = .milliseconds(50)
+
+    private let clock: any Clock<Duration>
+
+    /// - Parameter clock: seam for the two delays above (`Duration` is
+    ///   behavior). Defaulted, so the single production call site is
+    ///   unchanged and the seam is behavior-preserving by construction.
+    init(clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
+    }
+
     /// Yields a debounced (~150ms trailing-edge) `Void` each time `path`
     /// changes on disk. The stream's lifetime owns the file descriptor: when
     /// the consuming `.task` is cancelled (or the iterator is dropped), the
@@ -61,7 +79,7 @@ final class FileWatcher: Sendable {
     /// the re-open fails (file genuinely gone) the stream is finished.
     func changes(for path: String) -> AsyncStream<Void> {
         AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let box = StreamState(path: path, continuation: continuation)
+            let box = StreamState(path: path, continuation: continuation, clock: self.clock)
 
             #if DEBUG
             Self._liveStreamCountLock.withLock { $0 += 1 }
@@ -117,10 +135,14 @@ private final class StreamState: @unchecked Sendable {
     private let inner = OSAllocatedUnfairLock<Inner>(initialState: Inner())
     private let path: String
     private let continuation: AsyncStream<Void>.Continuation
+    private let clock: any Clock<Duration>
 
-    init(path: String, continuation: AsyncStream<Void>.Continuation) {
+    init(path: String,
+         continuation: AsyncStream<Void>.Continuation,
+         clock: any Clock<Duration>) {
         self.path = path
         self.continuation = continuation
+        self.clock = clock
     }
 
     /// Open `self.path` and start a dispatch source for it. Returns `false`
@@ -201,12 +223,24 @@ private final class StreamState: @unchecked Sendable {
     }
 
     private func scheduleDebouncedNotify() {
+        let clock = self.clock
         let task = Task { [weak self] in
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: .milliseconds(150))
+            try? await clock.sleep(for: FileWatcher.debounceInterval)
+            // The `Task.isCancelled` re-check is load-bearing, not belt-and-braces:
+            // `try?` swallows the `CancellationError` and falls through, and a
+            // sleep that already *resumed* can no longer throw at all. So
+            // cancelling the superseded task is not by itself enough to stop it —
+            // this guard is the only thing that keeps a replaced debounce from
+            // firing a stale notification. Removing it re-introduces
+            // notify-per-write.
             guard !Task.isCancelled, let self else { return }
             self.yieldIfActive()
         }
+        // The task is armed BEFORE it is installed below, so under a virtual
+        // clock the sleep can resume before this lock is even taken. That is
+        // safe only because `yieldIfActive()` re-checks `terminated` under the
+        // lock — it stops being safe the moment that re-check is removed or
+        // hoisted out of the lock.
         inner.withLock { i in
             if i.terminated {
                 task.cancel()
@@ -218,12 +252,19 @@ private final class StreamState: @unchecked Sendable {
     }
 
     private func scheduleReopen() {
+        let clock = self.clock
         let task = Task { [weak self] in
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: .milliseconds(50))
+            try? await clock.sleep(for: FileWatcher.reopenDelay)
+            // Same reasoning as `scheduleDebouncedNotify`: `try?` swallows
+            // cancellation and a resumed sleep cannot throw, so this guard —
+            // not `task.cancel()` — is what stops a superseded re-open from
+            // opening a second FD for the same stream.
             guard !Task.isCancelled, let self else { return }
             self.performReopen()
         }
+        // Armed before installed (see `scheduleDebouncedNotify`): safe only
+        // because `performReopen()` re-checks `terminated` under the lock
+        // before doing anything, and stops being safe if that check moves.
         inner.withLock { i in
             if i.terminated {
                 task.cancel()
