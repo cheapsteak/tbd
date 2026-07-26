@@ -79,6 +79,13 @@ struct PanelContentResolutionTests {
             _ = try resolvePanelContent(opts)
         }
     }
+
+    @Test func renderFlagOnNonFileContentIsInvalid() throws {
+        let opts = try ContentOptions.parse(["--web", "https://example.com", "--render"])
+        #expect(throws: CLIError.self) {
+            _ = try resolvePanelContent(opts)
+        }
+    }
 }
 
 @Suite("tbd panel placement resolution")
@@ -146,6 +153,16 @@ struct PanelPlacementResolutionTests {
         let opts = try PlacementOptions.parse(["--beside", "primary", "--edge", "left", "--share", "1.5"])
         #expect(throws: CLIError.self) {
             _ = try resolvePanelPlacement(opts)
+        }
+    }
+
+    @Test func bareShareWithoutBesideReportsMissingBesideNotRange() throws {
+        let opts = try PlacementOptions.parse(["--share", "1.5"])
+        do {
+            _ = try resolvePanelPlacement(opts)
+            Issue.record("expected resolvePanelPlacement to throw")
+        } catch let error as CLIError {
+            #expect("\(error)".contains("require --beside"))
         }
     }
 }

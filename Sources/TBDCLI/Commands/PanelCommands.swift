@@ -354,6 +354,9 @@ struct PanelSelectTab: AsyncParsableCommand {
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
         let tabID = try parseUUID(tab, label: "tab ID")
 
+        // baseRevision here is the SELECTED tab's own revision (there's no
+        // separate target panel/tab) — fine because selectTab never mutates
+        // a tab's layout, so staleness on that tab's tree can't apply.
         let result = try applyPanelOperation(
             client: client, worktreeID: worktreeID, tabID: tabID,
             operation: .selectTab(tabID: tabID))
@@ -435,21 +438,23 @@ func resolvePanelContent(_ opts: ContentOptions) throws -> PanelContent {
                 ? "Specify one of --file, --web, --transcript, --note"
                 : "Specify only one of --file, --web, --transcript, --note")
     }
-    return resolved[0]
+    let content = resolved[0]
+    if opts.render || opts.source {
+        guard case .file = content else {
+            throw CLIError.invalidArgument("--render/--source only apply to --file")
+        }
+    }
+    return content
 }
 
 /// Resolve `PlacementOptions` into a `PanelPlacement`. `--replace` and
 /// `--beside` are mutually exclusive; `--edge`/`--share` are only valid
 /// alongside `--beside`; no placement flags at all means `.automatic`.
 func resolvePanelPlacement(_ opts: PlacementOptions) throws -> PanelPlacement {
-    if let share = opts.share {
-        guard (0...1).contains(share) else {
-            throw CLIError.invalidArgument("--share must be between 0 and 1")
-        }
-    }
-
     switch (opts.replace, opts.beside) {
     case (nil, nil):
+        // "requires --beside" must win over the range check below — a bare
+        // --share with no placement target is missing --beside, not out of range.
         guard opts.edge == nil, opts.share == nil else {
             throw CLIError.invalidArgument("--edge/--share require --beside")
         }
@@ -464,6 +469,11 @@ func resolvePanelPlacement(_ opts: PlacementOptions) throws -> PanelPlacement {
     case (nil, let beside?):
         guard let edge = opts.edge else {
             throw CLIError.invalidArgument("--beside requires --edge")
+        }
+        if let share = opts.share {
+            guard (0...1).contains(share) else {
+                throw CLIError.invalidArgument("--share must be between 0 and 1")
+            }
         }
         let anchor: PanelAnchor = beside.lowercased() == "primary"
             ? .primary
