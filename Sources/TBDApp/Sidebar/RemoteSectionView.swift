@@ -92,19 +92,22 @@ struct RemoteSectionView: View {
 }
 
 /// One provider's section header: name + a health-suffix icon when the
-/// provider isn't fully healthy. Styled consistently with
-/// `RepoSectionView`'s header (12pt semibold name, 22pt bottom-aligned row)
-/// — a provider is the section-level analogue of a repo, so it wears the
-/// same weight of chrome rather than `ScratchSectionView`'s `.headline`. No
-/// tap/selection — there's no provider-level detail view (Task 10 only
-/// routes session selections). Provider health never dims the rows below
-/// it: per the contract, an unreachable provider never means its sessions
-/// are dead, only that the local mirror may be stale — health is
-/// section-level state shown here, the same way a `.missing` repo dims only
-/// its own header/chevron in `RepoSectionView`, not an unrelated signal
-/// painted onto every row.
+/// provider isn't fully healthy, plus a `+` to create a new session on this
+/// provider (Task 10 — opens `RemoteCreateSheet` with no repo prefill; the
+/// repo-scoped equivalent lives on `RepoSectionView`'s context menu).
+/// Styled consistently with `RepoSectionView`'s header (12pt semibold name,
+/// 22pt bottom-aligned row) — a provider is the section-level analogue of a
+/// repo, so it wears the same weight of chrome rather than
+/// `ScratchSectionView`'s `.headline`. No tap/selection on the row itself —
+/// there's no provider-level detail view (Task 10 only routes session
+/// selections). Provider health never dims the rows below it: per the
+/// contract, an unreachable provider never means its sessions are dead, only
+/// that the local mirror may be stale — health is section-level state shown
+/// here, the same way a `.missing` repo dims only its own header/chevron in
+/// `RepoSectionView`, not an unrelated signal painted onto every row.
 struct RemoteProviderHeaderRow: View {
     let provider: RemoteProviderStatus
+    @State private var showingCreateSheet = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -114,11 +117,25 @@ struct RemoteProviderHeaderRow: View {
                 .lineLimit(1)
             healthSuffix
             Spacer()
+            Button {
+                showingCreateSheet = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("New \(provider.describe?.name ?? provider.config.name) session")
         }
         .frame(height: 22, alignment: .bottom)
         .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+        .sheet(isPresented: $showingCreateSheet) {
+            RemoteCreateSheet(provider: provider.config, describe: provider.describe, repoPrefill: nil)
+        }
     }
 
     @ViewBuilder
@@ -381,30 +398,68 @@ struct RemoteSessionRowView: View {
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         }
         .contextMenu {
-            Button("Rename…") { isEditing = true }
-            if session.gone {
-                Button("Dismiss") {
-                    Task {
-                        do {
-                            try await appState.daemonClient.remoteDismiss(
-                                provider: session.provider, sessionID: session.payload.id)
-                        } catch {
-                            remoteRowLogger.error(
-                                "remoteDismiss failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
-                        }
-                    }
+            let capabilities = appState.remoteProviders
+                .first { $0.config.name == session.provider }?.describe?.capabilities ?? []
+            ForEach(
+                Array(RemoteSessionActionMenu.items(capabilities: capabilities, gone: session.gone).enumerated()),
+                id: \.offset
+            ) { _, item in
+                switch item {
+                case let .action(action):
+                    actionButton(action)
+                case .divider:
+                    Divider()
                 }
-            } else {
-                Button("Stop", role: .destructive) {
-                    Task {
-                        do {
-                            try await appState.daemonClient.remoteStop(
-                                provider: session.provider, sessionID: session.payload.id)
-                        } catch {
-                            remoteRowLogger.error(
-                                "remoteStop failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
-                        }
-                    }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func actionButton(_ action: RemoteSessionActionMenu.Action) -> some View {
+        Button(role: action.role == .destructive ? .destructive : nil) {
+            runAction(action.kind)
+        } label: {
+            Text(action.title)
+        }
+    }
+
+    /// Dispatches a `RemoteSessionActionMenu.Kind` to its side effect. Kept
+    /// inline (unlike `RowActionMenuActions`) since a remote row has far
+    /// fewer actions and none of the context-building complexity that
+    /// justified splitting the worktree version out.
+    private func runAction(_ kind: RemoteSessionActionMenu.Kind) {
+        switch kind {
+        case .rename:
+            isEditing = true
+        case .attach:
+            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .attach)
+        case .viewLog:
+            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .log)
+        case .sendText:
+            // No dedicated tab for Send — the send field renders below
+            // whichever tab is active, so this just selects the session.
+            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
+        case .copySessionID:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(session.payload.id, forType: .string)
+        case .stop:
+            Task {
+                do {
+                    try await appState.daemonClient.remoteStop(
+                        provider: session.provider, sessionID: session.payload.id)
+                } catch {
+                    remoteRowLogger.error(
+                        "remoteStop failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
+                }
+            }
+        case .dismiss:
+            Task {
+                do {
+                    try await appState.daemonClient.remoteDismiss(
+                        provider: session.provider, sessionID: session.payload.id)
+                } catch {
+                    remoteRowLogger.error(
+                        "remoteDismiss failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
                 }
             }
         }

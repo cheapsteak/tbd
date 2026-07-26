@@ -33,6 +33,8 @@ struct RepoSectionView: View {
     @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
+    @State private var showingRemoteCreateSheet = false
+    @State private var remoteCreateSheetProvider: RemoteProviderStatus?
     // Hover the `+` (or ⌥-click it) to open the model-profile picker; a plain
     // click still creates a worktree with the default profile.
     @StateObject private var newWorktreeMenu = HoverMenuModel()
@@ -194,9 +196,41 @@ struct RepoSectionView: View {
             Button(repo.hidden ? "Unhide" : "Hide") {
                 Task { await appState.setRepoHidden(id: repo.id, hidden: !repo.hidden) }
             }
+            // Task 10: a repo-scoped entry point into the create sheet,
+            // prefilled with this repo — omitted (not disabled) when no
+            // remote provider is registered at all, mirroring how
+            // `RemoteSessionActionMenu` omits capability-gated items rather
+            // than graying them out. A single provider skips straight to the
+            // sheet; more than one asks which provider first.
+            if !appState.remoteProviders.isEmpty {
+                if appState.remoteProviders.count == 1, let only = appState.remoteProviders.first {
+                    Button("New Remote Session…") { openRemoteCreateSheet(for: only) }
+                } else {
+                    Menu("New Remote Session…") {
+                        ForEach(appState.remoteProviders, id: \.config.name) { provider in
+                            Button(provider.describe?.name ?? provider.config.name) {
+                                openRemoteCreateSheet(for: provider)
+                            }
+                        }
+                    }
+                }
+            }
             Divider()
             Button("Remove from List...", role: .destructive) {
                 showRemoveConfirm = true
+            }
+        }
+        .sheet(isPresented: $showingRemoteCreateSheet) {
+            if let remoteCreateSheetProvider {
+                RemoteCreateSheet(
+                    provider: remoteCreateSheetProvider.config,
+                    describe: remoteCreateSheetProvider.describe,
+                    // Same normalization `RemoteRepoMatching` uses to resolve
+                    // a session's `meta["repo"]` back to a repo — so a
+                    // session created from here round-trips into THIS repo's
+                    // section instead of landing unmatched.
+                    repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL)
+                )
             }
         }
         .confirmationDialog(
@@ -322,6 +356,11 @@ struct RepoSectionView: View {
 
     private func createWorktree() {
         appState.createWorktree(repoID: repo.id)
+    }
+
+    private func openRemoteCreateSheet(for provider: RemoteProviderStatus) {
+        remoteCreateSheetProvider = provider
+        showingRemoteCreateSheet = true
     }
 
     private func locateRepo() {
