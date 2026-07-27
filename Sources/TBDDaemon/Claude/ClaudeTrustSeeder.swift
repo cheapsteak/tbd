@@ -22,11 +22,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// is not "one TBD made".
 ///
 /// It does **not** cover contents TBD merely *hosted*. A worktree flagged
-/// `foreignHead` was checked out from `refs/pull/<n>/head`, whose commits can
-/// come from a third-party fork: TBD created the directory, but a stranger
-/// authored the `.claude/settings.json`, hooks, MCP config and `CLAUDE.md`
-/// inside it. That is precisely what the dialog exists to gate, so these
-/// worktrees are never seeded and Claude asks as usual.
+/// `foreignHead` was checked out from a pull-request head TBD fetched
+/// (`refs/pull/<n>/head`) rather than from a branch already present in the
+/// operator's repo. TBD created the directory, but the `.claude/settings.json`,
+/// hooks, MCP config and `CLAUDE.md` inside it came in with that fetched ref —
+/// which may be a third-party fork's. That is precisely what the dialog exists
+/// to gate, so these worktrees are never seeded and Claude asks as usual.
 ///
 /// **Why prevention is the only fix.** The trust dialog blocks *before*
 /// SessionStart, so no Claude Code hook ever fires while it is up. A session
@@ -58,6 +59,17 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// suppress the trust dialog. There is no CLI flag or env var for it; pre-seeding
 /// the JSON key is the only mechanism.
 ///
+/// **Concurrency.** `.claude.json` is a single shared file that many worktrees
+/// target at once (the six seed call sites fire on create, extra-session
+/// restore, terminal create, revive, profile swap and hibernation wake, across
+/// unrelated repos and therefore unrelated `RepoSerializer` lanes). The
+/// read-merge-write is not atomic on its own, so it runs inside
+/// `ClaudeTrustSeeder.writer`, an actor whose critical section covers read →
+/// parse → merge → atomic rename. That makes TBD's own seeds safe against each
+/// other: two worktrees can never both read the same base and have the loser's
+/// key dropped by the winner's rename. See `writer` for what it does *not*
+/// cover.
+///
 /// Known limitation (degrades gracefully to the status quo): when a user sets
 /// `CLAUDE_CONFIG_DIR` only in their interactive shell rc (e.g. `.zshrc`) and uses
 /// no TBD model profile, the daemon can't observe that value — it isn't in the
@@ -83,13 +95,17 @@ enum ClaudeTrustSeeder {
     /// Best-effort: never throws (logs on failure). Idempotent. Preserves all
     /// existing top-level keys and all existing keys inside the target project
     /// entry via read-merge-write. Leaves a malformed `.claude.json` untouched.
+    ///
+    /// `async` only because the read-merge-write hops onto `writer` to
+    /// serialize; the gate and path resolution below are pure and stay on the
+    /// caller.
     static func ensureTrusted(
         worktree: Worktree,
         autoTrustNonScratch: Bool,
         profileConfigDir: String?,
         homeDirectory: String = NSHomeDirectory(),
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) {
+    ) async {
         // Two-tier gate (see the type doc comment for the full argument):
         // scratch spaces are TBD-owned empty dirs and always seed; a non-scratch
         // worktree's contents come from a repo the operator registered — so the
@@ -98,10 +114,16 @@ enum ClaudeTrustSeeder {
         //
         // The `foreignHead` exclusion is the boundary of the whole argument:
         // TBD vouches for the directory it created, NOT for contents fetched
-        // from an unvetted ref. A fork contributor's `refs/pull/<n>/head` brings
-        // its own `.claude/settings.json`, hooks, MCP config and `CLAUDE.md`
-        // into a directory TBD made — which is exactly the case the trust
-        // dialog exists to gate, so let it render. Note this is deliberately
+        // from a ref that was not already in the operator's repo. The flag means
+        // exactly that — the contents came from a pull-request head TBD fetched
+        // (`refs/pull/<n>/head`) rather than from a local branch. That covers a
+        // fork contributor's PR, and also a colleague's same-repo PR whose head
+        // branch has not been fetched locally (see `PickerItem` in
+        // BranchPickerMerge.swift: every PR-only row sets `checkoutPRHead`).
+        // Either way the ref brings its own `.claude/settings.json`, hooks, MCP
+        // config and `CLAUDE.md` into a directory TBD made, which is what the
+        // trust dialog exists to gate — so let it render. Erring toward asking
+        // on a same-repo PR head is the safe direction. Note this is deliberately
         // NOT keyed on `prNumber`: a decorated same-repo PR row stamps a number
         // while checking out an ordinary local branch, and must still seed.
         // It applies to the non-scratch tier only — a scratch space has no git
@@ -135,53 +157,97 @@ enum ClaudeTrustSeeder {
             projectKeys.append(resolvedPath)
         }
 
-        let fm = FileManager.default
+        await writer.seed(
+            projectKeys: projectKeys,
+            configDirURL: configDirURL,
+            claudeJSONPath: claudeJSONPath,
+            worktreePath: worktree.path)
+    }
 
-        // Read-merge-write, preserving every existing key. If the file exists but
-        // is malformed JSON, do NOT clobber it — log and return (best-effort).
-        var topLevel: [String: Any] = [:]
-        if fm.fileExists(atPath: claudeJSONPath.path) {
-            guard let existing = try? Data(contentsOf: claudeJSONPath) else {
-                logger.warning("could not read \(claudeJSONPath.path, privacy: .public); skipping trust seed")
-                return
+    /// The process-wide lane every seed's read-merge-write runs on.
+    ///
+    /// One lane rather than one per config dir: the early return below collapses
+    /// writes to at most once per newly-seen path, so contention is negligible
+    /// and a lane table would be state to keep for no measurable gain.
+    private static let writer = TrustSeedWriter()
+
+    /// Serializes the read → parse → merge → write critical section.
+    ///
+    /// **What this covers:** TBD's own concurrent seeds. The six call sites fire
+    /// from unrelated `RepoSerializer` lanes (and wake / revive / terminal-create
+    /// are not serialized against creates at all), so without this two seeds could
+    /// read the same base and the loser's key would vanish under the winner's
+    /// atomic rename — leaving that worktree stalled on the trust dialog, exactly
+    /// the machine-invisible failure the seeder exists to prevent.
+    ///
+    /// **What this does NOT cover:** an ambient Claude Code process writing the
+    /// same `.claude.json`. That is a different OS process; in-process
+    /// serialization cannot order against it, and no file lock is taken. The
+    /// mitigation there is frequency, not exclusion — see the early return in
+    /// `seed(projectKeys:configDirURL:claudeJSONPath:worktreePath:)`.
+    actor TrustSeedWriter {
+        fileprivate init() {}
+
+        /// Read-merge-write, preserving every existing key. Runs to completion
+        /// without suspending, so the actor's serial execution makes the whole
+        /// read-through-rename window atomic against other seeds.
+        ///
+        /// Best-effort: never throws (logs on failure). If the file exists but is
+        /// malformed JSON, do NOT clobber it — log and return.
+        func seed(
+            projectKeys: [String],
+            configDirURL: URL,
+            claudeJSONPath: URL,
+            worktreePath: String
+        ) {
+            let fm = FileManager.default
+
+            var topLevel: [String: Any] = [:]
+            if fm.fileExists(atPath: claudeJSONPath.path) {
+                guard let existing = try? Data(contentsOf: claudeJSONPath) else {
+                    logger.warning("could not read \(claudeJSONPath.path, privacy: .public); skipping trust seed")
+                    return
+                }
+                guard let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] else {
+                    logger.warning("malformed .claude.json at \(claudeJSONPath.path, privacy: .public); leaving untouched")
+                    return
+                }
+                topLevel = parsed
             }
-            guard let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] else {
-                logger.warning("malformed .claude.json at \(claudeJSONPath.path, privacy: .public); leaving untouched")
-                return
+
+            // Skip the write entirely when every target key is already trusted,
+            // so a repeat spawn / wake / revive of an already-seeded path does no
+            // I/O at all. Beyond saving work, this is the only mitigation left for
+            // the CROSS-PROCESS case the actor cannot reach: an ambient Claude
+            // Code process writes this same shared file, and our atomic rename
+            // from a slightly-stale read would drop whatever it wrote (history,
+            // numStartups, project state) between our read and our write.
+            // Collapsing writes to at most once per newly-seen path — scratch or
+            // worktree — instead of once per spawn shrinks that window; it does
+            // not close it.
+            let existingProjects = (topLevel["projects"] as? [String: Any]) ?? [:]
+            let allAlreadyTrusted = projectKeys.allSatisfy { key in
+                (existingProjects[key] as? [String: Any])?["hasTrustDialogAccepted"] as? Bool == true
             }
-            topLevel = parsed
-        }
+            if allAlreadyTrusted { return }
 
-        // Skip the write entirely when every target key is already trusted. The
-        // early return avoids clobbering a concurrently-running ambient Claude's
-        // write to this SHARED file: our atomic rename from a slightly-stale read
-        // would drop whatever that process wrote (history, numStartups, project
-        // state) between our read and our write. Returning here collapses writes
-        // to at most once per newly-seen path — scratch or worktree — instead of
-        // once per spawn, keeping us within the same infrequent-writer envelope
-        // Claude's own multi-instance writes already tolerate.
-        let existingProjects = (topLevel["projects"] as? [String: Any]) ?? [:]
-        let allAlreadyTrusted = projectKeys.allSatisfy { key in
-            (existingProjects[key] as? [String: Any])?["hasTrustDialogAccepted"] as? Bool == true
-        }
-        if allAlreadyTrusted { return }
+            var projects = existingProjects
+            for key in projectKeys {
+                var entry = (projects[key] as? [String: Any]) ?? [:]
+                entry["hasTrustDialogAccepted"] = true
+                projects[key] = entry
+            }
+            topLevel["projects"] = projects
 
-        var projects = existingProjects
-        for key in projectKeys {
-            var entry = (projects[key] as? [String: Any]) ?? [:]
-            entry["hasTrustDialogAccepted"] = true
-            projects[key] = entry
-        }
-        topLevel["projects"] = projects
-
-        do {
-            try fm.createDirectory(at: configDirURL, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(
-                withJSONObject: topLevel, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: claudeJSONPath, options: [.atomic])
-            logger.debug("seeded folder-trust for \(worktree.path, privacy: .public) in \(claudeJSONPath.path, privacy: .public)")
-        } catch {
-            logger.warning("failed to seed folder-trust at \(claudeJSONPath.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            do {
+                try fm.createDirectory(at: configDirURL, withIntermediateDirectories: true)
+                let data = try JSONSerialization.data(
+                    withJSONObject: topLevel, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: claudeJSONPath, options: [.atomic])
+                logger.debug("seeded folder-trust for \(worktreePath, privacy: .public) in \(claudeJSONPath.path, privacy: .public)")
+            } catch {
+                logger.warning("failed to seed folder-trust at \(claudeJSONPath.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 }

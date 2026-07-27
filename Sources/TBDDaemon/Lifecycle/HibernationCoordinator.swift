@@ -541,7 +541,7 @@ public actor HibernationCoordinator {
         // dialog blocks before SessionStart, so the stalled wake would be
         // machine-invisible. Cheap no-op once already trusted. `config` is a
         // `try?` read; fall back to the shipped default.
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree,
             autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
             profileConfigDir: profileConfigDir)

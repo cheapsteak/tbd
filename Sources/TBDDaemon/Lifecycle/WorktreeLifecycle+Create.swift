@@ -648,7 +648,7 @@ extension WorktreeLifecycle {
             // Scratch always seeds; non-scratch honors the config flag and is
             // skipped entirely when the row is `foreignHead` (PR-head checkout,
             // possibly fork-authored contents). Best-effort, never throws.
-            ClaudeTrustSeeder.ensureTrusted(
+            await ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree,
                 autoTrustNonScratch: config.autoTrustWorktrees,
                 profileConfigDir: profileConfigDir)
@@ -844,7 +844,7 @@ extension WorktreeLifecycle {
                 let restoreProfileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
                 // Pre-accept the folder-trust dialog so restoring an extra
                 // archived session onto a fresh profile dir doesn't re-prompt.
-                ClaudeTrustSeeder.ensureTrusted(
+                await ClaudeTrustSeeder.ensureTrusted(
                     worktree: worktree,
                     autoTrustNonScratch: config.autoTrustWorktrees,
                     profileConfigDir: restoreProfileConfigDir)

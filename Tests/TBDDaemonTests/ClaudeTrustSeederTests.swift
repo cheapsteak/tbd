@@ -46,26 +46,26 @@ struct ClaudeTrustSeederTests {
     // MARK: - Scratch tier: seeds regardless of the toggle
 
     @Test("scratch worktree seeds hasTrustDialogAccepted=true")
-    func gateOnSeedsTrust() {
+    func gateOnSeedsTrust() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir))
     }
 
     @Test("toggle OFF: scratch worktree is still seeded (unconditional tier)")
-    func toggleOffStillSeedsScratch() {
+    func toggleOffStillSeedsScratch() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir),
@@ -75,13 +75,13 @@ struct ClaudeTrustSeederTests {
     // MARK: - Non-scratch tier: both branches of the toggle
 
     @Test("toggle ON: non-scratch TBD-created worktree is seeded")
-    func toggleOnSeedsNonScratch() {
+    func toggleOnSeedsNonScratch() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-real-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir),
@@ -89,13 +89,13 @@ struct ClaudeTrustSeederTests {
     }
 
     @Test("toggle OFF: non-scratch worktree writes nothing")
-    func toggleOffWritesNothingForNonScratch() {
+    func toggleOffWritesNothingForNonScratch() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-real-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         let file = configDir.appendingPathComponent(".claude.json")
@@ -103,7 +103,7 @@ struct ClaudeTrustSeederTests {
     }
 
     @Test("toggle OFF leaves an existing .claude.json untouched for non-scratch")
-    func toggleOffLeavesExistingConfigUntouched() throws {
+    func toggleOffLeavesExistingConfigUntouched() async throws {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -113,7 +113,7 @@ struct ClaudeTrustSeederTests {
 
         let wtPath = "/private/tmp/tbd-real-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath)
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         #expect(try String(contentsOf: file, encoding: .utf8) == sentinel)
@@ -122,13 +122,13 @@ struct ClaudeTrustSeederTests {
     // MARK: - Foreign-head tier: contents TBD cannot vouch for
 
     @Test("toggle ON: foreign-head worktree is NOT seeded")
-    func foreignHeadIsNotSeededWithToggleOn() {
+    func foreignHeadIsNotSeededWithToggleOn() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-fork-pr-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath, prNumber: 42, foreignHead: true)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir) == false,
@@ -138,13 +138,13 @@ struct ClaudeTrustSeederTests {
     }
 
     @Test("toggle OFF: foreign-head worktree is NOT seeded either")
-    func foreignHeadIsNotSeededWithToggleOff() {
+    func foreignHeadIsNotSeededWithToggleOff() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-fork-pr-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath, prNumber: 42, foreignHead: true)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir) == false)
@@ -155,13 +155,13 @@ struct ClaudeTrustSeederTests {
     /// `foreignHead` stays false and it must still seed. Gating on `prNumber`
     /// instead of `foreignHead` would fail the originally reported bug.
     @Test("toggle ON: same-repo PR worktree (prNumber set, not foreign) IS seeded")
-    func decoratedPRWorktreeIsStillSeeded() {
+    func decoratedPRWorktreeIsStillSeeded() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-same-repo-pr-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath, prNumber: 9, foreignHead: false)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir),
@@ -172,13 +172,13 @@ struct ClaudeTrustSeederTests {
     /// could be foreign, so even a (nonsensical) `foreignHead` stamp must not
     /// reintroduce the guaranteed first-spawn stall.
     @Test("scratch + foreignHead is still seeded (scratch tier is unconditional)")
-    func scratchIgnoresForeignHead() {
+    func scratchIgnoresForeignHead() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath, foreignHead: true)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir))
@@ -187,7 +187,7 @@ struct ClaudeTrustSeederTests {
     // MARK: - Preserve top-level keys
 
     @Test("preserves unrelated top-level keys and other project entries")
-    func preservesTopLevelKeys() throws {
+    func preservesTopLevelKeys() async throws {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -204,7 +204,7 @@ struct ClaudeTrustSeederTests {
 
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let json = readClaudeJSON(configDir)
@@ -220,7 +220,7 @@ struct ClaudeTrustSeederTests {
     // MARK: - Preserve intra-project keys
 
     @Test("preserves existing keys inside the target project entry")
-    func preservesIntraProjectKeys() throws {
+    func preservesIntraProjectKeys() async throws {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -235,7 +235,7 @@ struct ClaudeTrustSeederTests {
         try JSONSerialization.data(withJSONObject: existing).write(to: file)
 
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let json = readClaudeJSON(configDir)
@@ -248,17 +248,17 @@ struct ClaudeTrustSeederTests {
     // MARK: - Idempotent
 
     @Test("running twice produces identical valid JSON")
-    func idempotent() throws {
+    func idempotent() async throws {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
         let firstData = try Data(contentsOf: configDir.appendingPathComponent(".claude.json"))
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
         let secondData = try Data(contentsOf: configDir.appendingPathComponent(".claude.json"))
 
@@ -272,7 +272,7 @@ struct ClaudeTrustSeederTests {
     // MARK: - Malformed JSON
 
     @Test("malformed .claude.json is left untouched and no throw")
-    func malformedJSONLeftUntouched() throws {
+    func malformedJSONLeftUntouched() async throws {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -283,7 +283,7 @@ struct ClaudeTrustSeederTests {
 
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let after = try String(contentsOf: file, encoding: .utf8)
@@ -293,7 +293,7 @@ struct ClaudeTrustSeederTests {
     // MARK: - Config-dir fallback branches
 
     @Test("nil profileConfigDir falls back to environment CLAUDE_CONFIG_DIR")
-    func fallsBackToEnvConfigDir() {
+    func fallsBackToEnvConfigDir() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
@@ -303,7 +303,7 @@ struct ClaudeTrustSeederTests {
         let homeDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: homeDir) }
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt,
             autoTrustNonScratch: true,
             profileConfigDir: nil,
@@ -317,14 +317,14 @@ struct ClaudeTrustSeederTests {
     }
 
     @Test("nil profileConfigDir + no CLAUDE_CONFIG_DIR falls back to homeDirectory")
-    func fallsBackToHomeDirectory() {
+    func fallsBackToHomeDirectory() async {
         // Use a temp dir as homeDirectory so the real ~/.claude.json is never touched.
         let homeDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: homeDir) }
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt,
             autoTrustNonScratch: true,
             profileConfigDir: nil,
@@ -338,7 +338,7 @@ struct ClaudeTrustSeederTests {
     // MARK: - Skip-if-already-trusted (no clobbering a concurrent writer)
 
     @Test("already-trusted key: file is not rewritten (byte-identical)")
-    func alreadyTrustedSkipsWrite() throws {
+    func alreadyTrustedSkipsWrite() async throws {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -353,10 +353,69 @@ struct ClaudeTrustSeederTests {
         try sentinel.write(to: file, atomically: true, encoding: .utf8)
 
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let after = try String(contentsOf: file, encoding: .utf8)
         #expect(after == sentinel)
+    }
+
+    // MARK: - Concurrent seeds (TBD racing itself)
+
+    /// Tier 2 (real concurrency, real filesystem).
+    ///
+    /// `.claude.json` is ONE shared file that every worktree targets whenever no
+    /// per-profile config dir resolves, and the six seed call sites fire from
+    /// unrelated `RepoSerializer` lanes — wake / revive / terminal-create are not
+    /// serialized against creates at all. Without `ClaudeTrustSeeder.writer`, two
+    /// seeds read the same base and the loser's key vanishes under the winner's
+    /// atomic rename, leaving that worktree stalled on the trust dialog: exactly
+    /// the machine-invisible failure the seeder exists to prevent, and most likely
+    /// right after ship when every existing worktree is simultaneously unseeded.
+    ///
+    /// This asserts the serialization, not just the happy path — it goes red if
+    /// the critical section stops being serialized.
+    @Test("concurrent seeds into one .claude.json: every key survives")
+    func concurrentSeedsAllSurvive() async throws {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let file = configDir.appendingPathComponent(".claude.json")
+
+        // Pre-existing payload with some bulk, so the read → parse → merge →
+        // serialize → rename window is wide enough for an unserialized version to
+        // lose the race. A real `~/.claude.json` carries conversation history and
+        // is far larger than this.
+        let filler = String(repeating: "x", count: 2048)
+        let existing: [String: Any] = [
+            "hasCompletedOnboarding": true,
+            "history": (0..<150).map { ["display": "\(filler)-\($0)"] },
+            "projects": [String: Any](),
+        ]
+        try JSONSerialization.data(withJSONObject: existing).write(to: file)
+
+        let worktrees = (0..<40).map { i in
+            makeWorktree(isScratch: false, path: "/private/tmp/tbd-concurrent-\(i)-\(UUID().uuidString)")
+        }
+        let configDirPath = configDir.path
+
+        await withTaskGroup(of: Void.self) { group in
+            for wt in worktrees {
+                group.addTask {
+                    await ClaudeTrustSeeder.ensureTrusted(
+                        worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDirPath)
+                }
+            }
+        }
+
+        let missing = worktrees.map(\.path).filter { !isTrusted($0, in: configDir) }
+        #expect(
+            missing.isEmpty,
+            // Each lost key is a worktree that will stall on the trust dialog.
+            "\(missing.count) of \(worktrees.count) seeds were lost to a concurrent rename")
+        // The unrelated top-level state a merge must never drop is still there.
+        let json = readClaudeJSON(configDir)
+        #expect(json?["hasCompletedOnboarding"] as? Bool == true)
+        #expect((json?["history"] as? [Any])?.count == 150)
     }
 }

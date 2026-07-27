@@ -291,7 +291,7 @@ extension RPCRouter {
         // falling back to `true` keeps the shipped default rather than silently
         // reinstating the stall.
         if isClaudeType {
-            ClaudeTrustSeeder.ensureTrusted(
+            await ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree,
                 autoTrustNonScratch: createConfig?.autoTrustWorktrees ?? true,
                 profileConfigDir: profileConfigDir)
@@ -590,7 +590,7 @@ extension RPCRouter {
             // `foreignHead` refusal, which is why the flag lives on the row
             // rather than in the create-time parameter list. `reviveConfig` is a
             // `try?` read; fall back to the shipped default.
-            ClaudeTrustSeeder.ensureTrusted(
+            await ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree,
                 autoTrustNonScratch: reviveConfig?.autoTrustWorktrees ?? true,
                 profileConfigDir: profileConfigDir)
@@ -1344,7 +1344,7 @@ extension RPCRouter {
         // resolve the same `resolveConfigDir(for: resolved)`; seed it once here.
         // Claude-only handler. `swapConfig` is a `try?` read; fall back to the
         // shipped default.
-        ClaudeTrustSeeder.ensureTrusted(
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
             profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved))
