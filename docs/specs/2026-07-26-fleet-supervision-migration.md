@@ -23,8 +23,9 @@ kinds:
    (`NightwatchSkillContent.swift`, `NightwatchDeskPrompts.swift`) and inside
    target repos' `.nightwatch/policy.json` files — each unit moves to the home
    the design assigns it, or is retired (§3).
-2. **Runtime artifacts** the desk agent produced (`queue/*`, `handoff.py`,
-   field learnings) — harvested before anything is deleted (§3).
+2. **Runtime artifacts** the desk agent produced (`queue/*`, field learnings;
+   `handoff.py` was one of these until it was absorbed into the binary) —
+   harvested before anything is deleted (§3).
 3. **Config state**: the `nightwatch_mode` column and the app's experimental
    flag — superseded by the posture column, orphaned in place (§6).
 4. **The desk worktree** — harvested, then archived by hand (§5).
@@ -71,7 +72,7 @@ by trusting this table.
 |---|---|
 | `TBDDaemon/Nightwatch/DaywatchRunner.swift` (loop, tick executor) | Superseded by the new daemon cadence (design §4). Delete at §6. |
 | `TBDDaemon/Nightwatch/DeskSessionManager.swift` | Superseded by the new supervisor session lifecycle (design §9). Delete at §6. |
-| `TBDShared/NightwatchSkillContent.swift` (981 lines of embedded policy) | Knowledge-extract in slice 0 (§3), then delete. Retires one of the three sanctioned TUI scrapers and its two SwiftLint exclusions. |
+| `TBDShared/NightwatchSkillContent.swift` (1528 lines of embedded policy) | Knowledge-extract in slice 0 (§3), then delete. Retires one of the three sanctioned TUI scrapers and its two SwiftLint exclusions. |
 | `TBDShared/NightwatchDeskPrompts.swift` | Doctrine-extract in slice 0, then delete. |
 | `PluginDirWriter.writeNightwatch()` + the on-disk skill dir | Delete after harvest; the boot-time overwrite disappears with it. |
 | `nightwatch.setMode` / `nightwatch.report` RPC, `RPCRouter+NightwatchHandlers.swift` | Superseded by `supervision.*` RPC surface. Delete at §6 (stale-CLI hazard: §6). |
@@ -79,7 +80,7 @@ by trusting this table.
 | `NightwatchMode` in `Models.swift`, `nightwatch_mode` in `ConfigStore` | Code deleted at §6; DB column orphaned in place. |
 | App surfaces: `NightwatchModeToggle`, `NightwatchStatusItem`, status-bar tint/badge, Settings "Fleet Automation" section, `nightwatchExperimentalEnabled` key | Superseded by the new posture control and the Fleet Supervision settings tab (design §10). Delete at §6. |
 | Tests (`DaywatchRunnerTests`, `DeskSessionManagerTests`, `NightwatchDeskPromptsTests`, `NightwatchModeTests`, `NightwatchModeToggleTests`, `NightwatchExperimentalGateTests`) | Delete with their subjects. |
-| Live runtime dir `~/Library/Application Support/TBD/plugin/skills/nightwatch/` (`queue/*`, agent-authored `scripts/handoff.py`, edited config files) | Harvest in slice 0, snapshot, then delete with `writeNightwatch()`. |
+| Live runtime dir `~/Library/Application Support/TBD/plugin/skills/nightwatch/` (`queue/*` and any edited config files — note `scripts/handoff.py` is no longer agent-owned here; it was absorbed into `NightwatchSkillContent` and is boot-overwritten like every other script) | Harvest in slice 0, snapshot, then delete with `writeNightwatch()`. |
 | The "◐ Watch Desk" scratch worktree | Final harvest at cutover, then archive by hand. |
 | Target repos' `.nightwatch/policy.json` | Advisory content folds into that repo's `.agents/supervision.md`; the file and directory are then removed from those repos (their consumer, `MergeGate`, is already gone). |
 | `docs/specs/2026-07-03-nightwatch-daywatch-design.md` | Keep as history; gains a superseded-by banner at §6. |
@@ -97,7 +98,7 @@ deletion.
 already destroys writer-owned edits on every daemon restart; the snapshot is
 the last defense for everything else before deletion.
 
-**Step 2 — triage.** Sort every unit of content — each section of the nine
+**Step 2 — triage.** Sort every unit of content — each section of the ten
 embedded files, each live-dir divergence from the embedded copy, each entry in
 the target repos' `.nightwatch/policy.json` — into exactly one bucket:
 
@@ -121,12 +122,13 @@ citations are to the baseline doc's §5–§6):
 | `wakePy` (pre-wake verifier) | Superseded (1) by compiled dispatch-time re-verification (design §4, P0-8). |
 | `tickPy` (capture-pane sweep) | Superseded (1) by the hook-fed state model and daemon sweep (design §2). This is the scraper retirement. |
 | `judgePy` (PR gating for one hardcoded repo) | Repo advisory (3) for the review-bot conventions; the mechanism is superseded (1). |
+| `handoffPy` (context-ceiling successor relay) | Superseded (1) by design §9's daemon-driven desk recycling, which externalizes to the shift record instead of relaying through a script. Agent-authored, later absorbed into the binary — worth one line in the disposition log as the clearest instance of the change process §5.3 of the baseline objects to, then discard (5). |
 | `tickCronSh` / `schedulerSh` (launchd) | Superseded (1) by the out-of-band heartbeat (design §14) — or discarded if the heartbeat is deferred; the shipped copy pointed at a dangling path anyway. |
 | `prioritiesTxt` | Stale fleet snapshot → discard (5). |
 | `safeWedgesTxt` | Discard (5), with a log line: prompt auto-approval is structurally removed (design §2's prompt-stalls subsection). The entries are at most candidates for source-side allow rules — a repo's own settings or the operator's per-repo overlay — should an operator ever want them there, and the shipped list, which carried a bare `git` prefix, is too broad to have ever been ratified. Nothing from it seeds standing rules. |
 | `dontTouchTxt` | Never-list entries → operator-binding (4); the frozen pane-ID comment → discard (5). |
 | `NightwatchDeskPrompts` | Claim-before-apply, escalation batching, the 200k respawn rule → doctrine (2), where the design has not already compiled them (§9 recycles context mechanically); person-specific wording → discard (5). |
-| Live dir: field-learning edits, `handoff.py`, `queue/for-*.md` | Learned prose → `~/tbd/repos/<id>/learnings.md` (P2-1 home); `handoff.py`'s relay idea is already absorbed by design §9; queue files are shift history → snapshot only. |
+| Live dir: field-learning edits, `queue/for-*.md` | Learned prose → `~/tbd/repos/<id>/learnings.md` (P2-1 home); queue files are shift history → snapshot only. `handoff.py` is no longer a live-dir divergence — it is embedded and boot-overwritten (see `handoffPy` above) — but snapshot-first still applies to the whole dir, because which files the writer owns has changed once already and the snapshot is what makes that harmless. |
 | Target repos' `.nightwatch/policy.json` | `priorities`, `dont_touch`, gate conditions → that repo's advisory playbook (3), except entries the operator promotes to binding (4). |
 
 **Step 3 — seed the destinations.** Open the `.agents/supervision.md` PR in
