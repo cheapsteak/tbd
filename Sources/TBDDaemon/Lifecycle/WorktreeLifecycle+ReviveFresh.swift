@@ -97,7 +97,8 @@ extension WorktreeLifecycle {
             worktreeID: pending.id,
             cols: cols,
             rows: rows,
-            carryover: carryover
+            carryover: carryover,
+            retryGeneratedNameOnCollision: false
         )
         guard let created = try await db.worktrees.get(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)

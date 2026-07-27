@@ -214,8 +214,10 @@ extension WorktreeLifecycle {
     ///
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
+    /// Set `retryGeneratedNameOnCollision` to false when callers have already
+    /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -310,7 +312,8 @@ extension WorktreeLifecycle {
                     repo: repo, name: worktree.name, branch: worktree.branch,
                     worktreePath: worktree.path,
                     userSpecifiedFolder: userSpecifiedFolder,
-                    userSpecifiedBranch: userSpecifiedBranch
+                    userSpecifiedBranch: userSpecifiedBranch,
+                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision
                 )
 
                 // 4. If the name changed due to collision, update the DB record
@@ -430,12 +433,13 @@ extension WorktreeLifecycle {
     }
 
     /// Creates the initial "Notes" tab for a freshly created repo-backed
-    /// worktree: one empty note row appended to the tab order (last; the
-    /// primary terminal keeps focus). The app materializes the tab from the
-    /// note row via its `reconcileNoteTabs` poll — note tabs use the note
-    /// row's UUID as the tab ID. Best-effort: a failure (e.g. the worktree
-    /// row vanished mid-create, FK-failing the insert) must never fail the
-    /// create, whose checkout and terminals are already valid.
+    /// worktree and appends it to the tab order (last; the primary terminal
+    /// keeps focus). Ordinary creates leave the note empty; callers may provide
+    /// a seed for flows whose initial Notes should carry context. The app
+    /// materializes the tab from the note row via its `reconcileNoteTabs` poll
+    /// — note tabs use the note row's UUID as the tab ID. Best-effort: a failure
+    /// (e.g. the worktree row vanished mid-create, FK-failing the insert) must
+    /// never fail the create, whose checkout and terminals are already valid.
     func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
@@ -460,7 +464,8 @@ extension WorktreeLifecycle {
         repo: Repo, name: String, branch: String,
         worktreePath: String,
         userSpecifiedFolder: Bool,
-        userSpecifiedBranch: Bool
+        userSpecifiedBranch: Bool,
+        retryGeneratedNameOnCollision: Bool
     ) async throws -> (name: String, branch: String, path: String) {
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
@@ -486,8 +491,9 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Fail immediately if user specified the folder — can't silently change it
-        if userSpecifiedFolder {
+        // Explicit folders and identity-sensitive callers cannot silently
+        // switch to a different generated folder and branch.
+        if userSpecifiedFolder || !retryGeneratedNameOnCollision {
             let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
                 "git worktree add failed — the folder or branch may already exist\(errorDetail)"

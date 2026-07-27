@@ -154,6 +154,83 @@ struct WorktreeReviveFreshTests {
         #expect(FileManager.default.fileExists(atPath: worktreeRoot) == rootExistedBefore)
     }
 
+    @Test func generatedNameCollisionFailsWithoutCreatingMisleadingFreshRevive() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let remoteDir = tempDir.appendingPathComponent("remote.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: remoteDir, withIntermediateDirectories: true)
+        try await shell("git init --bare -b main", at: remoteDir)
+        try await shell("git remote add origin '\(remoteDir.path)'", at: repoDir)
+        try await shell("git push -u origin main", at: repoDir)
+        _ = try installGeneratedBranchCollisionHook(repoDir: repoDir, rejections: 2)
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db,
+            repo: repo,
+            tempDir: tempDir,
+            sessions: ["A"],
+            archivedHeadSHA: try await GitManager().headSHA(repoPath: repoDir.path)
+        )
+        try writeSourceTranscript(sessionID: "A")
+        let rowsBefore = try await db.worktrees.list()
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            try await lifecycle.reviveConversationOnFreshBranch(
+                archivedWorktreeID: archived.id,
+                sessionID: "A",
+                date: operationDate
+            )
+        }
+
+        #expect(try await db.worktrees.list() == rowsBefore)
+        #expect(try await db.notes.list().isEmpty)
+        #expect(
+            recorder.snapshot().flatMap { $0 }.contains {
+                $0.contains("You have been moved to a fresh worktree.")
+            } == false
+        )
+        let worktreeRoot = try #require(repo.worktreeRoot)
+        let createdPaths = try FileManager.default.contentsOfDirectory(atPath: worktreeRoot)
+        #expect(createdPaths.isEmpty)
+    }
+
+    @Test func ordinaryCreateStillRetriesGeneratedNameCollision() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let remoteDir = tempDir.appendingPathComponent("remote.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: remoteDir, withIntermediateDirectories: true)
+        try await shell("git init --bare -b main", at: remoteDir)
+        try await shell("git remote add origin '\(remoteDir.path)'", at: repoDir)
+        try await shell("git push -u origin main", at: repoDir)
+        let rejectionCount = try installGeneratedBranchCollisionHook(
+            repoDir: repoDir,
+            rejections: 2
+        )
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeReviveFreshLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let created = try await lifecycle.createWorktree(
+            repoID: repo.id,
+            skipClaude: true
+        )
+
+        #expect(created.status == .active)
+        #expect(
+            try String(contentsOf: rejectionCount, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines) == "2"
+        )
+        let worktreeRoot = try #require(repo.worktreeRoot)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: worktreeRoot).count == 1)
+    }
+
     @Test func successfulFetchCarriesOnlySelectedConversationAndSeedsProvenance() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
@@ -163,17 +240,27 @@ struct WorktreeReviveFreshTests {
         try FileManager.default.createDirectory(at: remoteDir, withIntermediateDirectories: true)
         try await shell("git init --bare -b main", at: remoteDir)
         try await shell("git remote add origin '\(remoteDir.path)'", at: repoDir)
-        try await shell(
-            "GIT_AUTHOR_DATE=2026-07-20T12:00:00Z GIT_COMMITTER_DATE=2026-07-20T12:00:00Z git commit --allow-empty -m 'remote base'",
-            at: repoDir
-        )
         try await shell("git push -u origin main", at: repoDir)
-        let remoteSHA = try await GitManager().headSHA(
+        let staleTrackingSHA = try await GitManager().headSHA(
             repoPath: repoDir.path, ref: "origin/main"
         )
-        try await shell("git reset --hard HEAD~1", at: repoDir)
+        let advanceDir = tempDir.appendingPathComponent("remote-advance", isDirectory: true)
+        try await shell("git clone '\(remoteDir.path)' '\(advanceDir.path)'", at: tempDir)
+        try await shell(
+            "GIT_AUTHOR_DATE=2026-07-20T12:00:00Z GIT_COMMITTER_DATE=2026-07-20T12:00:00Z git commit --allow-empty -m 'remote base'",
+            at: advanceDir
+        )
+        try await shell("git push origin main", at: advanceDir)
+        let remoteSHA = try await GitManager().headSHA(
+            repoPath: advanceDir.path, ref: "HEAD"
+        )
         let localSHA = try await GitManager().headSHA(repoPath: repoDir.path, ref: "main")
-        #expect(remoteSHA != localSHA)
+        #expect(staleTrackingSHA == localSHA)
+        #expect(remoteSHA != staleTrackingSHA)
+        #expect(
+            try await GitManager().headSHA(repoPath: repoDir.path, ref: "origin/main")
+                == staleTrackingSHA
+        )
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
@@ -209,6 +296,10 @@ struct WorktreeReviveFreshTests {
         #expect(created.branch == "tbd/\(created.name)")
         #expect(
             try await GitManager().headSHA(repoPath: created.path, ref: "HEAD")
+                == remoteSHA
+        )
+        #expect(
+            try await GitManager().headSHA(repoPath: repoDir.path, ref: "origin/main")
                 == remoteSHA
         )
 
@@ -575,6 +666,37 @@ struct WorktreeReviveFreshTests {
         )
         try #"{"type":"user","message":{"content":"source conversation"}}"#
             .write(to: source, atomically: true, encoding: .utf8)
+    }
+
+    private func installGeneratedBranchCollisionHook(
+        repoDir: URL,
+        rejections: Int
+    ) throws -> URL {
+        let hook = repoDir.appendingPathComponent(".git/hooks/reference-transaction")
+        let rejectionCount = repoDir.appendingPathComponent(
+            ".git/fresh-revive-test-rejection-count"
+        )
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "prepared" ] && grep -q "refs/heads/tbd/"; then
+            count=0
+            if [ -f "\(rejectionCount.path)" ]; then
+                count=$(cat "\(rejectionCount.path)")
+            fi
+            if [ "$count" -lt \(rejections) ]; then
+                count=$((count + 1))
+                echo "$count" > "\(rejectionCount.path)"
+                exit 1
+            fi
+        fi
+        exit 0
+        """
+        try script.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hook.path
+        )
+        return rejectionCount
     }
 
     private func waitUntil(
