@@ -244,6 +244,63 @@ extension RPCRouter {
         return try RPCResponse(result: worktree)
     }
 
+    func handleWorktreeReviveConversationFresh(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            WorktreeReviveConversationFreshParams.self,
+            from: paramsData
+        )
+        guard let source = try await db.worktrees.get(id: params.archivedWorktreeID) else {
+            throw WorktreeLifecycleError.worktreeNotFound(params.archivedWorktreeID)
+        }
+        guard let repoID = source.repoID else {
+            throw WorktreeLifecycleError.invalidOperation(
+                "Cannot revive a conversation on a fresh branch without a repository."
+            )
+        }
+
+        let lifecycle = self.lifecycle
+        let outcome: (
+            completion: WorktreeCreateCompletion,
+            result: WorktreeReviveConversationFreshResult
+        ) = try await withCheckedThrowingContinuation { continuation in
+            Task {
+                await repoSerializer.submit(repoID: repoID) {
+                    do {
+                        let outcome = try await lifecycle
+                            .reviveConversationOnFreshBranch(
+                                archivedWorktreeID: params.archivedWorktreeID,
+                                sessionID: params.sessionID,
+                                cols: params.cols,
+                                rows: params.rows
+                            )
+                        continuation.resume(returning: outcome)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+
+        let created = outcome.result.worktree
+        switch outcome.completion {
+        case .ready:
+            subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                worktreeID: created.id,
+                repoID: created.repoID,
+                name: created.name,
+                path: created.path
+            )))
+        case .preSessionPending:
+            // The lifecycle already broadcast `.worktreeCreated` alongside
+            // the pre-session terminal. Match ordinary create and do not
+            // duplicate the row.
+            break
+        }
+        return try RPCResponse(result: outcome.result)
+    }
+
     func handleWorktreeAdopt(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeAdoptParams.self, from: paramsData)
         let outcome = try await lifecycle.adoptWorktree(
