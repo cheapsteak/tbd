@@ -31,7 +31,7 @@ extension AppState {
         let toastID = activeToast?.id
         let delay = toastTickDuration * 4
         toastDismissTask = Task { @MainActor [weak self] in
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+            // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration is `AppState.toastTickDuration` (a settable `Duration` on AppState.swift, doc'd as the injectable clock seam), exercised by Tests/TBDAppTests/DeepLinkToastTests.swift which sets it to .milliseconds(5) and joins via `await toastDismissTask?.value`; see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled,
                   let self, self.activeToast?.id == toastID else { return }

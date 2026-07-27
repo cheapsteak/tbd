@@ -285,7 +285,7 @@ final class FDPromise: @unchecked Sendable {
     /// by the receive loop's no-waiter path.
     func value(timeout: Duration) async throws -> Int32 {
         let timeoutTask = Task { [weak self] in
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+            // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration is the caller-supplied `timeout:` parameter of `value(timeout:)`, exercised by Tests/TBDAppTests/FDSidecarClientTests.swift which drives the timeout path at .milliseconds(100); see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: timeout)
             self?.onCancelOrTimeout?()
             self?.settle(fd: nil, error: FDSidecarError.timedOut)

@@ -64,7 +64,7 @@ public struct ProcessDaywatchExecutor: DaywatchExecuting {
             // Set up a 5-minute deadline. The timeout Task's check-and-set is also protected
             // by the lock, so only one of {termination, timeout} will successfully resume.
             Task {
-                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+                // swiftlint:disable:next no_raw_task_sleep - see issue #529: not migrated because this deadline Task is armed AFTER `process.run()`, the same ordering `BoundedProcessRunner` documents as a measured flake (a real fork/exec sits in front of a TestClock sleeper's registration, so a fast child can finish before the sleeper is registered), and fixing the ordering needs a kill-on-arrival branch that is untested-by-construction — see issue #529 for the analysis plus two further defects at this site, and docs/specs/2026-07-24-test-hardening-design.md
                 try await Task.sleep(for: .seconds(5 * 60))
                 state.lock.withLock { s in
                     if !s.finished {

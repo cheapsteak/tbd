@@ -8,6 +8,17 @@ import TBDShared
 /// `load-buffer` + `paste-buffer -d -p`). tmux is the SOLE bracketed-paste
 /// authority.
 ///
+/// That authority is CONTINGENT, and the precondition is worth naming here
+/// because nothing in this file expresses it: `paste-buffer -p` wraps in
+/// ESC[200~/ESC[201~ only *because* the application in the pane has enabled
+/// bracketed-paste mode (DECSET 2004). Against a pane whose app has not, the
+/// same `-p` delivers the bytes verbatim — measured on tmux 3.6a, 22 wrapped
+/// bytes vs 10 bare for the same payload. So if an agent TUI ever stops
+/// setting 2004, nothing on this path wraps and "SOLE authority" becomes
+/// "no authority". Asserted nightly by probe P3 in
+/// `scripts/nightly-tmux-probes.sh` (two arms: 2004 on -> wrapped, off ->
+/// verbatim), so the comment and the check move together.
+///
 /// Why no keystroke-path rider survives: stock tmux (our 3.2 floor) exposes no
 /// bracketed-paste format variable, so §3's attach replay cannot restore
 /// SwiftTerm's DECSET-2004 tracking after a tab-switch re-attach — SwiftTerm's

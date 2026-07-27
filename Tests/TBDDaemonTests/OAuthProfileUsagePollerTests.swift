@@ -491,9 +491,25 @@ private final class MutableClock: @unchecked Sendable {
 
 @Suite struct OAuthProfileUsagePollerBackoffTests {
 
-    /// Build a poller whose scheduled loop runs exactly one sweep (the cadence
-    /// sleeper throws to stop the loop), with a deterministic clock and zero
-    /// jitter.
+    /// Build a poller for testing the *backoff arithmetic* of sweeps that the
+    /// test drives by hand — `sweepNow()` (the picker-open refresh) and
+    /// `sweepForTest()` (which stands in for the scheduled sweep `runLoop()`
+    /// would issue). The injected `now` makes every backoff window a pure
+    /// function of `clock.advance(_:)`, and zero jitter makes the exponential
+    /// windows exact rather than ranged.
+    ///
+    /// Nothing here starts or stops a loop. An earlier version of this comment
+    /// claimed the cadence sleeper "throws to stop the loop"; that mechanism
+    /// does not exist. The sleeper below is non-throwing, `runLoop()` swallows
+    /// its sleeper's errors with `try?` and would keep looping anyway, and —
+    /// decisively — no test in this file calls `poller.start()`, so `runLoop()`
+    /// is never entered. The sleeper is consulted only by `sweep()`'s
+    /// inter-profile stagger, which is why a no-op makes sweeps instant.
+    ///
+    /// Coverage gap this leaves, stated so the next reader need not re-derive
+    /// it: because nothing calls `start()`, `runLoop()`'s cadence pacing and
+    /// its startup `skipFresherThan: cadence` handoff (set once, then cleared
+    /// to nil for every subsequent tick) are untested.
     private func scheduledPoller(
         profile: ModelProfile,
         fetcher: ScriptedProfileUsageFetcher,

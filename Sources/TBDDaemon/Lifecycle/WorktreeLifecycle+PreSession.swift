@@ -252,7 +252,7 @@ extension WorktreeLifecycle {
                 }
                 return .paneKilled
             }
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+            // swiftlint:disable:next no_raw_task_sleep - already seamed: `preSessionPollInterval` / `preSessionTimeout` are injected `WorktreeLifecycle.init` parameters, exercised by Tests/TBDDaemonTests/PreSessionHookTests.swift (via PreSessionTestSupport's `makeLifecycle`, which injects 0.05); migrating to `any Clock<Duration>` would also have to restructure the `Date()`-based deadline above, since the existential pins `Duration` but not `Instant`; see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: pollNanos)
         }
         // Deadline race: the marker may have landed during the final poll
