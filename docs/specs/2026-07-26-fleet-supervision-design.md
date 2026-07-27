@@ -308,6 +308,39 @@ rule-shaped, the supervisor proposes making it binding; one approval turns it
 into a standing rule. Prose knowledge and binding rules connect through the
 single ratification gesture.
 
+### Why the binding tier is structured at all (post-#509 accounting)
+
+With merge authority delegated to GitHub, the verbs left to gate are modest —
+send, wake, pause, approve-a-prompt — so it is fair to ask whether the binding
+tier could melt into prose too. It cannot, for exactly four reasons, and the
+design should never grow past what they require:
+
+1. **The supervised-mode promise (P0-3).** The verb gate consults posture and
+   rules with no model in the loop. Prose relaxations would mean either
+   maximal conservatism forever or the supervisor self-gating by interpreting
+   prose — the label-lie again.
+2. **"Never re-ask me" (P1-5).** The thing that would re-ask is the daemon's
+   queue; only the gate remembering the approval can suppress the 3 a.m., 4
+   a.m., and 5 a.m. repeats.
+3. **Never-lists must hold when nobody is watching.** A rule that binds while
+   the model is the only mind awake is definitionally not a prompt.
+4. **`intervene` is instruction injection.** Fleet agents run with permissions
+   skipped; a supervisor message is arbitrary instruction to an agent with
+   full tool access. Merging could be delegated to the forge; this action
+   surface is TBD's alone, and the gate in front of it is the one piece of
+   enforcement nobody else can hold.
+
+Consequence of the reduced scope: the rule store stays a flat list — scope +
+verb + stance + lifetime. No conditions language, no rule interactions, no
+SHA-pinning. Nothing left at stake demands more.
+
+Storage, settled: standing rules are a **file**
+(`~/tbd/supervision/standing-rules.json`), loaded into memory at startup,
+consulted in-memory on every verb, atomically rewritten on each gesture,
+reloaded on hand-edit. "Structured" is a statement about format and reader
+(the gate cannot interpret sentences), not about storage. Tens of rules, one
+writer at a time: nothing a database provides is needed.
+
 ### Prior art in the current system (and what #509 changed)
 
 The pre-redesign system handled these as: a hardcoded `STANDING_RULE` prompt
@@ -321,13 +354,12 @@ desk's own notes file as both memory and action log (hence P1-7's
 
 PR #509 (merged 2026-07-26) deleted the merge gate and the clearance/audit
 stores with it — correctly, since their authority (may this merge?) was
-delegated to GitHub branch protection. Consequence one: the clearance table is
-lineage, not substrate — its shape was right (scoped, enforced, voidable,
-auditable) and its layer was wrong; standing rules revive the shape at the
-layer TBD legitimately owns (what the supervisor may do to sessions), which no
-forge can absorb. Consequence two: post-#509 there is **no** enforced
-operator-decision mechanism in the system at all — the verb gate + standing
-rules is the first, not an upgrade.
+delegated to GitHub branch protection. Two consequences. First: the clearance
+table is history, not justification — its shape happened to be right (scoped,
+enforced, voidable, auditable), but the case for standing rules stands
+entirely on the four reasons above, not on lineage to deleted code. Second:
+post-#509 there is **no** enforced operator-decision mechanism in the system
+at all — the verb gate + standing rules is the first, not an upgrade.
 
 ## 9. Shift lifecycle (P2-2)
 
@@ -391,13 +423,114 @@ Principle: **you act where you already read.**
   a multi-account topology and is a workflow judgment. If it exists, it is a
   playbook instruction to a supervisor that already has the usage facts.
 
-## 12. Not yet walked
+## 12. Delivery acknowledgement
 
-- **Delivery acknowledgement** — how the design observes that a dispatched
-  message actually landed (the brief allows relying on targeted, draft-safe
-  delivery but not on send-success; the answer will be an observation, likely
-  the re-check reading transcript/state, stated explicitly). *(not yet walked)*
-- **Runaway detection (P2-4)** — the cheap-signal half. *(not yet walked)*
-- **Out-of-band heartbeat (P3-1)**. *(not yet walked)*
-- **The strongest argument against this design** — owed by the brief's
-  deliverable outline; to be written once the above close. *(not yet walked)*
+The send call cannot confirm landing (one adapter pushes without ack; the
+other can fail on a turn race). Landing is therefore an observation the design
+was already making: **the one-minute re-check doubles as the ack read.** Every
+dispatched message carries its ledger id as a marker. At re-check the daemon
+reads two machine facts — does the session's transcript now contain the
+marker, and did session state transition to `working`? Three outcomes, all
+recorded on the action's ledger line:
+
+- *Landed and acting* — done.
+- *Landed but still blocked* — a fresh case within a minute (P1-6).
+- *Not landed* — retry the delivery once; if the second re-check still shows
+  nothing, stop: anomaly line + escalation. Two silent failures means
+  something structural is wrong with that session, and a third blind send is
+  how duplicate-message bugs are born.
+
+No new machinery: the timer exists for P1-6, the transcript path is captured
+per terminal, the marker is the ledger id being written anyway.
+
+## 13. Runaway detection (P2-4)
+
+Detection is compiled counters; response is judged. Cheap facts per cycle,
+all from interfaces already read: turns this window (appended transcript JSONL
+records — a tail count, not content parsing), hook-event churn, and
+commits/diff unchanged across N cycles (the git sweep already knows).
+Threshold: global default, per-repo override in the DB settings surface (like
+the idle threshold).
+
+Crossing a threshold does not *do* anything — it produces a case in the next
+work order ("agent Y: 31 turns, no commits in 90 minutes"). The supervisor
+reads the transcript and judges: genuinely looping → `pause` (a consequential
+verb: proposal in supervised mode, standing-rules-gated in autonomous);
+legitimately grinding on a hard problem → note and leave it.
+
+**Auto-pause-on-threshold is refused deliberately.** "Burning quota without
+progress" and "thinking hard" are indistinguishable in counters, and pausing
+a working agent is exactly the kind of wrong action that destroys trust in
+the subsystem overnight.
+
+## 14. Out-of-band heartbeat (P3-1)
+
+The daemon writes a tiny `status.json` in the shift directory each sweep tick
+(posture, last-sweep timestamp). The watchdog is an opt-in `launchd` job with
+no logic beyond: *if a shift claims to be active and the status file hasn't
+moved in ~10 minutes, raise a notification.* It reads a file — not the socket,
+not the DB — so a dead daemon cannot take it down. It never acts on the fleet:
+a safety net that can only wake the operator, never machinery impersonating
+the supervisor. A down daemon means silence-plus-alarm — the
+unknown-degrades-to-inaction constraint at the largest scale.
+
+## 15. Deliberately not built
+
+- **A verdict enum / work-arc schema** — work interpretation differs by repo,
+  team, and person; a compiled taxonomy is the old system's defect regrown.
+- **`supervision.json`** — melted into standing rules; repos advise, operators
+  bind.
+- **Per-mode playbooks** — mode is context in one playbook; splitting files
+  invites unenforced promises.
+- **The act-with-veto-window HITL variant** — a missed veto is an unsanctioned
+  action; supervised mode must not quietly become autonomous mode.
+- **Cross-account rebalancing** — presumes one person's topology; if it exists
+  at all it is playbook prose to a supervisor that already has the usage facts.
+- **Auto-pause on runaway counters** — see §13.
+- **A supervisor patrol loop** — the daemon drives; judgment is woken with
+  work orders (see §16 for the cost of this).
+- **Repo-shipped binding rules** — binding requires per-operator ratification;
+  the promotion flow is the seam through which shared bindings could return
+  if teams demand them.
+- **DB tables for the queue, decisions, or ledger** — the queue is a
+  projection of the ledger; decisions are a file; the ledger is per-shift
+  JSONL. Supervision adds one column to the database.
+- **A supervisor-authored account** — the record produces the summary; the
+  supervisor gets color (attributed notes), not authorship.
+
+## 16. The strongest argument against this design
+
+**The judgment tier can only be as insightful as the trigger vocabulary that
+wakes it.** The supervisor is strictly reactive: it reasons only about cases
+the sweep can mechanically notice — idleness, blockage, counters crossing
+thresholds. Whatever the sweep cannot express never reaches judgment at all.
+Three agents failing the same way for the same systemic reason arrive as three
+independent cases, or as none. A pattern spanning the night — the kind of
+thing an expensive patrolling supervisor might have caught precisely because
+it was looking without being told what to look for — has no path into a work
+order. The design buys affordability (P0-6) and enforceability (P0-3) by
+capping its only reasoning component's field of view at what compiled code
+thought to measure. If that cap proves too tight, the pressure will show up as
+operators asking "why didn't the supervisor notice X overnight?" — and the
+mitigation seam is a periodic low-frequency digest work order (a fleet-wide
+summary as a case, once every N cycles), which restores patrol-like synthesis
+at bounded cost without inverting the architecture. It is deliberately not
+designed here; it should be built when that pressure is real, not before.
+
+Two secondary honest costs:
+
+- **Cold start.** Conservative defaults plus operator ratification means the
+  first nights are approval-grinding, and value accrues only as standing
+  rules and learnings accumulate. An operator who doesn't invest gets a
+  nagging queue and may conclude the subsystem is useless. The old system
+  worked on night one *for its one team* because policy was welded in;
+  generality was purchased with per-operator training cost. The bet: the
+  ratification gestures are cheap enough (scope choices on answers already
+  being given) that training happens as a side effect of use.
+- **Safe-and-useless is a quiet failure mode.** The substrate's honesty bias
+  means that if the event pipeline rots, nights become unknown-heavy and the
+  system correctly does nothing. Anomaly lines make this loud in the account
+  — but the symptom of a broken sensor layer is an empty, calm-looking night,
+  and distinguishing "nothing happened" from "nothing was seen" requires
+  actually reading the anomaly section. The account renderer should make
+  unknown-heavy nights visually unmistakable.
