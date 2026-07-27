@@ -92,6 +92,39 @@ enum ArchivedSearchDisplay {
         guard resultsQuery == trimmed else { return .clientPreview }
         return .daemonResults
     }
+
+    /// What the list area renders.
+    enum ListState: Equatable {
+        case rows
+        /// No verdict yet: the daemon's answer for this query hasn't arrived
+        /// and the client-side preview over the loaded page came up empty.
+        case searching
+        /// A verdict: nothing matches (or `hideEmpty` is hiding what does).
+        case noMatches
+    }
+
+    /// **"I don't know yet" and "there is nothing" must not look identical.**
+    ///
+    /// The client-side preview filters only the *loaded* page, so for the
+    /// feature's whole purpose — finding an archive older than the first 50 —
+    /// the preview is legitimately empty while the real answer is still in
+    /// flight. Rendering that as "No matches" made the list read as a verdict
+    /// during the entire time the user was typing: every keystroke restarts the
+    /// 250 ms debounce, so the unsettled window lasts as long as the typing
+    /// does, not the ~150 ms the RPC actually takes.
+    ///
+    /// A search that already FAILED is excluded deliberately: there is no
+    /// answer coming, so a spinner would run forever. The inline
+    /// "Search failed — showing loaded results only" note explains that case.
+    static func listState(
+        decision: Decision,
+        searchFailed: Bool,
+        hasVisibleRows: Bool
+    ) -> ListState {
+        if hasVisibleRows { return .rows }
+        guard decision == .clientPreview, !searchFailed else { return .noMatches }
+        return .searching
+    }
 }
 
 struct ArchivedWorktreesView: View {
@@ -138,6 +171,22 @@ struct ArchivedWorktreesView: View {
     /// therefore showing the client-side preview of loaded rows only.
     private var searchFailed: Bool {
         isSearching && appState.archivedSearchFailed[repoID] == true
+    }
+
+    /// True while the daemon's answer for the query in the field is still
+    /// outstanding (debounce window or in-flight RPC) and hasn't failed. Drives
+    /// both spinners — the list's "Searching…" and the field's inline one.
+    private var isSearchPending: Bool {
+        displayDecision == .clientPreview && !searchFailed
+    }
+
+    /// What the list area should render.
+    private var listState: ArchivedSearchDisplay.ListState {
+        ArchivedSearchDisplay.listState(
+            decision: displayDecision,
+            searchFailed: searchFailed,
+            hasVisibleRows: !rows.isEmpty
+        )
     }
 
     /// Merge a worktree list with this repo's lingering revive snapshots (so a
@@ -302,9 +351,12 @@ struct ArchivedWorktreesView: View {
             Divider()
 
             ScrollViewReader { proxy in
-                if rows.isEmpty {
+                switch listState {
+                case .searching:
+                    searchingState
+                case .noMatches:
                     noMatchesState
-                } else {
+                case .rows:
                     List {
                         ForEach(rows) { row in
                             ArchivedWorktreeRow(
@@ -399,6 +451,14 @@ struct ArchivedWorktreesView: View {
             TextField("Search by name", text: $searchQuery)
                 .textFieldStyle(.plain)
                 .font(.callout)
+            // The other half of "unsettled must not look settled": when the
+            // preview DOES have rows, the list looks like a final answer while
+            // it is still narrowing, so results appear to change after the fact
+            // for no visible reason.
+            if isSearchPending {
+                ProgressView()
+                    .controlSize(.mini)
+            }
             if !searchQuery.isEmpty {
                 Button {
                     clearSearch()
@@ -441,6 +501,21 @@ struct ArchivedWorktreesView: View {
         } else {
             await appState.loadMoreArchivedWorktrees(repoID: repoID)
         }
+    }
+
+    /// Nothing visible YET — the daemon's answer for this query is still
+    /// coming. Deliberately offers no Clear/Show-all affordances: there is no
+    /// verdict to remedy, and buttons here would invite the user to act on a
+    /// result that doesn't exist.
+    private var searchingState: some View {
+        VStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Searching…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Nothing visible, but the repo does have archives — offer whichever

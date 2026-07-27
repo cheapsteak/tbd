@@ -102,6 +102,70 @@ struct ArchivedSearchDisplayTests {
     }
 }
 
+/// Tier 1. The full truth table for what the list area renders.
+///
+/// The bug this pins: an empty *client-side preview* was rendered as a
+/// definitive "No matches". The preview filters only the loaded page, so it is
+/// legitimately empty whenever the user is searching for an archive older than
+/// the first 50 — the feature's entire purpose. And because each keystroke
+/// restarts the 250 ms debounce, that state persists for as long as the user is
+/// typing, not for the ~150 ms the RPC takes: they read "No matches" the whole
+/// time they type the word.
+@Suite("Archived search list state")
+struct ArchivedSearchListStateTests {
+    private func state(
+        _ decision: ArchivedSearchDisplay.Decision,
+        failed: Bool = false,
+        rows: Bool
+    ) -> ArchivedSearchDisplay.ListState {
+        ArchivedSearchDisplay.listState(
+            decision: decision, searchFailed: failed, hasVisibleRows: rows
+        )
+    }
+
+    /// The reported bug. Asserted twice — the positive contract, and explicitly
+    /// that it is NOT the verdict it used to render.
+    @Test("an unsettled query with an empty preview is Searching, not No matches")
+    func unsettledEmptyPreviewIsSearching() {
+        let result = state(.clientPreview, failed: false, rows: false)
+        #expect(result == .searching)
+        #expect(result != .noMatches, "an unsettled preview must never read as a verdict")
+    }
+
+    /// No answer is coming, so a spinner would run forever. The inline
+    /// "Search failed" note carries the explanation instead.
+    @Test("a FAILED search with an empty preview is No matches, never a spinner")
+    func failedSearchIsNoMatchesNotSpinner() {
+        #expect(state(.clientPreview, failed: true, rows: false) == .noMatches)
+    }
+
+    @Test("the daemon's own empty answer is a genuine No matches")
+    func daemonEmptyAnswerIsNoMatches() {
+        #expect(state(.daemonResults, rows: false) == .noMatches)
+        // `searchFailed` is irrelevant once a settled answer exists.
+        #expect(state(.daemonResults, failed: true, rows: false) == .noMatches)
+    }
+
+    /// Regression guard for the pre-existing behaviour: with no query at all,
+    /// an empty list means `hideEmpty` is hiding everything — that must keep
+    /// its "Show all" verdict rather than becoming an endless spinner.
+    @Test("no query with an empty list stays No matches, not Searching")
+    func unfilteredEmptyIsNoMatches() {
+        #expect(state(.unfiltered, rows: false) == .noMatches)
+        #expect(state(.unfiltered, failed: true, rows: false) == .noMatches)
+    }
+
+    @Test("any decision with visible rows renders the rows")
+    func visibleRowsAlwaysRender() {
+        for decision: ArchivedSearchDisplay.Decision in [.unfiltered, .daemonResults, .clientPreview] {
+            for failed in [true, false] {
+                #expect(state(decision, failed: failed, rows: true) == .rows,
+                        "decision \(decision), failed \(failed) must render rows")
+            }
+        }
+    }
+}
+
 /// Tier 1. Regression coverage for the second archived row source.
 ///
 /// Search results are rows the daemon matched in pages `archivedWorktrees`
