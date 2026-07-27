@@ -1,0 +1,329 @@
+import Clocks
+import Foundation
+import Testing
+@testable import TBDApp
+import TBDShared
+import TestSupport
+
+/// Tier 1. The pure client-side half of archived-worktree search: the substring
+/// match that backs the preview shown while the daemon's SQL answer is still in
+/// flight. Kept semantically identical to `WorktreeStore.list(nameQuery:)` so
+/// the preview is a subset of the daemon's answer, not a different question.
+@Suite("Archived worktree search filter")
+struct ArchivedWorktreeSearchFilterTests {
+    private func worktree(name: String, displayName: String) -> Worktree {
+        Worktree(
+            repoID: UUID(),
+            name: name,
+            displayName: displayName,
+            branch: "tbd/\(name)",
+            path: "/tmp/\(name)",
+            status: .archived,
+            tmuxServer: "srv"
+        )
+    }
+
+    @Test("an empty or whitespace-only query matches everything")
+    func emptyQueryMatchesEverything() {
+        let wt = worktree(name: "curious-wolverine", displayName: "Curious Wolverine")
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: ""))
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: "   "))
+    }
+
+    @Test("matches the folder name, case-insensitively")
+    func matchesFolderName() {
+        let wt = worktree(name: "curious-wolverine", displayName: "Renamed")
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: "wolverine"))
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: "WOLVERINE"))
+    }
+
+    @Test("matches the display name even when the folder name does not")
+    func matchesDisplayName() {
+        let wt = worktree(name: "aaa-bbb", displayName: "Search Rail")
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: "rail"))
+        #expect(!ArchivedWorktreeSearchFilter.matches(wt, query: "zzz"))
+    }
+
+    @Test("substring, not prefix")
+    func matchesMidStringSubstring() {
+        let wt = worktree(name: "tbd-archived-search", displayName: "tbd-archived-search")
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: "archiv"))
+    }
+
+    @Test("the query is trimmed before matching")
+    func queryIsTrimmed() {
+        let wt = worktree(name: "curious-wolverine", displayName: "Curious Wolverine")
+        #expect(ArchivedWorktreeSearchFilter.matches(wt, query: "  wolverine  "))
+    }
+
+    @Test("a non-matching query matches neither name")
+    func nonMatchingQuery() {
+        let wt = worktree(name: "curious-wolverine", displayName: "Curious Wolverine")
+        #expect(!ArchivedWorktreeSearchFilter.matches(wt, query: "otter"))
+    }
+}
+
+/// Tier 1. Which row set the archived list renders for a given query, given
+/// the query the results in hand actually answer.
+///
+/// The `.clientPreview` case for a *mismatched* results-query is a regression
+/// test: the results and their query used to live in separate `AppState` dicts,
+/// and the in-flight query was stamped before the RPC while the rows were
+/// replaced after it. For that whole window the view believed the previous
+/// query's rows were the settled answer for the new one — and since daemon
+/// results are not re-filtered client-side, it displayed rows that do not match
+/// what the user typed. Typing appeared not to narrow the list.
+@Suite("Archived search display decision")
+struct ArchivedSearchDisplayTests {
+    @Test("no query shows every loaded row, whatever results are held")
+    func emptyQueryIsUnfiltered() {
+        #expect(ArchivedSearchDisplay.decide(query: "", resultsQuery: nil) == .unfiltered)
+        #expect(ArchivedSearchDisplay.decide(query: "   ", resultsQuery: "abc") == .unfiltered)
+    }
+
+    @Test("results answering exactly this query are the row set")
+    func matchingResultsQueryUsesDaemonResults() {
+        #expect(ArchivedSearchDisplay.decide(query: "abc", resultsQuery: "abc") == .daemonResults)
+        // The stored query is already trimmed; the typed one may not be.
+        #expect(ArchivedSearchDisplay.decide(query: "  abc ", resultsQuery: "abc") == .daemonResults)
+    }
+
+    @Test("results answering a DIFFERENT query fall back to the client-side preview")
+    func staleResultsQueryFallsBackToPreview() {
+        // The exact stale-results defect: "abc" answered, "abcd" now typed.
+        #expect(ArchivedSearchDisplay.decide(query: "abcd", resultsQuery: "abc") == .clientPreview)
+        // And the reverse (user deleted a character).
+        #expect(ArchivedSearchDisplay.decide(query: "abc", resultsQuery: "abcd") == .clientPreview)
+    }
+
+    @Test("no results at all fall back to the client-side preview")
+    func noResultsFallsBackToPreview() {
+        #expect(ArchivedSearchDisplay.decide(query: "abc", resultsQuery: nil) == .clientPreview)
+    }
+}
+
+/// Tier 1. Regression coverage for the second archived row source.
+///
+/// Search results are rows the daemon matched in pages `archivedWorktrees`
+/// never loaded. Every lookup written against the loaded pages alone silently
+/// fails for them — which made Revive a no-op (no RPC, no alert, just a
+/// `logger.warning`) on exactly the row a user searched to find, and made
+/// `ensureArchivedSelectionValid` judge a search-only selection stale and
+/// re-point the detail pane on the next refresh.
+///
+/// `AppState` constructs safely here: `init` skips its auto-connect under the
+/// test harness (see `AppStateTestModeGuardTests`), and none of the methods
+/// exercised below issue an RPC.
+@MainActor
+@Suite("Archived snapshot resolution")
+struct ArchivedSnapshotResolutionTests {
+    private func makeState() -> (AppState, String) {
+        let suiteName = "TBDAppTests.ArchivedSnapshots.\(UUID().uuidString)"
+        return (AppState(userDefaults: UserDefaults(suiteName: suiteName)!), suiteName)
+    }
+
+    private func worktree(repoID: UUID?, name: String) -> Worktree {
+        Worktree(
+            repoID: repoID, name: name, displayName: name, branch: "tbd/\(name)",
+            path: "/tmp/\(name)", status: .archived, tmuxServer: "srv"
+        )
+    }
+
+    // MARK: the pure union
+
+    @Test("the union carries rows that exist only in the search results")
+    func unionIncludesSearchOnlyRows() {
+        let loaded = worktree(repoID: UUID(), name: "loaded")
+        let searchOnly = worktree(repoID: UUID(), name: "search-only")
+        let merged = AppState.mergeArchivedSnapshots(
+            loaded: [loaded], searchResults: [searchOnly]
+        )
+        #expect(merged.map(\.id) == [loaded.id, searchOnly.id])
+    }
+
+    @Test("a row in both sources appears once, taking the loaded copy")
+    func unionDedupesPreferringLoaded() {
+        let repoID = UUID()
+        var loaded = worktree(repoID: repoID, name: "shared")
+        loaded.displayName = "fresh"
+        var stale = loaded
+        stale.displayName = "stale"
+
+        let merged = AppState.mergeArchivedSnapshots(loaded: [loaded], searchResults: [stale])
+        #expect(merged.count == 1)
+        #expect(merged.first?.displayName == "fresh")
+    }
+
+    @Test("either source may be empty")
+    func unionHandlesEmptySources() {
+        let only = worktree(repoID: UUID(), name: "only")
+        #expect(AppState.mergeArchivedSnapshots(loaded: [], searchResults: [only]).map(\.id) == [only.id])
+        #expect(AppState.mergeArchivedSnapshots(loaded: [only], searchResults: []).map(\.id) == [only.id])
+        #expect(AppState.mergeArchivedSnapshots(loaded: [], searchResults: []).isEmpty)
+    }
+
+    // MARK: the lookup the revive paths use
+
+    /// The Finding-1 regression: this is the exact resolution both
+    /// `reviveWorktree` and `reviveWithSession` guard on. Against
+    /// `archivedWorktrees` alone it returned nil and the revive silently
+    /// no-opped.
+    @Test("archivedSnapshot resolves a row present only in the search results")
+    func archivedSnapshotResolvesSearchOnlyRow() {
+        let (state, suite) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let repoID = UUID()
+        let loaded = worktree(repoID: repoID, name: "loaded")
+        let searchOnly = worktree(repoID: repoID, name: "search-only")
+
+        state.archivedWorktrees[repoID] = [loaded]
+        state.archivedSearchResults[repoID] = ArchivedSearchResults(
+            query: "search", worktrees: [searchOnly], hasMore: false
+        )
+
+        #expect(state.archivedSnapshot(id: searchOnly.id)?.id == searchOnly.id)
+        #expect(state.archivedSnapshot(id: loaded.id)?.id == loaded.id)
+        #expect(state.archivedSnapshot(id: UUID()) == nil)
+    }
+
+    /// A selection on a search-only row must survive selection maintenance.
+    /// This branch early-returns, so no `fetchSessions` RPC is issued.
+    @Test("ensureArchivedSelectionValid keeps a selection on a search-only row")
+    func selectionOnSearchOnlyRowSurvives() {
+        let (state, suite) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let repoID = UUID()
+        let loaded = worktree(repoID: repoID, name: "loaded")
+        let searchOnly = worktree(repoID: repoID, name: "search-only")
+
+        state.archivedWorktrees[repoID] = [loaded]
+        state.archivedSearchResults[repoID] = ArchivedSearchResults(
+            query: "search", worktrees: [searchOnly], hasMore: false
+        )
+        state.selectArchivedWorktree(searchOnly.id, repoID: repoID)
+
+        state.ensureArchivedSelectionValid(repoID: repoID)
+        #expect(state.selectedArchivedWorktreeIDs[repoID] == searchOnly.id,
+                "a search-only selection is legitimate and must not be re-pointed")
+    }
+}
+
+/// Tier 1. Regression coverage for the page-preserving refresh arithmetic
+/// shared by `refreshArchivedWorktrees` and `refreshArchivedSearch`.
+///
+/// The Finding-2 defect was that the search re-run refetched page 0 and
+/// replaced the stored results, collapsing Load More–accumulated pages. Both
+/// refreshes now derive their fetch size and `hasMore` from this one type; what
+/// is covered here is that arithmetic, not the RPC wiring (`AppState.daemonClient`
+/// has no injection seam, so the wiring itself is not reachable in a unit test).
+@Suite("Archived refresh plan")
+struct ArchivedRefreshPlanTests {
+    private let pageSize = 50
+
+    @Test("a first-time refresh fetches exactly one page")
+    func firstRefreshFetchesOnePage() {
+        let plan = ArchivedRefreshPlan(currentCount: 0, pageSize: pageSize)
+        #expect(plan.fetchCount == 50)
+        #expect(plan.knownExhausted == false)
+        #expect(plan.hasMore(fetched: 50))
+        #expect(!plan.hasMore(fetched: 12))
+    }
+
+    /// The invariant the search re-run was missing: with 150 rows already
+    /// pulled in, a refresh must ask for all 150, not the first 50.
+    @Test("a refresh preserves already-loaded pages")
+    func refreshPreservesLoadedPages() {
+        let plan = ArchivedRefreshPlan(currentCount: 150, pageSize: pageSize)
+        #expect(plan.fetchCount == 150)
+        #expect(plan.knownExhausted == false)
+        #expect(plan.hasMore(fetched: 150))
+    }
+
+    /// A partial last page proves the server has nothing more, so the larger
+    /// refetch returning fewer rows than it asked for must not re-arm
+    /// "Load More".
+    @Test("a partial page is known-exhausted and never re-arms Load More")
+    func partialPageIsKnownExhausted() {
+        let plan = ArchivedRefreshPlan(currentCount: 73, pageSize: pageSize)
+        #expect(plan.fetchCount == 73)
+        #expect(plan.knownExhausted)
+        #expect(!plan.hasMore(fetched: 73))
+        #expect(!plan.hasMore(fetched: 100))
+    }
+}
+
+/// Tier 1. Debounce contract for the archived search field: a burst of
+/// keystrokes must cost one RPC, not one per character. Entirely virtual time —
+/// see `Tests/CLAUDE.md` "Clock and date seams".
+///
+/// `.serialized` for the same reason as `AppearanceDebounceTests`: every test
+/// here drives a `TestClock`, and each advance costs a `Task.megaYield()`; run
+/// in parallel these starve each other on the arming handshake.
+@MainActor
+@Suite("Archived search debounce", .clockDriven, .serialized)
+struct SearchQueryDebouncerTests {
+    private static let interval = Duration.milliseconds(250)
+
+    @MainActor
+    private final class Box {
+        var values: [String] = []
+    }
+
+    @Test("a burst within one window collapses to a single fire with the last value")
+    func burstCollapsesToLastValue() async {
+        let clock = TestClock()
+        let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
+        let fired = Box()
+
+        debouncer.schedule("w") { [fired] in fired.values.append($0) }
+        debouncer.schedule("wo") { [fired] in fired.values.append($0) }
+        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
+
+        await clock.advanceWhenSuspended(by: Self.interval)
+        #expect(fired.values == ["wolv"])
+    }
+
+    @Test("nothing fires until the full interval has elapsed")
+    func firesOnTheBoundary() async {
+        let clock = TestClock()
+        let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
+        let fired = Box()
+
+        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
+
+        await clock.advanceWhenSuspended(by: Self.interval - .milliseconds(1))
+        #expect(fired.values.isEmpty, "one millisecond short of the window must not fire")
+
+        await clock.advance(by: .milliseconds(1))
+        #expect(fired.values == ["wolv"])
+    }
+
+    @Test("cancel() drops a pending fire")
+    func cancelDropsPendingFire() async {
+        let clock = TestClock()
+        let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
+        let fired = Box()
+
+        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
+        await clock.advanceWhenSuspended(by: .milliseconds(100))
+
+        debouncer.cancel()
+        await clock.advance(by: Self.interval)
+        #expect(fired.values.isEmpty, "a cancelled query must never reach the daemon")
+    }
+
+    @Test("queries separated by a full window fire twice, in order")
+    func separatedQueriesFireTwice() async {
+        let clock = TestClock()
+        let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
+        let fired = Box()
+
+        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
+        await clock.advanceWhenSuspended(by: Self.interval)
+        #expect(fired.values == ["wolv"])
+
+        debouncer.schedule("otter") { [fired] in fired.values.append($0) }
+        await clock.advanceWhenSuspended(by: Self.interval)
+        #expect(fired.values == ["wolv", "otter"])
+    }
+}

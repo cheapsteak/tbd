@@ -362,14 +362,28 @@ public struct WorktreeStore: Sendable {
     /// note `repoID: nil` alone means "no repo filter" (every repo plus
     /// scratch), not "scratch only"; `scratchOnly` is the only way to get
     /// scratch-only rows.
-    /// This composes with `status`: all filters are applied when given together.
+    /// When `nameQuery` is non-nil and not whitespace-only, restricts to rows
+    /// whose folder `name` OR `displayName` *contains* the query
+    /// (case-insensitive substring, not a prefix match). A blank or
+    /// whitespace-only query means "no filter". LIKE metacharacters (`%`, `_`)
+    /// and the escape character in the query are escaped, so they match
+    /// literally rather than acting as wildcards.
+    ///
+    /// Case-insensitivity comes from SQLite's built-in `LIKE`, which folds
+    /// **ASCII only** — a non-ASCII query matches case-sensitively. Accepted:
+    /// worktree names are generated ASCII slugs.
+    ///
+    /// This composes with `status`: all filters are applied when given
+    /// together, and all of them are applied *before* `limit`/`offset` so
+    /// pagination pages over the matching set.
     public func list(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         excludeArchived: Bool = false,
         scratchOnly: Bool = false,
         limit: Int? = nil,
-        offset: Int? = nil
+        offset: Int? = nil,
+        nameQuery: String? = nil
     ) async throws -> [Worktree] {
         try await writer.read { db in
             var request = WorktreeRecord.all()
@@ -385,6 +399,14 @@ public struct WorktreeStore: Sendable {
             if excludeArchived {
                 request = request.filter(Column("status") != WorktreeStatus.archived.rawValue)
             }
+            if let pattern = Self.likePattern(for: nameQuery) {
+                // GRDB's `.like()` operator has no escape-character overload,
+                // so the ESCAPE clause is spelled out as raw SQL. Arguments
+                // stay bound (no interpolation of user text into SQL).
+                request = request.filter(sql: """
+                    (name LIKE ? ESCAPE '\\' OR displayName LIKE ? ESCAPE '\\')
+                    """, arguments: [pattern, pattern])
+            }
             if status == .archived {
                 request = request.order(Column("archivedAt").desc)
             } else {
@@ -395,6 +417,25 @@ public struct WorktreeStore: Sendable {
             }
             return try request.fetchAll(db).compactMap { $0.toModel() }
         }
+    }
+
+    /// Build the `%…%` LIKE pattern for a user-typed name query, or nil when
+    /// the query is absent/blank (== no filter).
+    ///
+    /// The escaping is the load-bearing part: without it a typed `%` is a
+    /// wildcard that matches every row, and `_` matches any single character.
+    /// The escape character itself must be escaped first, otherwise a trailing
+    /// `\` would escape the closing `%` we append. `internal` so it is directly
+    /// unit-testable.
+    static func likePattern(for nameQuery: String?) -> String? {
+        guard let raw = nameQuery else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let escaped = trimmed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        return "%\(escaped)%"
     }
 
     /// Get a worktree by ID.

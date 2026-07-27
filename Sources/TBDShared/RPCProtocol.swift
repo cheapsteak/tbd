@@ -942,6 +942,17 @@ public struct WorktreeListParams: Codable, Sendable {
     /// backward compatibility — old daemons ignore the unknown key and always
     /// enrich; old clients omit it and get the enriched default.
     public let includeSessionCounts: Bool?
+    /// Substring filter over the worktree's folder `name` **and** its
+    /// `displayName`: a row matches when the query appears anywhere in either
+    /// (not just as a prefix). Matching is case-insensitive for ASCII — the
+    /// daemon implements this with SQLite `LIKE`, whose built-in case folding
+    /// does not cover non-ASCII characters.
+    ///
+    /// nil or blank (whitespace-only) means "no filter". The filter is applied
+    /// *before* `limit`/`offset`, so pagination pages over the matching set.
+    /// Optional (nil == no filter) for backward compatibility — old daemons
+    /// ignore the unknown key and return everything; old clients omit it.
+    public let nameQuery: String?
     public init(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
@@ -949,7 +960,8 @@ public struct WorktreeListParams: Codable, Sendable {
         offset: Int? = nil,
         excludeArchived: Bool? = nil,
         scratchOnly: Bool? = nil,
-        includeSessionCounts: Bool? = nil
+        includeSessionCounts: Bool? = nil,
+        nameQuery: String? = nil
     ) {
         self.repoID = repoID
         self.status = status
@@ -958,6 +970,7 @@ public struct WorktreeListParams: Codable, Sendable {
         self.excludeArchived = excludeArchived
         self.scratchOnly = scratchOnly
         self.includeSessionCounts = includeSessionCounts
+        self.nameQuery = nameQuery
     }
 }
 

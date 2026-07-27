@@ -125,7 +125,8 @@ extension RPCRouter {
             excludeArchived: params.excludeArchived ?? false,
             scratchOnly: params.scratchOnly ?? false,
             limit: params.limit,
-            offset: params.offset
+            offset: params.offset,
+            nameQuery: params.nameQuery
         )
         // Enrich archived worktrees with a real session-file count so the
         // client can filter on actual disk state, not stale stored IDs.
