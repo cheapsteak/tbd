@@ -80,9 +80,12 @@ liveness identifies gone agents. This design adds two things:
    the result is loudly reported as `unknown`. The daemon never silently picks
    one input.
 2. **Install Claude Code's Notification hook** so "awaiting input" carries a
-   structured reason. A future list of automatically allowed permissions (P2-3)
-   will match this reason. The one-minute re-check (P1-6) will also use it to
-   answer, "Did the agent advance past the prompt?"
+   structured reason. That reason has two consumers. It rides along in the
+   escalation payload, so an operator carrying a stall sees exactly what was
+   asked, verbatim — including the prompts a repo's deliberate `ask` rules
+   raise, which are escalated rather than answered ("Prompt stalls (P2-3)"
+   below). The one-minute re-check (P1-6) also uses it to answer, "Did the agent
+   advance past the prompt?"
 
 One more session-state fact comes free from the same source: **context load** —
 the tokens currently in a session's context window, read from the last
@@ -114,15 +117,122 @@ the app already has. If operator hooks repeatedly implement the same
 calculation in the future, consider moving that specific calculation into the
 app.
 
+### Prompt stalls (P2-3): prevention, never advancement
+
+P2-3 asks for agents to be advanced past an operator-authored allowlist of
+routine permission prompts. The story is honest about the pain and wrong about
+the mechanism. Advancing a rendered dialog from outside requires either
+scraping the screen to find it or timing keystrokes blind — the same mechanism
+§12 refuses for the Channels consent prompt, refused here for the same reason:
+auto-answering a dialog defeats it while leaving it in place as theater. The
+resolution is **prevention at the source, never advancement from outside** —
+and where the source deliberately wants a human, escalation.
+
+Start from what daemon-spawned fleet sessions actually face.
+`ClaudeSpawnCommandBuilder` hard-codes `--dangerously-skip-permissions` on both
+Claude spawn paths, and the Codex spawn passes
+`--dangerously-bypass-approvals-and-sandbox`. Those flags remove the agent's
+*default* permission checks; they do not silence a repo's explicit ones. A
+repo's own committed Claude settings can carry `permissions.ask` rules, and an
+`ask` rule still prompts under the bypass flag — by design, because it is the
+repo deliberately requesting a human at a point it chose. This is real, not
+hypothetical: one target repo in the motivating fleet gates PR merges
+(`gh pr merge*`, plus the merge and auto-merge API routes) and
+production-credential fetches this way, precisely so an agent has to get a
+human before doing those things. So the allowlist P2-3 asks for *would* have
+something to match — and matching it is exactly what must not happen. An
+allowlist that auto-grants a repo's deliberate `ask` is the tool overruling the
+repo's own decision about when a human is required.
+
+Alongside those asks, the residual dialog zoo still stalls agents: folder
+trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.
+Folder trust looks solved and isn't: `ClaudeTrustSeeder` pre-answers it for
+scratch spaces only — its `guard worktree.isScratch else { return }` returns
+early for repo-backed worktrees — and a fleet worktree is a path Claude has
+never been trusted at, exactly as fresh and untrusted as a scratch dir. Seeding
+trust for non-scratch worktrees is prong 2's first piece of new work, not
+existing coverage. None of these dialogs has a machine answer path today.
+`ask`-rule prompts join the zoo as its one permission-shaped member — and they
+are the one member that is deliberate. The rest is friction to remove before it
+is ever drawn; an `ask` is a question to carry to a human.
+
+So the design answers the stall in three prongs, each at a different moment:
+
+1. **Tool-permission behavior is fixed at the source — TBD never
+   counter-configures it.** The one place that decides what prompts is the
+   agent's own permission config: the repo's committed settings, plus the
+   operator's per-repo claude-settings overlay, which already deep-merges into
+   the per-session `--settings` file at spawn. TBD delivers that overlay and
+   stops there. It grows no counter-setting that auto-answers what a repo's
+   settings deliberately ask about — "the repo says always ask before merging;
+   the tool says always grant merge requests" is two configs fighting each
+   other, and a standing waste of both tokens and the reader's trust in either
+   setting. TBD invents no matching language, stores no conditions, and
+   evaluates nothing at runtime; an `ask` that survives spawn is honored as an
+   escalation (prong 3). If overnight operation shouldn't stall on a given ask,
+   the fix is to change that ask rule at its source — a reviewable settings
+   change in the repo or in the operator's overlay — never a TBD-side grant
+   list. The same holds should non-skip-permissions fleet spawns ever ship:
+   the operator's allowlist is `permissions.allow` in that same config,
+   enforced by the agent's own engine.
+2. **Config-answerable dialogs — pre-answered by seeders before spawn**, one
+   seeder per agent kind, following the `ClaudeTrustSeeder` precedent.
+   `ClaudeTrustSeeder` is precedent for the *pattern* only — it seeds scratch
+   spaces and returns early for repo worktrees — so carrying trust seeding to
+   non-scratch fleet worktrees is work this prong names, not work that already
+   exists. A dialog that has a config answer is answered before it can ever be
+   drawn.
+3. **Everything that still stalls is a genuine question** — either because it
+   was never routine, or because a repo's settings deliberately made it a
+   question and prong 1 declines to answer for them. A firing `ask` rule is not
+   noise to suppress; it is the repo asking for a human, and it lands here. It
+   surfaces as an awaiting-input case and is escalated. It is never advanced
+   and never auto-granted.
+
+The story's "never past anything else" clause is then enforced *structurally*
+rather than by an allowlist's precision: TBD has no prompt-advancing mechanism
+at all — not for the zoo, and not for the permission prompts a repo's `ask`
+rules deliberately raise — so there is nothing to gate and nothing to get
+wrong. One consequence for the rest of this document: the `approve-a-prompt`
+verb is removed from the verb set (§3, §8).
+
+None of this makes stalls cheap to ignore, and nothing above slows detection.
+The one-minute re-check (P1-6, §4 step 8, §12) still notices a stalled agent
+within a minute of an intervention, and the sweep still raises awaiting-input
+as a case. Prevention plus fast escalation is how "a trivial prompt doesn't
+cost a night" is actually met — the night is lost to a prompt nobody *sees*,
+not to a prompt nobody auto-answers.
+
+*Cautionary prior art.* The old system shipped `safe_wedges.txt`: a list of
+command prefixes (`gh api`, `git`, `gh pr comment/edit/review/ready`,
+`gh issue`, with a "never `gh pr merge`" note) consumed by an out-of-tree
+screen-scraping babysitter (`~/.fleet/babysitter_daemon.py`) that typed
+approvals into panes. Both halves are instructive. The mechanism was typing
+into a rendered TUI — exactly what is refused here. And the list itself was too
+coarse to ratify: a bare `git` prefix would have waved through
+`git push --force`, and a bare `gh api` prefix would have auto-approved the
+very merge and auto-merge API calls a repo's `ask` rules deliberately gate. An
+allowlist written in a vocabulary the tool invented,
+matched against text the tool scraped, is two guesses stacked. That machine was
+checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
+`launchd` job remains.
+
 ## 3. The two modes (P0-2, P0-3)
 
-There is one operating posture: **off / supervised / autonomous**. It is a
+There is one operating posture: **off / attended / autonomous**. It is a
 configuration column in the daemon. It can be set from the app and CLI, is
 broadcast when it changes, and survives a restart, just like every other daemon
 toggle.
 
+**A note on the name.** The requirements brief calls this posture
+"human-supervised" (P0-2). It is renamed here because "supervised" collided with
+the subsystem's own name: this subsystem *is* fleet supervision, and the
+supervisor supervises the fleet in both modes. The posture names the human's
+side of the relationship — an operator is in the loop, and consequential verbs
+queue for them — not the supervisor's. "Autonomous" is unchanged.
+
 **Enforcement controls capabilities; it does not rely on prompt wording.** The
-supervisor acts only through daemon commands, called verbs. In supervised mode,
+supervisor acts only through daemon commands, called verbs. In attended mode,
 the daemon turns consequential verbs into proposals. The call succeeds, but
 the daemon adds the action to a queue instead of executing it. No prompt can
 confuse the supervisor into acting autonomously because the verb cannot execute
@@ -139,13 +249,31 @@ cannot misreport its actions because it is not the reporter.
   (P0-10).
 - The veto-window variant (act after a cancellable delay) is rejected outright:
   a missed veto allows an action that was never approved. That would silently
-  turn supervised mode into autonomous mode, exactly the false promise P0-3 is
+  turn attended mode into autonomous mode, exactly the false promise P0-3 is
   intended to prevent.
 
-Compiled defaults are as conservative as possible. In supervised mode, every
+Compiled defaults are as conservative as possible. In attended mode, every
 verb that affects the fleet becomes a proposal. In autonomous mode, verbs
 execute and questions are collected into escalation batches. Standing rules
 (§5) can relax these defaults. Files shipped by a repository cannot.
+
+### The verbs (normative)
+
+This table is the single normative inventory of the supervisor's capabilities.
+Every other mention of a verb in this document defers to it.
+
+| Verb | What it does | Gated? | Attended mode | Autonomous mode |
+| --- | --- | --- | --- | --- |
+| `intervene` | Deliver a re-verified message to a fleet agent (the send path of §4 step 7) | gated | Becomes a proposal | Executes; ledger line |
+| `wake` | Unpark and resume a parked session | gated | Becomes a proposal | Executes; ledger line |
+| `pause` | Halt a runaway session (§13) | gated | Becomes a proposal | Executes; ledger line |
+| `escalate` | Queue an exact question for the operator | ungated | Ledger line; appears in the queue immediately | Ledger line; batched for morning |
+| `note` | Attributed prose into the account | ungated | Ledger line | Ledger line |
+| `learn` | Append to the repo's learnings file | ungated | Ledger line | Ledger line |
+
+Every verb is both a `tbd supervise <verb>` CLI command and an RPC method, so
+nothing exists only as a button (§10). `approve-a-prompt` is deliberately
+absent: see §2's prompt-stalls subsection.
 
 ## 4. The wake-to-action loop
 
@@ -176,14 +304,32 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    The daemon performs three steps. First, it **re-verifies** every external
    claim in the message against live sources at send time. An old premise stops
    the send and returns the conflicting facts (P0-8). Second, it **checks
-   posture**. In supervised mode, a consequential action becomes a proposal.
+   posture**. In attended mode, a consequential action becomes a proposal.
    The supervisor uses the same code path in either mode. Third, the daemon
    **delivers** the message through the adapter and **writes the ledger line
    itself**.
 8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
-   memory). The result is added to the action's ledger line. A new blocked state
+   memory). The result is recorded as an outcome line referencing the action
+   (§6). A new blocked state
    becomes a new case within one minute instead of fifteen (P1-6).
 9. **Everything else costs nothing.** The other agents: zero tokens, zero sends.
+
+**"Outstanding work" is a compiled, global fact list.** Step 1's parked-session
+skip turns on one question: does any of these hold? Commits on the branch that
+are not on the default branch; uncommitted changes in the worktree; an open PR
+that is not merged; failing or missing required checks on an open PR; or an
+undetermined result from any of those probes — which is its own loud case, and
+is never silently treated as "nothing outstanding." That list is fixed and
+identical in every repo.
+
+The trade is deliberate and worth stating plainly: a repo cannot alter *whether*
+a wake happens, only what the wake *warrants* — through its playbook, after the
+supervisor is already awake. The requirements brief's P1-4 worked example ("the
+check yields a verdict; the repo decides what the verdict warrants") is honored
+at the warrant step, not at the wake step. Letting repos hook the wake step
+would put authored code inside the model-free sweep that runs for forty agents
+every cycle. The cost of getting it wrong the other way is small: a false wake
+spends a few supervisor tokens and ends in a note.
 
 Boundary cases:
 - **Supervisor can't decide** → `tbd supervise escalate` with the exact item,
@@ -276,15 +422,21 @@ attention — it never changes what any verb is allowed to do.
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
   **action** records an intervention, wake, or pause, including the message
-  text, the state snapshot that justified it, and the posture. A later line
-  references the action's ID and records its outcome. **proposal** and
+  text, the state snapshot that justified it, and the posture. A separate
+  **outcome** line references the action's ID and records what was observed.
+  **lifecycle** records shift open, shift close, posture changes, and desk
+  recycles (§9). **proposal** and
   **resolution** record proposed actions and their results. **escalation** and
   **resolution** record questions and their answers. **decision** records a
   standing rule created from any source. **anomaly** records an unknown state,
   an old premise found during send-time verification, a failed fetch, or a dark
   supervisor. Deliberate inaction is recorded as seriously as action. **note**
-  is the only kind the supervisor writes. It is attributed prose added with
-  `tbd supervise note`. It may reference other lines but can never change them.
+  and **learning** are the two kinds whose content is supervisor-authored prose
+  — a note is attributed prose added with `tbd supervise note`, and a learning
+  records an append to a repo's learnings file made with `tbd supervise learn`
+  (§8). Both are written by the daemon's verb handlers like every other line,
+  and neither can change any other line. The supervisor may reference lines and
+  contribute prose; it can never author an action, an outcome, or the account.
 - Its structure prevents several false claims: an action nobody performed
   because only verb handlers write action lines; an outcome nobody observed
   because outcomes come from the re-check; and certainty the system did not
@@ -302,6 +454,35 @@ attention — it never changes what any verb is allowed to do.
   escalations), needs-you (the escalation batch), went-wrong (anomalies), and
   now-binding (decisions). A closing supervisor narrative is a final note *on
   top of* the generated report. It adds context but does not author the record.
+
+### Ledger line shape
+
+Every line shares one envelope — `{ "id", "ts", "shift", "posture", "kind" }` —
+plus a payload determined by its kind. The envelope is what makes the views in
+this section plain queries: filter by kind, window by `ts`, group by `shift`.
+
+| Kind | Payload carries |
+| --- | --- |
+| `action` | The verb, the target (worktree / terminal / repo), the message text, and the state snapshot — with its source and observed-at — that justified it |
+| `outcome` | A reference to the action, one of the three §12 results, and the observed-at of that observation |
+| `proposal` | Everything an `action` carries, plus the supervisor's reasoning and the age of the state it reasoned from |
+| `resolution` | A reference to the proposal or escalation, the result (approved / rejected / answered / expired), the scope choice if one was made, and the operator's optional explanation |
+| `escalation` | The exact item, the exact proposed command, and the recommendation |
+| `decision` | The rule created, its lifetime (shift or always), and its origin |
+| `anomaly` | The category and the detail |
+| `note` | The author, the text, and optional references to other lines |
+| `learning` | The target repo and the appended text — the durable content lives in `~/tbd/repos/<id>/learnings.md` (§8); this line is the record of the append |
+| `lifecycle` | Opening, closing, posture change, or desk recycle — this is the kind behind every line §9 describes |
+
+Two representative lines, an action and the outcome that later references it:
+
+```json
+{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","posture":"autonomous","kind":"action","verb":"intervene","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
+{"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","posture":"autonomous","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
+```
+
+Field lists beyond this are implementation detail and will grow. The envelope,
+the set of kinds, and the never-claims above are the contract.
 
 ## 7. Persistence and storage map
 
@@ -377,12 +558,14 @@ single confirmation connects prose knowledge to binding rules.
 
 ### Why the binding tier is structured at all (post-#509 accounting)
 
-GitHub now has merge authority, so few verbs remain behind the gate: send,
-wake, pause, and approve-a-prompt. It is reasonable to ask whether prose could
+GitHub now has merge authority, so few verbs remain behind the gate:
+`intervene`, `wake`, and `pause` (§3). A fourth, `approve-a-prompt`, was removed
+along with the P2-3 resolution (§2) — no prompt-advancement mechanism exists, so
+there is nothing there to gate. It is reasonable to ask whether prose could
 replace the binding tier. It cannot, for exactly four reasons. The design must
 not grow beyond what these reasons require:
 
-1. **The supervised-mode promise (P0-3).** The verb gate consults posture and
+1. **The attended-mode promise (P0-3).** The verb gate consults posture and
    rules without using a model. If prose could relax them, the system would
    either remain maximally conservative forever or let the supervisor control
    its own capabilities by interpreting prose. The latter would make the mode
@@ -410,6 +593,42 @@ action, and reloaded after a manual edit. "Structured" describes the format and
 its reader: the gate cannot interpret sentences. It does not imply database
 storage. With tens of rules and one writer at a time, a database adds nothing.
 
+### The file shape
+
+```json
+{
+  "version": 1,
+  "automation": { "default": "in", "repos": { "<repo-id>": "out" } },
+  "rules": [
+    {
+      "id": "<uuid>",
+      "verb": "intervene",
+      "scope": { "repo": "<repo-id>" },
+      "stance": "allow",
+      "origin": { "shift": "<shift-id>", "ledger": "<line-id>" },
+      "createdAt": "2026-07-27T03:12:00Z"
+    }
+  ]
+}
+```
+
+`scope` has exactly three shapes — `{}` (fleet-wide), `{ "repo": … }`, and
+`{ "worktree": … }` — and nothing richer; there is no language for conditions,
+by the argument above. `stance` is `allow` or `deny`. `origin` links every rule
+to the ledger line that created it, which is what the inspection surface's "why"
+link resolves (§10): no rule exists without a recorded reason for existing.
+
+The file carries **only lifetime-always rules.** A shift-scoped rule is a
+decision line in that shift's ledger, projected into the same in-memory rule set
+the gate consults (§7), and gone when the shift ends. So the logical rule shape —
+scope, verb, stance, lifetime — is realized across two stores, split on the
+lifetime field, which is exactly why the file itself needs no lifetime field.
+
+Automation membership is the dedicated `automation` object rather than a rule
+with a special verb: same file, same loader, same gate, but a distinct question
+("may the daemon act in this repo at all?") that is asked before any verb is
+considered.
+
 ### Repo automation membership (operator-configurable)
 
 Which repos the supervisor may act on is an operator setting, not a design
@@ -425,11 +644,11 @@ constant. It has two pieces:
   are stored; a repo with no mark follows the default, so flipping the default
   never requires touching individual repos.
 
-Both live in `standing-rules.json` as entries alongside the verb rules — same
-file, same loader, same gate, one source of truth for "may the daemon act
+Both live in `standing-rules.json` in the same file as the verb rules — same
+loader, same gate, one source of truth for "may the daemon act
 here." Membership is checked before any verb executes **and before proposals
 are created**: a repo that resolves to *out* generates no proposals in
-supervised mode and no actions in autonomous mode. It still appears in the
+attended mode and no actions in autonomous mode. It still appears in the
 fact sweep and the account — observability is never gated, and "repo X needed
 attention but is out of automation" is the honest report. Because membership
 is enforced at the same model-free gate as the never-lists, it holds when
@@ -459,9 +678,9 @@ standing rules will be the first such mechanism, not an upgrade.
 ## 9. Shift lifecycle (P2-2)
 
 - **A shift is born from the posture switch, and only from it.** off →
-  supervised/autonomous creates a shift ID, creates
+  attended/autonomous creates a shift ID, creates
   `~/tbd/shifts/<id>/`, writes the opening ledger line, and starts the
-  supervisor. A switch between supervised ↔ autonomous during a shift keeps
+  supervisor. A switch between attended ↔ autonomous during a shift keeps
   the *same* shift and adds a posture-change ledger line. Every action line
   already records its posture. Only switching to off ends a shift.
 - **The desk is a scratch space, tracked by ID** rather than by its display
@@ -500,8 +719,8 @@ already exists — it is the shift record.**
 The sequence, all daemon-driven:
 
 1. **Detect** — the supervisor is a session like any other, so its context
-   load is already a session-state fact. Threshold: a config number, default
-   around 200k tokens.
+   load is already a session-state fact. Threshold: a compiled default, around
+   200k tokens (§13).
 2. **Hold** — the daemon stops delivering work orders to the desk. New cases
    queue; the sweep keeps running; the fleet stays watched. The recycle waits
    until the supervisor is idle with no case in flight.
@@ -551,7 +770,7 @@ Principle: **you take action where you already read the relevant information.**
   appear beside it. Approval also offers scope choices: this once / this shift
   / always for this repo. This is the only user interface (UI) that creates
   standing verb rules; automation membership is managed in the Fleet
-  Automation settings tab below. A rejection can include an optional one-line
+  Supervision settings tab below. A rejection can include an optional one-line
   explanation,
   which reaches the supervisor in its next work order. Each escalation shows
   the exact item, exact command, recommendation, and an answer box. Every
@@ -563,12 +782,15 @@ Principle: **you take action where you already read the relevant information.**
   the playbook (advisory) and standing rules (binding); the chat is neither.
   If you type something rule-shaped, the supervisor may propose making it
   standing through the normal ratification path.
-- **Fleet automation gets its own Settings tab.** It replaces the current
+- **Fleet supervision gets its own Settings tab.** It replaces the current
   Settings section and holds the automation-membership section — the
   default-in/default-out control and the per-repo in/out/follow-default list
-  (§8) — alongside the standing-rules inspection surface described next. Both
-  are views of `standing-rules.json`, following the house file-backed-settings
-  pattern: tilde-abbreviated path shown, copy button, manual edits respected.
+  (§8) — alongside the standing-rules inspection surface described next. The
+  tab takes the subsystem's name; "automation" survives only in the membership
+  setting's own name, where it is precise (in or out of automation = may the
+  daemon act here on its own). Both are views of `standing-rules.json`,
+  following the house file-backed-settings pattern: tilde-abbreviated path
+  shown, copy button, manual edits respected.
   Every control has a CLI twin (`tbd supervise automation ...`).
 - **Standing rules get a simple inspection surface** with the rule list, scope,
   origin, and a revoke action. The origin links to the ledger for the shift
@@ -600,8 +822,8 @@ The design already has a later observation that can confirm delivery:
 **the one-minute re-check also checks acknowledgement.** Every sent message
 includes its ledger ID as a marker. During the re-check, the daemon reads two
 machine facts: whether the session transcript contains the marker, and whether
-the session state changed to `working`. It records one of three results on the
-action's ledger line:
+the session state changed to `working`. It records one of three results as an
+outcome line referencing the action:
 
 - *Landed and acting* — done.
 - *Landed but still blocked* — a fresh case within a minute (P1-6).
@@ -696,7 +918,7 @@ Crossing a threshold does not itself cause an action. It creates a case in the
 next work order, such as "agent Y: 31 turns, no commits in 90 minutes." The
 supervisor reads the transcript and decides. If the agent is truly looping, it
 uses `pause`. This is a consequential verb, so it becomes a proposal in
-supervised mode and passes through the standing-rules gate in autonomous mode.
+attended mode and passes through the standing-rules gate in autonomous mode.
 If the agent is making legitimate progress on a hard problem, the supervisor
 adds a note and leaves it alone.
 
@@ -704,6 +926,29 @@ adds a note and leaves it alone.
 cannot distinguish "burning quota without progress" from "thinking hard."
 Pausing a working agent by mistake would destroy trust in overnight
 supervision.
+
+### The compiled numbers
+
+Every number this document names, collected in one place so a reader never has
+to hunt for the value that governs a behavior:
+
+| Number | Default | Where it acts |
+| --- | --- | --- |
+| Idle-intervention threshold | 40 min | §4 step 2 |
+| Post-intervention re-check | 60 s | §4 step 8, §12 |
+| Delivery retries before anomaly | 2 sends | §12 |
+| Supervisor recycle threshold | ~200k tokens of context | §9 |
+| Runaway: turns in window | 30 turns | §13 |
+| Runaway: no-progress window | 90 min with no commits | §13 |
+| Heartbeat staleness | 10 min | §14 |
+
+**All of these are compiled constants at parity — no new config columns.** That
+preserves §7's one-column property, which is a real property of the design and
+not an accounting convenience: the moment numbers become columns, "where is this
+system's state?" stops having a one-line answer. If real shifts prove a number
+wrong, promoting that one number to a config column is a conscious amendment to
+§7, argued on its own merits — the same posture taken toward per-repo threshold
+overrides (§15).
 
 ## 14. Out-of-band heartbeat (P3-1)
 
@@ -727,12 +972,17 @@ to inaction at the largest scale.
 - **Per-mode playbooks** — one playbook receives the mode as context. Separate
   files would invite promises the daemon does not enforce.
 - **The act-with-veto-window human-in-the-loop (HITL) variant** — a missed veto
-  allows an unapproved action. Supervised mode must not silently become
+  allows an unapproved action. Attended mode must not silently become
   autonomous mode.
 - **Cross-account rebalancing** — assumes one person's account arrangement. If
   it exists at all, it is playbook prose for a supervisor that already has the
   usage facts.
 - **Auto-pause on runaway counters** — see §13.
+- **Prompt advancement from outside** — no mechanism types into a rendered
+  dialog, ever. Routine permission prompts are prevented at spawn (the agent's
+  own permission config, delivered through the settings overlay),
+  config-answerable dialogs are pre-answered by seeders, and everything else is
+  a genuine question that gets escalated. See §2.
 - **Per-repo threshold overrides** — global compiled defaults only, at parity.
   Numbers do not fit the standing-rules shape, and a repo-table column would
   break the one-column property (§7); if operation proves the need, that
