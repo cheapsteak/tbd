@@ -117,18 +117,40 @@ the app already has. If operator hooks repeatedly implement the same
 calculation in the future, consider moving that specific calculation into the
 app.
 
-### Prompt stalls (P2-3): prevention, never advancement
+### Prompt stalls (P2-3): the machine-interface test
 
 P2-3 asks for agents to be advanced past an operator-authored allowlist of
 routine permission prompts. The story is honest about the pain and wrong about
-the mechanism. Advancing a rendered dialog from outside requires either
-scraping the screen to find it or timing keystrokes blind — the same mechanism
-§12 refuses for the Channels consent prompt, refused here for the same reason:
-auto-answering a dialog defeats it while leaving it in place as theater. The
-resolution is **prevention at the source, never advancement from outside** —
-and where the source deliberately wants a human, escalation.
+the mechanism: an allowlist matched against a rendered dialog is screen-scraping
+with extra steps. An earlier draft of this design answered by refusing *all*
+dialog advancement — "prevention, never advancement." That overcorrected. It
+fused two separate things into one prohibition, and pulling them apart is the
+actual rule.
 
-Start from what daemon-spawned fleet sessions actually face.
+**Scraping is a way of *knowing*. Keystrokes are a way of *acting*.** The ban
+belongs on the knowing, and there it is unmoved: reading a rendered terminal to
+learn what is on the screen breaks silently when the agent changes its copy,
+couples TBD to one agent version, and sits at the wrong layer. Typing into a
+pane is a different thing, and it is not exotic — it is how *everything* in
+this design is delivered. `intervene` types. The fleet delivery adapter types
+(§12). The rate-limit actuator types. A rule that forbade keystrokes would
+forbid the system's only way to reach an agent at all.
+
+So the rule is not "never advance a dialog." It is a three-condition test:
+
+> **TBD may drive a dialog if and only if (1) its existence is known from a
+> machine interface, (2) its content is known verbatim from a machine
+> interface, and (3) its outcome is verifiable from a machine interface. The
+> screen is never consulted for any of the three.**
+
+The conditions are conjunctive, and the third is not decoration: acting without
+a machine-readable record of what came of it is how an automated answer becomes
+unaccountable. Anything that fails any condition is not driven — it is
+prevented at the source, or carried to a human. Today exactly one dialog
+passes: Claude Code's `AskUserQuestion`.
+
+**A repo's `ask` rules fail the test, and would be refused even if they
+passed.** Start from what daemon-spawned fleet sessions actually face.
 `ClaudeSpawnCommandBuilder` hard-codes `--dangerously-skip-permissions` on both
 Claude spawn paths, and the Codex spawn passes
 `--dangerously-bypass-approvals-and-sandbox`. Those flags remove the agent's
@@ -144,6 +166,14 @@ something to match — and matching it is exactly what must not happen. An
 allowlist that auto-grants a repo's deliberate `ask` is the tool overruling the
 repo's own decision about when a human is required.
 
+That is an **authority** ruling, not a mechanical one, and it must be stated in
+a form the test cannot erode. Should some future agent version ship hooks and
+records that put permission prompts squarely inside all three conditions,
+`ask`-rule prompts would *still* not be auto-answered. The repo asked for a
+human; TBD's job is to fetch one. If a given ask fires too often to survive a
+night, the fix is at its source — a reviewable settings change in the repo or
+in the operator's overlay — never a TBD-side grant list.
+
 Alongside those asks, the residual dialog zoo still stalls agents: folder
 trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.
 Folder trust looks solved and isn't: `ClaudeTrustSeeder` pre-answers it for
@@ -151,10 +181,96 @@ scratch spaces only — its `guard worktree.isScratch else { return }` returns
 early for repo-backed worktrees — and a fleet worktree is a path Claude has
 never been trusted at, exactly as fresh and untrusted as a scratch dir. Seeding
 trust for non-scratch worktrees is prong 2's first piece of new work, not
-existing coverage. None of these dialogs has a machine answer path today.
-`ask`-rule prompts join the zoo as its one permission-shaped member — and they
-are the one member that is deliberate. The rest is friction to remove before it
-is ever drawn; an `ask` is a question to carry to a human.
+existing coverage. `ask`-rule prompts join the zoo as its one permission-shaped
+member — and they are the one member that is deliberate. Measured against the
+test, one other member of that zoo separates from the rest.
+
+**`AskUserQuestion` passes all three conditions today** — not as an aspiration,
+but on machinery already in the tree:
+
+1. **Existence.** TBD's Claude settings overlay
+   (`Sources/TBDDaemon/Hooks/ClaudeHookOverlay.swift`) already registers
+   `PreToolUse` and `PostToolUse` hooks matched on `AskUserQuestion`. The
+   pre-hook fires *before* the picker renders. The daemon learns the dialog
+   exists from an event, not from a screen.
+2. **Content.** That same pre-hook carries the full structured payload — the
+   questions, their options, headers, the multi-select flag, and the
+   `tool_use_id` — into the daemon's in-memory pending-question store. It is
+   the *only* machine source of that content while the dialog is live: TBD's
+   pending-question work in May established empirically that the transcript
+   JSONL does not contain the `tool_use` record mid-dialog, which is exactly
+   why the hook bridge was built. Verbatim, structured, before render.
+3. **Outcome.** Once the dialog resolves, the `tool_result` lands in the
+   transcript in a stable shape TBD already parses. What was answered is a
+   machine fact afterward, not an inference.
+
+No other member of the zoo has even one of the three. That is why this is
+written as a test and not as a list: the list would have to be maintained
+against every agent release, while the test re-evaluates itself every time a
+machine interface appears or disappears.
+
+**Actuation: dismiss and reply — never select.** The obvious way to answer a
+picker is to arrow or type a digit to the intended option and press Enter. That
+is refused, and refused for the original reason. Option choreography depends on
+the rendered ordering and on where the highlight currently sits, and TBD
+observes neither. Getting it wrong does not fail loudly — it selects the
+neighboring option and reports success. Choosing "B" by counting keystrokes is
+scraping with the reading step replaced by a guess.
+
+So there is no per-dialog key choreography anywhere in this design. The
+sequence is one shape for every question:
+
+1. **Dismiss with Escape.** Escape closes the picker and can never select — the
+   same property the rate-limit actuator already relies on, where a blind Enter
+   could have confirmed a paid plan upgrade and Escape could not.
+2. **Wait for the dialog's resolution signal** — the `PostToolUse` hook
+   clearing the pending entry. A machine signal, never a timer. Nothing is
+   typed into a session that may still have a modal on screen.
+3. **Deliver the response as ordinary composer text** through the standard
+   delivery adapter, with §12's acknowledgement path verifying it landed: the
+   ledger marker appears in the transcript, or the send is retried once and
+   then escalated.
+
+The answer is therefore a sentence rather than a keystroke, which is a gain and
+not a compromise. "B, but only after you have checked X" costs nothing extra;
+neither does "none of these — here is the thing you did not consider." A picker
+can only return one of its own options. The composer can return judgment.
+
+**This is the `answer` verb (§3), gated like every other consequential verb.**
+In attended mode the proposal *is the relayed question*: it carries the agent's
+questions and options verbatim alongside the supervisor's proposed response and
+its reasoning, so the operator can approve it or simply answer differently
+themselves. The queue entry is the dialog, delivered at last to the human it
+was always addressed to. In autonomous mode the verb executes through the
+standing-rules gate and writes its action line. The response need not be an
+answer at all: "these options are underspecified — work through the tradeoffs
+and ask me again" is a legitimate response, and so is a redirect. Which
+response a question warrants is playbook judgment (§5); the mechanism is
+identical either way.
+
+**How the question becomes a case.** The hook stays an unconditional dumb
+reporter — no posture check on the agent side, ever. It reports; the daemon
+owns posture and already receives every event. The fork lives in the daemon's
+RPC handler: when a shift is active and the terminal's repo resolves in
+automation (§8), a pending question becomes a case, and the event **hastens an
+immediate mini-tick for that terminal** instead of waiting for the next sweep.
+Same pure decision function, triggered by an event rather than the clock, so
+the daemon still drives the loop (§1). **The work order carries the question
+payload verbatim out of the daemon's store**, so the supervisor fetches
+nothing — which dissolves the need for any new read surface. Nothing is
+ledgered for the question itself; facts are not ledger lines. The question
+snapshot rides in the `answer` action's line, or in the escalation line if the
+supervisor punts.
+
+**Store hygiene, and what a restart costs.** The pending store's time-to-live
+is a garbage-collection backstop for stranded entries, not a dialog's clock. It
+must never expire a still-live dialog during a shift: resolution comes from the
+`PostToolUse` clear, not from elapsed time. The store staying memory-only is
+fine under §7's restart rule. A mid-shift daemon restart degrades honestly —
+the awaiting-input state persists, so the case still knows a question is
+pending, but its content is gone, and the case reports that loudly rather than
+quietly. The supervisor's options are then to dismiss and ask the agent to
+restate its question as text, or to escalate. Never to guess at what was asked.
 
 So the design answers the stall in three prongs, each at a different moment:
 
@@ -184,17 +300,26 @@ So the design answers the stall in three prongs, each at a different moment:
    drawn.
 3. **Everything that still stalls is a genuine question** — either because it
    was never routine, or because a repo's settings deliberately made it a
-   question and prong 1 declines to answer for them. A firing `ask` rule is not
-   noise to suppress; it is the repo asking for a human, and it lands here. It
-   surfaces as an awaiting-input case and is escalated. It is never advanced
-   and never auto-granted.
+   question and prong 1 declines to answer for them. Genuine questions are not
+   noise to suppress; they are routed, and the test decides where. A question
+   that passes all three conditions becomes a case the supervisor answers with
+   `answer` — today that is `AskUserQuestion` and nothing else. Everything that
+   fails surfaces as an awaiting-input case and is escalated to the operator,
+   unadvanced and never auto-granted. A firing `ask` rule always lands in the
+   second group, by the authority ruling above, however good its machine
+   interfaces ever get.
 
 The story's "never past anything else" clause is then enforced *structurally*
-rather than by an allowlist's precision: TBD has no prompt-advancing mechanism
-at all — not for the zoo, and not for the permission prompts a repo's `ask`
-rules deliberately raise — so there is nothing to gate and nothing to get
-wrong. One consequence for the rest of this document: the `approve-a-prompt`
-verb is removed from the verb set (§3, §8).
+rather than by an allowlist's precision — enforced by the test rather than by
+the absence of a mechanism. A dialog TBD cannot see through a machine interface
+is a dialog TBD cannot drive, and no prompt wording or operator list can change
+that, because the gap is in the facts and not in the policy. One consequence
+for the rest of this document: the `approve-a-prompt` verb stays removed from
+the verb set (§3, §8), and `answer` is not its return. `approve-a-prompt` was a
+blanket, model-free auto-grant of permission prompts — the tool deciding in
+advance that a whole class of questions needed no human. `answer` is one judged
+response to one question whose text the daemon holds verbatim, gated by
+posture, delivered as text, and recorded. It grants nothing.
 
 None of this makes stalls cheap to ignore, and nothing above slows detection.
 The one-minute re-check (P1-6, §4 step 8, §12) still notices a stalled agent
@@ -207,13 +332,18 @@ not to a prompt nobody auto-answers.
 command prefixes (`gh api`, `git`, `gh pr comment/edit/review/ready`,
 `gh issue`, with a "never `gh pr merge`" note) consumed by an out-of-tree
 screen-scraping babysitter (`~/.fleet/babysitter_daemon.py`) that typed
-approvals into panes. Both halves are instructive. The mechanism was typing
-into a rendered TUI — exactly what is refused here. And the list itself was too
-coarse to ratify: a bare `git` prefix would have waved through
-`git push --force`, and a bare `gh api` prefix would have auto-approved the
-very merge and auto-merge API calls a repo's `ask` rules deliberately gate. An
-allowlist written in a vocabulary the tool invented,
-matched against text the tool scraped, is two guesses stacked. That machine was
+approvals into panes. The wedges failed the machine-interface test twice over,
+and the two failures are independent. First, the *content*: the babysitter knew
+what it was approving only by reading the rendered TUI — condition 2 satisfied
+by scraping, which is to say not satisfied, with condition 3 never attempted at
+all. Second, the *vocabulary*: the list was written in matching language the
+tool invented for itself rather than read from the config that actually decides,
+and it was too coarse to ratify — a bare `git` prefix would have waved through
+`git push --force`, and a bare `gh api` prefix would have auto-approved the very
+merge and auto-merge API calls a repo's `ask` rules deliberately gate. A list
+written in a vocabulary the tool invented, matched against text the tool
+scraped, is two guesses stacked. Note what the new rule does *not* rescue here:
+`answer` shares the typing with that machine, and nothing else. That machine was
 checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
 `launchd` job remains.
 
@@ -267,13 +397,16 @@ Every other mention of a verb in this document defers to it.
 | `intervene` | Deliver a re-verified message to a fleet agent (the send path of §4 step 7) | gated | Becomes a proposal | Executes; ledger line |
 | `wake` | Unpark and resume a parked session | gated | Becomes a proposal | Executes; ledger line |
 | `pause` | Halt a runaway session (§13) | gated | Becomes a proposal | Executes; ledger line |
+| `answer` | Respond to an agent's `AskUserQuestion` — dismiss the dialog, reply as composer text (§2) | gated | Becomes a proposal that *is* the relayed question: the agent's questions and options verbatim, plus the proposed response and reasoning. The operator approves it or answers differently themselves | Executes; ledger line |
 | `escalate` | Queue an exact question for the operator | ungated | Ledger line; appears in the queue immediately | Ledger line; batched for morning |
 | `note` | Attributed prose into the account | ungated | Ledger line | Ledger line |
 | `learn` | Append to the repo's learnings file | ungated | Ledger line | Ledger line |
 
 Every verb is both a `tbd supervise <verb>` CLI command and an RPC method, so
 nothing exists only as a button (§10). `approve-a-prompt` is deliberately
-absent: see §2's prompt-stalls subsection.
+absent, and `answer` is not it under another name: see §2's prompt-stalls
+subsection for the difference between a blanket auto-grant and one judged reply
+delivered as text.
 
 ## 4. The wake-to-action loop
 
@@ -331,6 +464,20 @@ would put authored code inside the model-free sweep that runs for forty agents
 every cycle. The cost of getting it wrong the other way is small: a false wake
 spends a few supervisor tokens and ends in a note.
 
+**One case arrives by event rather than by tick: a pending `AskUserQuestion`.**
+The `PreToolUse` hook already reports every one of them to the daemon
+unconditionally, with no posture check on the agent side — the daemon owns
+posture and sees every event anyway. The fork is in the daemon's RPC handler:
+with a shift active and the terminal's repo in automation (§8), a pending
+question becomes a case and **hastens an immediate mini-tick for that
+terminal**, running the same pure decision function the clock would have run
+minutes later. The work order carries the question payload verbatim from the
+daemon's store, so the supervisor fetches nothing and needs no new read
+surface. From there it is an ordinary case: judgment, then the `answer` verb
+through the same gate as every other verb. Full mechanics, including the
+dismiss-and-reply actuation and what a mid-shift restart costs, are in §2's
+prompt-stalls subsection.
+
 Boundary cases:
 - **Supervisor can't decide** → `tbd supervise escalate` with the exact item,
   exact proposed command, and recommendation. Those lines appear unchanged in
@@ -373,8 +520,14 @@ contains two labeled playbooks.
   never writes them again. It never reconciles these files at startup.
 - The shipped default contains only universals (what stuck means, smallest
   intervention that restores progress, escalate instead of guessing, one
-  intervention per agent per wake). It contains no commands, bot names, or
-  organization-specific content.
+  intervention per agent per wake). One of those universals concerns questions
+  specifically: **often the first move on an `AskUserQuestion` is not to answer
+  it but to ask the agent that raised it to think through the tradeoffs of its
+  own options in more detail, so the eventual decision is better informed.**
+  That is advice, which is why it is prose here and not compiled — §2's
+  `answer` verb carries a redirect exactly as readily as an answer, and the
+  playbook is where the choice between them belongs. The default contains no
+  commands, bot names, or organization-specific content.
 
 **There is no `supervision.json`.** An earlier draft included a small,
 structured policy file for the daemon to enforce. It would have held overrides
@@ -421,8 +574,8 @@ attention — it never changes what any verb is allowed to do.
 - `~/tbd/shifts/<shift-id>/ledger.jsonl` — an append-only file with one
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
-  **action** records an intervention, wake, or pause, including the message
-  text, the state snapshot that justified it, and the posture. A separate
+  **action** records an intervention, wake, pause, or answer, including the
+  message text, the state snapshot that justified it, and the posture. A separate
   **outcome** line references the action's ID and records what was observed.
   **lifecycle** records shift open, shift close, posture changes, and desk
   recycles (§9). **proposal** and
@@ -463,7 +616,7 @@ this section plain queries: filter by kind, window by `ts`, group by `shift`.
 
 | Kind | Payload carries |
 | --- | --- |
-| `action` | The verb, the target (worktree / terminal / repo), the message text, and the state snapshot — with its source and observed-at — that justified it |
+| `action` | The verb, the target (worktree / terminal / repo), the message text, and the state snapshot — with its source and observed-at — that justified it. For `answer`, that snapshot includes the question payload verbatim: no separate line records the question, because a pending question is a fact and facts are not ledgered |
 | `outcome` | A reference to the action, one of the three §12 results, and the observed-at of that observation |
 | `proposal` | Everything an `action` carries, plus the supervisor's reasoning and the age of the state it reasoned from |
 | `resolution` | A reference to the proposal or escalation, the result (approved / rejected / answered / expired), the scope choice if one was made, and the operator's optional explanation |
@@ -559,11 +712,17 @@ single confirmation connects prose knowledge to binding rules.
 ### Why the binding tier is structured at all (post-#509 accounting)
 
 GitHub now has merge authority, so few verbs remain behind the gate:
-`intervene`, `wake`, and `pause` (§3). A fourth, `approve-a-prompt`, was removed
-along with the P2-3 resolution (§2) — no prompt-advancement mechanism exists, so
-there is nothing there to gate. It is reasonable to ask whether prose could
-replace the binding tier. It cannot, for exactly four reasons. The design must
-not grow beyond what these reasons require:
+`intervene`, `wake`, `pause`, and `answer` (§3). A fifth, `approve-a-prompt`,
+was removed along with the P2-3 resolution (§2) and stays removed: it was a
+blanket, model-free auto-grant of permission prompts, and nothing in this design
+grants a permission on an agent's behalf. `answer` does not restore it. It
+advances exactly one dialog — the one whose existence, verbatim content, and
+outcome all reach the daemon through machine interfaces — by dismissing it and
+replying as text, which is judgment delivered through the ordinary send path,
+never an auto-grant. That is why it belongs behind this gate rather than outside
+the verb set. It is reasonable to ask whether prose could replace the binding
+tier. It cannot, for exactly four reasons. The design must not grow beyond what
+these reasons require:
 
 1. **The attended-mode promise (P0-3).** The verb gate consults posture and
    rules without using a model. If prose could relax them, the system would
@@ -575,11 +734,12 @@ not grow beyond what these reasons require:
    3 a.m., 4 a.m., and 5 a.m.
 3. **Never-lists must hold when nobody is watching.** When the model is the
    only active decision-maker, a binding rule cannot depend on a prompt.
-4. **`intervene` injects instructions.** Fleet agents run with permission
-   checks skipped. A supervisor message can contain any instruction for an
-   agent with full tool access. Merge authority could move to the code-hosting
-   service, but only TBD controls this action. No other system can enforce the
-   gate in front of it.
+4. **`intervene` injects instructions, and so does `answer`.** Fleet agents run
+   with permission checks skipped. A supervisor message can contain any
+   instruction for an agent with full tool access, and a reply to a question is
+   the same text arriving through the same composer. Merge authority could move
+   to the code-hosting service, but only TBD controls these actions. No other
+   system can enforce the gate in front of them.
 
 Because the scope is small, the rule store remains a flat list with scope,
 verb, stance, and lifetime. It has no language for conditions, no rule
@@ -894,10 +1054,12 @@ options, none decided here:
    runs on `terminal.send` like the fleet, and the account says so.
 
 **Driving the consent prompt with keystrokes is refused**, whatever the
-options above yield: it requires either scraping the screen to find the
-prompt or blind keystroke timing, and auto-typing "yes" into a consent dialog
-defeats the dialog while leaving it in place as theater. Degraded delivery is
-the honest failure mode.
+options above yield: it fails all three conditions of §2's machine-interface
+test — no hook announces it, no payload carries its text, and no record shows
+what was answered — so finding it requires scraping the screen or timing
+keystrokes blind, and auto-typing "yes" into a consent dialog defeats the
+dialog while leaving it in place as theater. Degraded delivery is the honest
+failure mode.
 
 ## 13. Runaway detection (P2-4)
 
@@ -978,11 +1140,15 @@ to inaction at the largest scale.
   it exists at all, it is playbook prose for a supervisor that already has the
   usage facts.
 - **Auto-pause on runaway counters** — see §13.
-- **Prompt advancement from outside** — no mechanism types into a rendered
-  dialog, ever. Routine permission prompts are prevented at spawn (the agent's
-  own permission config, delivered through the settings overlay),
-  config-answerable dialogs are pre-answered by seeders, and everything else is
-  a genuine question that gets escalated. See §2.
+- **Prompt advancement from outside** — no mechanism selects within a rendered
+  dialog, and none acts on screen-read state. The one sanctioned path is §2's
+  three-condition machine-interface test: dismiss with Escape and reply as
+  composer text, permitted only for a dialog whose existence, verbatim content,
+  and outcome all reach the daemon through machine interfaces. Today
+  `AskUserQuestion` is the only dialog that qualifies. Everything else stays as
+  it was: routine permission prompts prevented at spawn (the agent's own
+  permission config, delivered through the settings overlay), config-answerable
+  dialogs pre-answered by seeders, and genuine questions escalated. See §2.
 - **Per-repo threshold overrides** — global compiled defaults only, at parity.
   Numbers do not fit the standing-rules shape, and a repo-table column would
   break the one-column property (§7); if operation proves the need, that

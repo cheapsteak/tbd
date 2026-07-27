@@ -198,19 +198,25 @@ the same.
   advanced past an operator-authored allowlist of safe approvals — and never past anything
   else — so that a trivial "allow this read?" doesn't cost a night.
 
-  *Amended 2026-07-27: as written, this story presumes a mechanism — advancing a rendered
-  dialog from outside — that the design refuses on principle, for the same reason it refuses
+  *Amended 2026-07-27: as written, this story presumes a mechanism — matching an operator's
+  allowlist against a rendered dialog — that the design refuses, for the same reason it refuses
   to keystroke-drive the Channels consent prompt: it requires screen-scraping or blind key
   timing, and it defeats the dialog while leaving it in place. The design satisfies the
-  story's intent structurally instead. Permission behavior is decided at the source — the
+  story's intent by other means. Permission behavior is decided at the source — the
   agent's own config: the repo's committed settings plus the operator's per-repo settings
   overlay, which TBD delivers and never counter-configures. The spawn-time bypass flag
   removes only *default* permission checks; a repo's explicit `permissions.ask` rules still
   prompt, deliberately, because they are that repo's chosen human gates. Those are escalated,
   never advanced or auto-granted; if one shouldn't stall a night, the fix is a reviewable
   change to that ask rule at its source, never a TBD-side grant list. Config-answerable
-  dialogs are pre-answered by seeders before spawn. "Never past anything else" thus holds
-  because no advancement mechanism exists to gate. See the design doc §2.*
+  dialogs are pre-answered by seeders before spawn. What still stalls is then governed by the
+  design's machine-interface test rather than by an allowlist: a dialog may be driven only when
+  its existence, its verbatim content, and its outcome are all known from machine interfaces.
+  One qualifies today — an agent's `AskUserQuestion`, handled by the gated `answer` verb, which
+  dismisses the dialog and replies as ordinary composer text. Everything that fails the test is
+  escalated unadvanced; a repo's `ask` rules are refused even if they were ever to pass it, on
+  the authority ruling above. "Never past anything else" thus holds by that test and that
+  ruling, not by an allowlist's precision. See the design doc §2.*
 - **P2-4 [A]** As an operator, I want runaway agents — looping, burning quota without
   progress — detected and flagged (or paused, in autonomous mode), so that one wedged
   session doesn't eat the shift's budget.

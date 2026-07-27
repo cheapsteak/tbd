@@ -155,9 +155,19 @@ only — no slice needs a later one:
   open's desk-spawn step no-ops until slice 4 delivers the desk — the shift
   still opens, writes its ledger, and closes, so no slice needs a later one.)
 - **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
-  supervision verbs as RPC behind the gate; the standing-rules loader
-  including automation membership and the default stance; the proposal queue
-  as a ledger projection; `tbd supervise queue/approve/reject/answer`.
+  supervision verbs as RPC behind the gate — four gated (`intervene`, `wake`,
+  `pause`, `answer`) and three ungated (`escalate`, `note`, `learn`); the
+  `answer` verb's behavior lands with its case flow in slice 4, but its gate
+  entry belongs here with the others. The standing-rules loader including
+  automation membership and the default stance; the proposal queue as a ledger
+  projection; `tbd supervise queue/approve/reject/answer` for the operator side.
+  **Naming collision to settle in this slice**: the operator's
+  escalation-answering command and the supervisor's new `answer` verb both want
+  the word `answer` on the same CLI noun. They are different surfaces — one
+  resolves a queued escalation, the other replies to an agent's question — so
+  one of the two needs a distinguishing subcommand before either ships. The
+  design's verb name is normative (design §3); the operator-side spelling is
+  not.
 - **Slice 4 — supervisor and delivery** (design §4, §9, §12). Wake decision
   from facts, work-order composition, the supervisor desk as a first-class
   session, `terminal.send` delivery for the fleet, the Channels adapter for
@@ -165,7 +175,23 @@ only — no slice needs a later one:
   ledger-marker acknowledgement re-check, supervisor context recycling, and the
   playbook resolver — three-tier `supervision.md` resolution (the operator's
   per-repo copy → `.agents/supervision.md` → the shipped default), which
-  includes adding `.agents/` as a level to the existing resolver.
+  includes adding `.agents/` as a level to the existing resolver. This slice
+  also carries the **`AskUserQuestion` case flow** (design §2, §4): the
+  daemon-side fork in the existing `terminal.askUserQuestionPending` handler —
+  the hook itself stays an unconditional dumb reporter and is not touched — so
+  that a pending question with a shift active and the repo in automation
+  becomes a case and hastens an immediate mini-tick for that terminal; work
+  orders carrying the question payload verbatim out of `PendingQuestionStore`;
+  and the store's TTL treated as a GC backstop that must not expire a still-live
+  dialog during a shift (resolution comes from the `PostToolUse` clear, not the
+  clock). Two non-blocking notes for whoever picks this up: pending questions
+  have no CLI read surface today (`terminal.transcript` is RPC-only, and the
+  work-order carriage is what makes a read surface unnecessary — a
+  `tbd`-side reader would be a debugging nicety, not a dependency); and
+  subagent-raised questions are deliberately dropped by the payload parser
+  (`isSubagentTranscript`), so they never become cases. Whether that stays is a
+  policy decision at implementation time — default: keep dropping them, since
+  the parent session surfaces its own questions.
 - **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
   tab (membership section + standing-rules inspection), the account panel as
   inbox, CLI parity for every control.
@@ -186,10 +212,13 @@ from real shifts, not against code review:
 
 - **Required green**: every P0 (P0-1 … P0-10) and every P1 (P1-1 … P1-7).
 - **Expected but not blocking**: P2-1, P2-2 (both are in the design and the
-  slices above); P2-4 lands with slice 6. P2-3 ships in **no slice** — it is
-  satisfied structurally by the design rather than implemented: prevention at
-  spawn for permission prompts, seeders for config-answerable dialogs, and
-  escalation for everything else (design §2).
+  slices above); P2-4 lands with slice 6. P2-3 is satisfied mostly
+  structurally rather than by implementation — prevention at spawn for
+  permission prompts, seeders for config-answerable dialogs, and escalation for
+  everything that fails the machine-interface test — with one implemented
+  piece, the `AskUserQuestion` case flow and `answer` verb in slices 3 and 4.
+  What the story actually asked for (an allowlist matched against rendered
+  prompts) ships in no slice and never will (design §2).
 - **Explicitly not blocking**: P3-1.
 
 Cutover is then an operator act, deliberately boring: set `nightwatch_mode`
