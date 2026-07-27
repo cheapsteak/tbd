@@ -4,17 +4,17 @@ Status of this document: descriptive, written against the tree as of 2026-07-25.
 
 Nightwatch is TBD's autonomous "fleet babysitter" feature: while the user is away (or merely distracted), something should keep the ~40 agent worktrees unblocked, triage stuck sessions, and shepherd PRs toward merge. This document explains what actually shipped under that name — which is substantially less, and structurally different, than either the feature's design spec or its own Settings copy suggests.
 
-> ### ⚠︎ Earmarked for deletion (tentative, 2026-07-26)
+> ### ⚠︎ Update 2026-07-26: System A has been removed (PR #509)
 >
-> **System A — the entire compiled merge-gate half — is provisionally marked for removal, not repair.** That is: `MergeGate.swift`, the `clearance` table and `ClearanceStore`, the `audit_log` write path fed by the PR-status hook, `AuditAction`, and the `Daemon.swift` wiring that feeds it placeholder inputs.
+> **System A — the entire compiled merge-gate half — was deleted from `main` by [PR #509](https://github.com/cheapsteak/tbd/pull/509), merged 2026-07-26.** That is: `MergeGate.swift`, the `clearance` table and `ClearanceStore`, the `audit_log` write path fed by the PR-status hook, `AuditAction`, and the `Daemon.swift` wiring that fed it placeholder inputs. System B (the Watch Desk) remains in the tree. Everything below describing System A is preserved as a historical record of what was removed and why; the rest of this document describes the tree as of 2026-07-25, before that removal.
 >
-> Rationale, pending confirmation:
+> The rationale that motivated the removal:
 >
 > 1. **The invariant it protects is already enforced better by the forge.** Branch protection's *"dismiss stale pull request approvals when new commits are pushed"* is exactly approval-bound-to-content, and GitHub's auto-merge plus merge queue supply the act-time re-verification. Crucially, forge enforcement sits **outside the trust boundary of the machine running the agents** — an agent with a shell can invoke `gh pr merge`, but it cannot merge what branch protection refuses. No local daemon-side gate can make that claim.
 > 2. **Of the three motivating incidents, only one is a merge problem.** Contested PR ownership is a concurrency problem; premature archival is a worktree-state problem. Neither needs a merge gate.
 > 3. **The extension mechanism it should have used already exists.** `HookResolver` ships the exact user-local → checked-in → global precedence this feature wanted; it is missing only fleet-state *events*, not machinery.
 >
-> Nothing in this block is decided. It records the current direction so a future reader does not invest in repairing System A before that question is settled. **The retained problem is fleet supervision — unblocking, triage, archival safety, observability — not merge authorization.**
+> **The retained problem is fleet supervision — unblocking, triage, archival safety, observability — not merge authorization.** The replacement design lives in [`docs/specs/2026-07-26-fleet-supervision-design.md`](specs/2026-07-26-fleet-supervision-design.md).
 
 ---
 
