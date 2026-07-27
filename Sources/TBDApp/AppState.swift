@@ -1033,8 +1033,7 @@ final class AppState: ObservableObject {
     /// AppState tests can exercise the action without a live daemon.
     lazy var freshConversationReviver:
         @MainActor (UUID, String, Int?, Int?) async throws
-            -> WorktreeReviveConversationFreshResult = {
-                [daemonClient] worktreeID, sessionID, cols, rows in
+            -> WorktreeReviveConversationFreshResult = { [daemonClient] worktreeID, sessionID, cols, rows in
                 try await daemonClient.reviveConversationOnFreshBranch(
                     worktreeID: worktreeID,
                     sessionID: sessionID,
