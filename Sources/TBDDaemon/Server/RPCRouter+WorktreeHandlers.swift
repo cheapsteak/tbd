@@ -254,6 +254,9 @@ extension RPCRouter {
         guard let source = try await db.worktrees.get(id: params.archivedWorktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(params.archivedWorktreeID)
         }
+        guard source.status == .archived else {
+            throw WorktreeLifecycleError.worktreeNotArchived(params.archivedWorktreeID)
+        }
         guard let repoID = source.repoID else {
             throw WorktreeLifecycleError.invalidOperation(
                 "Cannot revive a conversation on a fresh branch without a repository."

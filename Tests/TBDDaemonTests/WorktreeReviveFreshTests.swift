@@ -384,6 +384,31 @@ struct WorktreeReviveFreshTests {
         #expect(deltas.createdCount(worktreeID: result.worktree.id) == 1)
     }
 
+    @Test func rpcRejectsActiveScratchAsNotArchivedBeforeRepositoryValidation() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeReviveFreshRouter(db: db, deltas: FreshReviveDeltas())
+        let scratch = try await db.worktrees.createScratch(
+            name: "active-scratch",
+            displayName: "Active Scratch",
+            path: FileManager.default.temporaryDirectory
+                .appendingPathComponent("active-scratch-\(UUID().uuidString)").path,
+            tmuxServer: "tbd-scratch-test"
+        )
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeReviveConversationFresh,
+            params: WorktreeReviveConversationFreshParams(
+                archivedWorktreeID: scratch.id,
+                sessionID: "missing-session"
+            )
+        ))
+
+        #expect(!response.success)
+        #expect(response.error == "Worktree is not archived: \(scratch.id)")
+    }
+
     @Test func rpcPreSessionCompletionDoesNotDuplicateEarlyCreateBroadcast() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
