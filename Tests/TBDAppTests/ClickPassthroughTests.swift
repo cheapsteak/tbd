@@ -23,4 +23,14 @@ struct ClickPassthroughTests {
     func capsLockAllowed() {
         #expect(TBDTerminalView.clickPassthroughBlocked(by: .capsLock) == false)
     }
+
+    @Test("manual passthrough stands down when native mouse reporting is on")
+    func standsDownWhenNativeReportingOn() {
+        #expect(TBDTerminalView.clickPassthroughActive(allowMouseReporting: true) == false)
+    }
+
+    @Test("manual passthrough stays active when native mouse reporting is off")
+    func activeWhenNativeReportingOff() {
+        #expect(TBDTerminalView.clickPassthroughActive(allowMouseReporting: false) == true)
+    }
 }
