@@ -77,7 +77,7 @@ by trusting this table.
 | `nightwatch.setMode` / `nightwatch.report` RPC, `RPCRouter+NightwatchHandlers.swift` | Superseded by `supervision.*` RPC surface. Delete at §6 (stale-CLI hazard: §6). |
 | `TBDCLI/Commands/NightwatchCommand.swift` | Superseded by `tbd supervise ...`. Delete at §6. |
 | `NightwatchMode` in `Models.swift`, `nightwatch_mode` in `ConfigStore` | Code deleted at §6; DB column orphaned in place. |
-| App surfaces: `NightwatchModeToggle`, `NightwatchStatusItem`, status-bar tint/badge, Settings "Fleet Automation" section, `nightwatchExperimentalEnabled` key | Superseded by the new posture control and the Fleet Automation settings tab (design §10). Delete at §6. |
+| App surfaces: `NightwatchModeToggle`, `NightwatchStatusItem`, status-bar tint/badge, Settings "Fleet Automation" section, `nightwatchExperimentalEnabled` key | Superseded by the new posture control and the Fleet Supervision settings tab (design §10). Delete at §6. |
 | Tests (`DaywatchRunnerTests`, `DeskSessionManagerTests`, `NightwatchDeskPromptsTests`, `NightwatchModeTests`, `NightwatchModeToggleTests`, `NightwatchExperimentalGateTests`) | Delete with their subjects. |
 | Live runtime dir `~/Library/Application Support/TBD/plugin/skills/nightwatch/` (`queue/*`, agent-authored `scripts/handoff.py`, edited config files) | Harvest in slice 0, snapshot, then delete with `writeNightwatch()`. |
 | The "◐ Watch Desk" scratch worktree | Final harvest at cutover, then archive by hand. |
@@ -166,7 +166,7 @@ only — no slice needs a later one:
   playbook resolver — three-tier `supervision.md` resolution (the operator's
   per-repo copy → `.agents/supervision.md` → the shipped default), which
   includes adding `.agents/` as a level to the existing resolver.
-- **Slice 5 — operator surfaces** (design §10). The Fleet Automation settings
+- **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
   tab (membership section + standing-rules inspection), the account panel as
   inbox, CLI parity for every control.
 - **Slice 6 — hardening** (design §11, §13, §14). Capacity holds, runaway
@@ -174,9 +174,9 @@ only — no slice needs a later one:
   cutover without blocking it.
 
 Soak discipline: after slice 4, run real shifts on the new system in
-supervised posture (the interlock means the old system is off for those
+attended posture (the interlock means the old system is off for those
 shifts; alternate if the new system disappoints). At least one clean
-supervised shift and one autonomous shift — scoped by automation membership to
+attended shift and one autonomous shift — scoped by automation membership to
 low-stakes repos — before the parity gate.
 
 ## 5. Cutover

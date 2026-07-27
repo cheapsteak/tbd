@@ -187,13 +187,20 @@ checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
 
 ## 3. The two modes (P0-2, P0-3)
 
-There is one operating posture: **off / supervised / autonomous**. It is a
+There is one operating posture: **off / attended / autonomous**. It is a
 configuration column in the daemon. It can be set from the app and CLI, is
 broadcast when it changes, and survives a restart, just like every other daemon
 toggle.
 
+**A note on the name.** The requirements brief calls this posture
+"human-supervised" (P0-2). It is renamed here because "supervised" collided with
+the subsystem's own name: this subsystem *is* fleet supervision, and the
+supervisor supervises the fleet in both modes. The posture names the human's
+side of the relationship — an operator is in the loop, and consequential verbs
+queue for them — not the supervisor's. "Autonomous" is unchanged.
+
 **Enforcement controls capabilities; it does not rely on prompt wording.** The
-supervisor acts only through daemon commands, called verbs. In supervised mode,
+supervisor acts only through daemon commands, called verbs. In attended mode,
 the daemon turns consequential verbs into proposals. The call succeeds, but
 the daemon adds the action to a queue instead of executing it. No prompt can
 confuse the supervisor into acting autonomously because the verb cannot execute
@@ -210,10 +217,10 @@ cannot misreport its actions because it is not the reporter.
   (P0-10).
 - The veto-window variant (act after a cancellable delay) is rejected outright:
   a missed veto allows an action that was never approved. That would silently
-  turn supervised mode into autonomous mode, exactly the false promise P0-3 is
+  turn attended mode into autonomous mode, exactly the false promise P0-3 is
   intended to prevent.
 
-Compiled defaults are as conservative as possible. In supervised mode, every
+Compiled defaults are as conservative as possible. In attended mode, every
 verb that affects the fleet becomes a proposal. In autonomous mode, verbs
 execute and questions are collected into escalation batches. Standing rules
 (§5) can relax these defaults. Files shipped by a repository cannot.
@@ -223,7 +230,7 @@ execute and questions are collected into escalation batches. Standing rules
 This table is the single normative inventory of the supervisor's capabilities.
 Every other mention of a verb in this document defers to it.
 
-| Verb | What it does | Gated? | Supervised mode | Autonomous mode |
+| Verb | What it does | Gated? | Attended mode | Autonomous mode |
 | --- | --- | --- | --- | --- |
 | `intervene` | Deliver a re-verified message to a fleet agent (the send path of §4 step 7) | gated | Becomes a proposal | Executes; ledger line |
 | `wake` | Unpark and resume a parked session | gated | Becomes a proposal | Executes; ledger line |
@@ -265,7 +272,7 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    The daemon performs three steps. First, it **re-verifies** every external
    claim in the message against live sources at send time. An old premise stops
    the send and returns the conflicting facts (P0-8). Second, it **checks
-   posture**. In supervised mode, a consequential action becomes a proposal.
+   posture**. In attended mode, a consequential action becomes a proposal.
    The supervisor uses the same code path in either mode. Third, the daemon
    **delivers** the message through the adapter and **writes the ledger line
    itself**.
@@ -520,7 +527,7 @@ there is nothing there to gate. It is reasonable to ask whether prose could
 replace the binding tier. It cannot, for exactly four reasons. The design must
 not grow beyond what these reasons require:
 
-1. **The supervised-mode promise (P0-3).** The verb gate consults posture and
+1. **The attended-mode promise (P0-3).** The verb gate consults posture and
    rules without using a model. If prose could relax them, the system would
    either remain maximally conservative forever or let the supervisor control
    its own capabilities by interpreting prose. The latter would make the mode
@@ -603,7 +610,7 @@ Both live in `standing-rules.json` in the same file as the verb rules — same
 loader, same gate, one source of truth for "may the daemon act
 here." Membership is checked before any verb executes **and before proposals
 are created**: a repo that resolves to *out* generates no proposals in
-supervised mode and no actions in autonomous mode. It still appears in the
+attended mode and no actions in autonomous mode. It still appears in the
 fact sweep and the account — observability is never gated, and "repo X needed
 attention but is out of automation" is the honest report. Because membership
 is enforced at the same model-free gate as the never-lists, it holds when
@@ -633,9 +640,9 @@ standing rules will be the first such mechanism, not an upgrade.
 ## 9. Shift lifecycle (P2-2)
 
 - **A shift is born from the posture switch, and only from it.** off →
-  supervised/autonomous creates a shift ID, creates
+  attended/autonomous creates a shift ID, creates
   `~/tbd/shifts/<id>/`, writes the opening ledger line, and starts the
-  supervisor. A switch between supervised ↔ autonomous during a shift keeps
+  supervisor. A switch between attended ↔ autonomous during a shift keeps
   the *same* shift and adds a posture-change ledger line. Every action line
   already records its posture. Only switching to off ends a shift.
 - **The desk is a scratch space, tracked by ID** rather than by its display
@@ -725,7 +732,7 @@ Principle: **you take action where you already read the relevant information.**
   appear beside it. Approval also offers scope choices: this once / this shift
   / always for this repo. This is the only user interface (UI) that creates
   standing verb rules; automation membership is managed in the Fleet
-  Automation settings tab below. A rejection can include an optional one-line
+  Supervision settings tab below. A rejection can include an optional one-line
   explanation,
   which reaches the supervisor in its next work order. Each escalation shows
   the exact item, exact command, recommendation, and an answer box. Every
@@ -737,12 +744,15 @@ Principle: **you take action where you already read the relevant information.**
   the playbook (advisory) and standing rules (binding); the chat is neither.
   If you type something rule-shaped, the supervisor may propose making it
   standing through the normal ratification path.
-- **Fleet automation gets its own Settings tab.** It replaces the current
+- **Fleet supervision gets its own Settings tab.** It replaces the current
   Settings section and holds the automation-membership section — the
   default-in/default-out control and the per-repo in/out/follow-default list
-  (§8) — alongside the standing-rules inspection surface described next. Both
-  are views of `standing-rules.json`, following the house file-backed-settings
-  pattern: tilde-abbreviated path shown, copy button, manual edits respected.
+  (§8) — alongside the standing-rules inspection surface described next. The
+  tab takes the subsystem's name; "automation" survives only in the membership
+  setting's own name, where it is precise (in or out of automation = may the
+  daemon act here on its own). Both are views of `standing-rules.json`,
+  following the house file-backed-settings pattern: tilde-abbreviated path
+  shown, copy button, manual edits respected.
   Every control has a CLI twin (`tbd supervise automation ...`).
 - **Standing rules get a simple inspection surface** with the rule list, scope,
   origin, and a revoke action. The origin links to the ledger for the shift
@@ -870,7 +880,7 @@ Crossing a threshold does not itself cause an action. It creates a case in the
 next work order, such as "agent Y: 31 turns, no commits in 90 minutes." The
 supervisor reads the transcript and decides. If the agent is truly looping, it
 uses `pause`. This is a consequential verb, so it becomes a proposal in
-supervised mode and passes through the standing-rules gate in autonomous mode.
+attended mode and passes through the standing-rules gate in autonomous mode.
 If the agent is making legitimate progress on a hard problem, the supervisor
 adds a note and leaves it alone.
 
@@ -924,7 +934,7 @@ to inaction at the largest scale.
 - **Per-mode playbooks** — one playbook receives the mode as context. Separate
   files would invite promises the daemon does not enforce.
 - **The act-with-veto-window human-in-the-loop (HITL) variant** — a missed veto
-  allows an unapproved action. Supervised mode must not silently become
+  allows an unapproved action. Attended mode must not silently become
   autonomous mode.
 - **Cross-account rebalancing** — assumes one person's account arrangement. If
   it exists at all, it is playbook prose for a supervisor that already has the
