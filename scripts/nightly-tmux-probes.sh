@@ -243,7 +243,7 @@ probe_control_mode_framing() {
   ws_phase="$(phase_of "$transcript" after-bad-command after-whitespace-line)"
 
   probe "P8" "a command yields %begin/%end with a matching id triple; an INVALID command yields %begin/%error" \
-        "TmuxControlConnection's block parser — %error, not %end, terminates a failed command"
+        "TmuxControlParser.swift:34-55 — the %begin…%end/%error framing; %error, not %end, terminates a failed command"
   local good_begin good_end
   good_begin="$(printf '%s' "$good_phase" | sed -n 's/^%begin \(.*\)$/\1/p' | tr -d '\r' | head -1)"
   good_end="$(printf '%s' "$good_phase"   | sed -n 's/^%end \(.*\)$/\1/p'   | tr -d '\r' | head -1)"
