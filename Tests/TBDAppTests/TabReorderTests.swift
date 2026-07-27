@@ -151,6 +151,12 @@ import TBDShared
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
     state.layouts[ids[1]] = .pane(.terminal(terminalID: ids[1]))
+    // Focus lives in tab 1, which is therefore also the active tab — the state
+    // the app is really in when Cmd-W closes it. Closing the ACTIVE tab is what
+    // moves the selection to the neighbour that takes its slot; closing a
+    // background tab must leave the selection alone (see
+    // `ActiveTabResolutionTests`), so the fixture has to say which this is.
+    state.activeTabIndices[worktreeID] = 1
     state.focusedTabCloseContext = .init(worktreeID: worktreeID, tabID: ids[1])
 
     state.closeFocusedTab()

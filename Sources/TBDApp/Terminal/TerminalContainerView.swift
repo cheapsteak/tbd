@@ -94,7 +94,7 @@ struct SingleWorktreeView: View {
     @State private var showAccountPicker = false
 
     private var activeTabIndex: Int {
-        get { appState.activeTabIndices[worktreeID] ?? 0 }
+        get { appState.resolvedActiveTabIndex(worktreeID: worktreeID) }
         nonmutating set {
             appState.setActiveTab(worktreeID: worktreeID, tabIndex: newValue)
             appState.historyActiveWorktrees.remove(worktreeID)
@@ -306,9 +306,7 @@ struct SingleWorktreeView: View {
     }
 
     private var activeTab: TBDShared.Tab? {
-        let tabs = worktreeTabs
-        guard !tabs.isEmpty else { return nil }
-        return tabs[min(activeTabIndex, tabs.count - 1)]
+        appState.resolvedActiveTab(worktreeID: worktreeID)
     }
 
     /// The active tab's terminal, if any — used to decide whether to show
@@ -502,10 +500,9 @@ private struct MultiWorktreeCell: View {
     /// The terminal shown in this cell — derived from the active tab's layout
     /// so it stays consistent with the dock's visibleTerminalIDs filter.
     private var primaryTerminal: Terminal? {
-        let tabs = appState.tabs[worktreeID] ?? []
-        guard !tabs.isEmpty else { return appState.terminals[worktreeID]?.first }
-        let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
-        let tab = tabs[min(activeIndex, tabs.count - 1)]
+        guard let tab = appState.resolvedActiveTab(worktreeID: worktreeID) else {
+            return appState.terminals[worktreeID]?.first
+        }
         let layout = appState.layouts[tab.id] ?? .pane(tab.content)
         // Use the first terminal in the active tab's layout tree
         guard let firstID = layout.allTerminalIDs().first else {
@@ -515,10 +512,7 @@ private struct MultiWorktreeCell: View {
     }
 
     private var activeTab: TBDShared.Tab? {
-        let tabs = appState.tabs[worktreeID] ?? []
-        guard !tabs.isEmpty else { return nil }
-        let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
-        return tabs[min(activeIndex, tabs.count - 1)]
+        appState.resolvedActiveTab(worktreeID: worktreeID)
     }
 
     var body: some View {
