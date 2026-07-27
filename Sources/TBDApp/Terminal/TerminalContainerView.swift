@@ -433,9 +433,10 @@ private struct ScheduledResumeBanner: View {
 /// Hand-rolled chrome rather than `.buttonStyle(.bordered)`: a `.small`
 /// bordered button is ~20pt tall and would inflate this 21pt bar by a third.
 /// Follows `ModelRailButton` (WorktreeProfilePickerView) — plain button, tight
-/// rounded-rect fill that brightens on hover — with a stroke added so the
-/// affordance reads as a control against the banner's own orange wash, and the
-/// palette kept to `.orange` so no new accent color enters the bar.
+/// rounded-rect — but stays outline-only (no fill) so it reads as a light
+/// control against the banner's own orange wash; hover strengthens the
+/// stroke instead of introducing a background. Palette kept to `.orange` so
+/// no new accent color enters the bar.
 private struct ScheduledResumeCancelButton: View {
     let action: () -> Void
 
@@ -447,11 +448,7 @@ private struct ScheduledResumeCancelButton: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.orange)
                 .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.orange.opacity(isHovered ? 0.32 : 0.18))
-                )
+                .padding(.vertical, 1)
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(Color.orange.opacity(isHovered ? 0.85 : 0.55), lineWidth: 1)
