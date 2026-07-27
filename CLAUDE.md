@@ -4,6 +4,16 @@ macOS native worktree + terminal manager for multi-agent Claude Code workflows.
 
 Use the `tbd-project` skill for architecture, conventions, and file reference.
 
+## Nightwatch is being replaced — feature freeze
+
+The fleet-supervision subsystem ("Nightwatch"/"Daywatch") is being redesigned
+from scratch and a migration to the new design is ongoing. The target design is
+[`docs/specs/2026-07-26-fleet-supervision-design.md`](docs/specs/2026-07-26-fleet-supervision-design.md)
+(requirements: [`docs/specs/2026-07-26-fleet-supervision-requirements.md`](docs/specs/2026-07-26-fleet-supervision-requirements.md)).
+Until the migration is complete, do **not** add new features to the existing
+Nightwatch implementation — bug fixes only. New supervision behavior belongs in
+the new design's structures, not the code being replaced.
+
 ## Main Session Agent
 
 The main chat session agent should not write code directly. Delegate all implementation work to suitable subagents (Agent tool). The main session focuses on planning, coordination, and reviewing subagent results.
