@@ -66,7 +66,8 @@ extension RPCRouter {
             guard let payload = row.decodedPayload else { return nil }
             return RemoteSessionInfo(provider: row.provider, payload: payload,
                                      gone: row.gone, dismissed: row.dismissed,
-                                     lastSeen: row.lastSeen, resolvedRepoID: row.resolvedRepoIDUUID)
+                                     lastSeen: row.lastSeen, resolvedRepoID: row.resolvedRepoIDUUID,
+                                     pinnedAt: row.pinnedAt)
         }
         return try RPCResponse(result: RemoteSessionsResult(sessions: sessions))
     }
@@ -234,6 +235,30 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteDismissParams.self, from: paramsData)
         let changed = try await db.remoteSessions.dismiss(provider: params.provider, sessionID: params.sessionID)
+        if changed {
+            subscriptions.broadcast(delta: .remoteSessionsChanged)
+        }
+        return .ok()
+    }
+
+    /// Pin or unpin a remote session for the sidebar dock. Local-only — it
+    /// touches the mirror row and never invokes a provider verb, so unlike
+    /// every handler above it needs no `RemoteProviderManager` (a session
+    /// whose provider has gone unhealthy, or whose row is already `gone`, can
+    /// still be unpinned). It still passes through `remoteGate()` because the
+    /// whole feature hides behind `config.remoteBackendsEnabled`.
+    ///
+    /// The timestamp is stamped HERE rather than by the client, so pin order
+    /// is server-assigned and consistent across clients — the same contract
+    /// `handleWorktreeSetPin` follows.
+    func handleRemoteSetPin(_ paramsData: Data) async throws -> RPCResponse {
+        guard try await remoteGate() != nil else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteSetPinParams.self, from: paramsData)
+        let changed = try await db.remoteSessions.setPinned(
+            provider: params.provider, sessionID: params.sessionID,
+            pinnedAt: params.pinned ? Date() : nil)
         if changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }

@@ -17,6 +17,22 @@ struct PinnedDockRow: Identifiable, Equatable {
     var id: UUID { worktree.id }
 }
 
+/// One rendered line in the pinned dock's remote group: a pinned remote
+/// session. Deliberately a SEPARATE row type from `PinnedDockRow` rather than
+/// an enum case inside it, because the two render into two different
+/// `ForEach`es — only the worktree one carries `.onMove` (see
+/// `PinnedDockView`). A remote session also has none of the nesting context a
+/// worktree row needs: the mirror is flat, so there is no depth and no
+/// section repo to inherit.
+struct PinnedDockRemoteRow: Identifiable, Equatable {
+    let session: RemoteSessionInfo
+
+    /// The deterministic per-`(provider, sessionID)` UUID from
+    /// `RemoteSessionIdentity` — the same tag the row carries in the remote
+    /// section, so selecting in either place lights up both copies.
+    var id: UUID { session.id }
+}
+
 /// Pure content model for the sidebar's pinned dock. Takes values and one
 /// lookup closure, returns values — no SwiftUI, no `AppState`, fully testable.
 ///
@@ -115,6 +131,51 @@ enum PinnedDockContent {
                               depth: depth + 1, children: children,
                               emitted: &emitted, into: &result)
         }
+    }
+
+    /// The pinned remote sessions, rendered as a group BELOW the pinned
+    /// worktrees in the same dock.
+    ///
+    /// Grouped rather than interleaved with worktree pins by `pinnedAt`, for
+    /// two reasons. Structurally, `.onMove` addresses one `ForEach`'s own
+    /// elements, and only worktrees carry a persisted `pinSortOrder` to drag
+    /// against — interleaving would put unmovable rows inside the movable
+    /// `ForEach` and make every drag index ambiguous. Behaviourally, the
+    /// grouping is predictable: dock order stays "worktrees you arranged,
+    /// then remote sessions in the order you pinned them".
+    ///
+    /// Filters, and the lifecycle choice behind each:
+    /// - `pinnedAt != nil` — the pin itself.
+    /// - `!dismissed` — dismissing means "get rid of it", so a dismissed
+    ///   session leaves the dock. The daemon also clears `pinnedAt` on
+    ///   dismiss (`RemoteSessionStore.dismiss`); this check is what makes the
+    ///   rendering correct regardless, including for a row dismissed by an
+    ///   older daemon that never cleared the column.
+    ///
+    /// Deliberately NOT filtered: `gone` and `exited`. A `gone` row is one the
+    /// provider stopped reporting, which self-heals the moment it reappears in
+    /// a snapshot (`RemoteSessionStore.applySnapshot` clears the flag), and an
+    /// exited session is still the thing the user pinned — both keep their
+    /// slot and render with `RemoteSessionRowView`'s existing dimmed /
+    /// secondary styling, the same way an archived WORKTREE keeps its pin
+    /// (see `rows`' `archivedAt` note — the difference is that a remote
+    /// session has no archived state to hide behind).
+    ///
+    /// Sorted oldest-pin-first so a new pin appends, matching `rows`'
+    /// `pinnedAt` fallback. Ties break on `(provider, sessionID)` so the order
+    /// is total — two sessions pinned inside the same millisecond must not
+    /// swap places between renders.
+    static func remoteRows(allRemoteSessions: [RemoteSessionInfo]) -> [PinnedDockRemoteRow] {
+        allRemoteSessions
+            .filter { $0.pinnedAt != nil && !$0.dismissed }
+            .sorted { lhs, rhs in
+                let l = lhs.pinnedAt ?? .distantPast
+                let r = rhs.pinnedAt ?? .distantPast
+                if l != r { return l < r }
+                if lhs.provider != rhs.provider { return lhs.provider < rhs.provider }
+                return lhs.payload.id < rhs.payload.id
+            }
+            .map(PinnedDockRemoteRow.init)
     }
 
     /// The contiguous run of rows belonging to one pinned root: the root itself

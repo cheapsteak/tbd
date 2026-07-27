@@ -447,10 +447,15 @@ struct RemoteSessionRowView: View {
         .contextMenu {
             let capabilities = appState.remoteProviders
                 .first { $0.config.name == session.provider }?.describe?.capabilities ?? []
-            ForEach(
-                Array(RemoteSessionActionMenu.items(capabilities: capabilities, gone: session.gone).enumerated()),
-                id: \.offset
-            ) { _, item in
+            let items = RemoteSessionActionMenu.items(
+                capabilities: capabilities, gone: session.gone,
+                // Read from the mirror rather than this row's captured
+                // `session`, so a dock copy and a section copy of the same
+                // session always offer the same verb.
+                isPinned: appState.remoteSessionIsPinned(
+                    provider: session.provider, sessionID: session.payload.id)
+            )
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 switch item {
                 case let .action(action):
                     actionButton(action)
@@ -508,6 +513,12 @@ struct RemoteSessionRowView: View {
                     remoteRowLogger.error(
                         "remoteDismiss failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
                 }
+            }
+        case .pin, .unpin:
+            let pinned = kind == .pin
+            Task {
+                await appState.setRemoteSessionPinned(
+                    provider: session.provider, sessionID: session.payload.id, pinned: pinned)
             }
         }
     }

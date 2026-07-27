@@ -203,6 +203,34 @@ extension AppState {
         }
     }
 
+    // MARK: - Pinned dock
+
+    /// Pin or unpin a remote session for the sidebar's pinned dock, then
+    /// re-fetch the mirror so the dock reflects daemon state.
+    ///
+    /// No optimistic local update, deliberately — same reasoning as
+    /// `setPinned(worktreeID:pinned:)`: the daemon stamps `pinnedAt`, so pin
+    /// ORDER is server-assigned and a guessed local timestamp could order the
+    /// dock differently from the next refresh. A failed pin therefore visibly
+    /// does not take, which is honest.
+    func setRemoteSessionPinned(provider: String, sessionID: String, pinned: Bool) async {
+        do {
+            try await remoteSessionPinSetter(provider, sessionID, pinned)
+            await refreshRemote()
+        } catch {
+            remoteLogger.error(
+                "Failed to set remote session pin for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(error, privacy: .public)")
+            showAlert("Couldn't update pin: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Whether this session currently carries a dock pin. Reads the mirror
+    /// (not a local copy of the row) so a menu built from a stale row still
+    /// offers the correct Pin/Unpin verb.
+    func remoteSessionIsPinned(provider: String, sessionID: String) -> Bool {
+        remoteSessions.first { $0.provider == provider && $0.payload.id == sessionID }?.pinnedAt != nil
+    }
+
     // MARK: - Settings toggle (Task 11)
 
     /// Persist the remote-backends master switch, then re-fetch capabilities

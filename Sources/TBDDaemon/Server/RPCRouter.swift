@@ -408,6 +408,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteRename(request.paramsData)
             case RPCMethod.remoteDismiss:
                 return try await handleRemoteDismiss(request.paramsData)
+            case RPCMethod.remoteSetPin:
+                return try await handleRemoteSetPin(request.paramsData)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.gcList:

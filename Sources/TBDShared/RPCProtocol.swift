@@ -227,6 +227,7 @@ public enum RPCMethod {
     public static let remoteLog = "remote.log"
     public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
+    public static let remoteSetPin = "remote.setPin"
     public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
@@ -1003,7 +1004,7 @@ public struct RemoteProvidersResult: Codable, Sendable {
 /// One row of the `remote.sessions` mirror — the provider-scoped payload
 /// plus the drift bookkeeping (`gone`/`dismissed`) the app needs to render
 /// (or hide) a stale session.
-public struct RemoteSessionInfo: Codable, Sendable, Identifiable {
+public struct RemoteSessionInfo: Codable, Sendable, Identifiable, Equatable {
     /// Stable synthetic identity for this mirror row — see
     /// `RemoteSessionIdentity`. ALWAYS recomputed from `provider`/
     /// `payload.id` rather than trusted off the wire (see `init(from:)`):
@@ -1026,17 +1027,26 @@ public struct RemoteSessionInfo: Codable, Sendable, Identifiable {
     /// keeps retrying resolution only while this stays nil. Once non-nil, it
     /// never changes, even if the provider's reported meta later does.
     public let resolvedRepoID: UUID?
+    /// When the user pinned this session to the sidebar's pinned dock, or nil
+    /// when it isn't pinned. Stamped daemon-side (`remote.setPin`) so pin
+    /// ORDER is server-assigned, exactly like `Worktree.pinnedAt`. Survives
+    /// app and daemon restarts because it lives on the mirror row, whose
+    /// primary key `(provider, sessionID)` is durable by contract.
+    /// `decodeIfPresent` so a payload from an older daemon still decodes.
+    public let pinnedAt: Date?
 
     public init(provider: String, payload: RemoteSessionPayload,
-                gone: Bool, dismissed: Bool, lastSeen: Date, resolvedRepoID: UUID? = nil) {
+                gone: Bool, dismissed: Bool, lastSeen: Date, resolvedRepoID: UUID? = nil,
+                pinnedAt: Date? = nil) {
         self.id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
         self.provider = provider; self.payload = payload
         self.gone = gone; self.dismissed = dismissed; self.lastSeen = lastSeen
         self.resolvedRepoID = resolvedRepoID
+        self.pinnedAt = pinnedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, provider, payload, gone, dismissed, lastSeen, resolvedRepoID
+        case id, provider, payload, gone, dismissed, lastSeen, resolvedRepoID, pinnedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -1047,6 +1057,7 @@ public struct RemoteSessionInfo: Codable, Sendable, Identifiable {
         dismissed = try c.decode(Bool.self, forKey: .dismissed)
         lastSeen = try c.decode(Date.self, forKey: .lastSeen)
         resolvedRepoID = try c.decodeIfPresent(UUID.self, forKey: .resolvedRepoID)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
         // See the `id` doc comment — deliberately recomputed, never decoded.
         id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
     }
@@ -1104,6 +1115,20 @@ public struct RemoteDismissParams: Codable, Sendable {
     public let sessionID: String
     public init(provider: String, sessionID: String) {
         self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Pin or unpin a remote session for the sidebar dock. Purely local — no
+/// provider verb is involved, so this works for any provider regardless of
+/// declared capabilities, and for a `gone` row too. Mirrors
+/// `WorktreeSetPinParams`: the client only says whether it wants the pin on
+/// or off, and the daemon stamps `pinnedAt` so pin order is server-assigned.
+public struct RemoteSetPinParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let pinned: Bool
+    public init(provider: String, sessionID: String, pinned: Bool) {
+        self.provider = provider; self.sessionID = sessionID; self.pinned = pinned
     }
 }
 

@@ -26,6 +26,10 @@ public struct RemoteSessionRow: Codable, FetchableRecord, PersistableRecord, Sen
     /// (matching `RepoRecord.id`'s convention) rather than a GRDB-native UUID
     /// type.
     public var resolvedRepoID: String?
+    /// Sidebar-dock pin timestamp, or nil when unpinned — see
+    /// `RemoteSessionInfo.pinnedAt`. Purely presentational: nothing in the
+    /// daemon reads this value beyond echoing it to clients.
+    public var pinnedAt: Date?
 
     public var decodedPayload: RemoteSessionPayload? {
         payload.data(using: .utf8).flatMap { try? JSONDecoder().decode(RemoteSessionPayload.self, from: $0) }
@@ -137,7 +141,11 @@ public struct RemoteSessionStore: Sendable {
                 agentState: session.agentState.rawValue,
                 firstSeen: now, lastSeen: now,
                 missingCount: 0, gone: false, dismissed: false,
-                resolvedRepoID: resolvedRepoID?.uuidString
+                resolvedRepoID: resolvedRepoID?.uuidString,
+                // A brand-new session is never pinned. An EXISTING row's pin
+                // is preserved because the branch above mutates and updates
+                // the row it read, never reconstructing it.
+                pinnedAt: nil
             ).insert(db)
             return (true, nil)
         }
@@ -253,12 +261,48 @@ public struct RemoteSessionStore: Sendable {
     /// Returns whether a row actually changed (an unknown session, or one
     /// already dismissed, changes nothing) — mirrors `markGone`'s contract so
     /// callers can skip a pointless UI broadcast.
+    ///
+    /// Dismissing also DROPS any sidebar-dock pin: dismiss means "get this
+    /// out of my sight", and a dismissed row is filtered out of every session
+    /// list, so leaving `pinnedAt` set would strand an invisible pin that
+    /// silently resurrects the row in the dock if the session were ever
+    /// un-dismissed. Deliberately part of the same UPDATE (not a second
+    /// statement) so the two can't diverge.
     @discardableResult
     public func dismiss(provider: String, sessionID: String) async throws -> Bool {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE remote_session SET dismissed = 1 WHERE provider = ? AND sessionID = ? AND dismissed = 0",
+                sql: """
+                    UPDATE remote_session SET dismissed = 1, pinnedAt = NULL
+                    WHERE provider = ? AND sessionID = ? AND dismissed = 0
+                    """,
                 arguments: [provider, sessionID])
+            return db.changesCount > 0
+        }
+    }
+
+    /// Pin or unpin one mirror row for the sidebar dock. `pinnedAt` is
+    /// stamped by the caller (the RPC handler, daemon-side) so pin order is
+    /// server-assigned and consistent across clients — the same contract
+    /// `WorktreeStore.setPinned` follows.
+    ///
+    /// Returns whether a row actually changed, mirroring `dismiss`/`markGone`
+    /// so the handler can skip a pointless UI broadcast. An unknown session
+    /// changes nothing; re-pinning an already-pinned row DOES change it (the
+    /// timestamp moves), which is why this compares against the requested
+    /// null-ness rather than blanket-writing.
+    @discardableResult
+    public func setPinned(provider: String, sessionID: String, pinnedAt: Date?) async throws -> Bool {
+        try await writer.write { db in
+            if let pinnedAt {
+                try db.execute(
+                    sql: "UPDATE remote_session SET pinnedAt = ? WHERE provider = ? AND sessionID = ?",
+                    arguments: [pinnedAt, provider, sessionID])
+            } else {
+                try db.execute(
+                    sql: "UPDATE remote_session SET pinnedAt = NULL WHERE provider = ? AND sessionID = ? AND pinnedAt IS NOT NULL",
+                    arguments: [provider, sessionID])
+            }
             return db.changesCount > 0
         }
     }

@@ -1022,6 +1022,15 @@ final class AppState: ObservableObject {
     /// tests can exercise the success branch without a real daemon.
     lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setRemoteBackends(enabled: enabled) }
+    /// How `setRemoteSessionPinned` pins/unpins a remote session for the
+    /// sidebar dock — injectable for the same reason as `remoteRenamePusher`,
+    /// so the pin action's success and failure branches are testable without
+    /// a real daemon.
+    lazy var remoteSessionPinSetter: @MainActor (String, String, Bool) async throws -> Void =
+        { [daemonClient] provider, sessionID, pinned in
+            try await daemonClient.setRemoteSessionPin(
+                provider: provider, sessionID: sessionID, pinned: pinned)
+        }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from
