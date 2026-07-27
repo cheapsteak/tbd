@@ -58,13 +58,11 @@ extension AppState {
     }
 
     /// Terminal ID at the root of the active tab's content (nil for
-    /// note/file tabs or when no tabs exist). Mirrors the view layer's
-    /// `?? 0` default for an unset active index.
+    /// note/file tabs or when no tabs exist). Shares the view layer's
+    /// active-tab resolution via `resolvedActiveTab`.
     private func activeTabTerminalID(worktreeID: UUID) -> UUID? {
-        let arr = tabs[worktreeID] ?? []
-        guard !arr.isEmpty else { return nil }
-        let idx = min(activeTabIndices[worktreeID] ?? 0, arr.count - 1)
-        guard case .terminal(let id) = arr[idx].content else { return nil }
+        guard let tab = resolvedActiveTab(worktreeID: worktreeID),
+              case .terminal(let id) = tab.content else { return nil }
         return id
     }
 

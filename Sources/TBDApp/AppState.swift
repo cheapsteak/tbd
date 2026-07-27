@@ -459,10 +459,7 @@ final class AppState: ObservableObject {
     var visibleTerminalIDs: Set<UUID> {
         var ids = Set<UUID>()
         for worktreeID in selectedWorktreeIDs {
-            let wtTabs = tabs[worktreeID] ?? []
-            guard !wtTabs.isEmpty else { continue }
-            let activeIndex = activeTabIndices[worktreeID] ?? 0
-            let tab = wtTabs[min(activeIndex, wtTabs.count - 1)]
+            guard let tab = resolvedActiveTab(worktreeID: worktreeID) else { continue }
             let layout = layouts[tab.id] ?? .pane(tab.content)
             for id in layout.allTerminalIDs() {
                 ids.insert(id)
@@ -536,8 +533,29 @@ final class AppState: ObservableObject {
         didSet { persistPaneHistories() }
     }
     @Published var tabs: [UUID: [TBDShared.Tab]] = [:]
+    /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
+    /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
+    /// than defaulting to 0 or clamping at the call site.
     @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
+    /// Worktrees whose persisted tab order / active tab has been hydrated from
+    /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
+    /// which is also true for the empty response a poll gets while the daemon is
+    /// still mid-create — treating that as loaded stranded the worktree without
+    /// its persisted "active = agent" selection for the rest of the session.
+    var tabStateHydratedWorktreeIDs: Set<UUID> = []
+    /// `listTabs` fetches already spent trying to hydrate a worktree, capped at
+    /// `maxTabStateHydrationAttempts`. Without a cap, a worktree whose tab state
+    /// is legitimately and permanently empty re-fires the RPC on every
+    /// `reconcileTabs` — which is every terminal-list change — forever.
+    var tabStateFetchAttempts: [UUID: Int] = [:]
+    /// Worktrees with a hydration fetch in flight, so overlapping reconciles
+    /// can't stack `Task`s for the same worktree.
+    var tabStateFetchesInFlight: Set<UUID> = []
+    /// Hydration attempt budget. The gap this covers is one poll wide — the
+    /// daemon persists tab order milliseconds after inserting the terminal
+    /// rows — so a single retry is always enough; the extra one is slack.
+    static let maxTabStateHydrationAttempts = 3
     @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
@@ -984,6 +1002,12 @@ final class AppState: ObservableObject {
         alert.buttons[1].keyEquivalent = "\r"
         return alert.runModal() == .alertFirstButtonReturn
     }
+    /// How `loadTabStates` fetches a worktree's persisted tab order / labels /
+    /// active tab — injectable for the same reason as `daemonCapabilitiesFetcher`
+    /// (`DaemonClient` is concrete, no protocol), so hydration tests can drive
+    /// the sequence of responses without a daemon.
+    lazy var tabStatesFetcher: @MainActor (UUID) async throws -> TabListResponse =
+        { [daemonClient] worktreeID in try await daemonClient.listTabs(worktreeID: worktreeID) }
     /// How the one-shot legacy panel import fires its RPC — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so trigger tests can record calls without a real daemon.
@@ -1826,20 +1850,16 @@ final class AppState: ObservableObject {
     /// looking at must never bold.
     func isActiveTabTerminal(_ terminalID: UUID, inFocusedWorktree worktreeID: UUID) -> Bool {
         guard selectedWorktreeIDs == [worktreeID] else { return false }
-        guard let arr = tabs[worktreeID], !arr.isEmpty else { return false }
-        let activeIndex = activeTabIndices[worktreeID] ?? 0
-        guard arr.indices.contains(activeIndex) else { return false }
-        return terminalIDs(in: arr[activeIndex]).contains(terminalID)
+        guard let tab = resolvedActiveTab(worktreeID: worktreeID) else { return false }
+        return terminalIDs(in: tab).contains(terminalID)
     }
 
     /// Remove the active tab's terminal(s) from `unreadTerminals` for the given
     /// worktree. Called when the user activates a tab or focuses a worktree so
     /// the surface they're now looking at clears its bold.
     func clearUnreadForActiveTab(worktreeID: UUID) {
-        guard let arr = tabs[worktreeID], !arr.isEmpty else { return }
-        let activeIndex = activeTabIndices[worktreeID] ?? 0
-        guard arr.indices.contains(activeIndex) else { return }
-        let tids = terminalIDs(in: arr[activeIndex])
+        guard let tab = resolvedActiveTab(worktreeID: worktreeID) else { return }
+        let tids = terminalIDs(in: tab)
         guard !tids.isEmpty else { return }
         unreadTerminals.subtract(tids)
     }
@@ -2298,7 +2318,11 @@ final class AppState: ObservableObject {
     /// terminals that aren't already represented (either as a tab root or
     /// embedded in another tab's split layout).
     func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
-        let alreadyLoadedOrder = worktreeTabOrders[worktreeID] != nil
+        // Capture the active tab's IDENTITY before touching the array: every
+        // mutation below shifts indices, so a stored index re-binds to whatever
+        // slid into its slot. The auto-close of the `setup` tab makes that a
+        // routine event, not an edge case, and the note tab is always last.
+        let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
 
@@ -2352,15 +2376,21 @@ final class AppState: ObservableObject {
         }
 
         tabs[worktreeID] = currentTabs
-        applyStoredOrder(worktreeID: worktreeID)
-        if !alreadyLoadedOrder {
-            Task { await loadTabStates(worktreeID: worktreeID) }
-        }
+        applyStoredOrder(worktreeID: worktreeID, anchor: .pinned(previousActiveTabID))
+        // Re-fetch until the daemon has actually persisted tab order / active
+        // tab. `worktreeTabOrders[worktreeID] != nil` was the old gate and it
+        // latched on the empty response a poll gets while the daemon is still
+        // mid-create, permanently stranding the worktree with no stored order
+        // and no hydrated selection. The scheduler owns the dedup and the
+        // attempt cap that keep this from becoming a poll loop.
+        scheduleTabStateHydration(worktreeID: worktreeID)
     }
 
     /// Reconcile note tabs — remove tabs whose note no longer exists,
     /// add tabs for notes not already represented.
-    private func reconcileNoteTabs(worktreeID: UUID, notes: [Note]) {
+    func reconcileNoteTabs(worktreeID: UUID, notes: [Note]) {
+        // Same identity capture as reconcileTabs — see the comment there.
+        let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
         var currentTabs = tabs[worktreeID] ?? []
         let noteIDs = Set(notes.map(\.id))
 
@@ -2383,7 +2413,7 @@ final class AppState: ObservableObject {
         }
 
         tabs[worktreeID] = currentTabs
-        applyStoredOrder(worktreeID: worktreeID)
+        applyStoredOrder(worktreeID: worktreeID, anchor: .pinned(previousActiveTabID))
     }
 
     /// Poll all cached PR statuses from the daemon (background, every ~30s).

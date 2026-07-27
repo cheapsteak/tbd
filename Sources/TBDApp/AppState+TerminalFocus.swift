@@ -44,15 +44,11 @@ extension AppState {
 
     func terminalIDForAutofocus(worktreeID: UUID) -> UUID? {
         guard !historyActiveWorktrees.contains(worktreeID),
-              let worktreeTabs = tabs[worktreeID],
-              !worktreeTabs.isEmpty
+              let activeTab = resolvedActiveTab(worktreeID: worktreeID)
         else {
             return nil
         }
 
-        let rawIndex = activeTabIndices[worktreeID] ?? 0
-        let activeIndex = min(max(rawIndex, 0), worktreeTabs.count - 1)
-        let activeTab = worktreeTabs[activeIndex]
         let activeLayout = layouts[activeTab.id] ?? .pane(activeTab.content)
 
         return activeLayout.allTerminalIDs().first
