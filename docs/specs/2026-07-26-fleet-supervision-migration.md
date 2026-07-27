@@ -53,6 +53,12 @@ delete.**
   re-enters this tree (use `acme` placeholders; extraction work that handles
   the real strings happens outside TBD's tree), and the two banned words stay
   out of everything.
+- **Scoped out: relocating worktree lifecycle hooks to `.agents/hooks/`.** The
+  design's ideal state puts them there (design §5), but that move touches the
+  whole existing hook system and every repo that ships hooks today. Parity
+  requires only `supervision.md` resolution through the three tiers, with
+  `.agents/` added as a resolver level (slice 4). The hooks relocation is its
+  own future project and blocks nothing here.
 
 ## 2. Disposition inventory
 
@@ -117,7 +123,7 @@ citations are to the baseline doc's §5–§6):
 | `judgePy` (PR gating for one hardcoded repo) | Repo advisory (3) for the review-bot conventions; the mechanism is superseded (1). |
 | `tickCronSh` / `schedulerSh` (launchd) | Superseded (1) by the out-of-band heartbeat (design §14) — or discarded if the heartbeat is deferred; the shipped copy pointed at a dangling path anyway. |
 | `prioritiesTxt` | Stale fleet snapshot → discard (5). |
-| `safeWedgesTxt` | Candidate P2-3 prompt-allowlist entries → operator-binding (4) after review. |
+| `safeWedgesTxt` | Discard (5), with a log line: prompt auto-approval is structurally removed (design §2's prompt-stalls subsection). The entries are at most dormant candidates for a per-repo permission-allowlist overlay fragment, and the shipped list — which carried a bare `git` prefix — is too broad to have ever been ratified. Nothing from it seeds standing rules. |
 | `dontTouchTxt` | Never-list entries → operator-binding (4); the frozen pane-ID comment → discard (5). |
 | `NightwatchDeskPrompts` | Claim-before-apply, escalation batching, the 200k respawn rule → doctrine (2), where the design has not already compiled them (§9 recycles context mechanically); person-specific wording → discard (5). |
 | Live dir: field-learning edits, `handoff.py`, `queue/for-*.md` | Learned prose → `~/tbd/repos/<id>/learnings.md` (P2-1 home); `handoff.py`'s relay idea is already absorbed by design §9; queue files are shift history → snapshot only. |
@@ -145,7 +151,9 @@ only — no slice needs a later one:
   `supervision_posture` config column (migration + record type + Codable
   model, one commit, per the house migration rule), the compiled interlock
   with `nightwatch_mode`, the shift directory with `ledger.jsonl` and the
-  `account.md` renderer, shift open/close bound to the posture switch.
+  `account.md` renderer, shift open/close bound to the posture switch. (Shift
+  open's desk-spawn step no-ops until slice 4 delivers the desk — the shift
+  still opens, writes its ledger, and closes, so no slice needs a later one.)
 - **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
   supervision verbs as RPC behind the gate; the standing-rules loader
   including automation membership and the default stance; the proposal queue
@@ -154,7 +162,10 @@ only — no slice needs a later one:
   from facts, work-order composition, the supervisor desk as a first-class
   session, `terminal.send` delivery for the fleet, the Channels adapter for
   the desk behind its own default-off flag with automatic degrade, the
-  ledger-marker acknowledgement re-check, supervisor context recycling.
+  ledger-marker acknowledgement re-check, supervisor context recycling, and the
+  playbook resolver — three-tier `supervision.md` resolution (the operator's
+  per-repo copy → `.agents/supervision.md` → the shipped default), which
+  includes adding `.agents/` as a level to the existing resolver.
 - **Slice 5 — operator surfaces** (design §10). The Fleet Automation settings
   tab (membership section + standing-rules inspection), the account panel as
   inbox, CLI parity for every control.
@@ -175,7 +186,10 @@ from real shifts, not against code review:
 
 - **Required green**: every P0 (P0-1 … P0-10) and every P1 (P1-1 … P1-7).
 - **Expected but not blocking**: P2-1, P2-2 (both are in the design and the
-  slices above); P2-3, P2-4 land with slice 6.
+  slices above); P2-4 lands with slice 6. P2-3 ships in **no slice** — it is
+  satisfied structurally by the design rather than implemented: prevention at
+  spawn for permission prompts, seeders for config-answerable dialogs, and
+  escalation for everything else (design §2).
 - **Explicitly not blocking**: P3-1.
 
 Cutover is then an operator act, deliberately boring: set `nightwatch_mode`
@@ -203,6 +217,11 @@ One slice, after the operator declares the cutover held. Checklist:
   in the vicinity of the next migration explaining why (the `v60`/`v61`
   precedent).
 - Delete the on-disk skill dir (snapshot from §3 already exists).
+- Verify no out-of-tree babysitter survives on the machine that runs shifts:
+  `~/.fleet/babysitter_daemon.py`, `daemon_watchdog.sh`, and any related
+  `launchd` jobs. The embedded skill text pointed operators at installing one,
+  so its absence is not implied by deleting TBD's code. Checked absent on the
+  dev machine 2026-07-27.
 - Add a superseded-by banner to `docs/specs/2026-07-03-nightwatch-daywatch-design.md`
   pointing at the new design; `docs/nightwatch.md` keeps its historical-record
   banner.
