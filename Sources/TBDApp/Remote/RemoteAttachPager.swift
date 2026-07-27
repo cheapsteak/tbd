@@ -21,12 +21,11 @@ import TBDShared
 /// DIFFERENT remote-session selections (that view is deliberately no longer
 /// `.id()`-keyed per selection — see its doc comment) so switching between
 /// recently-viewed sessions doesn't tear down and respawn their terminals.
-/// Background attaches do NOT currently survive leaving remote-session mode
-/// entirely (selecting a worktree/repo/scratch section tears down
-/// `RemoteSessionDetailView`, and this pager with it) — a deliberate,
-/// documented scope boundary: the requirement this satisfies is "switching
-/// back between remote sessions is instant," not "a background SSM
-/// connection survives an excursion to an unrelated worktree."
+/// Background attaches ALSO survive leaving remote-session mode entirely
+/// (selecting a worktree/repo/scratch section): `RemoteSessionDetailView`
+/// itself is now hosted inside `DetailSectionHostPager`'s `.remote` tab,
+/// which stays mounted (hidden, not torn down) across that excursion for
+/// exactly this reason — see that type's doc comment.
 struct RemoteAttachPager: NSViewControllerRepresentable {
     let selections: [RemoteSessionSelection]
     let activeSelection: RemoteSessionSelection?

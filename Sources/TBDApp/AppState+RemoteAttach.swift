@@ -87,4 +87,20 @@ extension AppState {
     var attachedRemoteSelections: [RemoteSessionSelection] {
         attachedRemoteSelections(now: Date())
     }
+
+    /// Which selection the persistently-mounted remote-session detail host
+    /// (`DetailSectionHostPager`'s `.remote` tab, via `RemoteSessionHostSlot`)
+    /// should currently render its chrome for: the active selection when
+    /// one exists, otherwise the most-recently-viewed remote session — so
+    /// the host still has SOME concrete session to describe while the user
+    /// is elsewhere (`RemoteSessionDetailView.selection` is non-optional,
+    /// and the host stays mounted, just hidden, across that excursion
+    /// specifically so `RemoteAttachPager`'s live connections survive it).
+    /// `nil` only when no remote session has ever been selected this app
+    /// session. Which stale session an invisible host's chrome technically
+    /// describes never matters for correctness — visibility is separately
+    /// gated on `selectedRemoteSession` itself, not this value.
+    var remoteSessionHostSelection: RemoteSessionSelection? {
+        selectedRemoteSession ?? recentlyAttachedRemoteSessions.first
+    }
 }

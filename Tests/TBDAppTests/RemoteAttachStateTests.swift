@@ -364,6 +364,50 @@ struct RemoteAttachStateTests {
         }
     }
 
+    // MARK: - Sticky host selection (survives navigating away)
+
+    /// `remoteSessionHostSelection` is what `DetailSectionHostPager`'s
+    /// `.remote` tab renders for while it's mounted-but-hidden (see that
+    /// type's doc comment) — the whole point of the fix this task is about:
+    /// a session that was selected, then left (e.g. the user clicked over
+    /// to a worktree), must still resolve to something so the hidden host
+    /// keeps describing the right session rather than going blank.
+    @Test func hostSelectionIsNilBeforeAnySessionIsEverSelected() {
+        withState { state in
+            #expect(state.remoteSessionHostSelection == nil)
+        }
+    }
+
+    @Test func hostSelectionIsTheActiveSelectionWhileOneIsSelected() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(state.remoteSessionHostSelection == sel("acme", "s1"))
+        }
+    }
+
+    /// The core "survives navigating away" case: once nothing is selected
+    /// (mirrors a worktree/repo/scratch section becoming active, which sets
+    /// `selectedRemoteSession = nil`), the host selection falls back to the
+    /// most-recently-viewed remote session rather than going nil.
+    @Test func hostSelectionFallsBackToMostRecentlyViewedOnceNothingIsSelected() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            seedSession(state, provider: "acme", id: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+
+            // Simulate navigating to a worktree section (AppState+Worktrees.swift
+            // clears `selectedRemoteSession` on that transition).
+            state.selectedRemoteSession = nil
+
+            #expect(state.remoteSessionHostSelection == sel("acme", "s2"))
+        }
+    }
+
     // MARK: - Pruning on mirror refresh
 
     @Test func pruningDropsDetachAndRecencyStateForSessionsNoLongerReported() {
