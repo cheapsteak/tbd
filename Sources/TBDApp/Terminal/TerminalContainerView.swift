@@ -403,11 +403,13 @@ enum HibernatedBannerModel {
 /// to inflate tab width; background tabs still signal via a bare "⏳" glyph
 /// in the tab label.
 ///
-/// Carries an inline "Cancel" — same trailing-plain-button idiom as the
-/// proxy-unreachable banner's "Dismiss" in TerminalPanelView — so dropping a
-/// queued auto-resume doesn't require finding the tab context menu. The menu
-/// item stays as the secondary affordance; both call
-/// `AppState.cancelScheduledResume`.
+/// Carries an inline "Cancel" so dropping a queued auto-resume doesn't require
+/// finding the tab context menu. The menu item stays as the secondary
+/// affordance; both call `AppState.cancelScheduledResume`.
+///
+/// The button sits immediately after the message (Spacer *after* it) rather
+/// than at the trailing window edge: on a wide window a far-right control is
+/// visually divorced from the sentence it acts on.
 private struct ScheduledResumeBanner: View {
     let resumeAt: Date
     let onCancel: () -> Void
@@ -418,17 +420,47 @@ private struct ScheduledResumeBanner: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.orange)
                 .lineLimit(1)
+            ScheduledResumeCancelButton(action: onCancel)
             Spacer()
-            Button("Cancel", action: onCancel)
-                .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
-                .help("Cancel the scheduled auto-resume")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.15))
+    }
+}
+
+/// Hand-rolled chrome rather than `.buttonStyle(.bordered)`: a `.small`
+/// bordered button is ~20pt tall and would inflate this 21pt bar by a third.
+/// Follows `ModelRailButton` (WorktreeProfilePickerView) — plain button, tight
+/// rounded-rect fill that brightens on hover — with a stroke added so the
+/// affordance reads as a control against the banner's own orange wash, and the
+/// palette kept to `.orange` so no new accent color enters the bar.
+private struct ScheduledResumeCancelButton: View {
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("Cancel")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.orange.opacity(isHovered ? 0.32 : 0.18))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.orange.opacity(isHovered ? 0.85 : 0.55), lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Cancel the scheduled auto-resume")
     }
 }
 
