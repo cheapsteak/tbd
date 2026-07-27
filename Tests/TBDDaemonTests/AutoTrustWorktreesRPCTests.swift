@@ -112,11 +112,8 @@ struct AutoTrustWorktreesRPCTests {
         #expect(wt.foreignHead == false, "ordinary creates are TBD-authored contents")
         #expect(try await db.worktrees.get(id: wt.id)?.foreignHead == false)
 
-        try await db.worktrees.setForeignHead(id: wt.id, value: true)
+        try await db.worktrees.markForeignHead(id: wt.id)
         #expect(try await db.worktrees.get(id: wt.id)?.foreignHead == true)
-
-        try await db.worktrees.setForeignHead(id: wt.id, value: false)
-        #expect(try await db.worktrees.get(id: wt.id)?.foreignHead == false)
     }
 
     /// A row written before v67 has no value for the column. The migration

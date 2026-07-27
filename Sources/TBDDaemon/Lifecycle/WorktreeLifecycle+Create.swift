@@ -270,7 +270,7 @@ extension WorktreeLifecycle {
                         // TBD made this directory but not its contents: stamp
                         // the row so folder-trust is never pre-answered for it.
                         checkedOutForeignHead = true
-                        try await db.worktrees.setForeignHead(id: worktreeID, value: true)
+                        try await db.worktrees.markForeignHead(id: worktreeID)
                     } else if ref.hasPrefix("origin/") {
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,

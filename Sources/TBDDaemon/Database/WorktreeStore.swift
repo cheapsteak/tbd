@@ -599,14 +599,14 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Record that this worktree's contents were checked out from an unvetted
-    /// ref (a PR head, whose commits may come from a third-party fork). Write-
-    /// once at create time; nothing clears it, because the contents never stop
-    /// being foreign-authored.
-    public func setForeignHead(id: UUID, value: Bool) async throws {
+    /// ref (a PR head, whose commits may come from a third-party fork).
+    /// One-way: only ever sets the flag to `true`. Nothing clears it, because
+    /// the contents never stop being foreign-authored.
+    public func markForeignHead(id: UUID) async throws {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE worktree SET foreign_head = ? WHERE id = ?",
-                arguments: [value, id.uuidString]
+                arguments: [true, id.uuidString]
             )
         }
     }
