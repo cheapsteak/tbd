@@ -579,6 +579,25 @@ actor DaemonClient {
         )
     }
 
+    /// Revive an archived conversation in a newly created worktree branch.
+    func reviveConversationOnFreshBranch(
+        worktreeID: UUID,
+        sessionID: String,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) async throws -> WorktreeReviveConversationFreshResult {
+        try await callAsync(
+            method: RPCMethod.worktreeReviveConversationFresh,
+            params: WorktreeReviveConversationFreshParams(
+                archivedWorktreeID: worktreeID,
+                sessionID: sessionID,
+                cols: cols,
+                rows: rows
+            ),
+            resultType: WorktreeReviveConversationFreshResult.self
+        )
+    }
+
     /// Rename a worktree's display name.
     func renameWorktree(id: UUID, displayName: String) async throws {
         try await callVoidAsync(

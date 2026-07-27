@@ -1028,6 +1028,20 @@ final class AppState: ObservableObject {
     /// RPC here. Production default asks the daemon; nil result = fetch failed.
     lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
         { [daemonClient] in try? await daemonClient.daemonCapabilities() }
+    /// How `reviveConversationOnFreshBranch` asks the daemon to create the
+    /// destination worktree and resume its selected session. Injectable so
+    /// AppState tests can exercise the action without a live daemon.
+    lazy var freshConversationReviver:
+        @MainActor (UUID, String, Int?, Int?) async throws
+            -> WorktreeReviveConversationFreshResult = {
+                [daemonClient] worktreeID, sessionID, cols, rows in
+                try await daemonClient.reviveConversationOnFreshBranch(
+                    worktreeID: worktreeID,
+                    sessionID: sessionID,
+                    cols: cols,
+                    rows: rows
+                )
+            }
     /// How `setControlModeEnabled` persists the flag — injectable for the same
     /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
     /// protocol), so the Settings-toggle tests can exercise the success branch.

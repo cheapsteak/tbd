@@ -242,6 +242,26 @@ extension AppState {
         }
     }
 
+    /// Create a new worktree branch from an archived conversation and resume
+    /// the selected session there. The archived worktree remains untouched.
+    func reviveConversationOnFreshBranch(worktreeID: UUID, sessionId: String) async {
+        do {
+            let size = mainAreaTerminalSize()
+            let result = try await freshConversationReviver(worktreeID, sessionId, size.cols, size.rows)
+            if findWorktree(id: result.worktree.id) == nil {
+                await refreshWorktrees()
+            }
+            navigateToActiveWorktree(result.worktree.id)
+            if let warning = result.warning {
+                showAlert(warning, isError: false)
+            }
+        } catch {
+            logger.error("reviveConversationOnFreshBranch failed: \(error, privacy: .public)")
+            showAlert("Couldn't revive conversation on a fresh branch: \(error.localizedDescription)", isError: true)
+            handleConnectionError(error)
+        }
+    }
+
     /// If the in-flight worktree was the selected archived row for its repo,
     /// move selection to the next-most-recent archived row (or clear).
     func advanceArchivedSelectionIfNeeded(worktreeID: UUID) {
