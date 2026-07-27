@@ -549,9 +549,14 @@ final class AppState: ObservableObject {
     /// is legitimately and permanently empty re-fires the RPC on every
     /// `reconcileTabs` — which is every terminal-list change — forever.
     var tabStateFetchAttempts: [UUID: Int] = [:]
-    /// Worktrees with a hydration fetch in flight, so overlapping reconciles
-    /// can't stack `Task`s for the same worktree.
-    var tabStateFetchesInFlight: Set<UUID> = []
+    /// The in-flight hydration `Task` per worktree, so overlapping reconciles
+    /// can't stack `Task`s for the same worktree. Holding the handle rather than
+    /// a bare `Set<UUID>` marker means the completion of that work is directly
+    /// awaitable — tests observe it with `await task.value` instead of polling
+    /// wall time for the flag to clear, and only the scheduler's own `Task`
+    /// clears the entry, so a direct `loadTabStates(worktreeID:)` call can no
+    /// longer clear an in-flight marker it does not own.
+    var tabStateFetchTasks: [UUID: Task<Void, Never>] = [:]
     /// Hydration attempt budget. The gap this covers is one poll wide — the
     /// daemon persists tab order milliseconds after inserting the terminal
     /// rows — so a single retry is always enough; the extra one is slack.
