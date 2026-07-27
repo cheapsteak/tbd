@@ -697,6 +697,9 @@ public final class Daemon: Sendable {
                 tmux: tmux,
                 inspector: ProductionPaneProcessInspector(),
                 readTranscript: { path in FileManager.default.contents(atPath: path) },
+                transcriptModifiedAt: { path in
+                    (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                },
                 // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the production value of `LimitResumeActuator`'s non-defaulted `waiter:` parameter (the seam itself), exercised by Tests/TBDDaemonTests/LimitResumeActuatorTests.swift which injects `waiter: { _ in }` at 5 construction sites; see docs/specs/2026-07-24-test-hardening-design.md
                 waiter: { duration in _ = try? await Task.sleep(for: duration) }
             )

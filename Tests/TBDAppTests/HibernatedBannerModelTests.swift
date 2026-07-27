@@ -108,8 +108,9 @@ struct HibernatedBannerModelTests {
     /// carrying the exact `resumeAt`.
     @Test func liveTerminalWithPendingResumeShowsScheduledBanner() {
         let resumeAt = Date(timeIntervalSince1970: 1_800_000_000)
-        let banner = HibernatedBannerModel.banner(for: terminal(pendingResumeAt: resumeAt))
-        #expect(banner == .scheduledResume(resumeAt))
+        let row = terminal(pendingResumeAt: resumeAt)
+        let banner = HibernatedBannerModel.banner(for: row)
+        #expect(banner == .scheduledResume(at: resumeAt, cancelTerminalID: row.id))
     }
 
     /// Precedence: parked AND `pendingResumeAt` set (parking now cancels the
@@ -125,6 +126,38 @@ struct HibernatedBannerModelTests {
         #expect(banner == .hibernatedOverlay(
             message: "Hibernated after the PR merged — click anywhere in the pane to resume"
         ))
+    }
+
+    // MARK: - Inline Cancel affordance
+    //
+    // The footer's "Cancel" button is driven off `Banner.cancelTerminalID`:
+    // non-nil only for the scheduled-resume footer, so the parked variants
+    // can't sprout a cancel control.
+
+    /// Scheduled resume → the footer exposes a cancel target, and it is THIS
+    /// terminal (what `AppState.cancelScheduledResume` gets handed).
+    @Test func scheduledResumeExposesCancelTarget() {
+        let row = terminal(pendingResumeAt: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(HibernatedBannerModel.banner(for: row)?.cancelTerminalID == row.id)
+    }
+
+    /// Parked → no cancel affordance (there is no footer to hang it on, and
+    /// parking already cancelled the resume daemon-side).
+    @Test func parkedBannerExposesNoCancelTarget() {
+        let banner = HibernatedBannerModel.banner(
+            for: terminal(hibernatedAt: Date(), hibernateReason: .manual)
+        )
+        #expect(banner?.cancelTerminalID == nil)
+    }
+
+    /// Parked AND a stale `pendingResumeAt` → still no cancel affordance,
+    /// same precedence as `parkedBeatsScheduledResume`.
+    @Test func parkedWithStalePendingResumeExposesNoCancelTarget() {
+        let banner = HibernatedBannerModel.banner(
+            for: terminal(hibernatedAt: Date(), hibernateReason: .auto,
+                          pendingResumeAt: Date(timeIntervalSince1970: 1_800_000_000))
+        )
+        #expect(banner?.cancelTerminalID == nil)
     }
 
     // MARK: - Full-pane wake overlay gate

@@ -219,9 +219,14 @@ struct SingleWorktreeView: View {
                 //   continue at ..." text would be misleading because nothing
                 //   is running to receive it.
                 switch HibernatedBannerModel.banner(for: activeTabTerminal) {
-                case .scheduledResume(let resumeAt)?:
+                case .scheduledResume(let resumeAt, let terminalID)?:
                     Divider()
-                    ScheduledResumeBanner(resumeAt: resumeAt)
+                    ScheduledResumeBanner(resumeAt: resumeAt) {
+                        // Same path as the tab context menu's "Cancel
+                        // Scheduled Resume" (TabBar), which stays as the
+                        // secondary affordance.
+                        Task { await appState.cancelScheduledResume(terminalID: terminalID) }
+                    }
                 case .hibernatedOverlay?, nil:
                     EmptyView()
                 }
@@ -337,8 +342,23 @@ enum HibernatedBannerModel {
         /// `parkedNoticeMessage` wiring in PanePlaceholder), carrying this
         /// reason-phrased message.
         case hibernatedOverlay(message: String)
-        /// Terminal has a scheduled auto-resume → the "⏳ resumes ..." footer.
-        case scheduledResume(Date)
+        /// Terminal has a scheduled auto-resume → the "⏳ resumes ..." footer,
+        /// which carries an inline Cancel button acting on `cancelTerminalID`
+        /// (the same `AppState.cancelScheduledResume` the tab context menu
+        /// calls).
+        case scheduledResume(at: Date, cancelTerminalID: UUID)
+
+        /// The terminal an inline Cancel button acts on, or nil for banner
+        /// states that expose no cancel affordance. Only the scheduled-resume
+        /// footer has something to cancel: a parked terminal gets no footer at
+        /// all, and its `pendingResumeAt` (if a stale mirror still carries one)
+        /// is already cancelled daemon-side by parking.
+        var cancelTerminalID: UUID? {
+            switch self {
+            case .scheduledResume(_, let terminalID): return terminalID
+            case .hibernatedOverlay: return nil
+            }
+        }
     }
 
     /// nil = neither footer nor overlay strip. Precedence: a parked terminal
@@ -353,7 +373,7 @@ enum HibernatedBannerModel {
             return .hibernatedOverlay(message: message(for: terminal.hibernateReason))
         }
         if let resumeAt = terminal.pendingResumeAt {
-            return .scheduledResume(resumeAt)
+            return .scheduledResume(at: resumeAt, cancelTerminalID: terminal.id)
         }
         return nil
     }
@@ -382,8 +402,15 @@ enum HibernatedBannerModel {
 /// "continue" at `resumeAt`). Replaces the wide per-tab label text that used
 /// to inflate tab width; background tabs still signal via a bare "⏳" glyph
 /// in the tab label.
+///
+/// Carries an inline "Cancel" — same trailing-plain-button idiom as the
+/// proxy-unreachable banner's "Dismiss" in TerminalPanelView — so dropping a
+/// queued auto-resume doesn't require finding the tab context menu. The menu
+/// item stays as the secondary affordance; both call
+/// `AppState.cancelScheduledResume`.
 private struct ScheduledResumeBanner: View {
     let resumeAt: Date
+    let onCancel: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -392,6 +419,11 @@ private struct ScheduledResumeBanner: View {
                 .foregroundStyle(.orange)
                 .lineLimit(1)
             Spacer()
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.orange)
+                .help("Cancel the scheduled auto-resume")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
