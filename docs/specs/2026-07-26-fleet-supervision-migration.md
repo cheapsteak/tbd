@@ -151,36 +151,59 @@ only — no slice needs a later one:
   `supervision_posture` config column (migration + record type + Codable
   model, one commit, per the house migration rule), the compiled interlock
   with `nightwatch_mode`, the shift directory with `ledger.jsonl` and the
-  `account.md` renderer, shift open/close bound to the posture switch. (Shift
-  open's desk-spawn step no-ops until slice 4 delivers the desk — the shift
-  still opens, writes its ledger, and closes, so no slice needs a later one.)
+  `account.md` renderer, shift open/close bound to the posture switch. Shift
+  open spawns no desks by design (design §9 — desks are lazy, born on their
+  project's first case in slice 4), so this slice's shift opens, writes its
+  ledger, and closes on its own; no slice needs a later one. Shift close gains
+  its dispose-every-desk step in slice 4, when there are desks to dispose.
 - **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
   supervision verbs as RPC behind the gate — four gated (`intervene`, `wake`,
   `pause`, `answer`) and three ungated (`escalate`, `note`, `learn`); the
   `answer` verb's behavior lands with its case flow in slice 4, but its gate
   entry belongs here with the others. The standing-rules loader including
   automation membership and the default stance; the proposal queue as a ledger
-  projection; `tbd supervise queue/approve/reject/answer` for the operator side.
-  **Naming collision to settle in this slice**: the operator's
-  escalation-answering command and the supervisor's new `answer` verb both want
-  the word `answer` on the same CLI noun. They are different surfaces — one
-  resolves a queued escalation, the other replies to an agent's question — so
-  one of the two needs a distinguishing subcommand before either ships. The
-  design's verb name is normative (design §3); the operator-side spelling is
-  not.
-- **Slice 4 — supervisor and delivery** (design §4, §9, §12). Wake decision
-  from facts, work-order composition, the supervisor desk as a first-class
-  session, `terminal.send` delivery for the fleet, the Channels adapter for
-  the desk behind its own default-off flag with automatic degrade, the
-  ledger-marker acknowledgement re-check, supervisor context recycling, and the
-  playbook resolver — three-tier `supervision.md` resolution (the operator's
-  per-repo copy → `.agents/supervision.md` → the shipped default), which
-  includes adding `.agents/` as a level to the existing resolver. This slice
+  projection; `tbd supervise queue/approve/reject` plus the operator's
+  `tbd supervise answer --escalation <id>`.
+  **The `answer` naming is settled** (design §3): one word, disambiguated by its
+  object, no synonyms. `--escalation <id>` is the operator resolving a question
+  the supervisor raised (queue resolution, ungated); `--terminal <id>` is a desk
+  answering a fleet agent's question (the gated verb, behavior in slice 4).
+  Implement them as one command with mutually exclusive, required argument
+  shapes so a wrong caller fails at parse time rather than misfiring: a desk has
+  no `--escalation` form at all, which is also what keeps resolutions off the
+  self-report path (design §10).
+  The loader in this slice also owns the **`projects` object** (design §5, §8):
+  parse declared multi-repo projects and their designated policy source, reject
+  a file where any repo appears in two projects, and resolve every other repo to
+  its implicit singleton. Standing-rule `scope` gains the `{ "project": … }`
+  shape alongside `{}`/`{ "repo": … }`/`{ "worktree": … }`, and automation
+  membership moves to the project level with singletons keyed by their repo's
+  implicit name. Test the degenerate case explicitly: with an empty `projects`
+  object, resolution, membership, and scoping must behave exactly as the
+  per-repo design did — that collapse is a stated invariant, not an
+  implementation detail.
+- **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake
+  decision from facts, work-order composition **grouped by project**, desks as
+  first-class sessions **one per project, spawned lazily on that project's first
+  case and all disposed at shift close**, the compiled **desk→project gate
+  binding** (a verb whose target is outside the calling desk's project is
+  refused before posture and rules are consulted), `terminal.send` delivery for
+  the fleet, the Channels adapter for desks behind its own default-off flag with
+  automatic degrade and a **per-desk-spawn handshake** (not per shift), the
+  ledger-marker acknowledgement re-check, **per-desk** context recycling at the
+  250k threshold, the **project tag on every ledger line**, and the playbook
+  resolver — three-tier `supervision.md` resolution run **per project** (the
+  operator's project-level copy → the project's designated repo file → the
+  shipped default), which includes adding `.agents/` as a level to the existing
+  resolver. For singleton projects the operator and repo levels are the existing
+  per-repo paths, so the resolver's singleton path is the one that must match
+  the old design byte for byte. This slice
   also carries the **`AskUserQuestion` case flow** (design §2, §4): the
   daemon-side fork in the existing `terminal.askUserQuestionPending` handler —
   the hook itself stays an unconditional dumb reporter and is not touched — so
-  that a pending question with a shift active and the repo in automation
-  becomes a case and hastens an immediate mini-tick for that terminal; work
+  that a pending question with a shift active and the terminal's project in
+  automation becomes a case for that project's desk and hastens an immediate
+  mini-tick for that terminal; work
   orders carrying the question payload verbatim out of `PendingQuestionStore`;
   and the store's TTL treated as a GC backstop that must not expire a still-live
   dialog during a shift (resolution comes from the `PostToolUse` clear, not the
@@ -193,8 +216,12 @@ only — no slice needs a later one:
   policy decision at implementation time — default: keep dropping them, since
   the parent session surfaces its own questions.
 - **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
-  tab (membership section + standing-rules inspection), the account panel as
-  inbox, CLI parity for every control.
+  tab — the **projects section** (declare a multi-repo project, pick members,
+  designate the policy source, and list ungrouped repos as the singletons they
+  are), the per-project membership section, and standing-rules inspection — plus
+  the account panel as inbox, showing every desk's proposals and escalations in
+  one project-labeled queue. CLI parity for every control
+  (`tbd supervise project ...`, `tbd supervise automation ...`).
 - **Slice 6 — hardening** (design §11, §13, §14). Capacity holds, runaway
   detection, the optional heartbeat. The heartbeat (P3-1) may be deferred past
   cutover without blocking it.
@@ -203,7 +230,13 @@ Soak discipline: after slice 4, run real shifts on the new system in
 attended posture (the interlock means the old system is off for those
 shifts; alternate if the new system disappoints). At least one clean
 attended shift and one autonomous shift — scoped by automation membership to
-low-stakes repos — before the parity gate.
+low-stakes projects — before the parity gate. **At least one of those shifts
+must exercise a declared multi-repo project**, and at least one must run with
+nothing declared at all: the singleton collapse and the grouped case are
+different code paths through the resolver, the gate binding, and desk spawning,
+and only the first is covered by every other shift by default. A night in which
+two projects both had cases is the cheapest evidence that per-project desks,
+the gate binding, and the shared queue actually hold.
 
 ## 5. Cutover
 
