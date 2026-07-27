@@ -1,0 +1,217 @@
+name: Nightly
+
+# Stage 3 of the test-hardening program
+# (docs/specs/2026-07-24-test-hardening-design.md §9). Three steps today —
+# live tmux probes, the flake-ledger stress loop, and the quarantine audit —
+# with a slot reserved for the interleaving fuzz pass (§8, stage 4).
+#
+# WHY THERE IS NO `pull_request` OR `push` TRIGGER: §9 requires that failures
+# land as issue comments and never as PR noise. With only `schedule` and
+# `workflow_dispatch`, there is no PR for this workflow to comment on and it can
+# never become a required check. That invariant is structural here, not a
+# convention someone has to remember while editing.
+
+on:
+  schedule:
+    # 11:00 UTC — ~03:00/04:00 US Pacific. Off-peak, per §9.
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+    inputs:
+      stress_iterations:
+        description: 'Iterations per stress target (whole-fast-pass arm uses its own smaller count)'
+        required: false
+        default: '10'
+      post_wire_fixture:
+        description: 'Post the wire-verification fixture comment to #519 (proves the reporting path works)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  issues: write   # the entire reporting mechanism is `gh issue comment`
+
+concurrency:
+  group: nightly
+  # NOT cancel-in-progress: a nightly that cancels itself on a manual dispatch
+  # would silently skip a night, and a skipped audit looks exactly like a clean one.
+  cancel-in-progress: false
+
+env:
+  # LITERAL PATHS, NEVER `${{ runner.temp }}`. The `runner` context is STEP-level
+  # only: a job-level `env:` referring to it resolves to the EMPTY STRING and
+  # GitHub does not error. Slice E shipped that spelling in its first commit —
+  # tests would have written to `/retry-metrics.jsonl`, failed at the filesystem
+  # root, and uploaded an empty artifact forever while `if-no-files-found` buried
+  # it. A feature dead on arrival, green for as long as nobody looked.
+  TRACKING_ISSUE: '519'
+  PROBE_LOG: /tmp/nightly-probes.log
+  STRESS_LOG: /tmp/nightly-stress.log
+  STRESS_REPORT_DIR: /tmp/nightly-stress-reports
+  AUDIT_REPORT: /tmp/nightly-audit.md
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # macOS: everything that needs a real tmux server or a Swift toolchain.
+  # ─────────────────────────────────────────────────────────────────────────────
+  probes-and-stress:
+    name: tmux probes + flake-ledger stress loop
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tmux
+        # macos runners don't ship tmux, and the probes drive a real server.
+        run: brew install tmux
+
+      - name: Select Xcode 26.6 (Swift 6.3.3)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - name: Capture Swift toolchain version
+        run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> "$GITHUB_ENV"
+
+      # RESTORE-ONLY, deliberately. A nightly that also SAVES would churn the
+      # cache every night and could evict the entry PR builds depend on. This job
+      # is allowed to benefit from the cache; it is not allowed to reshape it.
+      - name: Restore SwiftPM build cache (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          restore-keys: |
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
+
+      # ── Step 1: live tmux probes ────────────────────────────────────────────
+      # continue-on-error so a probe failure still lets the stress loop run and
+      # still gets reported; the job is failed deliberately at the end.
+      - name: Live tmux probes
+        id: probes
+        continue-on-error: true
+        # Measured at ~9s locally. Ten minutes is a hang-guard, not a budget.
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          bash scripts/nightly-tmux-probes.sh 2>&1 | tee "$PROBE_LOG"
+
+      - name: Report probe failures
+        if: steps.probes.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/nightly-report.sh \
+            --issue "$TRACKING_ISSUE" \
+            --title "Live tmux probes FAILED — a behaviour this repo relies on has changed" \
+            --body-file "$PROBE_LOG" \
+            --post
+
+      # ── Step 2: flake-ledger stress loop ────────────────────────────────────
+      # Attaches to #494 (ControlModeInputHealthTests), #503 (GitManagerTimeout
+      # + the whole-fast-pass repro shape) and #496 (AppearanceDebounce).
+      - name: Flake-ledger stress loop
+        id: stress
+        continue-on-error: true
+        # An OUTER timeout is mandatory: `.clockDriven` was measured failing to
+        # bound a hang, so neither a test trait nor the harness's own per-iteration
+        # deadline is allowed to be the only guard.
+        timeout-minutes: 120
+        run: |
+          set -o pipefail
+          mkdir -p "$STRESS_REPORT_DIR"
+          bash scripts/nightly-flake-stress.sh \
+            --iterations "${{ github.event.inputs.stress_iterations || '10' }}" \
+            --report-dir "$STRESS_REPORT_DIR" 2>&1 | tee "$STRESS_LOG"
+
+      - name: Report stress failures to the issue each target names
+        if: steps.stress.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          reports=("$STRESS_REPORT_DIR"/*.md)
+          if [ ${#reports[@]} -eq 0 ]; then
+            # The step failed but produced no per-target report: that is a
+            # harness failure (build error, bad argument), not a flake. It still
+            # has to reach a human, so it goes to the tracking issue.
+            bash scripts/nightly-report.sh \
+              --issue "$TRACKING_ISSUE" \
+              --title "Flake-ledger stress loop FAILED without producing a target report (harness error)" \
+              --body-file "$STRESS_LOG" \
+              --post
+            exit 0
+          fi
+          for report in "${reports[@]}"; do
+            issue="$(basename "$report" .md)"
+            bash scripts/nightly-report.sh \
+              --issue "$issue" \
+              --title "Nightly stress loop reproduced this flake" \
+              --body-file "$report" \
+              --post
+          done
+
+      # ── Step 3 slot: interleaving fuzz pass (§8, stage 4 — slice I) ─────────
+      # Append here rather than in a new job: this job already pays the toolchain
+      # setup and the cache restore, and the fuzz pass needs both.
+
+      - name: Fail the job if any nightly step failed
+        # Without this, `continue-on-error` would leave the run green and the
+        # only signal would be an issue comment nobody is watching for.
+        if: steps.probes.outcome == 'failure' || steps.stress.outcome == 'failure'
+        run: |
+          echo "::error::probes=${{ steps.probes.outcome }} stress=${{ steps.stress.outcome }}"
+          exit 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ubuntu: the quarantine audit. A SEPARATE JOB, deviating from §9's "one job".
+  #
+  # It needs only `gh` and `jq`. As a fourth step on the macOS job it would be
+  # suppressed whenever the macOS half wedges or a macOS runner is unavailable —
+  # i.e. it would stop reporting exactly when things are worst, and a silent
+  # audit is indistinguishable from a clean codebase. ubuntu costs nothing
+  # against the 5-concurrent-macOS-job cap.
+  # ─────────────────────────────────────────────────────────────────────────────
+  quarantine-audit:
+    name: Quarantine audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit the quarantine list against the retry-metrics ledger
+        id: audit
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          bash scripts/nightly-quarantine-audit.sh run --days 7 | tee "$AUDIT_REPORT"
+
+      - name: Report audit findings
+        if: steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/nightly-report.sh \
+            --issue "$TRACKING_ISSUE" \
+            --title "Quarantine audit found something" \
+            --body-file "$AUDIT_REPORT" \
+            --post
+
+      # Proof that the reporting path works, on demand. A clean nightly posts
+      # NOTHING, so without this the `gh issue comment` wire would be exercised
+      # for the first time on the night something breaks. The comment is
+      # labelled and KEPT — a deleted verification leaves no evidence the wire
+      # was ever proven.
+      - name: Post the wire-verification fixture (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch' && inputs.post_wire_fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/nightly-report.sh --issue "$TRACKING_ISSUE" --fixture --post
+
+      - name: Fail the job if the audit found something
+        if: steps.audit.outcome == 'failure'
+        run: |
+          echo "::error::quarantine audit reported findings — see the comment on issue #$TRACKING_ISSUE"
+          exit 1
