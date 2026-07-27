@@ -130,10 +130,15 @@ Claude spawn paths, and the Codex spawn passes
 `--dangerously-bypass-approvals-and-sandbox`. Tool-permission prompts therefore
 *cannot occur* in a fleet session as it is spawned today; the allowlist P2-3
 asks for would have nothing to match. What does still stall an agent is the
-residual dialog zoo: folder trust (already pre-answered by
-`ClaudeTrustSeeder`), `/login`, plan-mode approval, `AskUserQuestion`, and
-first-run dialogs. None of those has a machine answer path, and none of them is
-a permission prompt.
+residual dialog zoo: folder trust, `/login`, plan-mode approval,
+`AskUserQuestion`, and first-run dialogs. Folder trust looks solved and isn't:
+`ClaudeTrustSeeder` pre-answers it for scratch spaces only — its
+`guard worktree.isScratch else { return }` returns early for repo-backed
+worktrees — and a fleet worktree is a path Claude has never been trusted at,
+exactly as fresh and untrusted as a scratch dir. Seeding trust for non-scratch
+worktrees is prong 2's first piece of new work, not existing coverage. None of
+these dialogs has a machine answer path today, and none of them is a permission
+prompt.
 
 So the design answers the stall in three prongs, each at a different moment:
 
@@ -145,8 +150,12 @@ So the design answers the stall in three prongs, each at a different moment:
    enforces it. TBD invents no matching language, stores no conditions, and
    evaluates nothing at runtime.
 2. **Config-answerable dialogs — pre-answered by seeders before spawn**, one
-   seeder per agent kind, following the `ClaudeTrustSeeder` precedent. A dialog
-   that has a config answer is answered before it can ever be drawn.
+   seeder per agent kind, following the `ClaudeTrustSeeder` precedent.
+   `ClaudeTrustSeeder` is precedent for the *pattern* only — it seeds scratch
+   spaces and returns early for repo worktrees — so carrying trust seeding to
+   non-scratch fleet worktrees is work this prong names, not work that already
+   exists. A dialog that has a config answer is answered before it can ever be
+   drawn.
 3. **Everything that still stalls is a genuine question** — definitionally not
    routine, because the routine cases were removed by prongs 1 and 2. It
    surfaces as an awaiting-input case and is escalated. It is never advanced.
