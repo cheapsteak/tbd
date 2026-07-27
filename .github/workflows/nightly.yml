@@ -186,7 +186,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          bash scripts/nightly-quarantine-audit.sh run --days 7 | tee "$AUDIT_REPORT"
+          # `2>&1` before the pipe, like the two steps above: the audit reports
+          # harness failures (bad gh call, auth hiccup) via die() on STDERR and
+          # exits 2, which this step treats as a failure and comments about. Without
+          # the redirect, $AUDIT_REPORT captures stdout only — measured at ZERO
+          # BYTES for a die() path — so the comment on #519 would arrive with no
+          # reason in it. That is the one case where the report has to carry the
+          # diagnosis, since a clean run posts nothing at all.
+          bash scripts/nightly-quarantine-audit.sh run --days 7 2>&1 | tee "$AUDIT_REPORT"
 
       - name: Report audit findings
         if: steps.audit.outcome == 'failure'

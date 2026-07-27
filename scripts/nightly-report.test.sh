@@ -85,6 +85,26 @@ test_missing_body_file_is_an_error_not_an_empty_comment() {
   rm -rf "$d"
 }
 
+test_every_workflow_step_that_tees_a_report_body_captures_stderr() {
+  # A comment is only worth posting if it carries the reason. Every nightly step
+  # that tees its output into a file which later becomes an issue-comment body
+  # must redirect stderr into that file first — the scripts report harness
+  # failures via stderr + a non-zero exit, which is exactly the case that gets
+  # commented about, and a clean run posts nothing at all.
+  #
+  # This exists because one of the three steps was missing `2>&1` on the first
+  # version of this PR: the audit's die() path produced ZERO bytes of stdout, so
+  # #519 would have received a comment with no reason in it. Two correct siblings
+  # in the same file did not stop the third from being wrong, so the check is
+  # mechanical rather than a habit.
+  local wf="$HERE/../.github/workflows/nightly.yml"
+  local total bad
+  total="$(grep -c 'tee "\$' "$wf")"
+  bad="$(grep 'tee "\$' "$wf" | grep -cv '2>&1 | tee')"
+  assert_eq "nightly.yml still has the three tee'd report steps" "3" "$total"
+  assert_eq "every tee'd step redirects stderr into the body it will post" "0" "$bad"
+}
+
 test_a_failed_gh_call_is_not_reported_as_success() {
   local d; d="$(mktmpd)"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$d/gh"; chmod +x "$d/gh"
