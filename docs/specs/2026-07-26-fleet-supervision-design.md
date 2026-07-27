@@ -126,7 +126,7 @@ resolution is **prevention at spawn, never advancement from outside.**
 
 Start from what daemon-spawned fleet sessions actually face.
 `ClaudeSpawnCommandBuilder` hard-codes `--dangerously-skip-permissions` on both
-Claude spawn paths (lines 96 and 102), and the Codex spawn passes
+Claude spawn paths, and the Codex spawn passes
 `--dangerously-bypass-approvals-and-sandbox`. Tool-permission prompts therefore
 *cannot occur* in a fleet session as it is spawned today; the allowlist P2-3
 asks for would have nothing to match. What does still stall an agent is the
@@ -373,8 +373,10 @@ attention — it never changes what any verb is allowed to do.
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
   **action** records an intervention, wake, or pause, including the message
-  text, the state snapshot that justified it, and the posture. A later line
-  references the action's ID and records its outcome. **proposal** and
+  text, the state snapshot that justified it, and the posture. A separate
+  **outcome** line references the action's ID and records what was observed.
+  **lifecycle** records shift open, shift close, posture changes, and desk
+  recycles (§9). **proposal** and
   **resolution** record proposed actions and their results. **escalation** and
   **resolution** record questions and their answers. **decision** records a
   standing rule created from any source. **anomaly** records an unknown state,
@@ -421,7 +423,7 @@ this section plain queries: filter by kind, window by `ts`, group by `shift`.
 Two representative lines, an action and the outcome that later references it:
 
 ```json
-{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","posture":"autonomous","kind":"action","verb":"intervene","target":{"worktree":"9800F94E","terminal":"C2CE2DA8"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
+{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","posture":"autonomous","kind":"action","verb":"intervene","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
 {"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","posture":"autonomous","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
 ```
 
