@@ -571,6 +571,68 @@ This requires no new machinery. The timer already exists for P1-6, the
 transcript path is recorded for each terminal, and the marker is the ledger ID
 the daemon already writes.
 
+### Delivery adapters: parity for the fleet, a channel for the desk
+
+Which adapter a session can be reached by is itself a per-session fact, with
+the same source-and-freshness treatment as any other fact.
+
+**Fleet agents: `terminal.send` (paste + submit), the mechanism that exists
+today.** This is the parity choice. Claude Code's research-preview Channels
+interface was validated as a prototype
+(`docs/research/2026-07-26-claude-code-channels/findings.md`): it delivers a
+message without touching the composer, but it needs agent-side integration (an
+MCP config and a startup flag with per-session consent), which collides with
+TBD's no-agent-cooperation constraint for sessions the user owns. Fleet
+delivery stays typing; overnight, composers are empty and the draft-safety gap
+is theoretical.
+
+**The desk alone: channel-first, with a verified fallback.** The desk is TBD's
+own infrastructure — TBD spawns it, owns its configuration, and disposes of
+it — so the no-cooperation constraint does not apply, and the desk is also the
+one session where a human and the daemon share a composer, which is exactly
+where draft-safe delivery pays. At desk spawn the daemon performs a
+**handshake**: emit a channel ping, then read the desk transcript for the
+channel envelope. Confirmed → the channel is the shift's adapter. Not
+confirmed (consent declined, feature removed, registration silently failed) →
+`terminal.send` for the shift, with one anomaly line noting degraded delivery.
+Mid-shift, the acknowledgement path above extends naturally: a channel send
+that fails acknowledgement twice is redelivered by typing and the adapter is
+marked degraded. The handshake decouples correctness from the channel's
+research-preview status entirely — the feature disappearing in an update
+demotes delivery to typing within one re-check cycle, recorded, no human
+needed.
+
+A side benefit: channel messages arrive in a typed envelope
+(`<channel source kind>`), so work orders and follow-ups are attributable and
+distinguishable from operator typing in the same session.
+
+**The consent question — options recorded for a later choice, in preference
+order.** The development-channel consent prompt is interactive and
+per-session; a 3 a.m. desk recycle has nobody present to answer it. The
+options, none decided here:
+
+1. **Approved plugin channel** (plain `--channels`, no dev-consent flow; TBD
+   already ships a plugin into every spawn). Caveat: approval requires
+   Anthropic review, which is unlikely to be granted for TBD — listed for
+   completeness, not counted on.
+2. **Pre-seed the consent** if it persists in any config file, following the
+   `ClaudeTrustSeeder` precedent (TBD already pre-answers Claude's
+   folder-trust dialog for scratch spaces). Legitimate for the desk
+   specifically: the consent warns that an external process can inject turns,
+   and the desk's external process is the daemon that owns it. Needs
+   investigation — "per-session" in the findings suggests it may not persist.
+3. **Manual consent when the shift start is attended** — the operator answers
+   the prompt once when flipping the posture. Unattended recycles then run
+   degraded until the next attended start.
+4. **Fallback, always available: typing.** If every route fails, the desk
+   runs on `terminal.send` like the fleet, and the account says so.
+
+**Driving the consent prompt with keystrokes is refused**, whatever the
+options above yield: it requires either scraping the screen to find the
+prompt or blind keystroke timing, and auto-typing "yes" into a consent dialog
+defeats the dialog while leaving it in place as theater. Degraded delivery is
+the honest failure mode.
+
 ## 13. Runaway detection (P2-4)
 
 Compiled counters detect possible runaway behavior; the supervisor judges the
