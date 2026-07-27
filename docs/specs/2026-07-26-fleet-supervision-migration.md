@@ -23,9 +23,10 @@ kinds:
    (`NightwatchSkillContent.swift`, `NightwatchDeskPrompts.swift`) and inside
    target repos' `.nightwatch/policy.json` files — each unit moves to the home
    the design assigns it, or is retired (§3).
-2. **Runtime artifacts** the desk agent produced (`queue/*`, field learnings;
-   `handoff.py` was one of these until it was absorbed into the binary) —
-   harvested before anything is deleted (§3).
+2. **Runtime artifacts** the desk agent produced (`queue/*`, field-learning
+   edits; `handoff.py` was one of these until it was absorbed into the binary) —
+   harvested before anything is deleted (§3), and any durable prose among them
+   lands in the advisory PR rather than a learnings file (design §8).
 3. **Config state**: the `nightwatch_mode` column and the app's experimental
    flag — superseded by the posture column, orphaned in place (§6).
 4. **The desk worktree** — harvested, then archived by hand (§5).
@@ -128,12 +129,13 @@ citations are to the baseline doc's §5–§6):
 | `safeWedgesTxt` | Discard (5), with a log line: prompt auto-approval is structurally removed (design §2's prompt-stalls subsection). The entries are at most candidates for source-side allow rules — a repo's own settings or the operator's per-repo overlay — should an operator ever want them there, and the shipped list, which carried a bare `git` prefix, is too broad to have ever been ratified. Nothing from it seeds standing rules. |
 | `dontTouchTxt` | Never-list entries → operator-binding (4); the frozen pane-ID comment → discard (5). |
 | `NightwatchDeskPrompts` | Claim-before-apply, escalation batching, the 200k respawn rule → doctrine (2), where the design has not already compiled them (§9 recycles context mechanically); person-specific wording → discard (5). |
-| Live dir: field-learning edits, `queue/for-*.md` | Learned prose → `~/tbd/repos/<id>/learnings.md` (P2-1 home); queue files are shift history → snapshot only. `handoff.py` is no longer a live-dir divergence — it is embedded and boot-overwritten (see `handoffPy` above) — but snapshot-first still applies to the whole dir, because which files the writer owns has changed once already and the snapshot is what makes that harmless. |
+| Live dir: field-learning edits, `queue/for-*.md` | Learned prose → **repo advisory (3)**, folded into that project's `.agents/supervision.md` in the PR step 3 already opens — there is no `learnings.md` destination in the new design (design §8); queue files are shift history → snapshot only. `handoff.py` is no longer a live-dir divergence — it is embedded and boot-overwritten (see `handoffPy` above) — but snapshot-first still applies to the whole dir, because which files the writer owns has changed once already and the snapshot is what makes that harmless. |
 | Target repos' `.nightwatch/policy.json` | `priorities`, `dont_touch`, gate conditions → that repo's advisory playbook (3), except entries the operator promotes to binding (4). |
 
 **Step 3 — seed the destinations.** Open the `.agents/supervision.md` PR in
 the target repo; write the confirmed standing rules (never-entries, the
-automation-membership marks and default stance); append learnings.
+automation-membership marks and default stance). There is no learnings file to
+append to — durable prose goes in the advisory PR.
 
 **Exit gate**: the disposition log accounts for every file in the inventory;
 the advisory PR exists; the rules file parses and the operator has confirmed
@@ -160,14 +162,17 @@ only — no slice needs a later one:
   its dispose-every-desk step in slice 4, when there are desks to dispose.
 - **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
   supervision verbs as RPC behind the gate — **three gated** (`intervene`,
-  `wake`, `pause`) and three ungated (`escalate`, `note`, `learn`). There is no
+  `wake`, `pause`) and **two ungated** (`escalate`, `note`). There is no
   `answer` verb: replying to an agent's question is `intervene`, and the dialog
   dismissal that makes it work is delivery-adapter behavior landing with the
-  adapter in slice 4 (design §2). The standing-rules loader including automation
+  adapter in slice 4 (design §2). There is no `learn` verb and no
+  `learnings.md` plumbing either — the machine-appended memory tier was removed
+  in favor of notes plus a reviewed playbook PR (design §8), so this slice
+  builds neither, and the ledger has **nine** kinds, not ten. The standing-rules loader including automation
   membership and the default stance; the proposal queue as a ledger projection.
-  The operator's queue surface is **one command**, `tbd supervise queue` to read
-  and `tbd supervise resolve <id> --approve|--reject|--answer` to act (design
-  §10) — all three flags construct the same `resolution` ledger kind, differing
+  The operator's queue surface is **one command**, `tbd supervise queue
+  [--resolved|--all] [--type …] [--project …]` to read and
+  `tbd supervise resolve <id> --approve|--reject|--answer` to act (design §10) — all three flags construct the same `resolution` ledger kind, differing
   only in `result`, so build it as one RPC with flag validation that teaches
   ("that's a proposal — `--approve` or `--reject` it") rather than three
   near-identical commands. `--scope` attaches to `resolve` itself, not to
@@ -182,7 +187,10 @@ only — no slice needs a later one:
   implicit name. Test the degenerate case explicitly: with an empty `projects`
   object, resolution, membership, and scoping must behave exactly as the
   per-repo design did — that collapse is a stated invariant, not an
-  implementation detail.
+  implementation detail. Mutations apply on the **next tick**, and any live desk
+  whose project definition changed is recycled through the §9 replacement path
+  (design §5) — so the loader must expose "which projects changed" and not just
+  the new state; that recycle lands with desks in slice 4.
 - **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake
   decision from facts, work-order composition **grouped by project**, desks as
   first-class sessions **one per project, spawned lazily on that project's first
@@ -227,8 +235,12 @@ only — no slice needs a later one:
   designate the policy source, and list ungrouped repos as the singletons they
   are), the per-project membership section, and standing-rules inspection — plus
   the account panel as inbox, showing every desk's proposals and escalations in
-  one project-labeled queue. CLI parity for every control
-  (`tbd supervise project ...`, `tbd supervise automation ...`).
+  one project-labeled queue. CLI parity for every control — and the whole
+  `tbd supervise` surface is pinned as a normative table in design §10, so this
+  slice's exit check is that every command in that table exists with that name
+  and shape, and that nothing outside it shipped. Regrouping is
+  `project move <repo> --to <project|singleton>` — no add/remove pair, because
+  the pair can express states "exactly one project per repo" forbids.
 - **Slice 6 — hardening** (design §11, §13, §14). Capacity holds, runaway
   detection, the optional heartbeat. The heartbeat (P3-1) may be deferred past
   cutover without blocking it.

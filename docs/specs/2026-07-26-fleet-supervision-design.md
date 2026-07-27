@@ -432,7 +432,6 @@ Every other mention of a verb in this document defers to it.
 | `pause` | Halt a runaway session (§13) | gated | Becomes a proposal | Executes; ledger line |
 | `escalate` | Queue an exact question for the operator | ungated | Ledger line; appears in the queue immediately | Ledger line; batched for morning |
 | `note` | Attributed prose into the account | ungated | Ledger line | Ledger line |
-| `learn` | Append to the repo's learnings file | ungated | Ledger line | Ledger line |
 
 [^ask]: When the target has a pending question, that proposal *is* the relayed
     question: the agent's questions and options verbatim, plus the supervisor's
@@ -447,10 +446,13 @@ absent, and nothing here restores it under another name: see §2's prompt-stalls
 subsection for the difference between a blanket auto-grant and one judged reply
 delivered as text.
 
-There are **three gated verbs** — `intervene`, `wake`, `pause` — and three
-ungated ones. An earlier draft added a fourth gated verb, `answer`, for replying
-to an agent's question; it was collapsed into `intervene` because answering *is*
-the send path and neither of its apparent differences needed a verb (§2). The
+There are **three gated verbs** — `intervene`, `wake`, `pause` — and **two
+ungated** ones, `escalate` and `note`. Two verbs were removed from earlier
+drafts, each for its own reason. `answer` collapsed into `intervene`, because
+answering *is* the send path and neither of its apparent differences needed a
+verb (§2). `learn` was removed with the whole machine-appended memory tier it
+served: same-shift memory is a `note`, and durable cross-shift knowledge is
+repo advisory content, which already has a home and a change process (§8). The
 operator's side of the queue is a separate surface with its own command
 (`resolve`, §10), not a verb the supervisor holds.
 
@@ -580,15 +582,15 @@ The unit that makes that possible is the **supervision project**.
   a named member repo's `.agents/supervision.md`, or an operator-level file.
   Related repos share one policy *by design*, so within a project there is
   nothing left to mix.
-- **Policy resolves per project**, and so do learnings.
+- **Policy resolves per project** — one playbook per desk.
 - **One desk per project**, spawned the first time that project has a case
   in a shift and disposed at shift end (§9). A desk's work orders contain only
   its project's cases and its one playbook.
 
 **The singleton case must collapse exactly.** With nothing declared — the state
 every installation starts in — every project is one repo, policy resolution is
-the per-repo three-tier lookup described below, learnings live per repo, and a
-repo with a case gets a desk holding one playbook. That is precisely the
+the per-repo three-tier lookup described below, and a repo with a case gets a
+desk holding one playbook. That is precisely the
 per-repo design this document carried before the grouping layer existed. The
 grouping *unwraps*: it is not a mode to be in, it is a generalization whose
 degenerate case is the previous design exactly. Any behavior that differs
@@ -620,6 +622,22 @@ heartbeats, morning views — to express something membership already expresses:
 a project the operator does not want acted on is marked out of automation (§8),
 which costs one mark and no new machinery. And an operator's morning does not
 decompose by project; it decomposes by what needs an answer.
+
+**Membership changes by `move`, never by add/remove.** Regrouping a repo is one
+command — `tbd supervise project move <repo> --to <project|singleton>`, with
+`--to singleton` restoring the default. An add/remove pair is deliberately not
+offered: with "every repo belongs to exactly one project" as the invariant, a
+`remove` leaves a repo belonging to nothing and an `add` can put it in a second
+place, so the pair can express states the model forbids and every caller would
+have to sequence them correctly. `move` cannot express them at all.
+
+**Project mutations take effect on the next tick.** A definition edited
+mid-shift is legal; it just does not retroactively change a desk that is already
+running against the old shape. Any live desk whose project definition changed is
+**recycled through §9's replacement path** — flush, tear down, respawn with the
+new membership and the newly resolved playbook. So there is exactly one moment
+of change, it is the same mechanism as a context recycle, and no desk is ever
+left bound to a definition that no longer exists.
 
 **Naming note.** TBD's schema has repos and nothing above them; supervision is
 the first subsystem to need a grouping layer. The word chosen is *project*. It
@@ -741,12 +759,11 @@ attention — it never changes what any verb is allowed to do.
   standing rule created from any source. **anomaly** records an unknown state,
   an old premise found during send-time verification, a failed fetch, or a dark
   supervisor. Deliberate inaction is recorded as seriously as action. **note**
-  and **learning** are the two kinds whose content is supervisor-authored prose
-  — a note is attributed prose added with `tbd supervise note`, and a learning
-  records an append to a repo's learnings file made with `tbd supervise learn`
-  (§8). Both are written by the daemon's verb handlers like every other line,
-  and neither can change any other line. The supervisor may reference lines and
-  contribute prose; it can never author an action, an outcome, or the account.
+  is the one kind whose content is supervisor-authored prose — attributed prose
+  added with `tbd supervise note`, written by the daemon's verb handler like
+  every other line, and unable to change any other line. The supervisor may
+  reference lines and contribute prose; it can never author an action, an
+  outcome, or the account.
 - Its structure prevents several false claims: an action nobody performed
   because only verb handlers write action lines; an outcome nobody observed
   because outcomes come from the re-check; and certainty the system did not
@@ -787,7 +804,6 @@ carry a null project, which is the accurate answer and not a gap.
 | `decision` | The rule created, its lifetime (shift or always), and its origin |
 | `anomaly` | The category and the detail |
 | `note` | The author, the text, and optional references to other lines |
-| `learning` | The target project and the appended text — the durable content lives in that project's learnings file (§8); this line is the record of the append |
 | `lifecycle` | Opening, closing, posture change, or desk recycle — this is the kind behind every line §9 describes |
 
 Two representative lines, an action and the outcome that later references it:
@@ -845,9 +861,10 @@ account, not a wrong action. The third category is **human-authored process**.
 Net property: **supervision adds one column to TBD's database.** Everything
 else it knows is in files a human can open.
 
-## 8. Remembered things: three kinds, three homes
+## 8. Remembered things: two kinds, two homes
 
-These categories need precise names because they are easy to confuse:
+There are exactly two places durable knowledge lives, and they need precise
+names because they are easy to confuse:
 
 1. **Binding rules** — enforced by the daemon at the verb gate, no model in the
    loop: `~/tbd/supervision/standing-rules.json`. The format is structured
@@ -858,21 +875,51 @@ These categories need precise names because they are easy to confuse:
    makes them inspectable. That surface is a view of the file with a list,
    links to origins, and a revoke action. The file remains the source of truth.
 2. **The playbook** — advisory prose, human-curated, travels with the repo
-   (`.agents/supervision.md`, three-tier). The tool never writes it after
-   seeding.
-3. **Learned knowledge (P2-1)** — raw, uncurated prose appended by the machine,
-   per project: `~/tbd/repos/<id>/learnings.md` for a singleton (unchanged from
-   the per-repo design), `~/tbd/supervision/projects/<name>/learnings.md` for a
-   declared one. Appended via `tbd supervise learn`, ledger line per append,
-   included in every future work order for that project. It takes effect
-   immediately. When an entry proves useful, a *human commit* promotes it into
-   the playbook. The tool freely rewrites only files it owns. Desks have no repo
-   checkouts, and the daemon never commits to repos.
+   (`.agents/supervision.md`, three-tier, resolved per project §5). The tool
+   never writes it after seeding.
 
-The categories connect in one controlled way. The supervisor considers a
-learning. If it continues to matter and looks like a rule, the supervisor
-proposes making it binding. One approval turns it into a standing rule. A
-single confirmation connects prose knowledge to binding rules.
+### How a shift's experience reaches the playbook (P2-1)
+
+An earlier draft had a third kind: raw prose the machine appended to a
+per-project `learnings.md` via a `learn` verb, included in every future work
+order, taking effect immediately. It is **removed**, because it was bridging two
+different needs and existing machinery serves each of them better.
+
+**Within a shift, a learning is a `note`.** Notes are in the shift record, and
+the shift record is what every replacement desk is briefed from (§9) and what
+the account renders. A desk that discovers at 1 a.m. that a repo's test suite
+needs a warm cache does not need a new file to tell its 4 a.m. successor —
+that was never the hard part.
+
+**Across shifts, a learning is repo advisory content, and that has a home and a
+change process already: the playbook, changed by a reviewed commit.** So at
+shift end, if learning-shaped notes exist, the desk's flush step (§9) **proposes
+spawning a capture worker** — an ordinary worker worktree, briefed to fold the
+shift's learnings into that project's `.agents/supervision.md` and open a PR.
+Spawning a worker is consequential, and it is deliberately *not* a verb: it
+arrives as a **proposal** in the same queue as everything else, survives shift
+end like every other unresolved item (§9), and is approved in the morning batch
+alongside the rest. Supervision uses the machinery it supervises — a worktree, an
+agent, a PR, a review — rather than inventing a private channel for its own
+memory.
+
+This also collapses a promise the removed tier only gestured at. That draft
+already said a learning worth keeping was promoted into the playbook by "a human
+commit" — but named no mechanism, so it was a follow-up someone had to remember.
+Now the commit *is* the mechanism, and the curation step is ordinary PR review.
+
+**The trade-off, stated plainly.** Cross-shift learning now costs PR latency,
+and it cannot take effect silently. Both are the point. Nothing becomes standing
+advice for a repo without a human reading the diff — which is the same authority
+principle as "repos advise; operators bind," applied to the tool's own output.
+The gap this leaves — a lesson learned tonight does not steer tonight's other
+desks — is covered by notes within a shift and is not worth a file that every
+future work order must carry and no one ever reviews.
+
+The two remaining kinds connect in one controlled way. The supervisor
+encounters something in the shift record that keeps mattering and looks like a
+hard rule; it proposes making it binding; one approval turns it into a standing
+rule. A single confirmation connects prose to enforcement.
 
 ### Why the binding tier is structured at all (post-#509 accounting)
 
@@ -1072,17 +1119,22 @@ standing rules will be the first such mechanism, not an upgrade.
   durable home for anything needing a human.
 - **Shift end is a teardown with a caller, and it disposes every desk.** The
   sequence is: stop the sweep → make a time-limited request to each live desk
-  for a closing note → render the final `account.md` → write the closing ledger
-  line → dispose of each desk by ending its session and deleting its scratch
-  worktree. Notes add context but are not required; a dead supervisor cannot
+  for a closing note **and, where the shift produced learning-shaped notes, a
+  capture proposal** (spawn a worker to fold them into that project's
+  `.agents/supervision.md` as a PR — §8) → render the final `account.md` →
+  write the closing ledger line → dispose of each desk by ending its session and
+  deleting its scratch worktree. The capture proposal outlives the desk that
+  raised it: it is an ordinary unresolved queue item, and unresolved items
+  already survive shift end, so the operator approves or drops it in the morning
+  batch like everything else. Notes add context but are not required; a dead supervisor cannot
   block closing, and neither can three of them. All durable data already lives
   outside the desks. Desks accumulated in the old system because nothing
   initiated cleanup. Here, the same operator action that ends the shift disposes
   of every desk the night created — a count the ledger knows, so none can be
   missed.
 - **Each shift starts fresh on purpose.** No resumed supervisor context.
-  Continuity lives in artifacts: the playbook, standing rules, learnings, and
-  earlier ledgers. The *system* learns; one session's context does not. If a
+  Continuity lives in artifacts: the playbook, standing rules, and earlier
+  ledgers. The *system* learns; one session's context does not. If a
   supervisor dies during a shift, the daemon writes an anomaly line, creates a
   replacement for that project in the same shift, and briefs it with its
   project's account so far.
@@ -1097,7 +1149,7 @@ context pays for that context on every turn. Waiting for auto-compaction is the
 expensive path. Instead, the daemon recycles a desk deliberately, using the
 mid-shift replacement path above. This works because of a decision already
 made: a supervisor externalizes everything durable as it goes (ledger,
-standing rules, learnings, account, escalations). **Its handoff document
+standing rules, notes, account, escalations). **Its handoff document
 already exists — it is the shift record.**
 
 Recycling is **per desk**, evaluated independently for each: a busy project's
@@ -1112,10 +1164,9 @@ The sequence, all daemon-driven:
    the fleet stays watched. The recycle waits until that supervisor is idle with
    no case in flight.
 3. **Flush** — a bounded request, same shape as the shift-end closing note:
-   "anything in your head not yet in artifacts, write it now as notes or
-   learnings." If the supervisor is wedged, the recycle proceeds without it —
-   that is exactly the crash path, which was already designed to be
-   survivable.
+   "anything in your head not yet in artifacts, write it now as notes." If the
+   supervisor is wedged, the recycle proceeds without it — that is exactly the
+   crash path, which was already designed to be survivable.
 4. **Recycle** — tear down that desk's session, spawn fresh into the same shift
    and the same project, and deliver the standard replacement briefing (posture,
    standing rules, that project's account so far, its open escalations, its one
@@ -1130,7 +1181,7 @@ consequential in this design needs a gesture or a gate; this deliberately does
 not. Recycling a desk touches no fleet agent and destroys no work state,
 because desks were built disposable — it is self-maintenance of the
 supervision machinery, not an act on the fleet. It appears in the account
-("3:12 a.m. — acme-web desk recycled at 261k context, 4 learnings flushed"), not
+("3:12 a.m. — acme-web desk recycled at 261k context, 4 notes flushed"), not
 in the proposal queue. If a recycle ever loses something that mattered, that
 is an artifact-externalization bug to fix — the answer is "that should have
 been in the record," never "a human should have approved the recycle."
@@ -1178,6 +1229,14 @@ Principle: **you take action where you already read the relevant information.**
   tbd supervise resolve <id> --reject  [--reason "…"]
   tbd supervise resolve <id> --answer  "text" [--scope …]
   ```
+
+  Its counterpart `queue` stays a plain noun and takes filters rather than
+  sprouting sibling commands: `--type proposal|escalation`, `--project <name>`,
+  and `--resolved` / `--all`. The default is unresolved items — the queue
+  *proper*, since the projection is created-minus-resolved (§7). `--resolved` is
+  therefore sugar over the ledger's resolution history rather than a second
+  view of the queue: a resolved item has *left* the queue, and what comes back
+  is the same data the account's done view renders.
 
   Three things this buys. The **scope choice attaches once**, to the command that
   creates every resolution, instead of being bolted onto two of three sibling
@@ -1245,6 +1304,85 @@ Principle: **you take action where you already read the relevant information.**
   needs-you batch in minutes (P0-10). Each answer creates a decision line.
   Each "never again" is a scope choice attached to an answer the operator is
   already giving.
+
+### The CLI surface (normative)
+
+This table is the complete `tbd supervise` surface. It is **normative for names
+and shapes**: exact flag spellings may grow, command and subcommand names may
+not drift. Everything the app can do appears here, because nothing exists only
+as a button.
+
+**Desk verbs — gated** (attended → proposal; autonomous → execute, ledger line,
+60-second re-check). All three are additionally bound to the calling desk's
+project (§5).
+
+```
+tbd supervise intervene --terminal <id> --text "…"
+tbd supervise wake      --worktree <id>
+tbd supervise pause     --terminal <id> [--reason "…"]
+```
+
+`intervene` delivers a re-verified message; when the target sits on a dialog the
+adapter clears it first, but **only a dialog the daemon machine-knows** — an
+unidentified one makes the delivery refuse and write an anomaly (§2). `wake`
+unparks a session with outstanding work. `pause` halts a runaway (§13).
+
+**Desk verbs — ungated** (ledger line only).
+
+```
+tbd supervise escalate --item "…" --command "…" --recommendation "…"
+tbd supervise note     --text "…" [--ref <line-id>]
+```
+
+**Operator — the queue.**
+
+```
+tbd supervise queue   [--resolved|--all] [--type proposal|escalation] [--project <name>]
+tbd supervise resolve <id> --approve [--scope this-once|this-shift|always]
+tbd supervise resolve <id> --reject  [--reason "…"]
+tbd supervise resolve <id> --answer  "…" [--scope …]
+```
+
+**Operator — posture.** `off → attended|autonomous` opens a shift;
+`attended|autonomous → off` closes it (§9).
+
+```
+tbd supervise posture
+tbd supervise posture off|attended|autonomous
+```
+
+**Operator — projects** (§5).
+
+```
+tbd supervise project list
+tbd supervise project create <name> --repos <id,…> --policy repo:<id>|operator
+tbd supervise project delete <name>
+tbd supervise project move   <repo> --to <project|singleton>
+```
+
+**Operator — automation membership and standing rules** (§8).
+
+```
+tbd supervise automation default in|out
+tbd supervise automation set <project> in|out|follow-default
+tbd supervise automation list
+tbd supervise rules list
+tbd supervise rules revoke <rule-id>
+```
+
+**Deliberately absent**, each with its argument elsewhere in this document:
+
+- **`learn`** — no machine-appended memory tier; same-shift memory is a `note`,
+  cross-shift memory is a reviewed playbook PR (§8).
+- **`answer --terminal`** — answering an agent is `intervene`; the operator's
+  `resolve --answer` is a different surface with a different actor (§2, §10).
+- **`approve-a-prompt`** — no blanket auto-grant of permission prompts exists,
+  and nothing restores one under another name (§2).
+- **Per-desk lifecycle commands** (spawn, recycle, dispose) — desks are daemon
+  self-maintenance, born on their project's first case and disposed at shift
+  close; there is nothing for an operator to drive (§9).
+- **Per-project posture** — one switch, fleet-wide; "not this project" is an
+  automation mark, not a posture (§5, §8).
 
 ## 11. Capacity awareness (P1-1, decomposed)
 
@@ -1443,6 +1581,15 @@ to inaction at the largest scale.
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
+- **A machine-appended learnings file** (and the `learn` verb and `learning`
+  ledger kind that fed it) — a per-project `learnings.md` the desk could append
+  to, carried in every future work order, taking effect with no review. Removed
+  because it bridged two needs that existing machinery serves better:
+  within a shift a learning is a `note` in the record every replacement desk is
+  briefed from, and across shifts it is repo advisory content, which already has
+  a home (the playbook) and a change process (a reviewed commit). Shift end
+  proposes a capture worker that opens that PR instead. The cost — PR latency,
+  and no silent adoption — is the feature. See §8.
 - **A separate `answer` verb** — replying to an agent's question is the send
   path, so it is `intervene`; the dismissal is a delivery-adapter concern and the
   "this is a response" quality is carried by the action's state snapshot (§2,
@@ -1529,7 +1676,7 @@ Two secondary honest costs:
 
 - **Cold start.** Conservative defaults and operator approval make the first
   few nights heavy on approvals. The system becomes more useful only as
-  standing rules and learnings accumulate. An operator who does not make that
+  standing rules and playbook refinements accumulate. An operator who does not make that
   investment will see a repetitive queue and may decide the subsystem is
   useless. The old system worked on the first night *for its one team* because
   its policy was built into the product. Supporting different teams introduces
