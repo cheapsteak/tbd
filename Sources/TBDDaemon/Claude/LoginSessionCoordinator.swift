@@ -144,7 +144,7 @@ public actor LoginSessionCoordinator {
                 activePumps.remove(terminalID)
                 pendingAutoLogin.remove(terminalID)
             }
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+            // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration comes from the injected `Delays` struct, exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift (`fastDelays()`) and Tests/TBDDaemonTests/ModelProfileSpawnTests.swift; see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: delays.pumpInitialDelay)
             var elapsed: Duration = .zero
             var sends = 0
@@ -158,11 +158,11 @@ public actor LoginSessionCoordinator {
                     sends += 1
                     logger.info("auto-login: typing /login into terminal \(terminalID, privacy: .public) (attempt \(sends, privacy: .public))")
                     await typeLogin()
-                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+                    // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration comes from the injected `Delays` struct, exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift (`fastDelays()`) and Tests/TBDDaemonTests/ModelProfileSpawnTests.swift; see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: delays.pumpPostSendDelay)
                     elapsed += delays.pumpPostSendDelay
                 case .promptReady, .notReady:
-                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+                    // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration comes from the injected `Delays` struct, exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift (`fastDelays()`) and Tests/TBDDaemonTests/ModelProfileSpawnTests.swift; see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: delays.pumpPollInterval)
                     elapsed += delays.pumpPollInterval
                 }
@@ -196,7 +196,7 @@ public actor LoginSessionCoordinator {
                     onLogin()
                     return
                 }
-                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+                // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration is `watchLoginIdentity`'s own `interval:` parameter (NOT the `Delays` struct — this loop predates it), exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift which passes .milliseconds(10); see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: interval)
                 elapsed += interval
             }

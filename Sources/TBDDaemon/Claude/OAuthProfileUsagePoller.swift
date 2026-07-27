@@ -114,7 +114,7 @@ public actor OAuthProfileUsagePoller {
         self.configDirPath = configDirPath
         self.fetcher = fetcher
         self.broadcast = broadcast
-        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
+        // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the default of the type's own `sleeper:` seam (which sits alongside the `now:` and `jitter:` seams), injected as `sleeper: { _ in }` at 6 sites in Tests/TBDDaemonTests/OAuthProfileUsagePollerTests.swift — but only the `sweep()` inter-profile stagger below is actually REACHED by those tests: no test calls `start()`, so `runLoop()`'s cadence use of this same closure is unexercised; see docs/specs/2026-07-24-test-hardening-design.md
         self.sleeper = sleeper ?? { try await Task.sleep(for: .seconds($0)) }
         self.now = now ?? { Date() }
         // Default jitter: uniform in [0, span). Injectable for deterministic

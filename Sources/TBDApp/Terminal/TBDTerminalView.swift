@@ -78,6 +78,15 @@ class TBDTerminalView: TerminalView {
     /// daemon-side `paste-buffer -p` owns bracketed-paste wrapping) or refused
     /// as oversize. Fall through to SwiftTerm's normal three-call bracketed
     /// paste ONLY when no control-mode attach is live.
+    ///
+    /// That ownership is CONTINGENT, not unconditional: `-p` wraps in
+    /// ESC[200~/ESC[201~ only because the pane's application has enabled
+    /// bracketed-paste mode (DECSET 2004). Against a pane that has NOT, the
+    /// same `-p` delivers the bytes verbatim with no markers — measured on
+    /// tmux 3.6a (22 wrapped bytes vs 10 bare). If an agent TUI ever stops
+    /// setting 2004, handing the paste to the daemon wraps nothing. Asserted
+    /// nightly by probe P3 in `scripts/nightly-tmux-probes.sh` (PR #523), a
+    /// two-arm probe: 2004 on → wrapped, 2004 off → verbatim.
     override func paste(_ sender: Any) {
         if let handler = onControlModePaste,
            let text = NSPasteboard.general.string(forType: .string),

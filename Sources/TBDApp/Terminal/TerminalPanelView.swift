@@ -727,6 +727,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // so the daemon-side `paste-buffer -p` is the SOLE wrapping
                 // authority — SwiftTerm's own 2004 tracking can be stale after
                 // a tab-switch re-attach, so no size rides the keystroke path.
+                // That sole-authority claim is CONTINGENT, not unconditional:
+                // `-p` wraps in ESC[200~/ESC[201~ only because the pane's
+                // application has enabled bracketed-paste mode (DECSET 2004).
+                // Against a pane that has NOT, the same `-p` delivers the bytes
+                // verbatim with no markers — measured on tmux 3.6a (22 wrapped
+                // bytes vs 10 bare). If an agent TUI ever stops setting 2004,
+                // nothing here wraps. Asserted nightly by probe P3 in
+                // scripts/nightly-tmux-probes.sh (PR #523), a two-arm probe:
+                // 2004 on → wrapped, 2004 off → verbatim.
                 // Returns true → the paste is consumed here (frame sent, or
                 // oversize refused); false → not attached, SwiftTerm's normal
                 // local paste runs.
