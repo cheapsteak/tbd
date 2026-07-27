@@ -37,6 +37,14 @@ struct ProviderFailureClassTests {
         #expect(ProviderFailureClass.classify(exitCode: 4, error: error("teapot_unavailable")) == .authNeeded)
     }
 
+    /// The union is a union, not a preference: a RECOGNIZED non-auth code
+    /// alongside exit 4 must not demote it. Exit class is the contract's
+    /// classification of record and stands on its own.
+    @Test func exitFourWithARecognizedNonAuthCodeIsStillAuthNeeded() {
+        #expect(ProviderFailureClass.classify(exitCode: 4, error: error("not_found")) == .authNeeded)
+        #expect(ProviderFailureClass.classify(exitCode: 4, error: error("credential_unresolvable")) == .authNeeded)
+    }
+
     @Test func exitThreeIsTransient() {
         #expect(ProviderFailureClass.classify(exitCode: 3, error: nil) == .transient)
     }

@@ -152,7 +152,7 @@ struct RemoteProviderHeaderRow: View {
     /// Non-nil while the provider's remediation command runs in its own PTY
     /// sheet. Presented from the ROW, not from inside the popover — a
     /// popover can't host a sheet of its own.
-    @State private var runningRemediation: RemoteRemediationCommandItem?
+    @State private var runningRemediation: RemoteRemediationRun?
 
     var body: some View {
         HStack(spacing: 4) {
@@ -181,16 +181,23 @@ struct RemoteProviderHeaderRow: View {
         .sheet(isPresented: $showingCreateSheet) {
             RemoteCreateSheet(provider: provider.config, describe: provider.describe, repoPrefill: nil)
         }
-        .sheet(item: $runningRemediation) { command in
-            if let presentation = authPresentation {
-                RemoteRemediationTerminalSheet(presentation: presentation, command: command.value)
-            }
+        // No `if let authPresentation` inside: the run carries its own
+        // presentation, so health flipping off `.needsAuth` while the
+        // command is still running (the expected outcome!) can't collapse
+        // the sheet's content to an empty view while it stays presented.
+        .sheet(item: $runningRemediation) { run in
+            RemoteRemediationTerminalSheet(run: run)
         }
     }
 
     /// The auth CTA for this provider, or nil when its health isn't
     /// `.needsAuth` — the exact same pure decision the session detail pane
     /// renders, so the two surfaces can't disagree.
+    ///
+    /// Provider-level chrome, so published health is the ONLY signal here.
+    /// The detail pane additionally passes its own session's attach-exit
+    /// class (`localAuthExit`); this row has no session in view and nothing
+    /// local to add.
     private var authPresentation: RemoteProviderAuthPresentation? {
         RemoteProviderAuthPresentation.make(from: provider)
     }
@@ -228,7 +235,7 @@ struct RemoteProviderHeaderRow: View {
                         presentation: presentation,
                         onRun: {
                             showingAuthPopover = false
-                            runningRemediation = presentation.command.map(RemoteRemediationCommandItem.init)
+                            runningRemediation = RemoteRemediationRun(presentation)
                         }
                     )
                     .padding(14)

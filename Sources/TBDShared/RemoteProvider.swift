@@ -244,7 +244,11 @@ public struct ProviderErrorObject: Codable, Sendable {
     public let remediation: ProviderRemediation?
 }
 
-public struct ProviderRemediation: Codable, Sendable {
+/// `Equatable` because the daemon diffs it: `RemoteProviderManager.setHealth`
+/// broadcasts on any change to the (state, message, remediation) triple, not
+/// just the state, so a probe that lands a remediation onto an already-
+/// `needs_auth` provider still reaches the app.
+public struct ProviderRemediation: Codable, Sendable, Equatable {
     public let label: String
     public let command: String?
 }

@@ -87,12 +87,33 @@ struct RemoteProviderAuthCTAView: View {
     }
 }
 
-/// Identifiable wrapper so an opaque command string can drive
-/// `.sheet(item:)` — which, unlike `.sheet(isPresented:)` + `if let`, can't
-/// structurally present an empty sheet.
-struct RemoteRemediationCommandItem: Identifiable, Equatable {
-    let value: String
-    var id: String { value }
+/// One in-flight remediation run, driving `.sheet(item:)`.
+///
+/// SELF-SUFFICIENT by design: it carries the whole presentation alongside
+/// the command, so the sheet renders entirely from this value and never
+/// re-reads live provider health. Health is expected to change while the
+/// sheet is open — clearing `.needsAuth` is the whole point of running the
+/// command — and a sheet whose content is conditioned on the CTA still
+/// existing collapses to an empty view mid-login while staying presented:
+/// no terminal, no Done button, Escape the only way out.
+///
+/// It is also an item rather than a bool because `.sheet(isPresented:)` +
+/// `if let` can structurally present an empty sheet the same way.
+struct RemoteRemediationRun: Identifiable, Equatable {
+    let presentation: RemoteProviderAuthPresentation
+    let command: String
+
+    /// Both halves participate: two providers could in principle offer the
+    /// same command string, and `.sheet(item:)` re-presents on id change.
+    var id: String { "\(presentation.providerName)\u{1}\(command)" }
+
+    /// `nil` when the presentation has no command — there is nothing to run,
+    /// so there is no sheet to present.
+    init?(_ presentation: RemoteProviderAuthPresentation) {
+        guard let command = presentation.command else { return nil }
+        self.presentation = presentation
+        self.command = command
+    }
 }
 
 /// Runs the provider's remediation command in a REAL terminal, hosted by the
@@ -102,9 +123,12 @@ struct RemoteRemediationCommandItem: Identifiable, Equatable {
 /// commands are interactive login flows — they prompt, they open browsers,
 /// they read a code back from the user — and none of that works without a
 /// controlling terminal.
+/// Everything it renders comes from the `run` it was handed, never from
+/// live provider health — see `RemoteRemediationRun`.
 struct RemoteRemediationTerminalSheet: View {
-    let presentation: RemoteProviderAuthPresentation
-    let command: String
+    let run: RemoteRemediationRun
+    private var presentation: RemoteProviderAuthPresentation { run.presentation }
+    private var command: String { run.command }
     @EnvironmentObject var appearance: AppearanceSettings
     @Environment(\.dismiss) private var dismiss
     @State private var exitCode: Int32?

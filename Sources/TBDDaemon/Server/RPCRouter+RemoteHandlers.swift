@@ -251,6 +251,20 @@ extension RPCRouter {
     /// The timestamp is stamped HERE rather than by the client, so pin order
     /// is server-assigned and consistent across clients — the same contract
     /// `handleWorktreeSetPin` follows.
+    func handleRemoteSetPin(_ paramsData: Data) async throws -> RPCResponse {
+        guard try await remoteGate() != nil else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteSetPinParams.self, from: paramsData)
+        let changed = try await db.remoteSessions.setPinned(
+            provider: params.provider, sessionID: params.sessionID,
+            pinnedAt: params.pinned ? Date() : nil)
+        if changed {
+            subscriptions.broadcast(delta: .remoteSessionsChanged)
+        }
+        return .ok()
+    }
+
     /// Correlate an `attach` exit the APP observed with provider health.
     /// `attach` is exec'd on a terminal's own TTY by the app, so this is the
     /// only way that exit code ever reaches the daemon — and the exit code is
@@ -269,20 +283,6 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteReportAttachExitParams.self, from: paramsData)
         try await manager.recordAttachExit(provider: params.provider, exitCode: params.exitCode)
-        return .ok()
-    }
-
-    func handleRemoteSetPin(_ paramsData: Data) async throws -> RPCResponse {
-        guard try await remoteGate() != nil else {
-            return Self.remoteBackendsDisabledResponse
-        }
-        let params = try decoder.decode(RemoteSetPinParams.self, from: paramsData)
-        let changed = try await db.remoteSessions.setPinned(
-            provider: params.provider, sessionID: params.sessionID,
-            pinnedAt: params.pinned ? Date() : nil)
-        if changed {
-            subscriptions.broadcast(delta: .remoteSessionsChanged)
-        }
         return .ok()
     }
 }

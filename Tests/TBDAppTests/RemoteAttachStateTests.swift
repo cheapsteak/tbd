@@ -3,6 +3,20 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
+/// One recorded `remoteAttachExitReporter` invocation.
+struct ExitReport: Equatable {
+    let provider: String
+    let sessionID: String
+    let exitCode: Int32
+}
+
+/// MainActor-isolated collector for the injected reporter seam — the
+/// reporter closure is `@MainActor`, so no locking is needed.
+@MainActor
+final class ExitReportRecorder {
+    var calls: [ExitReport] = []
+}
+
 /// Integration-through-`AppState` tests for the remote attach-lifecycle
 /// wiring: `selectRemoteSession`/`activateRemoteSession` touching recency
 /// and clearing (or not clearing) the explicit-detach flag,
@@ -19,20 +33,6 @@ import TBDShared
 /// Every test constructs `AppState(userDefaults:)` against a unique throwaway
 /// suite — TBDApp ships as an unbundled SPM executable, so `UserDefaults.standard`
 /// is the running developer's real `TBDApp.plist`.
-/// One recorded `remoteAttachExitReporter` invocation.
-struct ExitReport: Equatable {
-    let provider: String
-    let sessionID: String
-    let exitCode: Int32
-}
-
-/// MainActor-isolated collector for the injected reporter seam — the
-/// reporter closure is `@MainActor`, so no locking is needed.
-@MainActor
-final class ExitReportRecorder {
-    var calls: [ExitReport] = []
-}
-
 @MainActor
 @Suite("Remote attach state")
 struct RemoteAttachStateTests {
@@ -392,16 +392,136 @@ struct RemoteAttachStateTests {
         }
     }
 
-    /// Repeated auth exits must NOT escalate `attempts` — retrying was never
-    /// the problem, and a grown backoff would only delay the reattach that
-    /// should follow re-authentication. Contrast with the unexpected-exit
-    /// test below, which does escalate.
-    @Test func repeatedAuthExitsDoNotEscalateAttempts() {
+    /// A FIRST auth exit starts at `attempts` 1, i.e. the short base
+    /// backoff — which is the only value the normal flow ever reaches,
+    /// since the health gate blocks every retry from here on.
+    @Test func firstAuthExitStartsAtAttemptsOne() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.attempts == 1)
+        }
+    }
+
+    /// Repeated auth exits escalate exactly like unexpected ones. That only
+    /// happens in the pathological case where a provider's `list`
+    /// authenticates (health clears, the session is re-admitted) but its
+    /// `attach` doesn't — an otherwise unbounded ~5s respawn loop, each
+    /// round costing a daemon probe. Escalation is the bound. See
+    /// `RemoteReconnectPolicy.nextPending`.
+    @Test func repeatedAuthExitsEscalateAttemptsLikeUnexpectedOnes() {
         withState { state in
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
-            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.attempts == 1)
+            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.attempts == 3)
+        }
+    }
+
+    // MARK: - Local auth-exit knowledge (independent of daemon health)
+
+    /// The app's own half of the auth CTA's gate: it knows the attach exited
+    /// in the auth class without waiting for the fire-and-forget report to
+    /// come back as published provider health.
+    @Test func authExitIsVisibleLocallyWithoutAnyProviderHealthChange() {
+        withState { state in
+            // Provider is still `.ok` — nothing has told the daemon yet.
+            seedProvider(state, name: "acme", health: .ok)
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+
+            #expect(state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+        }
+    }
+
+    /// The other classes must not light it: a transport failure and a clean
+    /// detach are not authentication problems, and neither is a selection
+    /// with no pending entry at all.
+    @Test func nonAuthExitsAreNotLocalAuthExits() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 137)
+            state.markRemoteSessionDetached(sel("acme", "s2"), exitCode: 0)
+            state.markRemoteSessionDetached(sel("acme", "s3"), exitCode: nil)
+
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s2")))
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s3")))
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "never-attached")))
+        }
+    }
+
+    /// Reattach clears the pending entry outright, so the local signal goes
+    /// with it — the CTA must not outlive the state that justified it.
+    @Test func reattachClearsTheLocalAuthExitSignal() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            #expect(state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+
+            state.reattachRemoteSession(sel("acme", "s1"))
+
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+        }
+    }
+
+    // MARK: - Provider health gates first-ever attach
+
+    /// A NEVER-attached session under an already-`.needsAuth` provider must
+    /// not spawn a doomed attach. `pendingReconnectBlockedSelections` can't
+    /// cover this — it only inspects selections that already have a pending
+    /// entry, i.e. ones that already burned one.
+    @Test func needsAuthProviderExcludesANeverAttachedSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+            seedSession(state, provider: "acme", id: "s1")
+
+            #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// The asymmetry, pinned: `.stale` is ordinary transport flake on the
+    /// CONTROL path (`list`), which says nothing about whether `attach` can
+    /// connect. Blocking on it would turn one bad poll into "you can't open
+    /// your sessions".
+    @Test func staleProviderStillAllowsANeverAttachedSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .stale)
+            seedSession(state, provider: "acme", id: "s1")
+
+            #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// Same for `.error` — a `list` that fails permanently is a broken
+    /// control path, not proof that `attach` fails.
+    @Test func errorProviderStillAllowsANeverAttachedSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .error)
+            seedSession(state, provider: "acme", id: "s1")
+
+            #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// Recovery re-admits it with no user gesture — the gate is health, and
+    /// health is republished by the daemon's poll.
+    @Test func recoveryFromNeedsAuthReAdmitsTheSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+
+            seedProvider(state, name: "acme", health: .ok)
+
+            #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
     }
 

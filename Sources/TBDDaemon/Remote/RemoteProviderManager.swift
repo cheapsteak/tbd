@@ -382,7 +382,22 @@ public actor RemoteProviderManager {
         let error = result.decodedError
         switch failureClass {
         case .authNeeded:
-            setHealth(provider: provider, to: (.needsAuth, error?.message, error?.remediation))
+            // Preserve what's already on file when the new error supplies
+            // nothing. `recordAttachExit` deliberately keeps the existing
+            // message/remediation (an attach exit carries none of its own)
+            // and then fires a `list` probe through here — a probe that
+            // itself exits 4 with unparseable stdout would otherwise clobber
+            // that preserved remediation back to `nil`, downgrading a good
+            // CTA to a bare "authentication needed". A freshly parsed value
+            // still wins, so recovery-with-new-detail is unaffected. Only
+            // this class does it: `.stale`/`.error` messages describe THIS
+            // invocation and go stale the moment it changes.
+            let previous = health[provider]
+            setHealth(provider: provider, to: (
+                .needsAuth,
+                error?.message ?? previous?.message,
+                error?.remediation ?? previous?.remediation
+            ))
         case .transient:
             setHealth(provider: provider, to: (.stale, error?.message ?? result.stderr, nil))
         case .permanent, .contractBug:
@@ -394,11 +409,25 @@ public actor RemoteProviderManager {
         setHealth(provider: provider, to: (.ok, nil, nil))
     }
 
+    /// Records a provider's health and broadcasts when ANY of the three
+    /// fields the app renders changed — state, message, or remediation.
+    ///
+    /// State alone is not enough: the auth path routinely transitions
+    /// `.needsAuth` → `.needsAuth` while ADDING detail (`recordAttachExit`
+    /// flips health off a bare exit code with no message, then its probe
+    /// lands the parsed message + remediation). Broadcasting on state alone
+    /// dropped that payload on the floor and left the app rendering a
+    /// command-less fallback CTA for the whole outage, since every later
+    /// poll is also `.needsAuth` → `.needsAuth`.
+    ///
+    /// Equally deliberately, it does NOT broadcast unconditionally: a
+    /// healthy provider re-setting `(.ok, nil, nil)` every 60s poll would
+    /// otherwise put a delta on the wire per provider per minute forever.
     private func setHealth(provider: String,
                            to new: (ProviderHealth, String?, ProviderRemediation?)) {
         let old = health[provider]
         health[provider] = new
-        if old?.state != new.0 {
+        if old?.state != new.0 || old?.message != new.1 || old?.remediation != new.2 {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
     }

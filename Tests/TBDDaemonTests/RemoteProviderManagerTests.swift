@@ -255,6 +255,115 @@ struct RemoteProviderManagerTests {
         #expect(await m.providerStatuses().first?.health == .ok)
     }
 
+    /// `recordAttachExit` preserves the remediation already on file, and the
+    /// probe it fires must not undo that: a probe whose `list` also exits 4
+    /// but returns nothing parseable supplies no message/remediation of its
+    /// own, and `recordFailure`'s auth branch falls back to what's on file
+    /// rather than clobbering it with nil.
+    @Test func aProbeWithUnparseableStdoutPreservesTheRemediationOnFile() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            // First poll parses a full error object → message + remediation.
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stderr: ""),
+            // The attach-exit probe re-confirms auth-needed but says nothing.
+            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        #expect(await m.providerStatuses().first?.remediationCommand == "acme-provider login")
+
+        // Health is already `.needsAuth`, so `recordAttachExit` fires no
+        // probe of its own — drive the probe-shaped call directly.
+        await m.pollOnce(provider: provider)
+
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.errorMessage == "expired", "an empty probe must not clobber the message on file")
+        #expect(statuses.first?.remediationCommand == "acme-provider login",
+                "an empty probe must not clobber the remediation on file")
+    }
+
+    /// The other branch of the same fallback: a newly parsed value always
+    /// wins over what's on file, so a provider that changes its remediation
+    /// mid-outage is reflected rather than pinned to the first one seen.
+    @Test func aFreshlyParsedRemediationWinsOverTheOneOnFile() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stderr: ""),
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "still expired", "remediation": {"label": "Sign in again", "command": "acme-provider login --renew"}}}"#.utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        await m.pollOnce(provider: provider)
+
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.errorMessage == "still expired")
+        #expect(statuses.first?.remediationCommand == "acme-provider login --renew")
+    }
+
+    // MARK: - Health broadcasting
+
+    /// The payload of this whole feature reaches the app on a
+    /// `needs_auth → needs_auth` transition: `recordAttachExit` flips health
+    /// off a bare exit code carrying no message, and its probe is what lands
+    /// the parsed message + remediation. Broadcasting on the health STATE
+    /// alone dropped that second step silently, leaving the app on a
+    /// command-less fallback CTA for the whole outage (every later poll is
+    /// also needs_auth → needs_auth).
+    @Test func addingARemediationWithoutAStateChangeStillBroadcasts() async throws {
+        let deltas = BroadcastDeltas()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let withRemediation = ProviderResult(
+            exitCode: 4,
+            stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+            stderr: "")
+        let invoker = FakeProviderInvoker(script: [
+            // ok → needs_auth, message only, no remediation.
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired"}}"#.utf8),
+                stderr: ""),
+            // needs_auth → needs_auth, ADDING a remediation.
+            withRemediation,
+            // needs_auth → needs_auth, identical in all three fields.
+            withRemediation,
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+
+        await m.pollOnce(provider: provider)
+        #expect(healthBroadcastCount(deltas) == 1, "ok → needs_auth broadcasts")
+
+        await m.pollOnce(provider: provider)
+        #expect(healthBroadcastCount(deltas) == 2,
+                "a remediation arriving on an already-needs_auth provider must reach the app")
+
+        await m.pollOnce(provider: provider)
+        #expect(healthBroadcastCount(deltas) == 2,
+                "a genuinely unchanged re-set must not broadcast (60s polls would flood the wire)")
+    }
+
+    private func healthBroadcastCount(_ deltas: BroadcastDeltas) -> Int {
+        deltas.snapshot().filter {
+            if case .remoteSessionsChanged = $0 { return true }
+            return false
+        }.count
+    }
+
     @Test func attachExitForAnUnknownProviderThrows() async throws {
         let m = manager(FakeProviderInvoker(script: []))
         await #expect(throws: (any Error).self) {

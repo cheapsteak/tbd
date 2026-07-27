@@ -44,8 +44,9 @@ struct RemoteSessionDetailView: View {
     @State private var showStopConfirm = false
     @State private var logRefreshToken = 0
     /// Non-nil while the provider's remediation command is running in its
-    /// own PTY sheet.
-    @State private var runningRemediation: RemoteRemediationCommandItem?
+    /// own PTY sheet. Cleared by `resetForNewSelection()` like every other
+    /// per-session `@State` here — see that method.
+    @State private var runningRemediation: RemoteRemediationRun?
 
     private var session: RemoteSessionInfo? {
         appState.remoteSessions.first {
@@ -118,6 +119,16 @@ struct RemoteSessionDetailView: View {
                 sendField
             }
         }
+        // Attached to the view's ROOT, deliberately — never inside
+        // `authPrompt`/`contentArea`. That subtree is conditional on
+        // `authPresentation != nil`, and running the command is expected to
+        // clear `.needsAuth`, which unmounts the subtree, tears down the
+        // sheet's PTY (`dismantleNSView` → `terminate()`) and kills an
+        // interactive login mid-flow. This parent stays mounted through
+        // every auth/detach/tab branch below it.
+        .sheet(item: $runningRemediation) { run in
+            RemoteRemediationTerminalSheet(run: run)
+        }
         .onAppear { adoptPendingTab() }
         .onChange(of: selection) { _, _ in resetForNewSelection() }
         .onChange(of: appState.remoteSessionRequestedTab) { _, _ in adoptPendingTab() }
@@ -145,6 +156,12 @@ struct RemoteSessionDetailView: View {
         sendText = ""
         isSending = false
         selectedTab = .attach
+        // Must be reset like the rest: a non-nil `runningRemediation`
+        // surviving a selection change re-presents itself with no user
+        // gesture — and, on a session belonging to a DIFFERENT provider,
+        // would run the previous provider's command under a label the user
+        // never asked for.
+        runningRemediation = nil
         adoptPendingTab()
     }
 
@@ -374,12 +391,24 @@ struct RemoteSessionDetailView: View {
         effectiveTab == .attach && availableTabs.contains(.attach) && isAttached
     }
 
-    /// The provider-authentication CTA for this session's provider, when its
-    /// health says it can't authenticate. Derived purely from published
-    /// provider health, so it appears and disappears with the daemon's poll
-    /// — no local state to get stuck.
+    /// The provider-authentication CTA for this session's provider.
+    ///
+    /// Unlike the sidebar's provider-level surface, this one feeds the model
+    /// a SECOND, local signal alongside published health: whether this
+    /// session's own last attach exited in the auth class. Reporting that
+    /// exit to the daemon is fire-and-forget, so health may lag it by a
+    /// poll — or never catch up at all if the report failed — and in that
+    /// window the misleading "Detached / Reattach" prompt is exactly what
+    /// renders instead. Both signals feed the same pure decision
+    /// (`RemoteProviderAuthPresentation.make`), so the two surfaces still
+    /// can't disagree about what a status MEANS, only about how much they
+    /// know.
     private var authPresentation: RemoteProviderAuthPresentation? {
-        RemoteProviderAuthPresentation.make(from: providerStatus)
+        RemoteProviderAuthPresentation.make(
+            from: providerStatus,
+            fallbackProviderName: selection.provider,
+            localAuthExit: appState.remoteSessionHasLocalAuthExit(selection)
+        )
     }
 
     /// Shown in place of `detachedPrompt` while the provider can't
@@ -393,15 +422,12 @@ struct RemoteSessionDetailView: View {
             RemoteProviderAuthCTAView(
                 presentation: presentation,
                 showsSessionReassurance: true,
-                onRun: { runningRemediation = presentation.command.map(RemoteRemediationCommandItem.init) }
+                onRun: { runningRemediation = RemoteRemediationRun(presentation) }
             )
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
-        .sheet(item: $runningRemediation) { command in
-            RemoteRemediationTerminalSheet(presentation: presentation, command: command.value)
-        }
     }
 
     /// Shown in place of the pager slot once `selection` has detached

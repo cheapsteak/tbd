@@ -33,3 +33,40 @@ struct RemoteAttachTerminalViewTests {
         #expect(RemoteAttachTerminalView.isUnexpectedExit(exitCode: nil) == false)
     }
 }
+
+/// Tier 1. The child environment a provider `attach` is spawned with — the
+/// other pure, injectable-seam half of `RemoteAttachTerminalView`. Same
+/// shape as `TerminalViewerEnvironmentTests`, which covers the scrubbing
+/// this composes on top of.
+@Suite("RemoteAttachTerminalView.attachEnvironment")
+struct RemoteAttachEnvironmentTests {
+    /// The provider may itself exec tmux on the far side, and a nested-attach
+    /// guard failure there is the same failure mode a nested LOCAL tmux
+    /// attach hits — so the scrubbing `makeViewerEnvironment` does has to
+    /// survive this wrapper.
+    @Test func stripsTMUXAndTMUXPane() {
+        let env = RemoteAttachTerminalView.attachEnvironment(base: [
+            "TMUX": "/tmp/tmux-501/default",
+            "TMUX_PANE": "%0",
+            "PATH": "/usr/local/bin",
+        ])
+        #expect(env["TMUX"] == nil)
+        #expect(env["TMUX_PANE"] == nil)
+        #expect(env["PATH"] == "/usr/local/bin")
+    }
+
+    /// `docs/remote-provider-contract.md` normatively requires this on EVERY
+    /// invocation. This is the only app-side spawn site, so without it a
+    /// provider that branches on the contract version would see a different
+    /// answer for `attach` than for every other verb.
+    @Test func setsTheContractVersion() {
+        #expect(RemoteAttachTerminalView.attachEnvironment(base: [:])["TBD_CONTRACT_VERSION"] == "1")
+    }
+
+    /// A provider that somehow inherited a different value must not win over
+    /// the version this build actually speaks.
+    @Test func overridesAnInheritedContractVersion() {
+        let env = RemoteAttachTerminalView.attachEnvironment(base: ["TBD_CONTRACT_VERSION": "99"])
+        #expect(env["TBD_CONTRACT_VERSION"] == "1")
+    }
+}

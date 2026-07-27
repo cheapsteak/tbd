@@ -780,15 +780,23 @@ final class AppState: ObservableObject {
     ///   incremented (a session that keeps failing immediately after each
     ///   automatic retry backs off further each time).
     /// - **Auth-needed exit** (exit class 4 — the provider can't
-    ///   authenticate) → also `pendingReconnectRemoteSessions`, so it still
-    ///   self-clears once health recovers with no user gesture, but WITHOUT
-    ///   escalating `attempts`: retrying was never the problem here, and the
-    ///   provider-health gate in `RemoteReconnectPolicy.isBlocked` (which
-    ///   blocks on any health other than `.ok`) is what actually holds the
-    ///   session back. Escalating backoff on top of that would only delay the
-    ///   reattach that should follow re-authentication. It additionally
-    ///   reports the exit to the daemon (fire-and-forget) so provider health
-    ///   picks up the auth state without waiting for the next 60s poll.
+    ///   authenticate) → the SAME escalating `pendingReconnectRemoteSessions`
+    ///   entry as an unexpected exit, so it self-clears once health recovers
+    ///   with no user gesture. In the normal flow the escalation never
+    ///   actually bites: there is exactly one auth exit, because
+    ///   `RemoteReconnectPolicy.isBlocked` then refuses every retry while
+    ///   health is `.needsAuth`, so `attempts` stays 1 and re-authentication
+    ///   is followed by a prompt reattach. It only climbs in the
+    ///   pathological case where `list` authenticates but `attach` doesn't —
+    ///   which is exactly the respawn loop that needs a bound. See
+    ///   `RemoteReconnectPolicy.nextPending`.
+    ///
+    ///   Only this class additionally reports the exit to the daemon
+    ///   (fire-and-forget) so provider health picks up the auth state
+    ///   without waiting for the next 60s poll. The two classes stay
+    ///   distinct in every OTHER respect — an auth exit is never worded as
+    ///   an unexpected session exit (see
+    ///   `RemoteAttachTerminalView.isUnexpectedExit`).
     ///
     /// Either way `selection` is excluded from `attachedRemoteSelections`
     /// until its respective clearing condition is met — the rule that
@@ -800,7 +808,7 @@ final class AppState: ObservableObject {
                 exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
             )
         case .authNeeded:
-            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.authNeededPending(
+            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
                 exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
             )
             reportRemoteAttachExit(selection, exitCode: exitCode)
@@ -1070,6 +1078,7 @@ final class AppState: ObservableObject {
             try await daemonClient.setRemoteSessionPin(
                 provider: provider, sessionID: sessionID, pinned: pinned)
         }
+
     /// How `reportRemoteAttachExit` tells the daemon an app-spawned `attach`
     /// exited — injectable for the same reason as `remoteSessionPinSetter`
     /// (`DaemonClient` is concrete, no protocol), so the auth-exit routing
