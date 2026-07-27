@@ -14,19 +14,23 @@ enum RemoteSessionDetailTab: String, CaseIterable, Equatable, Hashable {
 }
 
 /// Detail pane shown when a remote-session sidebar row is selected
-/// (`AppState.selectedRemoteSession`) — routed from `ContentView` the same
-/// way `ScratchDetailView`/`RepoDetailView` are. No file viewer or diff
-/// panel: those are local-worktree-only and simply aren't rendered here
-/// (spec non-goal for v1 remote sessions).
+/// (`AppState.selectedRemoteSession`), hosted (via `RemoteSessionHostSlot`)
+/// inside `DetailSectionHostPager`'s `.remote` tab — mounted continuously
+/// for the lifetime of the app session once any remote session has ever
+/// been selected, hidden (not torn down) whenever a different top-level
+/// section is showing, so it survives navigating away and back. No file
+/// viewer or diff panel: those are local-worktree-only and simply aren't
+/// rendered here (spec non-goal for v1 remote sessions).
 ///
-/// UNLIKE its earlier revision, the caller (`ContentView`) deliberately does
-/// NOT key this view with `.id(selection)` any more: this view now hosts
-/// `RemoteAttachPager`, which keeps recently-viewed sessions' attach
-/// terminals alive across selection changes (bounded keep-alive — see
-/// `RemoteAttachLifecycle`), and `.id()`-ing the parent would tear that
-/// pager down (and every live connection it holds) on every single session
-/// switch, defeating the whole point. Instead this view resets its own
-/// per-session-only `@State` explicitly via `.onChange(of: selection)`.
+/// UNLIKE its earlier revision, the caller deliberately does NOT key this
+/// view with `.id(selection)`: this view now hosts `RemoteAttachPager`,
+/// which keeps recently-viewed sessions' attach terminals alive across
+/// selection changes AND across excursions to a non-remote section
+/// (bounded keep-alive — see `RemoteAttachLifecycle`), and `.id()`-ing the
+/// parent would tear that pager down (and every live connection it holds)
+/// on every single session switch, defeating the whole point. Instead this
+/// view resets its own per-session-only `@State` explicitly via
+/// `.onChange(of: selection)`.
 struct RemoteSessionDetailView: View {
     let selection: RemoteSessionSelection
     @EnvironmentObject var appState: AppState
