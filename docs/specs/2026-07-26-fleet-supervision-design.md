@@ -80,9 +80,12 @@ liveness identifies gone agents. This design adds two things:
    the result is loudly reported as `unknown`. The daemon never silently picks
    one input.
 2. **Install Claude Code's Notification hook** so "awaiting input" carries a
-   structured reason. A future list of automatically allowed permissions (P2-3)
-   will match this reason. The one-minute re-check (P1-6) will also use it to
-   answer, "Did the agent advance past the prompt?"
+   structured reason. That reason has two consumers. It rides along in the
+   escalation payload, so an operator carrying a stall sees exactly what was
+   asked, verbatim — including the prompts a repo's deliberate `ask` rules
+   raise, which are escalated rather than answered ("Prompt stalls (P2-3)"
+   below). The one-minute re-check (P1-6) also uses it to answer, "Did the agent
+   advance past the prompt?"
 
 One more session-state fact comes free from the same source: **context load** —
 the tokens currently in a session's context window, read from the last
