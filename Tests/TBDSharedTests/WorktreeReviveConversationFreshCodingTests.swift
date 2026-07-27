@@ -3,7 +3,7 @@ import Testing
 @testable import TBDShared
 
 @Suite("Revive conversation fresh RPC coding")
-struct WorktreeReviveConversationFreshCodingTests {
+struct ReviveFreshRPCCodingTests {
     @Test func paramsRoundTrip() throws {
         let id = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let value = WorktreeReviveConversationFreshParams(
