@@ -126,8 +126,22 @@ public actor HibernationCoordinator {
     /// re-check the pane's current command, and how long we wait between checks.
     /// 15 × 200ms ≈ 3s — ported from the old Suspend feature. If claude is still
     /// the pane's program after the whole window, we fall back to SIGTERM.
-    static let exitPollAttempts = 15
-    static let exitPollInterval: Duration = .milliseconds(200)
+    ///
+    /// Injectable (defaulted init parameters) rather than `static let`, so a
+    /// test can cross the exhaustion threshold in a handful of `TestClock`
+    /// advances instead of paying ~3s of real wall time to prove one branch.
+    /// Deliberately not `private`: the production defaults are pinned by a test.
+    /// `nonisolated` because both are immutable and `Sendable`, so reading them
+    /// needs no actor hop — without it a test's synchronous `#expect` against
+    /// them fails to compile. Safe only while they stay `let`; a `var` here
+    /// would have to drop `nonisolated` and every reader would need `await`.
+    nonisolated let exitPollAttempts: Int
+    nonisolated let exitPollInterval: Duration
+
+    /// Delay seam for the verify-exit poll (`Duration` is behavior). Tests
+    /// inject a `TestClock` so the poll's pacing is virtual and the
+    /// "escalate after exactly N attempts" boundary is exact.
+    private let clock: any Clock<Duration>
 
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -139,7 +153,10 @@ public actor HibernationCoordinator {
         modelProfileResolver: ModelProfileResolver? = nil,
         subscriptions: StateSubscriptionManager? = nil,
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        exitPollAttempts: Int = 15,
+        exitPollInterval: Duration = .milliseconds(200),
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
         self.tmux = tmux
@@ -149,6 +166,9 @@ public actor HibernationCoordinator {
         self.configDirManager = configDirManager
         self.inputActivity = InputActivityTracker()
         self.now = now
+        self.exitPollAttempts = exitPollAttempts
+        self.exitPollInterval = exitPollInterval
+        self.clock = clock
     }
 
     /// Projects root for a wake spawn's resolved profile config dir path,
@@ -894,9 +914,16 @@ public actor HibernationCoordinator {
             logger.debug("hibernate: /exit send failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return false
         }
-        for _ in 0..<Self.exitPollAttempts {
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: Self.exitPollInterval)
+        // Invariant, preserved verbatim from the pre-clock version: `try?` is
+        // NOT a cancellation check. On a cancelled task every `sleep` throws
+        // immediately, so this loop burns all `exitPollAttempts` iterations at
+        // zero delay, returns false, and the caller escalates straight to
+        // SIGTERM. That is a real defect, filed separately; it is deliberately
+        // NOT fixed here — an untested cancellation guard on a kill path is
+        // exactly the accretion this migration refuses. Anything added to this
+        // loop must keep that behaviour or change it with its own test.
+        for _ in 0..<exitPollAttempts {
+            try? await clock.sleep(for: exitPollInterval)
             if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: paneID),
                !ClaudeStateDetector.isClaudeProcess(cmd) {
                 return true
