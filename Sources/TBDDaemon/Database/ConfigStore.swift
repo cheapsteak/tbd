@@ -30,6 +30,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var auto_resume_on_api_error: Bool?
     var hibernate_input_veto_enabled: Bool?
     var auto_close_setup_enabled: Bool?
+    /// Pre-accept Claude's folder-trust dialog for TBD-created worktrees.
+    /// Default ON (see the `v66_config_auto_trust_worktrees` migration).
+    var auto_trust_worktrees: Bool?
     var gc_enabled: Bool?
     var gc_grace_seconds: Int?
     var gc_snapshot_retention_days: Int?
@@ -58,6 +61,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
             hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
             autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
+            autoTrustWorktrees: auto_trust_worktrees ?? true,
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
             gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
@@ -278,6 +282,20 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET auto_close_setup_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the auto-trust opt-out for TBD-created worktrees (default ON).
+    /// Read fresh at every spawn/wake, so no daemon restart is required — the
+    /// next Claude spawn picks it up. Turning it OFF does not un-trust anything
+    /// already seeded; it only stops TBD from seeding new non-scratch paths.
+    /// Scratch spaces are seeded unconditionally and are not governed by this.
+    public func setAutoTrustWorktrees(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_trust_worktrees = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

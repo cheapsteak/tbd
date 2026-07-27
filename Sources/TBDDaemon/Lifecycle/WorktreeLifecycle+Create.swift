@@ -623,11 +623,16 @@ extension WorktreeLifecycle {
                     scratchInstructions: config.scratchInstructions,
                     scratchRenamePrompt: config.scratchRenamePrompt)
             let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-            // Pre-accept Claude Code's folder-trust dialog for scratch spaces so
-            // fresh, TBD-owned scratch dirs don't prompt on every launch.
-            // Self-gates on isScratch; best-effort, never throws.
-            ClaudeTrustSeeder.ensureTrustedForScratch(
-                worktree: worktree, profileConfigDir: profileConfigDir)
+            // Pre-accept Claude Code's folder-trust dialog. TBD just created
+            // this worktree from a repo the operator registered, so the trust
+            // answer is known by construction — and the dialog blocks before
+            // SessionStart, so a stall here would be machine-invisible.
+            // Scratch always seeds; non-scratch honors the config flag.
+            // Best-effort, never throws.
+            ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: config.autoTrustWorktrees,
+                profileConfigDir: profileConfigDir)
             if isResume {
                 // Pre-resume freshness: `claude --resume` only looks in the
                 // project dir derived from the current cwd. If the archived
@@ -818,10 +823,12 @@ extension WorktreeLifecycle {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
                 let restoreProfileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-                // Pre-accept the folder-trust dialog for scratch spaces so restoring
-                // an extra archived session onto a fresh profile dir doesn't re-prompt.
-                ClaudeTrustSeeder.ensureTrustedForScratch(
-                    worktree: worktree, profileConfigDir: restoreProfileConfigDir)
+                // Pre-accept the folder-trust dialog so restoring an extra
+                // archived session onto a fresh profile dir doesn't re-prompt.
+                ClaudeTrustSeeder.ensureTrusted(
+                    worktree: worktree,
+                    autoTrustNonScratch: config.autoTrustWorktrees,
+                    profileConfigDir: restoreProfileConfigDir)
                 // Same pre-resume freshness sync as the primary terminal above.
                 await TranscriptProjectDirSync.ensureSessionResumableDetached(
                     sessionID: sessionID,

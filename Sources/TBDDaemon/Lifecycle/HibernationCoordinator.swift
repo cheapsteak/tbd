@@ -536,11 +536,15 @@ public actor HibernationCoordinator {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
         )
         let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-        // Pre-accept Claude's folder-trust dialog for scratch spaces so a wake
-        // onto a fresh isolated profile dir (never seeded before) doesn't re-prompt.
-        // Self-gates on isScratch; a cheap no-op once already trusted.
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: worktree, profileConfigDir: profileConfigDir)
+        // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
+        // isolated profile dir (never seeded before) doesn't re-prompt — the
+        // dialog blocks before SessionStart, so the stalled wake would be
+        // machine-invisible. Cheap no-op once already trusted. `config` is a
+        // `try?` read; fall back to the shipped default.
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: worktree,
+            autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
+            profileConfigDir: profileConfigDir)
         // Pre-resume freshness: if the worktree was moved/promoted while this
         // session was parked, its transcript still lives under the OLD munged
         // project dir; the cwd-scoped `claude --resume` below only checks the

@@ -156,6 +156,7 @@ struct GeneralSettingsTab: View {
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
+                autoTrustWorktreesToggle
                 Toggle("Auto-resume Claude sessions when the usage limit resets",
                        isOn: Binding(
                     get: { appState.autoResumeOnLimitReset },
@@ -296,6 +297,22 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setAutoCloseSetupEnabled(newValue) } }
         ))
         .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. Off by default (soaking). Applies to newly created worktrees.")
+    }
+
+    /// Pre-accept Claude's folder-trust dialog for TBD-created worktrees.
+    /// Reads the persisted flag from `daemon.capabilities` and writes via
+    /// `config.setAutoTrustWorktrees`. ON by default — the trust question has
+    /// a known answer for a worktree TBD made from a repo you registered, and
+    /// the dialog blocks before any hook fires, so a stalled session is
+    /// invisible to TBD.
+    @ViewBuilder
+    private var autoTrustWorktreesToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Trust worktrees TBD creates", isOn: Binding(
+            get: { capabilities?.autoTrustWorktrees ?? true },
+            set: { newValue in Task { await appState.setAutoTrustWorktrees(newValue) } }
+        ))
+        .help("Answer Claude's \u{201C}do you trust the files in this folder?\u{201D} prompt ahead of time for worktrees TBD created. TBD made the worktree from a repo you registered, so the answer is already known \u{2014} and the prompt blocks before any Claude hook fires, so a session waiting on it looks idle to TBD instead of stuck. On by default. Turning it off only stops future worktrees from being pre-trusted; nothing already trusted is undone, and TBD's own scratch spaces are always trusted.")
     }
 
     /// Remote agent sessions master switch. Reads the persisted flag from

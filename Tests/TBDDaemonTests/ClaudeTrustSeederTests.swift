@@ -32,7 +32,14 @@ struct ClaudeTrustSeederTests {
         return json
     }
 
-    // MARK: - Gate ON
+    /// True when `.claude.json` in `configDir` marks `path` as trusted.
+    private func isTrusted(_ path: String, in configDir: URL) -> Bool {
+        let projects = readClaudeJSON(configDir)?["projects"] as? [String: Any]
+        let entry = projects?[path] as? [String: Any]
+        return entry?["hasTrustDialogAccepted"] as? Bool == true
+    }
+
+    // MARK: - Scratch tier: seeds regardless of the toggle
 
     @Test("scratch worktree seeds hasTrustDialogAccepted=true")
     func gateOnSeedsTrust() {
@@ -41,29 +48,71 @@ struct ClaudeTrustSeederTests {
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
-        let json = readClaudeJSON(configDir)
-        let projects = json?["projects"] as? [String: Any]
-        let entry = projects?[wtPath] as? [String: Any]
-        #expect(entry?["hasTrustDialogAccepted"] as? Bool == true)
+        #expect(isTrusted(wtPath, in: configDir))
     }
 
-    // MARK: - Gate OFF (required both-branches test)
+    @Test("toggle OFF: scratch worktree is still seeded (unconditional tier)")
+    func toggleOffStillSeedsScratch() {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: true, path: wtPath)
 
-    @Test("non-scratch worktree writes nothing")
-    func gateOffWritesNothing() {
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
+
+        #expect(isTrusted(wtPath, in: configDir),
+                "scratch spaces are TBD-owned empty dirs — the toggle must not gate them")
+    }
+
+    // MARK: - Non-scratch tier: both branches of the toggle
+
+    @Test("toggle ON: non-scratch TBD-created worktree is seeded")
+    func toggleOnSeedsNonScratch() {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-real-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: false, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
+
+        #expect(isTrusted(wtPath, in: configDir),
+                "the spawn-stall fix: TBD created this worktree, so pre-seed the known answer")
+    }
+
+    @Test("toggle OFF: non-scratch worktree writes nothing")
+    func toggleOffWritesNothingForNonScratch() {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let wtPath = "/private/tmp/tbd-real-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: false, path: wtPath)
+
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         let file = configDir.appendingPathComponent(".claude.json")
         #expect(FileManager.default.fileExists(atPath: file.path) == false)
+    }
+
+    @Test("toggle OFF leaves an existing .claude.json untouched for non-scratch")
+    func toggleOffLeavesExistingConfigUntouched() throws {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let file = configDir.appendingPathComponent(".claude.json")
+        let sentinel = "{\"hasCompletedOnboarding\":true,\"projects\":{}}"
+        try sentinel.write(to: file, atomically: true, encoding: .utf8)
+
+        let wtPath = "/private/tmp/tbd-real-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: false, path: wtPath)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
+
+        #expect(try String(contentsOf: file, encoding: .utf8) == sentinel)
     }
 
     // MARK: - Preserve top-level keys
@@ -86,8 +135,8 @@ struct ClaudeTrustSeederTests {
 
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let json = readClaudeJSON(configDir)
         #expect(json?["hasCompletedOnboarding"] as? Bool == true)
@@ -117,8 +166,8 @@ struct ClaudeTrustSeederTests {
         try JSONSerialization.data(withJSONObject: existing).write(to: file)
 
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let json = readClaudeJSON(configDir)
         let projects = json?["projects"] as? [String: Any]
@@ -136,12 +185,12 @@ struct ClaudeTrustSeederTests {
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
         let firstData = try Data(contentsOf: configDir.appendingPathComponent(".claude.json"))
 
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
         let secondData = try Data(contentsOf: configDir.appendingPathComponent(".claude.json"))
 
         #expect(firstData == secondData)
@@ -165,8 +214,8 @@ struct ClaudeTrustSeederTests {
 
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let after = try String(contentsOf: file, encoding: .utf8)
         #expect(after == garbage)
@@ -185,8 +234,9 @@ struct ClaudeTrustSeederTests {
         let homeDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: homeDir) }
 
-        ClaudeTrustSeeder.ensureTrustedForScratch(
+        ClaudeTrustSeeder.ensureTrusted(
             worktree: wt,
+            autoTrustNonScratch: true,
             profileConfigDir: nil,
             homeDirectory: homeDir.path,
             environment: ["CLAUDE_CONFIG_DIR": configDir.path])
@@ -205,8 +255,9 @@ struct ClaudeTrustSeederTests {
         let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
         let wt = makeWorktree(isScratch: true, path: wtPath)
 
-        ClaudeTrustSeeder.ensureTrustedForScratch(
+        ClaudeTrustSeeder.ensureTrusted(
             worktree: wt,
+            autoTrustNonScratch: true,
             profileConfigDir: nil,
             homeDirectory: homeDir.path,
             environment: [:])
@@ -233,8 +284,8 @@ struct ClaudeTrustSeederTests {
         try sentinel.write(to: file, atomically: true, encoding: .utf8)
 
         let wt = makeWorktree(isScratch: true, path: wtPath)
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: wt, profileConfigDir: configDir.path)
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
         let after = try String(contentsOf: file, encoding: .utf8)
         #expect(after == sentinel)

@@ -808,6 +808,22 @@ public struct Config: Codable, Sendable, Equatable {
     /// shell for debugging. Default OFF: this kills a pane and deletes rows
     /// without a user gesture, so it is opt-in until it soaks.
     public var autoCloseSetupEnabled: Bool
+    /// Pre-accept Claude Code's folder-trust dialog for worktrees TBD created.
+    /// Default ON.
+    ///
+    /// The dialog asks "is this a project you created or one you trust?" — and
+    /// for a worktree TBD created from a repo the operator registered, TBD
+    /// already holds every fact the question is about, so the answer is yes by
+    /// construction. Seeding writes that answer through Claude's own config
+    /// persistence and the dialog never renders. That matters because the
+    /// dialog blocks BEFORE SessionStart: no hook fires while it is up, so a
+    /// stalled-on-trust session is invisible to TBD and prevention is the only
+    /// available fix.
+    ///
+    /// Turning this OFF only stops future seeding of non-scratch worktrees; it
+    /// never un-trusts a path. Scratch spaces are seeded unconditionally and
+    /// are not governed by this flag.
+    public var autoTrustWorktrees: Bool
     /// Master switch for the daemon-owned orphan GC sweep. Default ON.
     public var gcEnabled: Bool
     /// Minimum age (seconds) an orphaned worktree/scratchpad must reach
@@ -854,6 +870,7 @@ public struct Config: Codable, Sendable, Equatable {
                 autoResumeOnApiError: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
+                autoTrustWorktrees: Bool = true,
                 gcEnabled: Bool = true,
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
                 gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays,
@@ -877,6 +894,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.autoResumeOnApiError = autoResumeOnApiError
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.autoTrustWorktrees = autoTrustWorktrees
         self.gcEnabled = gcEnabled
         self.gcGraceSeconds = gcGraceSeconds
         self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
@@ -918,6 +936,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         autoCloseSetupEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // Absent (older daemon / older persisted JSON) defaults to ON, matching
+        // the column default — the trust answer is known by construction.
+        autoTrustWorktrees = try c.decodeIfPresent(
+            Bool.self, forKey: .autoTrustWorktrees) ?? true
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
         gcGraceSeconds = try c.decodeIfPresent(Int.self, forKey: .gcGraceSeconds)
             ?? Config.defaultGCGraceSeconds
