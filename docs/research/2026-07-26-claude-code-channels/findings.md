@@ -1,7 +1,8 @@
-# Claude Code Channels: draft-safe message injection
+# Draft-safe message injection: Claude Code Channels and Codex app-server
 
 **Status:** Investigated, not implemented
 **Tested:** 2026-07-26 with Claude Code v2.1.220 and Haiku 4.5
+**Codex schema inspected:** 2026-07-26 with codex-cli 0.145.0
 
 ## Summary
 
@@ -17,10 +18,18 @@ general delivery guarantee: custom development channels require startup
 consent, channel notifications have no delivery acknowledgement, and the same
 development-channel mechanism did not work with `claude -p`.
 
+Codex exposes a separate native pathway through its experimental app-server
+protocol. A client can steer an active turn or start a new turn without sending
+terminal input. The protocol shape is documented and present in the installed
+Codex schema, but composer-draft preservation and concurrent-client behavior
+have not yet been tested.
+
 Official documentation:
 
 - [Channels](https://code.claude.com/docs/en/channels)
 - [Channels reference](https://code.claude.com/docs/en/channels-reference)
+- [Codex app-server](https://learn.chatgpt.com/docs/app-server.md)
+- [Codex scheduled tasks](https://learn.chatgpt.com/docs/automations.md)
 
 ## Observed facts
 
@@ -111,6 +120,58 @@ that combination was not tested.
 This section describes v2.1.220 implementation details, not a stable public
 contract. It should be rechecked when upgrading Claude Code.
 
+## Codex app-server pathway
+
+Codex app-server is the native protocol used by rich Codex clients. Unlike
+Claude Code Channels, it is not an MCP capability. A terminal UI can connect to
+an app-server over a local Unix socket:
+
+```sh
+codex app-server --listen unix:///path/to/codex.sock
+codex --remote unix:///path/to/codex.sock
+```
+
+For an in-flight turn, a client can append user input with `turn/steer`:
+
+```json
+{
+  "method": "turn/steer",
+  "id": 42,
+  "params": {
+    "threadId": "thr_123",
+    "expectedTurnId": "turn_456",
+    "input": [
+      {
+        "type": "text",
+        "text": "Scheduled message"
+      }
+    ]
+  }
+}
+```
+
+`expectedTurnId` is a race-safety precondition: the request fails if that turn
+is no longer active. When the thread is idle, the client can instead use
+`turn/start`. The server emits `turn/completed` when a turn finishes, giving a
+scheduler a machine-readable point at which to start a queued follow-up.
+
+The generated 0.145.0 experimental schema does not expose a server-side queue
+request. Codex clients provide queueing as a user-interface behavior, so a TBD
+adapter should retain a scheduled message until `turn/completed` and then call
+`turn/start`. Some active turns, including `/review` and manual `/compact`, can
+reject steering with `activeTurnNotSteerable`; the adapter must wait or report
+that state rather than silently dropping the message.
+
+Codex also supports scheduled tasks that can return to an existing chat on
+minute-based intervals. Scheduling is managed through the ChatGPT web or
+desktop surfaces, not Codex CLI. That product feature may cover user-facing
+follow-up loops, but it does not replace a TBD-controlled local delivery
+protocol.
+
+No official Codex documentation describes an MCP server pushing unsolicited
+channel messages into a Codex conversation. App-server is therefore the
+narrowest documented integration point for TBD.
+
 ## Unknowns and limitations
 
 - Channels are a research-preview Claude Code feature.
@@ -123,6 +184,12 @@ contract. It should be rechecked when upgrading Claude Code.
   were not tested.
 - The interactive tests establish composer preservation for v2.1.220; they do
   not establish a compatibility guarantee for future versions.
+- Codex app-server is experimental.
+- The Codex pathway has not been exercised with an unsent terminal composer
+  draft. Because it bypasses terminal input, draft preservation is plausible,
+  but it is not yet an observed fact.
+- Multiple clients addressing the same app-server thread, reconnect behavior,
+  and scheduler recovery after a rejected steer remain unverified.
 
 ## Implication for TBD
 
@@ -149,6 +216,21 @@ merely because it wrote the MCP notification. A first implementation should
 either describe delivery as best-effort or add a separate acknowledgement
 protocol, with bounded retention and deduplication in the daemon.
 
+For Codex, the corresponding candidate path is:
+
+```text
+TBD scheduler
+    -> tbdd
+    -> terminal-specific Codex app-server socket
+    -> turn/steer while active, or turn/start while idle
+    -> Codex conversation
+```
+
+This path has stronger protocol feedback than Claude Code Channels:
+`turn/steer` returns the accepted turn ID, rejects a stale `expectedTurnId`, and
+the server reports turn completion. TBD would still need bounded retention,
+deduplication, and a policy for non-steerable turns.
+
 ## Constraint tension
 
 This design is in tension with
@@ -166,8 +248,14 @@ would need an explicit product decision before implementation.
 ## Recommendation
 
 Treat Channels as a validated interactive prototype, not yet as core
-infrastructure. The next investigation should verify an approved plugin channel,
-document reconnect and acknowledgement semantics, and decide whether an optional
-agent integration is compatible with TBD's no-cooperation constraint. Keep
-scheduled delivery out of `terminal.send`: terminal input cannot provide the
-draft-preservation property demonstrated here.
+infrastructure. The next investigation should verify an approved Claude plugin
+channel and run the same empty-composer and dirty-composer tests against a
+remote Codex TUI plus app-server client. It should also test multiple clients,
+reconnect behavior, and non-steerable-turn recovery before either pathway is
+used for delivery.
+
+Decide separately whether an optional Claude agent integration is compatible
+with TBD's no-cooperation constraint. Codex app-server is a host integration
+rather than an agent-side MCP plugin, but it would change how TBD launches and
+owns Codex sessions. Keep scheduled delivery out of `terminal.send`: terminal
+input cannot provide the draft-preservation property demonstrated here.
