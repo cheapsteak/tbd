@@ -21,9 +21,17 @@ struct TerminalAutoResizeFlagTests {
     private let key = AppState.terminalAutoResizeKey
 
     /// Build an isolated UserDefaults domain seeded with the flag value,
-    /// hand the body an `AppState` wired to that domain, then tear the
-    /// domain down so nothing persists across tests.
-    private func withFlag(_ enabled: Bool, _ body: (AppState) throws -> Void) rethrows {
+    /// hand the body an `AppState` wired to that domain plus the domain
+    /// itself, then tear the domain down so nothing persists across tests.
+    ///
+    /// The body gets the `UserDefaults` because `AppState.terminalAutoResizeEnabled`
+    /// is a *live* `userDefaults.bool(forKey:)` read, not a cached-at-init
+    /// value — so writing the key mid-test flips the flag for subsequent
+    /// reads. `mainAreaTerminalSizeOn` relies on that; see the comment there.
+    private func withFlag(
+        _ enabled: Bool,
+        _ body: (AppState, UserDefaults) throws -> Void
+    ) rethrows {
         let suiteName = "TBDAppTests.TerminalAutoResize.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -31,14 +39,17 @@ struct TerminalAutoResizeFlagTests {
         }
         defaults.set(enabled, forKey: key)
         let state = AppState(userDefaults: defaults)
-        try body(state)
+        try body(state, defaults)
     }
 
     @Test("returns (nil, nil) when flag is off so daemon falls back to its 220×50 default")
     func mainAreaTerminalSizeOff() {
-        withFlag(false) { state in
+        withFlag(false) { state, _ in
             // The defaults seed mainAreaSize at 1120x776, which would
             // otherwise produce a real cell count — verify the flag wins.
+            // Safe to assign with the flag off: the `didSet` reaches
+            // `scheduleMainAreaSizeBroadcast()`, which returns at its own
+            // `guard terminalAutoResizeEnabled` before arming anything.
             state.mainAreaSize = CGSize(width: 1200, height: 800)
             let size = state.mainAreaTerminalSize()
             // nil (not 0) is required so callers' Int? params trigger the
@@ -51,8 +62,31 @@ struct TerminalAutoResizeFlagTests {
 
     @Test("returns real cell counts when flag is on")
     func mainAreaTerminalSizeOn() throws {
-        try withFlag(true) { state in
+        try withFlag(true) { state, defaults in
+            // Seed the viewport with the flag OFF, then flip it back on.
+            //
+            // Assigning `mainAreaSize` while the flag is on runs its `didSet`
+            // → `scheduleMainAreaSizeBroadcast()`, which arms a 300ms debounce
+            // in a stored Task. That task outlives this test and then fires a
+            // REAL `setMainAreaSize` RPC at `~/tbd/sock` — the developer's
+            // running daemon — violating the repo's "tests must not touch
+            // ~/tbd" rule, and reporting any failure from a Task with no
+            // enclosing test scope. `AppState.daemonClient` is a
+            // non-injectable `let` with no protocol, so nothing can intercept
+            // that RPC; the seam is filed as issue #532. Until it lands, the
+            // flag guard is the only interception point we have — and
+            // cancelling the debounce isn't an option either, because
+            // `mainAreaSizeBroadcastTask` is `private` (not `@testable`-reachable).
+            //
+            // This costs no coverage: the subject here is
+            // `mainAreaTerminalSize()` with the flag ON, which is exercised
+            // exactly as before. The debounce was only ever an unasserted
+            // side effect of the setup. `terminalAutoResizeEnabled` reads
+            // UserDefaults on every access, so the flip below is immediate.
+            defaults.set(false, forKey: key)
             state.mainAreaSize = CGSize(width: 1200, height: 800)
+            defaults.set(true, forKey: key)
+
             let size = state.mainAreaTerminalSize()
             // Exact cell metrics depend on the platform monospaced font, so
             // we just assert plausible bounds — the floor is 80x24 and a
