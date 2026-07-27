@@ -30,8 +30,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var auto_resume_on_api_error: Bool?
     var hibernate_input_veto_enabled: Bool?
     var auto_close_setup_enabled: Bool?
-    /// Pre-accept Claude's folder-trust dialog for TBD-created worktrees.
-    /// Default ON (see the `v66_config_auto_trust_worktrees` migration).
+    /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
+    /// repos (TBD-created ones and the repo's own checkout), excluding
+    /// fork-PR-head checkouts. Default ON (see the
+    /// `v66_config_auto_trust_worktrees` migration).
     var auto_trust_worktrees: Bool?
     var gc_enabled: Bool?
     var gc_grace_seconds: Int?

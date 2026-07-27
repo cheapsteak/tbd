@@ -13,14 +13,18 @@ struct ClaudeTrustSeederTests {
             .appendingPathComponent("tbd-trust-seed-test-\(UUID().uuidString)", isDirectory: true)
     }
 
-    private func makeWorktree(isScratch: Bool, path: String) -> Worktree {
+    private func makeWorktree(
+        isScratch: Bool, path: String, prNumber: Int? = nil, foreignHead: Bool = false
+    ) -> Worktree {
         Worktree(
             repoID: isScratch ? nil : UUID(),
             name: "wt",
             displayName: "wt",
             branch: "main",
             path: path,
-            tmuxServer: "srv"
+            tmuxServer: "srv",
+            prNumber: prNumber,
+            foreignHead: foreignHead
         )
     }
 
@@ -113,6 +117,71 @@ struct ClaudeTrustSeederTests {
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         #expect(try String(contentsOf: file, encoding: .utf8) == sentinel)
+    }
+
+    // MARK: - Foreign-head tier: contents TBD cannot vouch for
+
+    @Test("toggle ON: foreign-head worktree is NOT seeded")
+    func foreignHeadIsNotSeededWithToggleOn() {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let wtPath = "/private/tmp/tbd-fork-pr-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: false, path: wtPath, prNumber: 42, foreignHead: true)
+
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
+
+        #expect(isTrusted(wtPath, in: configDir) == false,
+                "a fork contributor authored these contents — the dialog must render")
+        let file = configDir.appendingPathComponent(".claude.json")
+        #expect(FileManager.default.fileExists(atPath: file.path) == false)
+    }
+
+    @Test("toggle OFF: foreign-head worktree is NOT seeded either")
+    func foreignHeadIsNotSeededWithToggleOff() {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let wtPath = "/private/tmp/tbd-fork-pr-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: false, path: wtPath, prNumber: 42, foreignHead: true)
+
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
+
+        #expect(isTrusted(wtPath, in: configDir) == false)
+    }
+
+    /// Over-exclusion guard: a *decorated* same-repo PR row carries `prNumber`
+    /// for status tracking but checks out an ordinary local branch, so
+    /// `foreignHead` stays false and it must still seed. Gating on `prNumber`
+    /// instead of `foreignHead` would fail the originally reported bug.
+    @Test("toggle ON: same-repo PR worktree (prNumber set, not foreign) IS seeded")
+    func decoratedPRWorktreeIsStillSeeded() {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let wtPath = "/private/tmp/tbd-same-repo-pr-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: false, path: wtPath, prNumber: 9, foreignHead: false)
+
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
+
+        #expect(isTrusted(wtPath, in: configDir),
+                "a PR-review worktree on a same-repo branch is the exact case the seeder exists for")
+    }
+
+    /// The scratch tier is absolute: a scratch space has no git contents that
+    /// could be foreign, so even a (nonsensical) `foreignHead` stamp must not
+    /// reintroduce the guaranteed first-spawn stall.
+    @Test("scratch + foreignHead is still seeded (scratch tier is unconditional)")
+    func scratchIgnoresForeignHead() {
+        let configDir = tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let wtPath = "/private/tmp/tbd-scratch-\(UUID().uuidString)"
+        let wt = makeWorktree(isScratch: true, path: wtPath, foreignHead: true)
+
+        ClaudeTrustSeeder.ensureTrusted(
+            worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
+
+        #expect(isTrusted(wtPath, in: configDir))
     }
 
     // MARK: - Preserve top-level keys

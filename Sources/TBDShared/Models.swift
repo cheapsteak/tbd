@@ -158,6 +158,19 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// local branch) get tracked.
     public var prNumber: Int?
 
+    /// True when this worktree's *contents* were checked out from a ref TBD
+    /// cannot vouch for — today, a `refs/pull/<n>/head` fetch of a PR whose
+    /// commits may come from a third-party fork. TBD created the directory, but
+    /// a stranger authored what is in it (`.claude/settings.json`, hooks, MCP
+    /// config, `CLAUDE.md`), so the folder-trust question does *not* have a
+    /// known answer and `ClaudeTrustSeeder` must not pre-answer it.
+    ///
+    /// Set only by the PR-head checkout branch of `completeCreateWorktree`.
+    /// `false` for everything else — including a *decorated* same-repo PR row,
+    /// which stamps `prNumber` for status tracking but checks out an ordinary
+    /// local branch, so it stays seedable.
+    public var foreignHead: Bool = false
+
     /// When this worktree was pinned to the sidebar dock; `nil` = unpinned.
     /// Purely a UI affordance — the daemon stores it but never acts on it.
     /// Ordering in the dock is ascending by this timestamp, so new pins append.
@@ -198,6 +211,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 promotedToRepoID: UUID? = nil,
                 prStatus: PRStatus? = nil,
                 prNumber: Int? = nil,
+                foreignHead: Bool = false,
                 pinnedAt: Date? = nil,
                 pinSortOrder: Int? = nil) {
         self.id = id
@@ -221,6 +235,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.promotedToRepoID = promotedToRepoID
         self.prStatus = prStatus
         self.prNumber = prNumber
+        self.foreignHead = foreignHead
         self.pinnedAt = pinnedAt
         self.pinSortOrder = pinSortOrder
     }
@@ -231,7 +246,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
-        case promotedToRepoID, prStatus, prNumber, pinnedAt, pinSortOrder
+        case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -257,6 +272,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         promotedToRepoID = try c.decodeIfPresent(UUID.self, forKey: .promotedToRepoID)
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
         prNumber = try c.decodeIfPresent(Int.self, forKey: .prNumber)
+        // Absent in JSON written before v67 — those rows predate fork-PR
+        // checkout tracking, so treat them as ordinary TBD-created contents.
+        foreignHead = try c.decodeIfPresent(Bool.self, forKey: .foreignHead) ?? false
         pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
         pinSortOrder = try c.decodeIfPresent(Int.self, forKey: .pinSortOrder)
     }
@@ -808,21 +826,30 @@ public struct Config: Codable, Sendable, Equatable {
     /// shell for debugging. Default OFF: this kills a pane and deletes rows
     /// without a user gesture, so it is opt-in until it soaks.
     public var autoCloseSetupEnabled: Bool
-    /// Pre-accept Claude Code's folder-trust dialog for worktrees TBD created.
+    /// Pre-accept Claude Code's folder-trust dialog for the worktrees TBD
+    /// created in a registered repo, and for that repo's own checkout.
     /// Default ON.
     ///
     /// The dialog asks "is this a project you created or one you trust?" — and
     /// for a worktree TBD created from a repo the operator registered, TBD
     /// already holds every fact the question is about, so the answer is yes by
-    /// construction. Seeding writes that answer through Claude's own config
-    /// persistence and the dialog never renders. That matters because the
-    /// dialog blocks BEFORE SessionStart: no hook fires while it is up, so a
-    /// stalled-on-trust session is invisible to TBD and prevention is the only
-    /// available fix.
+    /// construction. The repo's `.main` checkout is covered by the second half
+    /// of the question: TBD did not create it, but registering it with
+    /// `tbd repo add` was itself a deliberate trust gesture. Seeding writes that
+    /// answer through Claude's own config persistence and the dialog never
+    /// renders. That matters because the dialog blocks BEFORE SessionStart: no
+    /// hook fires while it is up, so a stalled-on-trust session is invisible to
+    /// TBD and prevention is the only available fix.
     ///
-    /// Turning this OFF only stops future seeding of non-scratch worktrees; it
-    /// never un-trusts a path. Scratch spaces are seeded unconditionally and
-    /// are not governed by this flag.
+    /// Worktrees flagged `Worktree.foreignHead` — contents fetched from a PR
+    /// head that a third-party fork may have authored — are never seeded, on or
+    /// off: TBD vouches for the directory it created, not for what was fetched
+    /// into it.
+    ///
+    /// Turning this OFF only stops future seeding of non-scratch worktrees —
+    /// including worktrees that already exist but were never seeded — and never
+    /// un-trusts a path. Scratch spaces are seeded unconditionally and are not
+    /// governed by this flag.
     public var autoTrustWorktrees: Bool
     /// Master switch for the daemon-owned orphan GC sweep. Default ON.
     public var gcEnabled: Bool

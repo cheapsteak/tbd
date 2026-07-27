@@ -1798,8 +1798,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
-    /// Whether TBD pre-accepts Claude's folder-trust dialog for the worktrees
-    /// it created (default ON). Re-evaluated by the daemon on every call.
+    /// Whether TBD pre-accepts Claude's folder-trust dialog for the worktrees of
+    /// registered repos — the ones TBD created plus the repo's own checkout, but
+    /// never a fork-PR-head checkout (default ON). Re-evaluated by the daemon on
+    /// every call.
     public let autoTrustWorktrees: Bool
     /// Whether the daemon owns panel-surface state (`daemon_panel_surface_enabled`,
     /// spec C Phase 2 §8/§10). Default OFF while the feature soaks — the app

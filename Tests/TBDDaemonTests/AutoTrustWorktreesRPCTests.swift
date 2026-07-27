@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -96,5 +97,59 @@ struct AutoTrustWorktreesRPCTests {
     func configDecodeBackCompat() throws {
         let result = try JSONDecoder().decode(Config.self, from: Data("{}".utf8))
         #expect(result.autoTrustWorktrees == true)
+    }
+
+    // MARK: - worktree.foreign_head (v67)
+
+    @Test("worktree foreignHead defaults false and round-trips through the store")
+    func foreignHeadRoundTrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/repoFH", displayName: "repoFH", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", displayName: "w", branch: "b",
+            path: "/tmp/repoFH/w", tmuxServer: "s", status: .active)
+        #expect(wt.foreignHead == false, "ordinary creates are TBD-authored contents")
+        #expect(try await db.worktrees.get(id: wt.id)?.foreignHead == false)
+
+        try await db.worktrees.setForeignHead(id: wt.id, value: true)
+        #expect(try await db.worktrees.get(id: wt.id)?.foreignHead == true)
+
+        try await db.worktrees.setForeignHead(id: wt.id, value: false)
+        #expect(try await db.worktrees.get(id: wt.id)?.foreignHead == false)
+    }
+
+    /// A row written before v67 has no value for the column. The migration
+    /// backfills `false`, but the record type must also survive a NULL rather
+    /// than failing to decode and dropping the worktree.
+    @Test("worktree row with a NULL foreign_head reads as false")
+    func nullForeignHeadReadsFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/repoFHNull", displayName: "repoFHNull", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", displayName: "w", branch: "b",
+            path: "/tmp/repoFHNull/w", tmuxServer: "s", status: .active)
+
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: "UPDATE worktree SET foreign_head = NULL WHERE id = ?",
+                arguments: [wt.id.uuidString])
+        }
+
+        let reread = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(reread.foreignHead == false)
+    }
+
+    /// Worktree JSON from a daemon without the new key must decode to false —
+    /// pre-v67 rows predate fork-PR checkout tracking.
+    @Test("Worktree JSON without foreignHead decodes as false")
+    func worktreeDecodeBackCompat() throws {
+        let json = Data(#"""
+        {"id":"11111111-1111-1111-1111-111111111111","name":"w","displayName":"w",
+         "branch":"b","path":"/tmp/w","status":"active","createdAt":0,"tmuxServer":"s"}
+        """#.utf8)
+        let wt = try JSONDecoder().decode(Worktree.self, from: json)
+        #expect(wt.foreignHead == false)
     }
 }

@@ -299,20 +299,22 @@ struct GeneralSettingsTab: View {
         .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. Off by default (soaking). Applies to newly created worktrees.")
     }
 
-    /// Pre-accept Claude's folder-trust dialog for TBD-created worktrees.
-    /// Reads the persisted flag from `daemon.capabilities` and writes via
+    /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
+    /// repos. Reads the persisted flag from `daemon.capabilities` and writes via
     /// `config.setAutoTrustWorktrees`. ON by default — the trust question has
-    /// a known answer for a worktree TBD made from a repo you registered, and
+    /// a known answer for a worktree TBD made from a repo you registered (and
+    /// for that repo's own checkout, which you registered deliberately), and
     /// the dialog blocks before any hook fires, so a stalled session is
-    /// invisible to TBD.
+    /// invisible to TBD. Worktrees checked out from a PR head are excluded:
+    /// their contents may be fork-authored, which is what the prompt gates.
     @ViewBuilder
     private var autoTrustWorktreesToggle: some View {
         let capabilities = appState.daemonCapabilities
-        Toggle("Trust worktrees TBD creates", isOn: Binding(
+        Toggle("Trust repos you add and the worktrees TBD makes in them", isOn: Binding(
             get: { capabilities?.autoTrustWorktrees ?? true },
             set: { newValue in Task { await appState.setAutoTrustWorktrees(newValue) } }
         ))
-        .help("Answer Claude's \u{201C}do you trust the files in this folder?\u{201D} prompt ahead of time for worktrees TBD created. TBD made the worktree from a repo you registered, so the answer is already known \u{2014} and the prompt blocks before any Claude hook fires, so a session waiting on it looks idle to TBD instead of stuck. On by default. Turning it off only stops future worktrees from being pre-trusted; nothing already trusted is undone, and TBD's own scratch spaces are always trusted.")
+        .help("Answer Claude's \u{201C}do you trust the files in this folder?\u{201D} prompt ahead of time for worktrees TBD created and for the checkout of each repo you added. You registered the repo and TBD made the worktree, so the answer is already known \u{2014} and the prompt blocks before any Claude hook fires, so a session waiting on it looks idle to TBD instead of stuck. Worktrees checked out from a pull request head are never pre-trusted, on or off: their files may come from someone else's fork, which is exactly what the prompt is for. On by default. Turning it off stops any further pre-trusting, including for worktrees that already exist; nothing already trusted is undone, and TBD's own scratch spaces are always trusted.")
     }
 
     /// Remote agent sessions master switch. Reads the persisted flag from

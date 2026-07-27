@@ -282,13 +282,14 @@ extension RPCRouter {
             ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
             : nil
 
-        // Pre-accept Claude Code's folder-trust dialog: this worktree is
-        // TBD-created from a registered repo, so the trust answer is known by
-        // construction, and the dialog blocks before SessionStart (a stall
-        // would be machine-invisible). Only the claude path can trigger it;
-        // best-effort (never throws), so seeding on fresh and resume is safe.
-        // `createConfig` is a `try?` read — falling back to `true` keeps the
-        // shipped default rather than silently reinstating the stall.
+        // Pre-accept Claude Code's folder-trust dialog: this worktree belongs to
+        // a registered repo, so the trust answer is known by construction, and
+        // the dialog blocks before SessionStart (a stall would be
+        // machine-invisible). The seeder still declines for `foreignHead` rows.
+        // Only the claude path can trigger it; best-effort (never throws), so
+        // seeding on fresh and resume is safe. `createConfig` is a `try?` read —
+        // falling back to `true` keeps the shipped default rather than silently
+        // reinstating the stall.
         if isClaudeType {
             ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree,
@@ -584,8 +585,10 @@ extension RPCRouter {
                 resolvedProfile = nil
             }
             let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-            // Reviving a closed terminal respawns claude in the same TBD-created
-            // worktree, so the same trust argument applies. `reviveConfig` is a
+            // Reviving a closed terminal respawns claude in the same worktree,
+            // so the same trust argument applies — including the seeder's
+            // `foreignHead` refusal, which is why the flag lives on the row
+            // rather than in the create-time parameter list. `reviveConfig` is a
             // `try?` read; fall back to the shipped default.
             ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree,
