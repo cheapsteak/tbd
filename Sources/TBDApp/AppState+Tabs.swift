@@ -128,12 +128,20 @@ extension AppState {
     ///   still spends the budget and stops.
     func scheduleTabStateHydration(worktreeID: UUID) {
         guard !tabStateHydratedWorktreeIDs.contains(worktreeID),
-              !tabStateFetchesInFlight.contains(worktreeID),
+              tabStateFetchTasks[worktreeID] == nil,
               tabStateFetchAttempts[worktreeID, default: 0] < Self.maxTabStateHydrationAttempts
         else { return }
         tabStateFetchAttempts[worktreeID, default: 0] += 1
-        tabStateFetchesInFlight.insert(worktreeID)
-        Task { await loadTabStates(worktreeID: worktreeID) }
+        // The handle is stored, not discarded: it IS the in-flight marker, and
+        // it lets a caller (today, only tests) await this scheduled work
+        // instead of watching for a side effect. The closure is MainActor-bound
+        // like its creator, so it cannot start before this assignment lands,
+        // and it clears its own entry as its last act — once `value` resumes,
+        // the worktree is eligible to schedule again.
+        tabStateFetchTasks[worktreeID] = Task {
+            await self.loadTabStates(worktreeID: worktreeID)
+            self.tabStateFetchTasks.removeValue(forKey: worktreeID)
+        }
     }
 
     /// Pull stored label overrides and tab order from the daemon for a worktree.
@@ -201,7 +209,11 @@ extension AppState {
             logger.error("loadTabStates failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
             handleConnectionError(error)
         }
-        tabStateFetchesInFlight.remove(worktreeID)
+        // NOTE: the in-flight entry is cleared by the scheduler's own `Task`,
+        // not here — this method is also called directly (initial load, tests),
+        // and clearing from here would drop a marker belonging to a fetch that
+        // is still running.
+        //
         // Gated one-shot legacy panel import (spec C §11.2) — fires at most
         // once per launch regardless of whether this particular listTabs
         // call succeeded, since it imports from AppState's already-loaded

@@ -6,8 +6,10 @@ import TBDShared
 
 // Tier 1, except the "Hydration gap" section, which is tier 2: those tests
 // observe an unstructured `Task` (`reconcileTabs` schedules `loadTabStates` in
-// one) through bounded polling, which is real concurrency, not virtual time.
-// Everything else is a pure in-process AppState state machine.
+// one), which is real concurrency, not virtual time. They await that `Task`'s
+// completion directly (`settleHydration`) — no wall-clock deadline is involved
+// anywhere in this file. Everything else is a pure in-process AppState state
+// machine.
 //
 // The one RPC these paths make (`listTabs`) is driven through the
 // `tabStatesFetcher` injectable-closure seam other AppState tests already use
@@ -477,9 +479,9 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    /// Tier 2 — bounded polling over the unstructured `Task` `reconcileTabs`
-    /// schedules. Uses the whole attempt budget: one empty response, then a
-    /// hydrating one on the last attempt the cap allows.
+    /// Tier 2 — awaits the unstructured `Task` `reconcileTabs` schedules. Uses
+    /// the whole attempt budget: one empty response, then a hydrating one on
+    /// the last attempt the cap allows.
     @Test("reconcileTabs re-fetches tab state until hydrated, then stops")
     func reconcileTabsRetriesTabStateFetchUntilHydrated() async {
         await withState { state in
@@ -494,13 +496,11 @@ struct ActiveTabResolutionTests {
                     : TabListResponse(tabs: [], order: [], activeTabID: nil)
             }
             let claudeTerminal = terminal(claude, worktreeID: worktreeID, label: "Claude")
-            // Waiting for the fetch to land (not merely to start) keeps the
+            // Awaiting the fetch to land (not merely to start) keeps the
             // in-flight dedup from swallowing the next reconcile's attempt.
             @MainActor func reconcileAndSettle() async {
                 state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
-                await waitFor("the scheduled fetch to finish") {
-                    !state.tabStateFetchesInFlight.contains(worktreeID)
-                }
+                await settleHydration(state, worktreeID: worktreeID)
             }
 
             await reconcileAndSettle()
@@ -516,10 +516,11 @@ struct ActiveTabResolutionTests {
             #expect(state.tabStateHydratedWorktreeIDs.contains(worktreeID))
             let settled = fetchCount
 
-            // ...and every reconcile after that is silent: no poll storm.
+            // ...and every reconcile after that is silent: no poll storm. Each
+            // round drains whatever it armed, so a re-fetch would land inside
+            // the loop and show up in the count below rather than racing it.
             await reconcileAndSettle()
             await reconcileAndSettle()
-            for _ in 0..<20 { await Task.yield() }
             #expect(fetchCount == settled, "a hydrated worktree must not re-fetch tab state")
         }
     }
@@ -551,8 +552,8 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    /// Tier 2 — the retry is scheduled in an unstructured `Task`, observed by
-    /// bounded polling. End-to-end version of the gap: the app has the tabs but
+    /// Tier 2 — the retry is scheduled in an unstructured `Task`, awaited
+    /// through its handle. End-to-end version of the gap: the app has the tabs but
     /// the daemon has not written yet, and the retry is what lands the
     /// selection on the agent.
     @Test("the hydration gap closes: a retry lands the selection on the agent tab")
@@ -578,16 +579,17 @@ struct ActiveTabResolutionTests {
             ]
 
             state.reconcileTabs(worktreeID: worktreeID, terminals: terminals)
-            await waitFor("the mid-create fetch") { fetchCount >= 1 }
+            await settleHydration(state, worktreeID: worktreeID)
+            #expect(fetchCount == 1, "the mid-create reconcile must have fetched once")
             #expect(state.tabStateHydratedWorktreeIDs.contains(worktreeID) == false,
                     "an empty response must not latch the worktree as hydrated")
 
             // The daemon has written now; the next reconcile must try again.
             hydrated = true
             state.reconcileTabs(worktreeID: worktreeID, terminals: terminals)
-            await waitFor("the hydrating retry") {
-                state.tabStateHydratedWorktreeIDs.contains(worktreeID)
-            }
+            await settleHydration(state, worktreeID: worktreeID)
+            #expect(state.tabStateHydratedWorktreeIDs.contains(worktreeID),
+                    "the retry must latch once the daemon's answer carries content")
 
             #expect(state.tabs[worktreeID]?.map(\.id) == [claude, setup, note])
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude,
@@ -615,9 +617,7 @@ struct ActiveTabResolutionTests {
             // so this measures the attempt cap and not the in-flight dedup.
             for _ in 0..<AppState.maxTabStateHydrationAttempts {
                 state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
-                await waitFor("the scheduled fetch to finish") {
-                    !state.tabStateFetchesInFlight.contains(worktreeID)
-                }
+                await settleHydration(state, worktreeID: worktreeID)
             }
             #expect(fetchCount == AppState.maxTabStateHydrationAttempts)
             #expect(state.tabStateHydratedWorktreeIDs.contains(worktreeID) == false)
@@ -627,11 +627,8 @@ struct ActiveTabResolutionTests {
             let settled = fetchCount
             for _ in 0..<5 {
                 state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
-                await waitFor("no further fetch") {
-                    !state.tabStateFetchesInFlight.contains(worktreeID)
-                }
+                await settleHydration(state, worktreeID: worktreeID)
             }
-            for _ in 0..<20 { await Task.yield() }
             #expect(fetchCount == settled,
                     "an empty-forever worktree must stop polling, not re-fire on every reconcile")
         }
@@ -659,9 +656,7 @@ struct ActiveTabResolutionTests {
             let claudeTerminal = terminal(claude, worktreeID: worktreeID, label: "Claude")
             @MainActor func reconcileAndSettle() async {
                 state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
-                await waitFor("the scheduled fetch to finish") {
-                    !state.tabStateFetchesInFlight.contains(worktreeID)
-                }
+                await settleHydration(state, worktreeID: worktreeID)
             }
 
             for _ in 0..<AppState.maxTabStateHydrationAttempts { await reconcileAndSettle() }
@@ -671,7 +666,6 @@ struct ActiveTabResolutionTests {
 
             let settled = fetchCount
             for _ in 0..<5 { await reconcileAndSettle() }
-            for _ in 0..<20 { await Task.yield() }
             #expect(fetchCount == settled,
                     "a worktree whose listTabs always fails must stop re-firing the RPC")
         }
@@ -695,9 +689,7 @@ struct ActiveTabResolutionTests {
             let claudeTerminal = terminal(claude, worktreeID: worktreeID, label: "Claude")
             @MainActor func reconcileAndSettle() async {
                 state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
-                await waitFor("the scheduled fetch to finish") {
-                    !state.tabStateFetchesInFlight.contains(worktreeID)
-                }
+                await settleHydration(state, worktreeID: worktreeID)
             }
 
             // Deliberately more rounds than the cap: none of them may be spent.
@@ -731,42 +723,35 @@ struct ActiveTabResolutionTests {
             state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
             state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
             state.reconcileTabs(worktreeID: worktreeID, terminals: [claudeTerminal])
-            await waitFor("the single scheduled fetch") { fetchCount >= 1 }
-            for _ in 0..<20 { await Task.yield() }
+            // `settleHydration` drains until nothing is armed, so a broken
+            // dedup shows up as a count of 3 here rather than as a race.
+            await settleHydration(state, worktreeID: worktreeID)
 
             #expect(fetchCount == 1, "overlapping reconciles must share one in-flight fetch")
         }
     }
 
-    /// Bounded poll for a MainActor condition driven by an unstructured Task
-    /// (`reconcileTabs` schedules `loadTabStates` in one). Reports the timeout
-    /// as a thrown error so the diagnostic survives into a CI summary, at the
-    /// CALLER's source location — without threading `#_sourceLocation` every
-    /// call site reports as this one line.
+    /// Await the hydration work `reconcileTabs` schedules, until none is armed.
     ///
-    /// The deadline is deliberately generous: these tests finish in ~80 ms
-    /// alone but were measured taking ~9.4 s of wall time inside the full
-    /// 1600-test parallel pass, where every `Task.sleep` re-queues behind the
-    /// rest of the run. It is a hang catcher, not a perf budget.
-    private func waitFor(
-        _ what: String,
-        timeout: Duration = .seconds(30),
-        sourceLocation: SourceLocation = #_sourceLocation,
-        _ condition: () -> Bool
-    ) async {
-        let deadline = ContinuousClock().now + timeout
-        while ContinuousClock().now < deadline {
-            if condition() { return }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        Issue.record(WaitTimeout(what: what, timeout: timeout), sourceLocation: sourceLocation)
-    }
-
-    private struct WaitTimeout: Error, CustomStringConvertible {
-        let what: String
-        let timeout: Duration
-        var description: String {
-            "timed out waiting for \(what) after polling up to \(timeout)"
+    /// `scheduleTabStateHydration` stores its unstructured `Task`, so the test
+    /// can await THAT rather than watch wall time for its side effects. This is
+    /// a completion signal, not a deadline: no budget to blow, so an
+    /// arbitrarily loaded machine makes the test slower and never red.
+    ///
+    /// The previous shape — polling `tabStateFetchesInFlight` every 5 ms
+    /// against a 30 s `ContinuousClock` deadline — measured the whole process's
+    /// contention for the (single, shared) main actor rather than this
+    /// worktree's fetch, and blew its budget on the full parallel pass while
+    /// sibling no-op tests in this same suite were themselves taking 25-45 s to
+    /// get a turn. It also added ~6000 main-actor wakeups per waiting test to
+    /// the congestion it was losing to.
+    ///
+    /// The loop drains rather than awaiting once, so a regression that armed
+    /// several overlapping fetches is still fully settled before the assertion.
+    /// Nothing arms a fetch except `reconcileTabs`, so it terminates.
+    private func settleHydration(_ state: AppState, worktreeID: UUID) async {
+        while let fetch = state.tabStateFetchTasks[worktreeID] {
+            await fetch.value
         }
     }
 }
