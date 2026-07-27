@@ -39,7 +39,7 @@ a quick audit:
 | Named item | Home | Where argued |
 | --- | --- | --- |
 | State derivation | Compiled. It is fact; a wrong answer poisons everything downstream, and it runs for the whole fleet every cycle. | §2 |
-| Intervention thresholds | Compiled default numbers with a per-repo override in settings. Crossing a threshold produces a case; the response is judged. | §2, §13 |
+| Intervention thresholds | Compiled default numbers, global. Per-repo tuning is deliberately deferred (§15). Crossing a threshold produces a case; the response is judged. | §2, §13 |
 | Cooldowns and dedup | Excluded by the brief (solved elsewhere). The sliver in this design — "intervention already in flight" and "re-check pending" checks — is compiled into the sweep. | §4 |
 | Per-repo policy | Authored: the playbook (advisory prose) plus standing rules (binding, operator-ratified). | §5, §8 |
 | Mode enforcement (P0-3) | Compiled: the verb gate. Capability gating, never prompt wording. | §3 |
@@ -259,6 +259,14 @@ for hours. A UI or CLI action sets a flag for that terminal or worktree,
 following the `keepWarm` precedent. The sweep checks the flag mechanically.
 Repository files contain rules about *kinds* of things. The DB records operator
 choices about *particular* things.
+
+P1-3's other half — *worktrees whose progress matters most get looked at
+first* — reuses an existing operator gesture the same way: the worktree
+**pin**. The sweep orders cases in the work order pinned-first (the pin state
+worktrees already carry), then by case age, and the supervisor works the list
+top-down. Pinning is already how an operator marks what matters, so priority
+costs no new schema and no new concept. Like every fact, ordering only shapes
+attention — it never changes what any verb is allowed to do.
 
 ## 6. The account (P0-9, P1-7)
 
@@ -614,7 +622,8 @@ the same source-and-freshness treatment as any other fact.
 **Fleet agents: `terminal.send` (paste + submit), the mechanism that exists
 today.** This is the parity choice. Claude Code's research-preview Channels
 interface was validated as a prototype
-(`docs/research/2026-07-26-claude-code-channels/findings.md`): it delivers a
+(`docs/research/2026-07-26-claude-code-channels/findings.md`, landed on
+`main` separately): it delivers a
 message without touching the composer, but it needs agent-side integration (an
 MCP config and a startup flag with per-session consent), which collides with
 TBD's no-agent-cooperation constraint for sessions the user owns. Fleet
@@ -675,9 +684,13 @@ response. Each cycle collects inexpensive facts from interfaces the daemon
 already reads. These facts are the number of turns in the current window,
 counted from appended transcript JSONL records without parsing their content;
 the rate of hook events; and whether commits or the diff stayed unchanged
-across N cycles, which the git sweep already knows. The threshold has a global
-default and a per-repository override in the DB settings surface, like the idle
-threshold.
+across N cycles, which the git sweep already knows. Each threshold is a
+compiled global default. Per-repository overrides are deliberately deferred
+(§15): the old system had none, numeric tuning does not fit the standing-rules
+shape (§8 deliberately has no language for parameters), and a new repo-table
+column would quietly break §7's one-column property. If real shifts prove a
+repo needs different numbers, a repo-table column is the house pattern for it —
+added as a conscious amendment to §7, not a side effect.
 
 Crossing a threshold does not itself cause an action. It creates a case in the
 next work order, such as "agent Y: 31 turns, no commits in 90 minutes." The
@@ -720,6 +733,10 @@ to inaction at the largest scale.
   it exists at all, it is playbook prose for a supervisor that already has the
   usage facts.
 - **Auto-pause on runaway counters** — see §13.
+- **Per-repo threshold overrides** — global compiled defaults only, at parity.
+  Numbers do not fit the standing-rules shape, and a repo-table column would
+  break the one-column property (§7); if operation proves the need, that
+  column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
 - **Repo-shipped binding rules** — binding requires approval from each
