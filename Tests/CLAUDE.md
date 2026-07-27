@@ -164,11 +164,42 @@ Four rules. Each traces to a real flake — provenance kept so the rule sticks.
    In `Tests/` it stays a review rule: the lint rule deliberately does not
    cover test code, where tier-2/3 bounded polling is legitimate. See
    "Clock and date seams" below for the seam the rule pushes you toward.
-4. **Timeout errors must report observed state, not just expected.**
-   (`fileBytesMismatch(expected: 6150, actual: 6150)` re-read the file
-   *after* the deadline and therefore lied about what it saw;
+4. **Timeout errors must report observed state, not just expected — and the
+   report has to survive into the CI summary.** Two halves; the second is the
+   one you satisfy accidentally-wrong.
+
+   *Observed, not expected.* `fileBytesMismatch(expected: 6150, actual: 6150)`
+   re-read the file *after* the deadline and therefore lied about what it saw;
    `fileBytesUnmatched(expected:observed:correctPrefix:)` is the corrected
-   shape.)
+   shape.
+
+   *Reaching the summary.* Only `Issue.record(_: some Error)` puts your text on
+   the **primary** failure line. Both `#expect(cond, "message")` and
+   `Issue.record(String)` demote the message to a trailing `↳` line that **CI
+   summaries drop** — measured with a render probe, not assumed. So the
+   thrown-`Error` shape this rule already cites is **load-bearing, not
+   incidental**: the error is what carries the diagnostic to the place you will
+   read it. The failure that established this arrived in CI as bare
+   `condition(value → 0)` and `condition(value → 2)`, distinguishable only by
+   column number, from two `#expect` calls whose message strings were perfect.
+   Verified rendering of the corrected shape:
+
+   ```
+   Caught error: FileWatcher: exactly one FD closed (baseline 0) — observed 1
+   after polling up to 25.0 seconds
+   ```
+
+   Scope: this applies to **timeout and bounded-wait diagnostics**, where the
+   expression (`condition(value → 0)`) is uninformative by construction and the
+   message *is* the whole finding. It is not a ban on `#expect(cond, "…")` for
+   ordinary assertions whose expression already describes itself. There is no
+   lint rule for it, deliberately — nothing can mechanically tell a timeout
+   diagnostic from an ordinary assertion, and a rule that fired on both would
+   be one people disable.
+
+   Consequence for tooling: anything that reads a **CI summary** to extract
+   diagnostics will not find them in the `#expect` form. (Readers of the full
+   tee'd log are unaffected — the `↳` line is present there.)
 
 Full rationale: `docs/specs/2026-07-24-test-hardening-design.md` §6.
 
