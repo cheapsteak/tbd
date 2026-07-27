@@ -84,6 +84,18 @@ liveness identifies gone agents. This design adds two things:
    will match this reason. The one-minute re-check (P1-6) will also use it to
    answer, "Did the agent advance past the prompt?"
 
+One more session-state fact comes free from the same source: **context load** —
+the tokens currently in a session's context window, read from the last
+assistant record's `usage` block at the transcript tail (the same tail read
+that already classifies rate limits). The window size (the denominator) is not
+in the transcript, so the app carries a small compiled model → window-size
+table — a universal fact about models, not about any repo's process. The
+statusline is deliberately **not** used as the source: its stdin JSON carries
+the same numbers, but claiming the `statusLine` settings key would overwrite a
+statusline the operator configured — a display slot the user owns. The data
+was always in the transcript; TBD reads it there, and the current pane-read
+for context goes away.
+
 **P1 — make existing work facts available overnight.** The daemon already
 calculates almost all work state. It gets pull request (PR) status for each
 worktree through batched GraphQL requests. It persists `PRStatus`, including
@@ -440,6 +452,61 @@ standing rules will be the first such mechanism, not an upgrade.
 - **Off is meaningful**: no shift exists, nothing observes the fleet, the last
   shift's residue is fully on disk. No half-on states.
 
+### Supervisor context recycling
+
+The supervisor runs all night and receives work orders full of playbooks and
+transcripts, so its context grows fast — and a session cruising at a huge
+context pays for that context on every turn. Waiting for auto-compaction is the
+expensive path. Instead, the daemon recycles the desk deliberately, using the
+mid-shift replacement path above. This works because of a decision already
+made: the supervisor externalizes everything durable as it goes (ledger,
+standing rules, learnings, account, escalations). **Its handoff document
+already exists — it is the shift record.**
+
+The sequence, all daemon-driven:
+
+1. **Detect** — the supervisor is a session like any other, so its context
+   load is already a session-state fact. Threshold: a config number, default
+   around 200k tokens.
+2. **Hold** — the daemon stops delivering work orders to the desk. New cases
+   queue; the sweep keeps running; the fleet stays watched. The recycle waits
+   until the supervisor is idle with no case in flight.
+3. **Flush** — a bounded request, same shape as the shift-end closing note:
+   "anything in your head not yet in artifacts, write it now as notes or
+   learnings." If the supervisor is wedged, the recycle proceeds without it —
+   that is exactly the crash path, which was already designed to be
+   survivable.
+4. **Recycle** — tear down the desk session, spawn fresh into the same shift,
+   and deliver the standard replacement briefing (posture, standing rules,
+   account so far, open escalations) **plus the predecessor's transcript
+   path**. Anything that lived only in the old context — a hunch
+   mid-investigation, steering the operator typed earlier — is not lost; it is
+   demoted from context to disk, and the new supervisor can search its
+   predecessor's transcript on demand without paying for that history on every
+   future turn. A ledger line links the old session ID to the new one.
+
+**This runs automatically, in both modes, with no proposal.** Everything else
+consequential in this design needs a gesture or a gate; this deliberately does
+not. Recycling the desk touches no fleet agent and destroys no work state,
+because the desk was built disposable — it is self-maintenance of the
+supervision machinery, not an act on the fleet. It appears in the account
+("3:12 a.m. — supervisor recycled at 214k context, 4 learnings flushed"), not
+in the proposal queue. If a recycle ever loses something that mattered, that
+is an artifact-externalization bug to fix — the answer is "that should have
+been in the record," never "a human should have approved the recycle."
+
+**Fleet agents are explicitly excluded from this.** Auto-compaction is fine
+for them; no handoff templates, recycle flags, or compaction counters exist
+for fleet sessions. The per-agent context fact is available for free (§2), and
+its only fleet-facing use is informational: a wake case may mention a parked
+session's context load, as input to judgment.
+
+*Note on the brief:* the requirements brief deferred supervisor self-handoff
+("assume the supervisor persists for the shift"). This section overrides that
+deferral by operator decision, and the reason is worth recording: the deferral
+assumed handoff was a hard open problem, and the shift-record design had
+already solved it as a side effect.
+
 ## 10. Operator surfaces (intent, not screens)
 
 Principle: **you take action where you already read the relevant information.**
@@ -567,6 +634,14 @@ to inaction at the largest scale.
 - **A supervisor-authored account** — the record produces the summary. The
   supervisor can add context through attributed notes but cannot author the
   account.
+- **Fleet-agent context management** — auto-compaction is fine for fleet
+  sessions. No handoff templates, recycle flags, or compaction counters for
+  agents; the context fact is informational only (§2, §9). Deliberate
+  recycling exists solely for the supervisor's own session (§9).
+- **The statusline as a data source** — its stdin JSON carries context data,
+  but claiming the `statusLine` settings key would overwrite the operator's
+  own statusline. The same numbers live in the transcript, which TBD already
+  reads (§2).
 
 ## 16. The strongest argument against this design
 
