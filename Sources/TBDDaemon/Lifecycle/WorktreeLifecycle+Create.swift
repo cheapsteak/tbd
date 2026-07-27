@@ -19,6 +19,18 @@ public enum WorktreeCreateCompletion: Sendable {
     case preSessionPending(phase3: Task<Void, Never>)
 }
 
+public struct ConversationCarryover: Sendable {
+    let sourceSessionID: String
+    let contextPrompt: String
+    let notesSeed: String
+
+    init(sourceSessionID: String, contextPrompt: String, notesSeed: String) {
+        self.sourceSessionID = sourceSessionID
+        self.contextPrompt = contextPrompt
+        self.notesSeed = notesSeed
+    }
+}
+
 extension WorktreeLifecycle {
     // MARK: - Create
 
@@ -203,7 +215,7 @@ extension WorktreeLifecycle {
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -359,14 +371,18 @@ extension WorktreeLifecycle {
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
                         modelOverride: modelOverride,
-                        claudeSettingsOverlay: claudeSettingsOverlay
+                        claudeSettingsOverlay: claudeSettingsOverlay,
+                        carryover: carryover
                     )
                     // Fresh creates get an initial note tab, appended after the
                     // primary spawn set the tab order. Create path only — a
                     // revive's surviving note rows re-materialize via the app's
                     // reconcile instead. Best-effort: if the worktree row
                     // vanished mid-wait, the note insert FK-fails and is logged.
-                    await createInitialNoteTab(worktreeID: worktree.id)
+                    await createInitialNoteTab(
+                        worktreeID: worktree.id,
+                        seed: carryover?.notesSeed
+                    )
                 }
                 return .preSessionPending(phase3: phase3)
             }
@@ -383,14 +399,18 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
-                claudeSettingsOverlay: claudeSettingsOverlay
+                claudeSettingsOverlay: claudeSettingsOverlay,
+                carryover: carryover
             )
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
             // 3c. Fresh repo-backed creates get an initial note tab (appended
             // last; the primary terminal keeps focus).
-            await createInitialNoteTab(worktreeID: worktreeID)
+            await createInitialNoteTab(
+                worktreeID: worktreeID,
+                seed: carryover?.notesSeed
+            )
 
             // 4. Update status to active
             let markActiveStart = clock.now
@@ -416,9 +436,16 @@ extension WorktreeLifecycle {
     /// row's UUID as the tab ID. Best-effort: a failure (e.g. the worktree
     /// row vanished mid-create, FK-failing the insert) must never fail the
     /// create, whose checkout and terminals are already valid.
-    func createInitialNoteTab(worktreeID: UUID) async {
+    func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
+            if let seed {
+                _ = try await db.notes.update(
+                    id: note.id,
+                    title: note.title,
+                    content: seed
+                )
+            }
             var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
             order.append(note.id)
             try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
@@ -561,18 +588,21 @@ extension WorktreeLifecycle {
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
-        claudeSettingsOverlay: String? = nil
+        claudeSettingsOverlay: String? = nil,
+        carryover: ConversationCarryover? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
-        let primaryTerminalKind = resolvePrimaryTerminalKind(
-            skipClaude: skipClaude,
-            archivedClaudeSessions: archivedClaudeSessions,
-            configuredPreference: config.primaryAgentPreference
-        )
+        let primaryTerminalKind: TerminalKind = carryover == nil
+            ? resolvePrimaryTerminalKind(
+                skipClaude: skipClaude,
+                archivedClaudeSessions: archivedClaudeSessions,
+                configuredPreference: config.primaryAgentPreference
+            )
+            : .claude
         let archivedSessions = archivedClaudeSessions ?? []
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
@@ -654,10 +684,10 @@ extension WorktreeLifecycle {
             primaryProfileID = nil
             primaryLabel = TerminalLabel.codex
         case .claude:
-            let archivedSession = archivedSessions.first
-            let sessionUUID = archivedSession ?? UUID().uuidString
+            let archivedSession = carryover == nil ? archivedSessions.first : nil
+            let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
-            let isResume = archivedSession != nil
+            let isResume = archivedSession != nil || carryover != nil
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
             // UUID (used on fresh create). Reviving with `--session-id` on an
@@ -699,9 +729,10 @@ extension WorktreeLifecycle {
             }
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
+                forkSession: carryover != nil,
                 freshSessionID: isResume ? nil : sessionUUID,
                 appendSystemPrompt: appendPrompt,
-                initialPrompt: isResume ? nil : initialPrompt,
+                initialPrompt: carryover?.contextPrompt ?? (isResume ? nil : initialPrompt),
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
@@ -759,6 +790,13 @@ extension WorktreeLifecycle {
             profileID: primaryProfileID,
             kind: primaryTerminalKind
         )
+        if carryover != nil {
+            SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+                terminalID: plannedTerminalID1,
+                paneID: window1.paneID,
+                server: tmuxServer
+            )
+        }
         var createdTerminals: [(id: UUID, label: String)] = [
             (id: plannedTerminalID1, label: primaryLabel)
         ]
@@ -859,7 +897,9 @@ extension WorktreeLifecycle {
         let additionalArchivedClaudeSessions: [String]
         switch primaryTerminalKind {
         case .claude:
-            additionalArchivedClaudeSessions = Array(archivedSessions.dropFirst())
+            additionalArchivedClaudeSessions = carryover == nil
+                ? Array(archivedSessions.dropFirst())
+                : archivedSessions
         case .codex:
             additionalArchivedClaudeSessions = archivedSessions
         case .shell:
