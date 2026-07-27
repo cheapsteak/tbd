@@ -30,6 +30,15 @@ on:
 permissions:
   contents: read
   issues: write   # the entire reporting mechanism is `gh issue comment`
+  # REQUIRED by the quarantine audit, and easy to omit: declaring a
+  # `permissions:` block sets every scope NOT listed to `none` rather than
+  # leaving it at its default. `scripts/nightly-quarantine-audit.sh` reads the
+  # Actions API three ways — `gh run list --workflow test.yml`, the run's
+  # artifact list, and the artifact zip — and all three need `actions: read`.
+  # Without it the audit 403s, dies, and comments that it died: not silent, but
+  # never actually auditing anything, every night, forever.
+  # Precedent in this repo: claude-code-review.yml:34 and claude.yml:26.
+  actions: read
 
 concurrency:
   group: nightly
@@ -193,16 +202,28 @@ jobs:
           # BYTES for a die() path — so the comment on #519 would arrive with no
           # reason in it. That is the one case where the report has to carry the
           # diagnosis, since a clean run posts nothing at all.
-          bash scripts/nightly-quarantine-audit.sh run --days 7 2>&1 | tee "$AUDIT_REPORT"
+          #
+          # The exit code is captured rather than just failing the step, because
+          # 1 (findings) and 2 (harness error) deserve different titles — a
+          # 403 on the Actions API is not "the quarantine list has a problem".
+          rc=0
+          bash scripts/nightly-quarantine-audit.sh run --days 7 2>&1 | tee "$AUDIT_REPORT" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
       - name: Report audit findings
         if: steps.audit.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "${{ steps.audit.outputs.rc }}" = "2" ]; then
+            title="Quarantine audit FAILED TO RUN (harness error) — it audited nothing"
+          else
+            title="Quarantine audit found something"
+          fi
           bash scripts/nightly-report.sh \
             --issue "$TRACKING_ISSUE" \
-            --title "Quarantine audit found something" \
+            --title "$title" \
             --body-file "$AUDIT_REPORT" \
             --post
 

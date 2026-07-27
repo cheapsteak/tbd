@@ -376,6 +376,30 @@ test_inventory_finds_the_real_selftests() {
 
 # ---------------------------------------------------------------------------
 
+test_workflow_grants_actions_read_because_this_script_reads_the_actions_api() {
+  # Declaring a `permissions:` block sets every scope NOT listed to `none`, so
+  # omitting `actions: read` does not fall back to a default — it revokes it.
+  # `fetch()` reads the Actions API three ways; without the scope every one of
+  # them 403s and the audit dies without ever auditing anything.
+  #
+  # DERIVED rather than hardcoded: the requirement is asserted only if this
+  # script actually still calls the Actions API, so the check tracks the code
+  # instead of restating a fact about it. It also fires the other way — add an
+  # Actions-API call to a workflow that lacks the scope and this goes red.
+  #
+  # This is here because my own end-to-end verification could not have caught it:
+  # I ran `fetch` under my personal `gh` auth, which has scopes the constrained
+  # workflow token does not.
+  local wf="$HERE/../.github/workflows/nightly.yml"
+  local uses_actions_api=0
+  grep -qE "gh run list|actions/runs/|actions/artifacts/|run list --repo" "$SCRIPT" && uses_actions_api=1
+  assert_eq "the audit still reads the Actions API (premise of this check)" "1" "$uses_actions_api"
+  if [[ "$uses_actions_api" -eq 1 ]]; then
+    assert_eq "so nightly.yml must grant actions: read" "1" \
+      "$(grep -cE '^[[:space:]]*actions:[[:space:]]*read' "$wf")"
+  fi
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
   echo "== $t"
   "$t"
