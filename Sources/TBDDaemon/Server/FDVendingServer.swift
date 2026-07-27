@@ -73,6 +73,25 @@ actor FDVendingServer {
     private var socketPath: String?
     private var listenerFD: Int32 = -1
 
+    /// How many times `send(fd:header:)` checks for an adopted client before
+    /// giving up, and how long it waits between checks. `retryAttempts` checks
+    /// are separated by `retryAttempts - 1` waits, so the default 10/50 ms pair
+    /// is a 450 ms window — the pre-seam behaviour, unchanged.
+    private let retryAttempts: Int
+    private let retryInterval: Duration
+    /// Delay seam (`docs/specs/2026-07-24-test-hardening-design.md` §5).
+    /// Existential, not generic: this is an `actor` carrying `Sendable`
+    /// conformances, and a generic parameter would infect its type.
+    private let clock: any Clock<Duration>
+
+    init(retryAttempts: Int = 10,
+         retryInterval: Duration = .milliseconds(50),
+         clock: any Clock<Duration> = ContinuousClock()) {
+        self.retryAttempts = retryAttempts
+        self.retryInterval = retryInterval
+        self.clock = clock
+    }
+
     /// Sink for app → daemon input frames. Set once by the daemon wiring BEFORE
     /// `listen`/`adoptConnection` (M2.2 delivers keystrokes here). Captured per
     /// connection at adopt time. When nil, input frames are logged and dropped.
@@ -214,16 +233,31 @@ actor FDVendingServer {
     /// Send `fd` plus `header` to the currently connected app client, wrapped in
     /// a `.fdVend` frame. Retries briefly while no client is adopted — the app
     /// connects eagerly at startup, so this only papers over a connect-vs-accept
-    /// race measured in milliseconds.
+    /// race measured in milliseconds. `retryAttempts` connection checks spaced
+    /// by `retryInterval` (see those properties for the window arithmetic).
+    ///
+    /// `clientFD` is re-read on EVERY iteration, never captured before the
+    /// loop, so a client adopted mid-window is picked up and — just as
+    /// importantly — a connection torn down mid-window is NOT vended into after
+    /// its fd number was closed and possibly recycled. The frame is encoded once
+    /// up front because it depends only on `header`, not on the connection.
     func send(fd: Int32, header: Data) async throws {
         let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
-        for attempt in 0..<10 {
+        for attempt in 0..<retryAttempts {
             if clientFD >= 0 {
                 try FDChannel.sendFD(fd, over: clientFD, frame: frame)
                 return
             }
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            if attempt < 9 { try? await Task.sleep(for: .milliseconds(50)) }
+            // No cancellation check, deliberately: `try?` swallows the
+            // `CancellationError`, the remaining attempts then burn instantly
+            // and the loop throws `.notConnected` — the same outcome, which the
+            // sole caller already handles by undoing the attach. That
+            // equivalence holds only because the post-wait step is a pure
+            // re-check that either sends or gives up; it stops being safe if
+            // this loop ever grows a side effect that must not run after
+            // cancellation, at which point it needs a real
+            // `Task.checkCancellation()`.
+            if attempt < retryAttempts - 1 { try? await clock.sleep(for: retryInterval) }
         }
         throw FDVendingServerError.notConnected
     }
