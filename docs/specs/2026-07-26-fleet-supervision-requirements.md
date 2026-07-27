@@ -212,8 +212,9 @@ the same.
   dialogs are pre-answered by seeders before spawn. What still stalls is then governed by the
   design's machine-interface test rather than by an allowlist: a dialog may be driven only when
   its existence, its verbatim content, and its outcome are all known from machine interfaces.
-  One qualifies today — an agent's `AskUserQuestion`, handled by the gated `answer` verb, which
-  dismisses the dialog and replies as ordinary composer text. Everything that fails the test is
+  One qualifies today — an agent's `AskUserQuestion`, answered through the gated `intervene`
+  verb: the delivery adapter dismisses the machine-known dialog, then replies as ordinary
+  composer text. (No separate verb; answering *is* the send path.) Everything that fails the test is
   escalated unadvanced; a repo's `ask` rules are refused even if they were ever to pass it, on
   the authority ruling above. "Never past anything else" thus holds by that test and that
   ruling, not by an allowlist's precision. See the design doc §2.*

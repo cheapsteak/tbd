@@ -157,21 +157,20 @@ only — no slice needs a later one:
   ledger, and closes on its own; no slice needs a later one. Shift close gains
   its dispose-every-desk step in slice 4, when there are desks to dispose.
 - **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
-  supervision verbs as RPC behind the gate — four gated (`intervene`, `wake`,
-  `pause`, `answer`) and three ungated (`escalate`, `note`, `learn`); the
-  `answer` verb's behavior lands with its case flow in slice 4, but its gate
-  entry belongs here with the others. The standing-rules loader including
-  automation membership and the default stance; the proposal queue as a ledger
-  projection; `tbd supervise queue/approve/reject` plus the operator's
-  `tbd supervise answer --escalation <id>`.
-  **The `answer` naming is settled** (design §3): one word, disambiguated by its
-  object, no synonyms. `--escalation <id>` is the operator resolving a question
-  the supervisor raised (queue resolution, ungated); `--terminal <id>` is a desk
-  answering a fleet agent's question (the gated verb, behavior in slice 4).
-  Implement them as one command with mutually exclusive, required argument
-  shapes so a wrong caller fails at parse time rather than misfiring: a desk has
-  no `--escalation` form at all, which is also what keeps resolutions off the
-  self-report path (design §10).
+  supervision verbs as RPC behind the gate — **three gated** (`intervene`,
+  `wake`, `pause`) and three ungated (`escalate`, `note`, `learn`). There is no
+  `answer` verb: replying to an agent's question is `intervene`, and the dialog
+  dismissal that makes it work is delivery-adapter behavior landing with the
+  adapter in slice 4 (design §2). The standing-rules loader including automation
+  membership and the default stance; the proposal queue as a ledger projection.
+  The operator's queue surface is **one command**, `tbd supervise queue` to read
+  and `tbd supervise resolve <id> --approve|--reject|--answer` to act (design
+  §10) — all three flags construct the same `resolution` ledger kind, differing
+  only in `result`, so build it as one RPC with flag validation that teaches
+  ("that's a proposal — `--approve` or `--reject` it") rather than three
+  near-identical commands. `--scope` attaches to `resolve` itself, not to
+  individual flags. `resolve` is operator-only and must not be reachable from a
+  desk, which is what keeps resolutions off the self-report path (design §10).
   The loader in this slice also owns the **`projects` object** (design §5, §8):
   parse declared multi-repo projects and their designated policy source, reject
   a file where any repo appears in two projects, and resolve every other repo to
@@ -207,7 +206,13 @@ only — no slice needs a later one:
   orders carrying the question payload verbatim out of `PendingQuestionStore`;
   and the store's TTL treated as a GC backstop that must not expire a still-live
   dialog during a shift (resolution comes from the `PostToolUse` clear, not the
-  clock). Two non-blocking notes for whoever picks this up: pending questions
+  clock). The **dialog-dismissing delivery adapter** lands here too: an
+  `intervene` whose target sits on a dialog gets ESC-then-paste, but **only when
+  the daemon machine-knows the dialog** (a pending `AskUserQuestion` in the
+  store). Any other on-screen state must make the delivery refuse and write an
+  anomaly — never a blind ESC. Test both branches; the refusal is the branch that
+  keeps the machine-interface test honest (design §2). Two non-blocking notes for
+  whoever picks this up: pending questions
   have no CLI read surface today (`terminal.transcript` is RPC-only, and the
   work-order carriage is what makes a read surface unnecessary — a
   `tbd`-side reader would be a debugging nicety, not a dependency); and
@@ -249,7 +254,8 @@ from real shifts, not against code review:
   structurally rather than by implementation — prevention at spawn for
   permission prompts, seeders for config-answerable dialogs, and escalation for
   everything that fails the machine-interface test — with one implemented
-  piece, the `AskUserQuestion` case flow and `answer` verb in slices 3 and 4.
+  piece, the `AskUserQuestion` case flow and its dialog-dismissing delivery
+  adapter in slice 4 (answered through `intervene`, not a verb of its own).
   What the story actually asked for (an allowlist matched against rendered
   prompts) ships in no slice and never will (design §2).
 - **Explicitly not blocking**: P3-1.

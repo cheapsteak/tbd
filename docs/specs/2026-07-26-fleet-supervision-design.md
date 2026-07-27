@@ -238,17 +238,45 @@ not a compromise. "B, but only after you have checked X" costs nothing extra;
 neither does "none of these — here is the thing you did not consider." A picker
 can only return one of its own options. The composer can return judgment.
 
-**This is the `answer` verb (§3), gated like every other consequential verb.**
-In attended mode the proposal *is the relayed question*: it carries the agent's
-questions and options verbatim alongside the supervisor's proposed response and
-its reasoning, so the operator can approve it or simply answer differently
-themselves. The queue entry is the dialog, delivered at last to the human it
-was always addressed to. In autonomous mode the verb executes through the
-standing-rules gate and writes its action line. The response need not be an
-answer at all: "these options are underspecified — work through the tradeoffs
-and ask me again" is a legitimate response, and so is a redirect. Which
-response a question warrants is playbook judgment (§5); the mechanism is
-identical either way.
+**This needs no verb of its own — it is `intervene` (§3).** Answering a question
+is mechanically the send path this design already has: clear the way, deliver
+composer text, verify it landed, write the action line, re-check. Two things
+about it look like they might warrant their own verb. Neither survives contact.
+
+The first is **the dismissal, which is a delivery-adapter concern rather than a
+supervisory act.** *Any* `intervene` aimed at a session sitting on a dialog needs
+that dialog gone before composer text can land — whether the case was raised by a
+pending question or by an idle timer that happened to fire while a picker was up.
+So the adapter does ESC-then-paste, under one strict guard: **it dismisses only
+dialogs the daemon machine-knows** — a pending `AskUserQuestion` in the store,
+which is to say a dialog that passed the three-condition test above. A session
+sitting on a dialog TBD cannot identify is never blind-Escaped. The delivery
+**refuses and writes an anomaly**, because a blind Escape into an unidentified
+modal is precisely the screen-blind actuation this section has spent its length
+refusing. Dismissal follows the knowledge, not the intent.
+
+The second is **the "this is a response" quality, which the case carries and the
+verb does not need to.** The action line's state snapshot *is* the pending
+question (§6), so the record already says what was being answered, verbatim. The
+attended-mode proposal shows the operator that same question alongside the
+supervisor's proposed reply, for the same reason. Account views label these lines
+as answers by reading the snapshot. A separate verb would have added a word to
+the vocabulary and nothing to the record.
+
+What the operator experiences is unchanged. In attended mode the proposal *is the
+relayed question* — the agent's questions and options verbatim, plus the proposed
+response and its reasoning — and the operator approves it or answers differently
+themselves. The queue entry is the dialog, delivered at last to the human it was
+always addressed to. In autonomous mode it executes through the standing-rules
+gate and writes its action line. The response need not be an answer at all:
+"these options are underspecified — work through the tradeoffs and ask me again"
+is a legitimate reply, and so is a redirect. Which one a question warrants is
+playbook judgment (§5); the mechanism is `intervene` either way.
+
+*What collapsing it costs* is recorded in §15 rather than hidden: a standing rule
+can no longer say "may answer when asked, but may not nudge unprompted," because
+both are one verb. That distinction is speculative until a real shift asks for
+it, and splitting the verb later is a conscious amendment, not a migration.
 
 **How the question becomes a case.** The hook stays an unconditional dumb
 reporter — no posture check on the agent side, ever. It reports; the daemon
@@ -263,8 +291,8 @@ ordinary tick, holding the same one playbook. **The work order carries the
 question payload verbatim out of the daemon's store**, so the supervisor fetches
 nothing — which dissolves the need for any new read surface. Nothing is
 ledgered for the question itself; facts are not ledger lines. The question
-snapshot rides in the `answer` action's line, or in the escalation line if the
-supervisor punts.
+snapshot rides in the `intervene` action's line as the state that justified it,
+or in the escalation line if the supervisor punts.
 
 **Store hygiene, and what a restart costs.** The pending store's time-to-live
 is a garbage-collection backstop for stranded entries, not a dialog's clock. It
@@ -307,8 +335,8 @@ So the design answers the stall in three prongs, each at a different moment:
    question and prong 1 declines to answer for them. Genuine questions are not
    noise to suppress; they are routed, and the test decides where. A question
    that passes all three conditions becomes a case the supervisor answers with
-   `answer` — today that is `AskUserQuestion` and nothing else. Everything that
-   fails surfaces as an awaiting-input case and is escalated to the operator,
+   `intervene` — today that is `AskUserQuestion` and nothing else. Everything
+   that fails surfaces as an awaiting-input case and is escalated to the operator,
    unadvanced and never auto-granted. A firing `ask` rule always lands in the
    second group, by the authority ruling above, however good its machine
    interfaces ever get.
@@ -319,11 +347,12 @@ the absence of a mechanism. A dialog TBD cannot see through a machine interface
 is a dialog TBD cannot drive, and no prompt wording or operator list can change
 that, because the gap is in the facts and not in the policy. One consequence
 for the rest of this document: the `approve-a-prompt` verb stays removed from
-the verb set (§3, §8), and `answer` is not its return. `approve-a-prompt` was a
-blanket, model-free auto-grant of permission prompts — the tool deciding in
-advance that a whole class of questions needed no human. `answer` is one judged
-response to one question whose text the daemon holds verbatim, gated by
-posture, delivered as text, and recorded. It grants nothing.
+the verb set (§3, §8), and nothing here restores it under another name.
+`approve-a-prompt` was a blanket, model-free auto-grant of permission prompts —
+the tool deciding in advance that a whole class of questions needed no human.
+What replaces it is one judged response to one question whose text the daemon
+holds verbatim, gated by posture, delivered as ordinary text through `intervene`,
+and recorded. It grants nothing.
 
 None of this makes stalls cheap to ignore, and nothing above slows detection.
 The one-minute re-check (P1-6, §4 step 8, §12) still notices a stalled agent
@@ -347,7 +376,7 @@ and it was too coarse to ratify — a bare `git` prefix would have waved through
 merge and auto-merge API calls a repo's `ask` rules deliberately gate. A list
 written in a vocabulary the tool invented, matched against text the tool
 scraped, is two guesses stacked. Note what the new rule does *not* rescue here:
-`answer` shares the typing with that machine, and nothing else. That machine was
+`intervene` shares the typing with that machine, and nothing else. That machine was
 checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
 `launchd` job remains.
 
@@ -398,31 +427,32 @@ Every other mention of a verb in this document defers to it.
 
 | Verb | What it does | Gated? | Attended mode | Autonomous mode |
 | --- | --- | --- | --- | --- |
-| `intervene` | Deliver a re-verified message to a fleet agent (the send path of §4 step 7) | gated | Becomes a proposal | Executes; ledger line |
+| `intervene` | Deliver a re-verified message to a fleet agent (the send path of §4 step 7). Also the way an agent's `AskUserQuestion` is answered — the adapter clears a machine-known dialog first (§2) | gated | Becomes a proposal [^ask] | Executes; ledger line |
 | `wake` | Unpark and resume a parked session | gated | Becomes a proposal | Executes; ledger line |
 | `pause` | Halt a runaway session (§13) | gated | Becomes a proposal | Executes; ledger line |
-| `answer` | Respond to an agent's `AskUserQuestion` — dismiss the dialog, reply as composer text (§2) | gated | Becomes a proposal that *is* the relayed question: the agent's questions and options verbatim, plus the proposed response and reasoning. The operator approves it or answers differently themselves | Executes; ledger line |
 | `escalate` | Queue an exact question for the operator | ungated | Ledger line; appears in the queue immediately | Ledger line; batched for morning |
 | `note` | Attributed prose into the account | ungated | Ledger line | Ledger line |
 | `learn` | Append to the repo's learnings file | ungated | Ledger line | Ledger line |
 
+[^ask]: When the target has a pending question, that proposal *is* the relayed
+    question: the agent's questions and options verbatim, plus the supervisor's
+    proposed response and reasoning. The operator approves it or answers
+    differently themselves. No separate verb marks this — the action's state
+    snapshot is the question (§6), so the record and the queue can both tell an
+    answer from an unprompted nudge without the vocabulary growing (§2).
+
 Every verb is both a `tbd supervise <verb>` CLI command and an RPC method, so
 nothing exists only as a button (§10). `approve-a-prompt` is deliberately
-absent, and `answer` is not it under another name: see §2's prompt-stalls
+absent, and nothing here restores it under another name: see §2's prompt-stalls
 subsection for the difference between a blanket auto-grant and one judged reply
 delivered as text.
 
-**One word, `answer`, disambiguated by its object — no synonyms.** The verb
-above is the desk's form: `tbd supervise answer --terminal <id>` answers a fleet
-agent's question, and it is gated. The operator has a form too:
-`tbd supervise answer --escalation <id>` resolves a question the *supervisor*
-raised, which is queue resolution rather than a fleet action and is not gated
-(§10). Both are the same act — answering a question from the rung below — so
-inventing a second word for one of them would obscure that. The argument shape
-and the actor differ, which makes a misuse a type error at the command line
-rather than a silent misfire: a desk cannot pass `--escalation`, and there is no
-form of the command that lets a desk resolve its own escalation (§10 explains
-why that would be self-report).
+There are **three gated verbs** — `intervene`, `wake`, `pause` — and three
+ungated ones. An earlier draft added a fourth gated verb, `answer`, for replying
+to an agent's question; it was collapsed into `intervene` because answering *is*
+the send path and neither of its apparent differences needed a verb (§2). The
+operator's side of the queue is a separate surface with its own command
+(`resolve`, §10), not a verb the supervisor holds.
 
 Every gated verb is additionally bound to its desk's project (§5): a verb whose
 target lies outside the calling desk's project is refused before posture or
@@ -510,8 +540,8 @@ question becomes a case and **hastens an immediate mini-tick for that
 terminal**, running the same pure decision function the clock would have run
 minutes later. The work order carries the question payload verbatim from the
 daemon's store, so the supervisor fetches nothing and needs no new read
-surface. From there it is an ordinary case: judgment, then the `answer` verb
-through the same gate as every other verb. Full mechanics, including the
+surface. From there it is an ordinary case: judgment, then `intervene` through
+the same gate as every other verb. Full mechanics, including the
 dismiss-and-reply actuation and what a mid-shift restart costs, are in §2's
 prompt-stalls subsection.
 
@@ -645,7 +675,7 @@ policies — that is the invariant the project exists to create.
   it but to ask the agent that raised it to think through the tradeoffs of its
   own options in more detail, so the eventual decision is better informed.**
   That is advice, which is why it is prose here and not compiled — §2's
-  `answer` verb carries a redirect exactly as readily as an answer, and the
+  `intervene` carries a redirect exactly as readily as an answer, and the
   playbook is where the choice between them belongs. A second universal covers
   the chat channel: **when an operator answers an escalation by typing in the
   desk's tab, proceed on that guidance, and say so — "acting on this now;
@@ -701,8 +731,8 @@ attention — it never changes what any verb is allowed to do.
 - `~/tbd/shifts/<shift-id>/ledger.jsonl` — an append-only file with one
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
-  **action** records an intervention, wake, pause, or answer, including the
-  message text, the state snapshot that justified it, and the posture. A separate
+  **action** records an intervention, wake, or pause, including the message
+  text, the state snapshot that justified it, and the posture. A separate
   **outcome** line references the action's ID and records what was observed.
   **lifecycle** records shift open, shift close, posture changes, and desk
   recycles (§9). **proposal** and
@@ -749,7 +779,7 @@ carry a null project, which is the accurate answer and not a gap.
 
 | Kind | Payload carries |
 | --- | --- |
-| `action` | The verb, the target (worktree / terminal / repo), the message text, and the state snapshot — with its source and observed-at — that justified it. For `answer`, that snapshot includes the question payload verbatim: no separate line records the question, because a pending question is a fact and facts are not ledgered |
+| `action` | The verb, the target (worktree / terminal / repo), the message text, and the state snapshot — with its source and observed-at — that justified it. When the intervention answers a pending question, that snapshot **is** the question payload, verbatim: no separate line records the question (a pending question is a fact, and facts are not ledgered), and no separate verb marks the answer — reading the snapshot is what distinguishes a reply from an unprompted nudge (§2) |
 | `outcome` | A reference to the action, one of the three §12 results, and the observed-at of that observation |
 | `proposal` | Everything an `action` carries, plus the supervisor's reasoning and the age of the state it reasoned from |
 | `resolution` | A reference to the proposal or escalation, the result (approved / rejected / answered / expired), the scope choice if one was made, and the operator's optional explanation |
@@ -847,16 +877,16 @@ single confirmation connects prose knowledge to binding rules.
 ### Why the binding tier is structured at all (post-#509 accounting)
 
 GitHub now has merge authority, so few verbs remain behind the gate:
-`intervene`, `wake`, `pause`, and `answer` (§3). A fifth, `approve-a-prompt`,
-was removed along with the P2-3 resolution (§2) and stays removed: it was a
-blanket, model-free auto-grant of permission prompts, and nothing in this design
-grants a permission on an agent's behalf. `answer` does not restore it. It
-advances exactly one dialog — the one whose existence, verbatim content, and
-outcome all reach the daemon through machine interfaces — by dismissing it and
-replying as text, which is judgment delivered through the ordinary send path,
-never an auto-grant. That is why it belongs behind this gate rather than outside
-the verb set. It is reasonable to ask whether prose could replace the binding
-tier. It cannot, for exactly four reasons. The design must not grow beyond what
+`intervene`, `wake`, and `pause` (§3). A fourth, `approve-a-prompt`, was removed
+along with the P2-3 resolution (§2) and stays removed: it was a blanket,
+model-free auto-grant of permission prompts, and nothing in this design grants a
+permission on an agent's behalf. Answering an agent's question does not restore
+it and did not earn a verb of its own — it advances exactly one dialog, the one
+whose existence, verbatim content, and outcome all reach the daemon through
+machine interfaces, by dismissing it and replying as text through `intervene`.
+That is judgment delivered on the ordinary send path, never an auto-grant, which
+is why it sits behind this same gate rather than beside it. It is reasonable to
+ask whether prose could replace the binding tier. It cannot, for exactly four reasons. The design must not grow beyond what
 these reasons require:
 
 1. **The attended-mode promise (P0-3).** The verb gate consults posture and
@@ -869,12 +899,12 @@ these reasons require:
    3 a.m., 4 a.m., and 5 a.m.
 3. **Never-lists must hold when nobody is watching.** When the model is the
    only active decision-maker, a binding rule cannot depend on a prompt.
-4. **`intervene` injects instructions, and so does `answer`.** Fleet agents run
-   with permission checks skipped. A supervisor message can contain any
-   instruction for an agent with full tool access, and a reply to a question is
-   the same text arriving through the same composer. Merge authority could move
-   to the code-hosting service, but only TBD controls these actions. No other
-   system can enforce the gate in front of them.
+4. **`intervene` injects instructions.** Fleet agents run with permission
+   checks skipped. A supervisor message can contain any instruction for an agent
+   with full tool access — and a reply to a question is the same text arriving
+   through the same composer, which is one more reason the two are one verb.
+   Merge authority could move to the code-hosting service, but only TBD controls
+   this action. No other system can enforce the gate in front of it.
 
 Because the scope is small, the rule store remains a flat list with scope,
 verb, stance, and lifetime. It has no language for conditions, no rule
@@ -1132,10 +1162,34 @@ Principle: **you take action where you already read the relevant information.**
   in the Fleet Supervision settings tab below. A rejection can include an
   optional one-line explanation, which reaches that project's supervisor in its
   next work order. Each escalation shows the exact item, exact command,
-  recommendation, and an answer box. Every action is also a CLI verb
-  (`tbd supervise queue/approve/reject`, and `tbd supervise answer --escalation
-  <id>` for the answer box — the operator's form of the one `answer` word, §3).
+  recommendation, and an answer box. Every one of these is also a CLI command —
+  `tbd supervise queue` to read it, `tbd supervise resolve` to act on it (below).
   Nothing exists only as a button.
+
+  **One command resolves the queue: `resolve`.** Approving, rejecting, and
+  answering are not three commands, because they are not three acts on the
+  record — all three construct the same ledger kind, a `resolution` line that
+  differs only in its `result` field (§6). So the command names the category and
+  the argument names the act, the shape `gh pr review --approve/--request-changes`
+  already made familiar:
+
+  ```
+  tbd supervise resolve <id> --approve [--scope this-once|this-shift|always]
+  tbd supervise resolve <id> --reject  [--reason "…"]
+  tbd supervise resolve <id> --answer  "text" [--scope …]
+  ```
+
+  Three things this buys. The **scope choice attaches once**, to the command that
+  creates every resolution, instead of being bolted onto two of three sibling
+  commands and forgotten on the third. **Future outcomes are arguments, not new
+  commands** — a `--dismiss-unanswered` for escalations the operator declines to
+  answer costs a flag, not a surface. And **per-type validity becomes flag
+  validation**, which can teach: aiming `--answer` at a proposal fails with
+  "that's a proposal — `--approve` or `--reject` it," rather than the operator
+  discovering an entire command does not apply to the item in front of them. The
+  panel keeps its labeled **Approve**, **Reject**, and **Answer** buttons — the
+  operator should never have to think in flags — and all three invoke this one
+  RPC.
 - **A supervisor's tab stays a plain conversation.** Typed instructions are
   conversation. They steer the session but do not set policy. The two durable
   channels for rules are
@@ -1144,7 +1198,8 @@ Principle: **you take action where you already read the relevant information.**
   standing through the normal ratification path.
 - **Chat steers; the act resolves.** These are not two routes to the same
   place, and the difference is worth being exact about. Answering an escalation
-  *from the queue* is a gesture that reaches the daemon, and the daemon then:
+  *from the queue* — the panel's Answer button, or `tbd supervise resolve <id>
+  --answer "…"` — is a gesture that reaches the daemon, and the daemon then:
   appends the `resolution` ledger line; drops the item from the queue
   projection; turns any scope choice into a `decision` and, if it is
   lifetime-always, a standing rule the gate will consult; carries the answer to
@@ -1156,10 +1211,10 @@ Principle: **you take action where you already read the relevant information.**
   the operator cannot see; the desk may not exist when the answer is given at
   all, since the morning queue is usually read after the shift closed and every
   desk was disposed; and the record must never contain consent nobody gave —
-  which is why **the desk deliberately has no verb that resolves an operator
-  escalation.** Give it one and resolutions become self-report, the exact defect
-  P1-7 names. Resolutions exist only as operator gestures reaching the daemon,
-  and that authorship *is* the evidence. The shipped playbook closes the loop
+  which is why **`resolve` is an operator command and appears nowhere in the
+  supervisor's verb set (§3).** Give a desk any form of it and resolutions become
+  self-report, the exact defect P1-7 names. Resolutions exist only as operator
+  gestures reaching the daemon, and that authorship *is* the evidence. The shipped playbook closes the loop
   from the other side (§5): a desk told something in chat acts on it and says
   "record it from the queue so it sticks."
 - **Fleet supervision gets its own Settings tab.** It replaces the current
@@ -1388,6 +1443,17 @@ to inaction at the largest scale.
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
+- **A separate `answer` verb** — replying to an agent's question is the send
+  path, so it is `intervene`; the dismissal is a delivery-adapter concern and the
+  "this is a response" quality is carried by the action's state snapshot (§2,
+  §6). The cost is real and accepted: a standing rule cannot distinguish
+  "may answer when asked" from "may nudge unprompted," because both are one verb.
+  That granularity is speculative until a shift asks for it; splitting the verb
+  then is a conscious amendment, not a migration. See §2.
+- **Separate `approve` / `reject` / `answer` queue commands** — all three write
+  one `resolution` kind differing only in `result`, so one `resolve` command
+  names the category and a flag names the act. Scope attaches once; new outcomes
+  are flags. The panel keeps three labeled buttons over the one RPC. See §10.
 - **Per-project shifts, postures, or ledgers** — the project is the unit of
   judgment and action, not of lifecycle. One posture switch keeps P0-2's
   one-gesture handover; one shift, ledger, account, and morning queue keep every
