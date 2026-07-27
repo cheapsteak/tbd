@@ -105,6 +105,7 @@ public enum RPCMethod {
     public static let worktreeArchive = "worktree.archive"
     public static let worktreeRerunPreSession = "worktree.rerunPreSession"
     public static let worktreeRevive = "worktree.revive"
+    public static let worktreeReviveConversationFresh = "worktree.reviveConversationFresh"
     public static let worktreeAdopt = "worktree.adopt"
     public static let worktreeRename = "worktree.rename"
     public static let worktreeReorder = "worktree.reorder"
@@ -1225,6 +1226,35 @@ public struct WorktreeReviveParams: Codable, Sendable {
         self.cols = cols
         self.rows = rows
         self.preferredSessionID = preferredSessionID
+    }
+}
+
+public struct WorktreeReviveConversationFreshParams: Codable, Sendable {
+    public let archivedWorktreeID: UUID
+    public let sessionID: String
+    public let cols: Int?
+    public let rows: Int?
+
+    public init(
+        archivedWorktreeID: UUID,
+        sessionID: String,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) {
+        self.archivedWorktreeID = archivedWorktreeID
+        self.sessionID = sessionID
+        self.cols = cols
+        self.rows = rows
+    }
+}
+
+public struct WorktreeReviveConversationFreshResult: Codable, Sendable {
+    public let worktree: Worktree
+    public let warning: String?
+
+    public init(worktree: Worktree, warning: String?) {
+        self.worktree = worktree
+        self.warning = warning
     }
 }
 
