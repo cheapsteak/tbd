@@ -169,4 +169,38 @@ struct RemoteProviderTests {
         let decoded = try decoder.decode(RemoteSessionInfo.self, from: try encoder.encode(info))
         #expect(decoded.resolvedRepoID == repoID)
     }
+
+    // MARK: - RemoteSessionInfo — pinnedAt wire defaults
+
+    /// A payload from a daemon predating the dock pin must decode with the
+    /// session simply unpinned, not fail.
+    @Test func sessionInfoDecodesWhenPinnedAtIsAbsent() throws {
+        let json = """
+        {"provider": "acme", "payload": {"id": "s1", "state": "running"},
+         "gone": false, "dismissed": false, "lastSeen": \(Date().timeIntervalSinceReferenceDate)}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+        let info = try decoder.decode(RemoteSessionInfo.self, from: json)
+        #expect(info.pinnedAt == nil)
+    }
+
+    @Test func sessionInfoRoundTripsPinnedAt() throws {
+        let pinnedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let info = RemoteSessionInfo(
+            provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+            gone: false, dismissed: false, lastSeen: Date(), pinnedAt: pinnedAt)
+        let decoded = try JSONDecoder().decode(
+            RemoteSessionInfo.self, from: try JSONEncoder().encode(info))
+        #expect(decoded.pinnedAt == pinnedAt)
+    }
+
+    @Test func setPinParamsRoundTrip() throws {
+        let params = RemoteSetPinParams(provider: "acme", sessionID: "s1", pinned: true)
+        let decoded = try JSONDecoder().decode(
+            RemoteSetPinParams.self, from: try JSONEncoder().encode(params))
+        #expect(decoded.provider == "acme")
+        #expect(decoded.sessionID == "s1")
+        #expect(decoded.pinned)
+    }
 }

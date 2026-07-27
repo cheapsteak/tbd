@@ -80,7 +80,8 @@ struct RPCRouterRemoteTests: ~Copyable {
     @Test func remoteVerbsErrorWhenFlagOff() async throws {
         let r = router(invoker: FakeProviderInvoker(script: []))
         for method in ["remote.providers", "remote.sessions", "remote.create",
-                       "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss"] {
+                       "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss",
+                       "remote.setPin"] {
             let response = await call(r, method,
                 #"{"provider": "fake", "sessionID": "x", "text": "t", "title": "t", "paramsJSON": "{}"}"#)
             #expect(response.success == false, "expected \(method) to be gated")
@@ -97,7 +98,8 @@ struct RPCRouterRemoteTests: ~Copyable {
         try await db.config.setRemoteBackendsEnabled(true)
         let r = router(manager: nil)
         for method in ["remote.providers", "remote.sessions", "remote.create",
-                       "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss"] {
+                       "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss",
+                       "remote.setPin"] {
             let response = await call(r, method,
                 #"{"provider": "fake", "sessionID": "x", "text": "t", "title": "t", "paramsJSON": "{}"}"#)
             #expect(response.success == false, "expected \(method) to be gated")
@@ -406,6 +408,100 @@ struct RPCRouterRemoteTests: ~Copyable {
             return false
         }
         #expect(changeBroadcasts.isEmpty)
+    }
+
+    @Test func setPinStampsPinnedAtAndBroadcastsChange() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake", sessions: [RemoteSessionPayload(id: "a", state: .running)], now: Date())
+        let deltas = BroadcastDeltas()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let before = Date()
+        let response = await call(r, "remote.setPin",
+            #"{"provider": "fake", "sessionID": "a", "pinned": true}"#)
+        #expect(response.success)
+        // Stamped daemon-side, not supplied by the client — the timestamp
+        // must land inside the window this call spanned.
+        let pinnedAt = try #require(try await db.remoteSessions.list().first?.pinnedAt)
+        #expect(pinnedAt >= before && pinnedAt <= Date())
+        let changeBroadcasts = deltas.snapshot().filter {
+            if case .remoteSessionsChanged = $0 { return true }
+            return false
+        }
+        #expect(changeBroadcasts.count == 1, "pinning must broadcast a change delta")
+    }
+
+    @Test func setPinUnpinsAndSurfacesPinnedAtOverTheWire() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake", sessions: [RemoteSessionPayload(id: "a", state: .running)], now: Date())
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        #expect(await call(r, "remote.setPin", #"{"provider": "fake", "sessionID": "a", "pinned": true}"#).success)
+
+        var sessions = try (await call(r, "remote.sessions")).decodeResult(RemoteSessionsResult.self).sessions
+        #expect(sessions.first?.pinnedAt != nil, "remote.sessions must carry the pin to the app")
+
+        #expect(await call(r, "remote.setPin", #"{"provider": "fake", "sessionID": "a", "pinned": false}"#).success)
+        sessions = try (await call(r, "remote.sessions")).decodeResult(RemoteSessionsResult.self).sessions
+        #expect(sessions.first?.pinnedAt == nil)
+    }
+
+    /// Same `changed`-gated broadcast contract `remote.dismiss` follows.
+    @Test func setPinDoesNotBroadcastWhenNothingChanged() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let deltas = BroadcastDeltas()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let response = await call(r, "remote.setPin",
+            #"{"provider": "fake", "sessionID": "nonexistent", "pinned": true}"#)
+        #expect(response.success)
+        let changeBroadcasts = deltas.snapshot().filter {
+            if case .remoteSessionsChanged = $0 { return true }
+            return false
+        }
+        #expect(changeBroadcasts.isEmpty)
+    }
+
+    /// Pinning is local-only, so unlike every other `remote.*` verb it needs
+    /// no `RemoteProviderManager` to reach the DB — but it stays behind the
+    /// same feature flag, in both of the gate's two failure modes.
+    @Test func setPinIsGatedByTheFlagInBothModes() async throws {
+        let params = #"{"provider": "fake", "sessionID": "x", "pinned": true}"#
+        let flagOff = await call(router(invoker: FakeProviderInvoker(script: [])), "remote.setPin", params)
+        #expect(flagOff.success == false)
+        #expect(flagOff.error == "remote backends disabled")
+
+        try await db.config.setRemoteBackendsEnabled(true)
+        let noManager = await call(router(manager: nil), "remote.setPin", params)
+        #expect(noManager.success == false)
+        #expect(noManager.error == "remote backends disabled")
+    }
+
+    /// A pinned session the provider stopped reporting must still be
+    /// unpinnable — no provider verb is involved, so `gone` is irrelevant.
+    @Test func setPinWorksOnAGoneRow() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake", sessions: [RemoteSessionPayload(id: "a", state: .running)], now: Date())
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        #expect(await call(r, "remote.setPin", #"{"provider": "fake", "sessionID": "a", "pinned": true}"#).success)
+        _ = try await db.remoteSessions.markGone(provider: "fake", sessionID: "a")
+
+        #expect(await call(r, "remote.setPin", #"{"provider": "fake", "sessionID": "a", "pinned": false}"#).success)
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first?.gone == true)
+        #expect(rows.first?.pinnedAt == nil)
     }
 
     @Test func configToggleRoundTrips() async throws {

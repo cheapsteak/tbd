@@ -1109,6 +1109,20 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "worktree", column: "pinSortOrder", type: .integer)
         }
 
+        // Pin a remote session to the same sidebar dock worktrees pin to.
+        // Nullable with NO default and NO backfill, for the same reasons
+        // v63 gives for `worktree.pinnedAt`: existing rows must land on NULL
+        // (= unpinned), and there is no Swift-side default to flip later, so
+        // the `ADD COLUMN ... DEFAULT` backfill trap does not apply. The pin
+        // rides on the mirror row rather than a side table because the row's
+        // primary key `(provider, sessionID)` is already the durable identity
+        // for a remote session (see `RemoteSessionIdentity`) and mirror rows
+        // are never deleted — only marked gone/dismissed — so a pin survives
+        // provider drift and daemon restarts.
+        migrator.registerMigration("v65_remote_session_pinned_at") { db in
+            try db.addColumnIfMissing(table: "remote_session", column: "pinnedAt", type: .datetime)
+        }
+
         return migrator
     }
 }

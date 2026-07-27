@@ -981,6 +981,17 @@ actor DaemonClient {
         )
     }
 
+    /// Pin or unpin a remote session for the sidebar's pinned dock. The
+    /// `pinnedAt` timestamp is stamped daemon-side, so pin ORDER is
+    /// server-assigned — the client only says whether it wants the pin on or
+    /// off (mirrors `setWorktreePin`).
+    func setRemoteSessionPin(provider: String, sessionID: String, pinned: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteSetPin,
+            params: RemoteSetPinParams(provider: provider, sessionID: sessionID, pinned: pinned)
+        )
+    }
+
     /// Set the remote-agent-backends master switch.
     func setRemoteBackends(enabled: Bool) async throws {
         try await callVoidAsync(

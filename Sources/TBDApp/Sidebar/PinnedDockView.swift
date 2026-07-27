@@ -13,6 +13,10 @@ import TBDShared
 /// gesture is attached.
 struct PinnedDockView: View {
     let rows: [PinnedDockRow]
+    /// Pinned remote sessions, rendered as a group below the worktree pins —
+    /// see `PinnedDockContent.remoteRows` for why they're grouped rather than
+    /// interleaved.
+    let remoteRows: [PinnedDockRemoteRow]
     let availableHeight: CGFloat
     @EnvironmentObject var appState: AppState
 
@@ -40,8 +44,22 @@ struct PinnedDockView: View {
         .tag(row.worktree.id)
     }
 
+    /// A pinned remote session's dock line. Renders the SAME
+    /// `RemoteSessionRowView` the remote/repo sections use, so status icon,
+    /// captions, exited/gone styling, rename, click-to-select and the context
+    /// menu (including Unpin) all come along unchanged — a dock copy of a row
+    /// must not be a second, drifting presentation of the same session.
+    @ViewBuilder
+    private func remoteDockRow(_ row: PinnedDockRemoteRow) -> some View {
+        RemoteSessionRowView(session: row.session)
+            .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .tag(row.id)
+    }
+
     var body: some View {
-        if !rows.isEmpty {
+        if !rows.isEmpty || !remoteRows.isEmpty {
             ScrollViewReader { proxy in
                 List(selection: $appState.selectedWorktreeIDs) {
                     // Nested deliberately: `.onMove` hands back indices into its
@@ -67,6 +85,13 @@ struct PinnedDockView: View {
                     .onMove { source, destination in
                         appState.reorderPins(fromOffsets: source, toOffset: destination)
                     }
+                    // A SEPARATE ForEach, deliberately outside the one above:
+                    // `.onMove`'s offsets index its own ForEach's elements, and
+                    // remote pins carry no `pinSortOrder` to drag against, so
+                    // folding them in would make every drag index ambiguous.
+                    ForEach(remoteRows) { row in
+                        remoteDockRow(row)
+                    }
                 }
                 .onChange(of: appState.selectedWorktreeIDs) { _, ids in
                     // Expanding a subtree can push the dock past its cap; keep
@@ -75,10 +100,22 @@ struct PinnedDockView: View {
                         withAnimation { proxy.scrollTo(target) }
                     }
                 }
+                // A remote selection needs its own observer: the tag is
+                // stripped back out of `selectedWorktreeIDs` on the way in
+                // (see `AppState.selectedWorktreeIDs`'s `didSet`), so the
+                // handler above never sees a remote id.
+                .onChange(of: appState.selectedRemoteSession) { _, selection in
+                    guard let selection,
+                          let row = remoteRows.first(where: {
+                              $0.session.provider == selection.provider
+                                  && $0.session.payload.id == selection.sessionID
+                          }) else { return }
+                    withAnimation { proxy.scrollTo(row.id) }
+                }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .frame(height: PinnedDockMetrics.height(rowCount: rows.count,
+            .frame(height: PinnedDockMetrics.height(rowCount: rows.count + remoteRows.count,
                                                    availableHeight: availableHeight))
         }
     }

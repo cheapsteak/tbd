@@ -83,6 +83,93 @@ struct RemoteSessionStoreTests {
         #expect(second == false)
     }
 
+    // MARK: - Sidebar-dock pin
+
+    @Test func setPinnedStampsAndClearsPinnedAt() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        var rows = try await db.remoteSessions.list()
+        #expect(rows[0].pinnedAt == nil, "a freshly mirrored session is never pinned")
+
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let pinned = try await db.remoteSessions.setPinned(provider: "p", sessionID: "a", pinnedAt: stamp)
+        #expect(pinned)
+        rows = try await db.remoteSessions.list()
+        #expect(rows[0].pinnedAt == stamp)
+
+        let unpinned = try await db.remoteSessions.setPinned(provider: "p", sessionID: "a", pinnedAt: nil)
+        #expect(unpinned)
+        rows = try await db.remoteSessions.list()
+        #expect(rows[0].pinnedAt == nil)
+    }
+
+    /// Both no-op branches of the `changed` contract: unpinning something
+    /// that was never pinned, and pinning a session that isn't mirrored.
+    @Test func setPinnedReportsNoChangeWhenThereIsNothingToChange() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        let unpinUnpinned = try await db.remoteSessions.setPinned(
+            provider: "p", sessionID: "a", pinnedAt: nil)
+        #expect(unpinUnpinned == false)
+        let unknown = try await db.remoteSessions.setPinned(
+            provider: "p", sessionID: "nope", pinnedAt: Date())
+        #expect(unknown == false)
+    }
+
+    /// The whole point of storing the pin on the mirror row: a pin has to
+    /// outlive ordinary provider churn. A session that goes absent twice
+    /// (gone), then comes back, keeps its pin the entire way through.
+    @Test func pinSurvivesSnapshotChurnIncludingGoneAndReappearance() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        _ = try await db.remoteSessions.setPinned(provider: "p", sessionID: "a", pinnedAt: Date())
+
+        // Ordinary re-poll with changed agent state.
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [payload("a", agent: .waitingInput)], now: Date())
+        #expect(try await db.remoteSessions.list()[0].pinnedAt != nil)
+
+        // Two absences → gone. The pin must not be collateral damage.
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [], now: Date())
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [], now: Date())
+        var rows = try await db.remoteSessions.list()
+        #expect(rows[0].gone)
+        #expect(rows[0].pinnedAt != nil)
+
+        // Reappears → still pinned, still in the dock.
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        rows = try await db.remoteSessions.list()
+        #expect(rows[0].gone == false)
+        #expect(rows[0].pinnedAt != nil)
+    }
+
+    @Test func pinSurvivesAnEventDrivenUpsertOne() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        _ = try await db.remoteSessions.setPinned(provider: "p", sessionID: "a", pinnedAt: Date())
+        _ = try await db.remoteSessions.upsertOne(
+            provider: "p", session: payload("a", agent: .waitingInput), now: Date())
+        #expect(try await db.remoteSessions.list()[0].pinnedAt != nil)
+    }
+
+    /// Dismiss means "get rid of it", so it drops the pin in the same
+    /// statement — a dismissed row must not keep an invisible pin that would
+    /// resurrect it in the dock.
+    @Test func dismissClearsThePin() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a")], now: Date())
+        _ = try await db.remoteSessions.setPinned(provider: "p", sessionID: "a", pinnedAt: Date())
+        #expect(try await db.remoteSessions.dismiss(provider: "p", sessionID: "a"))
+        let rows = try await db.remoteSessions.list()
+        #expect(rows[0].dismissed)
+        #expect(rows[0].pinnedAt == nil)
+    }
+
+    @Test func pinsAreScopedToOneProviderSessionPair() async throws {
+        _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [payload("a"), payload("b")], now: Date())
+        _ = try await db.remoteSessions.applySnapshot(provider: "q", sessions: [payload("a")], now: Date())
+        _ = try await db.remoteSessions.setPinned(provider: "p", sessionID: "a", pinnedAt: Date())
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.first { $0.provider == "p" && $0.sessionID == "a" }?.pinnedAt != nil)
+        #expect(rows.first { $0.provider == "p" && $0.sessionID == "b" }?.pinnedAt == nil)
+        #expect(rows.first { $0.provider == "q" && $0.sessionID == "a" }?.pinnedAt == nil)
+    }
+
     @Test func upsertOneAppliesEdgeDetectionWithoutTouchingOtherRows() async throws {
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p", sessions: [payload("a"), payload("b")], now: Date())

@@ -15,6 +15,18 @@ import TBDShared
 /// coverage goes through the injectable `remoteProvidersFetcher` /
 /// `remoteSessionsFetcher` seams (same pattern as `daemonCapabilitiesFetcher`
 /// in `ModelProfileAppStateTests.swift`) rather than a live daemon.
+/// Records calls made through an injected `AppState` seam. A reference type
+/// because the seams are escaping closures — a captured local `var` can't be
+/// mutated from one.
+@MainActor
+private final class Recorder {
+    private var calls: [String] = []
+    func record(_ call: String) { calls.append(call) }
+    func snapshot() -> [String] { calls }
+}
+
+private enum TestPinError: Error { case boom }
+
 @MainActor
 @Suite("Remote backends — app state")
 struct RemoteAppStateTests {
@@ -451,6 +463,86 @@ struct RemoteAppStateTests {
 
             #expect(state.daemonCapabilities?.remoteBackendsEnabled == true,
                     "a transient refresh failure after a successful set must not snap the toggle off")
+        }
+    }
+
+    // MARK: - Sidebar-dock pin
+
+    private func session(_ id: String, provider: String = "acme",
+                         pinnedAt: Date? = nil) -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: provider, payload: RemoteSessionPayload(id: id, state: .running),
+            gone: false, dismissed: false, lastSeen: Date(), pinnedAt: pinnedAt)
+    }
+
+    @Test func setRemoteSessionPinned_callsTheSetterAndRefreshes() async {
+        await withStateAsync { state in
+            let calls = Recorder()
+            state.remoteSessionPinSetter = { provider, sessionID, pinned in
+                calls.record("\(provider)/\(sessionID)/\(pinned)")
+            }
+            state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
+            state.remoteSessionsFetcher = {
+                RemoteSessionsResult(sessions: [self.session("s1", pinnedAt: Date())])
+            }
+
+            await state.setRemoteSessionPinned(provider: "acme", sessionID: "s1", pinned: true)
+
+            #expect(calls.snapshot() == ["acme/s1/true"])
+            // The refresh is what makes the dock reflect the new pin — the
+            // action deliberately does no optimistic local write.
+            #expect(state.remoteSessions.first?.pinnedAt != nil)
+        }
+    }
+
+    @Test func setRemoteSessionPinned_unpinPassesFalseThrough() async {
+        await withStateAsync { state in
+            let calls = Recorder()
+            state.remoteSessionPinSetter = { provider, sessionID, pinned in
+                calls.record("\(provider)/\(sessionID)/\(pinned)")
+            }
+            state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
+            state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: [self.session("s1")]) }
+
+            await state.setRemoteSessionPinned(provider: "acme", sessionID: "s1", pinned: false)
+
+            #expect(calls.snapshot() == ["acme/s1/false"])
+            #expect(state.remoteSessions.first?.pinnedAt == nil)
+        }
+    }
+
+    /// A failed pin must not leave the UI claiming a pin that never landed —
+    /// there is no optimistic write to roll back, so the mirror is untouched.
+    @Test func setRemoteSessionPinned_failureLeavesTheMirrorUntouched() async {
+        await withStateAsync { state in
+            state.remoteSessions = [self.session("s1")]
+            state.remoteSessionPinSetter = { _, _, _ in throw TestPinError.boom }
+            var refreshed = false
+            state.remoteSessionsFetcher = {
+                refreshed = true
+                return RemoteSessionsResult(sessions: [])
+            }
+
+            await state.setRemoteSessionPinned(provider: "acme", sessionID: "s1", pinned: true)
+
+            #expect(refreshed == false, "a failed pin must not trigger the refresh")
+            #expect(state.remoteSessions.first?.pinnedAt == nil)
+        }
+    }
+
+    @Test func remoteSessionIsPinned_readsTheMirror() {
+        withState { state in
+            state.remoteSessions = [
+                self.session("pinned", pinnedAt: Date()),
+                self.session("plain"),
+                self.session("pinned", provider: "other"),
+            ]
+            #expect(state.remoteSessionIsPinned(provider: "acme", sessionID: "pinned"))
+            #expect(!state.remoteSessionIsPinned(provider: "acme", sessionID: "plain"))
+            // Same session id, different provider — pins are per-pair.
+            #expect(!state.remoteSessionIsPinned(provider: "other", sessionID: "pinned"))
+            // An unknown session is not pinned (and must not trap).
+            #expect(!state.remoteSessionIsPinned(provider: "acme", sessionID: "nope"))
         }
     }
 

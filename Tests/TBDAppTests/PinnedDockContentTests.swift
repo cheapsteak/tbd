@@ -39,6 +39,18 @@ struct PinnedDockContentTests {
     /// and Swift 6 rejects it outright.
     private static let noChildren: @Sendable (UUID) -> [Worktree] = { _ in [] }
 
+    private static func remote(_ sessionID: String,
+                               provider: String = "prov",
+                               pinnedAt: Date? = nil,
+                               dismissed: Bool = false,
+                               gone: Bool = false,
+                               state: RemoteProcessState = .running) -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: provider,
+            payload: RemoteSessionPayload(id: sessionID, state: state, agentState: .working),
+            gone: gone, dismissed: dismissed, lastSeen: at(0), pinnedAt: pinnedAt)
+    }
+
     // MARK: deskRow
 
     @Test("desk resolves only when the flag is on and mode is not off",
@@ -230,6 +242,105 @@ struct PinnedDockContentTests {
         let rows = PinnedDockContent.rows(allWorktrees: [newer, older],
                                           selectedIDs: [], children: Self.noChildren)
         #expect(rows.map(\.worktree.name) == ["older", "newer"])
+    }
+
+    // MARK: remoteRows
+
+    @Test("an unpinned remote session never reaches the dock")
+    func remoteUnpinnedExcluded() {
+        let rows = PinnedDockContent.remoteRows(
+            allRemoteSessions: [Self.remote("a"), Self.remote("b", pinnedAt: Self.at(0))])
+        #expect(rows.map(\.session.payload.id) == ["b"])
+    }
+
+    @Test("pinned remote sessions sort oldest-pin-first so a new pin appends")
+    func remotePinOrdering() {
+        let rows = PinnedDockContent.remoteRows(allRemoteSessions: [
+            Self.remote("a", pinnedAt: Self.at(30)),
+            Self.remote("b", pinnedAt: Self.at(10)),
+            Self.remote("c", pinnedAt: Self.at(20)),
+        ])
+        #expect(rows.map(\.session.payload.id) == ["b", "c", "a"])
+    }
+
+    /// Two pins landing on the same timestamp must not swap places between
+    /// renders — the sort has to be total, not merely stable-by-luck.
+    @Test("identical pin timestamps break the tie on (provider, sessionID)")
+    func remotePinTiesAreTotallyOrdered() {
+        let same = Self.at(5)
+        let sessions = [
+            Self.remote("z", provider: "alpha", pinnedAt: same),
+            Self.remote("a", provider: "beta", pinnedAt: same),
+            Self.remote("b", provider: "alpha", pinnedAt: same),
+        ]
+        let forward = PinnedDockContent.remoteRows(allRemoteSessions: sessions)
+        let reversed = PinnedDockContent.remoteRows(allRemoteSessions: sessions.reversed())
+        #expect(forward.map(\.id) == reversed.map(\.id))
+        #expect(forward.map(\.session.payload.id) == ["b", "z", "a"])
+    }
+
+    /// Dismiss means "get rid of it", so the row leaves the dock even if the
+    /// stored pin somehow survived (an older daemon that didn't clear the
+    /// column on dismiss).
+    @Test("a dismissed remote session leaves the dock even while pinned")
+    func remoteDismissedExcluded() {
+        let rows = PinnedDockContent.remoteRows(allRemoteSessions: [
+            Self.remote("a", pinnedAt: Self.at(0), dismissed: true),
+            Self.remote("b", pinnedAt: Self.at(10)),
+        ])
+        #expect(rows.map(\.session.payload.id) == ["b"])
+    }
+
+    /// The counterpart choice: a session the provider stopped reporting keeps
+    /// its slot (it self-heals when the provider lists it again) and renders
+    /// with `RemoteSessionRowView`'s existing dimmed styling.
+    @Test("a gone remote session keeps its pin and its dock slot")
+    func remoteGoneStaysPinned() {
+        let rows = PinnedDockContent.remoteRows(
+            allRemoteSessions: [Self.remote("a", pinnedAt: Self.at(0), gone: true)])
+        #expect(rows.map(\.session.payload.id) == ["a"])
+        #expect(rows[0].session.gone)
+    }
+
+    @Test("an exited remote session keeps its pin and its dock slot")
+    func remoteExitedStaysPinned() {
+        let rows = PinnedDockContent.remoteRows(
+            allRemoteSessions: [Self.remote("a", pinnedAt: Self.at(0), state: .exited)])
+        #expect(rows.map(\.session.payload.id) == ["a"])
+        #expect(rows[0].session.payload.state == .exited)
+    }
+
+    /// Two providers can mint the same session id; the dock rows must still
+    /// be distinct, because `List`/`ForEach` identity is the row `id`.
+    @Test("same session id on two providers yields two distinct dock rows")
+    func remoteRowsAreKeyedByProviderAndSession() {
+        let rows = PinnedDockContent.remoteRows(allRemoteSessions: [
+            Self.remote("dup", provider: "alpha", pinnedAt: Self.at(0)),
+            Self.remote("dup", provider: "beta", pinnedAt: Self.at(10)),
+        ])
+        #expect(rows.count == 2)
+        #expect(rows[0].id != rows[1].id)
+        #expect(rows[0].id == RemoteSessionIdentity.uuid(provider: "alpha", sessionID: "dup"))
+    }
+
+    @Test("no pinned remote sessions means no remote dock rows")
+    func remoteRowsEmpty() {
+        #expect(PinnedDockContent.remoteRows(allRemoteSessions: []).isEmpty)
+        #expect(PinnedDockContent.remoteRows(allRemoteSessions: [Self.remote("a")]).isEmpty)
+    }
+
+    /// Pinning a remote session must not disturb the worktree half of the
+    /// dock — the two groups are computed independently.
+    @Test("remote pins do not appear in, or reorder, the worktree rows")
+    func remoteAndWorktreePinsAreIndependent() {
+        let wtRows = PinnedDockContent.rows(
+            allWorktrees: [Self.wt("a", pinnedAt: Self.at(0)), Self.wt("b", pinnedAt: Self.at(10))],
+            selectedIDs: [], children: Self.noChildren)
+        #expect(wtRows.map(\.worktree.name) == ["a", "b"])
+        let remoteRows = PinnedDockContent.remoteRows(
+            allRemoteSessions: [Self.remote("r", pinnedAt: Self.at(5))])
+        #expect(remoteRows.map(\.session.payload.id) == ["r"])
+        #expect(wtRows.count == 2)   // the remote pin added no worktree row
     }
 
     // MARK: subtree

@@ -76,6 +76,9 @@ struct SidebarView: View {
                 selectedIDs: appState.selectedWorktreeIDs,
                 children: appState.children(of:)
             )
+            let dockRemoteRows = PinnedDockContent.remoteRows(
+                allRemoteSessions: appState.remoteSessions
+            )
             let desk = PinnedDockContent.deskRow(
                 allWorktrees: appState.allWorktrees,
                 mode: appState.nightwatchMode,
@@ -88,7 +91,8 @@ struct SidebarView: View {
                 // Dock, desk slot, mode toggle and Add Repository share this
                 // VStack's `.background(.bar)` as a single visual group.
                 Divider()
-                PinnedDockView(rows: dockRows, availableHeight: sidebarHeight)
+                PinnedDockView(rows: dockRows, remoteRows: dockRemoteRows,
+                               availableHeight: sidebarHeight)
                 PinnedDockDeskSlot(desk: desk)
                 if nightwatchExperimental {
                     NightwatchModeToggle()
