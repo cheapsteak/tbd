@@ -317,7 +317,8 @@ account, not a wrong action. The third category is **human-authored process**.
   decisions are ledger events viewed in the same way. They end with the shift,
   and the shift directory contains everything needed for debugging or sharing.
 - **Durable files**: `~/tbd/supervision/standing-rules.json` — the rules
-  enforced at the command gate. The operator owns the file. It is atomically
+  enforced at the command gate, including repo automation membership and its
+  default stance (§8). The operator owns the file. It is atomically
   rewritten after each operator action and can be edited by hand. The daemon
   reloads it after a change because these are the operator's rules. It also
   loads the file into memory for per-verb lookups. Every change appends a
@@ -400,6 +401,31 @@ checked in memory for every verb, atomically rewritten after each operator
 action, and reloaded after a manual edit. "Structured" describes the format and
 its reader: the gate cannot interpret sentences. It does not imply database
 storage. With tens of rules and one writer at a time, a database adds nothing.
+
+### Repo automation membership (operator-configurable)
+
+Which repos the supervisor may act on is an operator setting, not a design
+constant. It has two pieces:
+
+- **A default stance**, chosen by the operator: default-in (every repo is
+  automatable unless marked out) or default-out (no repo is automatable until
+  marked in). The system ships with default-in, because the autonomous posture
+  is already an explicit operator choice and this matches the old system's
+  watch-everything behavior; an operator who wants deliberate per-repo
+  onboarding flips one control.
+- **A per-repo mark**: in, out, or follow-the-default. Only explicit marks
+  are stored; a repo with no mark follows the default, so flipping the default
+  never requires touching individual repos.
+
+Both live in `standing-rules.json` as entries alongside the verb rules — same
+file, same loader, same gate, one source of truth for "may the daemon act
+here." Membership is checked before any verb executes **and before proposals
+are created**: a repo that resolves to *out* generates no proposals in
+supervised mode and no actions in autonomous mode. It still appears in the
+fact sweep and the account — observability is never gated, and "repo X needed
+attention but is out of automation" is the honest report. Because membership
+is enforced at the same model-free gate as the never-lists, it holds when
+nobody is watching (reason 3 above).
 
 ### Prior art in the current system (and what #509 changed)
 
@@ -516,7 +542,9 @@ Principle: **you take action where you already read the relevant information.**
   supervisor reasoning, and age of its state. Approve and reject controls
   appear beside it. Approval also offers scope choices: this once / this shift
   / always for this repo. This is the only user interface (UI) that creates
-  standing rules. A rejection can include an optional one-line explanation,
+  standing verb rules; automation membership is managed in the Fleet
+  Automation settings tab below. A rejection can include an optional one-line
+  explanation,
   which reaches the supervisor in its next work order. Each escalation shows
   the exact item, exact command, recommendation, and an answer box. Every
   action is also a CLI verb (`tbd supervise queue/approve/reject/answer`).
@@ -527,6 +555,13 @@ Principle: **you take action where you already read the relevant information.**
   the playbook (advisory) and standing rules (binding); the chat is neither.
   If you type something rule-shaped, the supervisor may propose making it
   standing through the normal ratification path.
+- **Fleet automation gets its own Settings tab.** It replaces the current
+  Settings section and holds the automation-membership section — the
+  default-in/default-out control and the per-repo in/out/follow-default list
+  (§8) — alongside the standing-rules inspection surface described next. Both
+  are views of `standing-rules.json`, following the house file-backed-settings
+  pattern: tilde-abbreviated path shown, copy button, manual edits respected.
+  Every control has a CLI twin (`tbd supervise automation ...`).
 - **Standing rules get a simple inspection surface** with the rule list, scope,
   origin, and a revoke action. The origin links to the ledger for the shift
   that created the rule. The file-backed view shows the tilde path, provides a
