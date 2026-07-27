@@ -13,6 +13,51 @@ enum TranscriptAction {
     case reviveWithSession
 }
 
+enum TranscriptHeaderActionKind: Hashable {
+    case resume
+    case reviveOriginal
+    case reviveFresh
+}
+
+struct TranscriptHeaderActionDescriptor: Equatable {
+    let kind: TranscriptHeaderActionKind
+    let title: String
+    let prominent: Bool
+}
+
+enum TranscriptHeaderActions {
+    static let revivePrefix = "Revive this session:"
+
+    static func descriptors(
+        for action: TranscriptAction,
+        defaultBranch: String
+    ) -> [TranscriptHeaderActionDescriptor] {
+        switch action {
+        case .resume:
+            [
+                TranscriptHeaderActionDescriptor(
+                    kind: .resume,
+                    title: "Resume",
+                    prominent: true
+                )
+            ]
+        case .reviveWithSession:
+            [
+                TranscriptHeaderActionDescriptor(
+                    kind: .reviveOriginal,
+                    title: "in original branch",
+                    prominent: true
+                ),
+                TranscriptHeaderActionDescriptor(
+                    kind: .reviveFresh,
+                    title: "on fresh \(defaultBranch)",
+                    prominent: false
+                )
+            ]
+        }
+    }
+}
+
 // MARK: - HistoryPaneView
 
 struct HistoryPaneView: View {
@@ -324,6 +369,8 @@ struct SessionTranscriptView: View {
     /// the last row (NSTableView renderer path).
     @State private var scrollToBottomToken: Int = 0
 
+    @State private var isFreshBranchReviveInFlight = false
+
     private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
@@ -332,11 +379,20 @@ struct SessionTranscriptView: View {
         appState.sessionTranscriptLoading.contains(sessionId)
     }
 
-    private var actionLabel: String {
-        switch action {
-        case .resume: return "Resume"
-        case .reviveWithSession: return "Revive with this session"
+    private var transcriptHeaderActions: [TranscriptHeaderActionDescriptor] {
+        TranscriptHeaderActions.descriptors(for: action, defaultBranch: sourceDefaultBranch)
+    }
+
+    private var sourceDefaultBranch: String {
+        guard let sourceWorktree = appState.archivedWorktrees.values
+            .flatMap({ $0 })
+            .first(where: { $0.id == worktreeID }),
+            let repoID = sourceWorktree.repoID,
+            let repo = appState.repos.first(where: { $0.id == repoID })
+        else {
+            return "main"
         }
+        return repo.defaultBranch
     }
 
     var body: some View {
@@ -354,18 +410,14 @@ struct SessionTranscriptView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(actionLabel) {
-                    Task {
-                        switch action {
-                        case .resume:
-                            await appState.resumeSession(worktreeID: worktreeID, sessionId: sessionId)
-                        case .reviveWithSession:
-                            await appState.reviveWithSession(worktreeID: worktreeID, sessionId: sessionId)
-                        }
-                    }
+                if action == .reviveWithSession {
+                    Text(TranscriptHeaderActions.revivePrefix)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                ForEach(transcriptHeaderActions, id: \.kind) { descriptor in
+                    transcriptHeaderActionButton(descriptor)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -453,6 +505,41 @@ struct SessionTranscriptView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func transcriptHeaderActionButton(
+        _ descriptor: TranscriptHeaderActionDescriptor
+    ) -> some View {
+        if descriptor.prominent {
+            Button(descriptor.title) {
+                performTranscriptHeaderAction(descriptor.kind)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        } else {
+            Button(descriptor.title) {
+                performTranscriptHeaderAction(descriptor.kind)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(descriptor.kind == .reviveFresh && isFreshBranchReviveInFlight)
+        }
+    }
+
+    private func performTranscriptHeaderAction(_ kind: TranscriptHeaderActionKind) {
+        Task {
+            switch kind {
+            case .resume:
+                await appState.resumeSession(worktreeID: worktreeID, sessionId: sessionId)
+            case .reviveOriginal:
+                await appState.reviveWithSession(worktreeID: worktreeID, sessionId: sessionId)
+            case .reviveFresh:
+                isFreshBranchReviveInFlight = true
+                defer { isFreshBranchReviveInFlight = false }
+                await appState.reviveConversationOnFreshBranch(worktreeID: worktreeID, sessionId: sessionId)
+            }
+        }
     }
 }
 
@@ -599,4 +686,3 @@ private extension Int64 {
         return String(format: "%.1f MB", bytes / 1_048_576)
     }
 }
-
