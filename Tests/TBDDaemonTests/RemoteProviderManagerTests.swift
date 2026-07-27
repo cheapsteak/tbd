@@ -255,11 +255,12 @@ struct RemoteProviderManagerTests {
         #expect(await m.providerStatuses().first?.health == .ok)
     }
 
-    /// `recordAttachExit` preserves the remediation already on file, and the
-    /// probe it fires must not undo that: a probe whose `list` also exits 4
-    /// but returns nothing parseable supplies no message/remediation of its
-    /// own, and `recordFailure`'s auth branch falls back to what's on file
-    /// rather than clobbering it with nil.
+    /// Inheritance branch A — previous state IS `.needsAuth`, so the text on
+    /// file is carried across. `recordAttachExit` preserves the remediation
+    /// already on file, and the probe it fires must not undo that: a probe
+    /// whose `list` also exits 4 but returns nothing parseable supplies no
+    /// message/remediation of its own, and `recordFailure`'s auth branch
+    /// falls back to what's on file rather than clobbering it with nil.
     @Test func aProbeWithUnparseableStdoutPreservesTheRemediationOnFile() async throws {
         let invoker = FakeProviderInvoker(script: [
             // First poll parses a full error object → message + remediation.
@@ -284,6 +285,86 @@ struct RemoteProviderManagerTests {
         #expect(statuses.first?.errorMessage == "expired", "an empty probe must not clobber the message on file")
         #expect(statuses.first?.remediationCommand == "acme-provider login",
                 "an empty probe must not clobber the remediation on file")
+    }
+
+    /// Inheritance branch B — previous state is NOT `.needsAuth`, so nothing
+    /// is carried across. A transport failure leaves a message like
+    /// "connection timed out" on file under `.stale`; the auth failure that
+    /// follows must not relabel that sentence as the provider's
+    /// AUTHENTICATION explanation. With no parsed error of its own the CTA
+    /// falls back to the app's neutral copy, which is correct-but-vague
+    /// rather than confidently wrong.
+    @Test func anAuthFailureFromStaleDoesNotInheritTheTransportMessage() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            // Transient → .stale, message taken from stderr.
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "connection timed out"),
+            // Auth failure with nothing parseable in stdout.
+            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        #expect(await m.providerStatuses().first?.errorMessage == "connection timed out")
+
+        await m.pollOnce(provider: provider)
+
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.errorMessage == nil,
+                "a transport message must not become the authentication explanation")
+        #expect(statuses.first?.remediationCommand == nil)
+    }
+
+    /// Same branch, entered from `.error` rather than `.stale` — the two
+    /// non-auth states reach the auth branch by different paths (permanent
+    /// vs transient classification), and neither may donate its text.
+    @Test func anAuthFailureFromErrorDoesNotInheritTheErrorMessage() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            // Permanent → .error, with a parsed message on file.
+            ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "credential_unresolvable", "message": "no such credential"}}"#.utf8),
+                stderr: ""),
+            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        #expect(await m.providerStatuses().first?.health == .error)
+
+        await m.pollOnce(provider: provider)
+
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.errorMessage == nil,
+                "a provisioning error must not become the authentication explanation")
+        #expect(statuses.first?.remediationCommand == nil)
+    }
+
+    /// The same gate on the attach path, whose `setHealth` is itself a
+    /// transition into `.needsAuth`. Were it to carry the stale transport
+    /// text across, the probe it fires would then inherit that text back
+    /// through `recordFailure` (which now sees a previous state of
+    /// `.needsAuth`) and the wrong words would survive the fix anyway.
+    @Test func attachExitFromStaleDoesNotLaunderTheTransportMessageThroughTheProbe() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "connection timed out"),
+            // The out-of-band probe re-confirms auth-needed but says nothing.
+            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        #expect(await m.providerStatuses().first?.health == .stale)
+
+        try await m.recordAttachExit(provider: "fake", exitCode: 4)
+
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.errorMessage == nil,
+                "the transport message must not survive into the auth CTA via the probe")
+        #expect(statuses.first?.remediationCommand == nil)
+        #expect(invoker.calls == [["list"], ["list"]],
+                "the transition off .stale still fires exactly one probe")
     }
 
     /// The other branch of the same fallback: a newly parsed value always

@@ -359,7 +359,13 @@ public actor RemoteProviderManager {
     /// - The auth class marks the provider `.needsAuth` while PRESERVING any
     ///   message/remediation already on file: an attach exit carries none of
     ///   its own, and clobbering a parsed remediation with `nil` would
-    ///   downgrade a good CTA to a bare "authentication needed".
+    ///   downgrade a good CTA to a bare "authentication needed". Preservation
+    ///   is limited to an already-`.needsAuth` provider, for the reason
+    ///   spelled out in `recordFailure`'s auth branch — text written under
+    ///   `.stale`/`.error` explains a different condition and must not be
+    ///   relabelled as an authentication explanation. Carrying it here would
+    ///   also survive the probe below, which inherits from the state this
+    ///   line writes.
     /// - It then triggers exactly ONE out-of-band `list` so the state is
     ///   either confirmed with a freshly parsed remediation or cleared
     ///   outright by a success. That probe is bounded by the
@@ -372,7 +378,8 @@ public actor RemoteProviderManager {
         }
         guard ProviderFailureClass.classify(exitCode: exitCode, error: nil) == .authNeeded else { return }
         let previous = health[name]
-        setHealth(provider: name, to: (.needsAuth, previous?.message, previous?.remediation))
+        let inheritable = previous?.state == .needsAuth ? previous : nil
+        setHealth(provider: name, to: (.needsAuth, inheritable?.message, inheritable?.remediation))
         guard previous?.state != .needsAuth else { return }
         await pollOnce(provider: config)
     }
@@ -383,20 +390,35 @@ public actor RemoteProviderManager {
         switch failureClass {
         case .authNeeded:
             // Preserve what's already on file when the new error supplies
-            // nothing. `recordAttachExit` deliberately keeps the existing
-            // message/remediation (an attach exit carries none of its own)
-            // and then fires a `list` probe through here — a probe that
-            // itself exits 4 with unparseable stdout would otherwise clobber
-            // that preserved remediation back to `nil`, downgrading a good
-            // CTA to a bare "authentication needed". A freshly parsed value
-            // still wins, so recovery-with-new-detail is unaffected. Only
-            // this class does it: `.stale`/`.error` messages describe THIS
-            // invocation and go stale the moment it changes.
+            // nothing — but ONLY while staying within `.needsAuth`.
+            //
+            // Why inherit at all: `recordAttachExit` deliberately keeps the
+            // existing message/remediation (an attach exit carries none of
+            // its own) and then fires a `list` probe through here — a probe
+            // that itself exits 4 with unparseable stdout would otherwise
+            // clobber that preserved remediation back to `nil`, downgrading
+            // a good CTA to a bare "authentication needed". A freshly parsed
+            // value still wins, so recovery-with-new-detail is unaffected.
+            //
+            // Why the asymmetry: text on file under `.ok`/`.stale`/`.error`
+            // describes a DIFFERENT condition. Inheriting it across a
+            // transition INTO `.needsAuth` would render, say, a transport
+            // timeout as the provider's authentication explanation — wrong
+            // words in the one string this CTA exists to deliver. On such a
+            // transition the fields go `nil` and the app renders its neutral
+            // fallback CTA instead. This still covers the path the
+            // inheritance was added for: `recordAttachExit` sets `.needsAuth`
+            // BEFORE firing its probe, so the probe's `recordFailure` sees a
+            // previous state of `.needsAuth`.
+            //
+            // Only this class inherits at all: `.stale`/`.error` messages
+            // describe THIS invocation and go stale the moment it changes.
             let previous = health[provider]
+            let inheritable = previous?.state == .needsAuth ? previous : nil
             setHealth(provider: provider, to: (
                 .needsAuth,
-                error?.message ?? previous?.message,
-                error?.remediation ?? previous?.remediation
+                error?.message ?? inheritable?.message,
+                error?.remediation ?? inheritable?.remediation
             ))
         case .transient:
             setHealth(provider: provider, to: (.stale, error?.message ?? result.stderr, nil))
