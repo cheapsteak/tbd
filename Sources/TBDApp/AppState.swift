@@ -303,6 +303,36 @@ final class AppState: ObservableObject {
     /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
     @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
 
+    // MARK: Archived-worktree search
+    //
+    // The archived list is paginated (50/page), so a purely client-side filter
+    // would silently miss older, unloaded archives — and fetching every
+    // remaining page is unaffordable (`handleWorktreeList` enriches each
+    // archived row with a `~/.claude/projects` scan; full enrichment measured
+    // ~19 s). So search is a daemon-side SQL filter with its OWN paginated
+    // result set, held separately from the unsearched `archivedWorktrees`
+    // pages so clearing the query restores them without a refetch.
+
+    /// The query whose search RPC is currently IN FLIGHT for a repo, stamped
+    /// before the await so a superseded response can be dropped.
+    ///
+    /// This is deliberately NOT the query the stored rows answer — that lives
+    /// inside `ArchivedSearchResults`. Deciding what to *display* from this
+    /// value would render the previous query's rows as if they were the answer
+    /// for the new one during the whole in-flight window.
+    @Published var archivedSearchQuery: [UUID: String] = [:]
+    /// Daemon-side search results (page-accumulated) and the query they answer,
+    /// keyed by repo ID. Absent until some response has landed.
+    @Published var archivedSearchResults: [UUID: ArchivedSearchResults] = [:]
+    /// Repos whose most recent archived-search RPC failed. Set only for the
+    /// query that was in flight, cleared when the next search starts or the
+    /// search is cleared. The rail reads it so a failed search degrades to a
+    /// *labelled* client-side view rather than silently claiming the loaded
+    /// rows are the whole answer.
+    @Published var archivedSearchFailed: [UUID: Bool] = [:]
+    /// Guards against concurrent `loadMoreArchivedSearchResults` calls.
+    @Published var isLoadingMoreArchivedSearch: [UUID: Bool] = [:]
+
     /// Orphan-GC reap records (History → Reclaimed), keyed by repo ID and
     /// fetched on demand alongside `archivedWorktrees`.
     @Published var reapRecords: [UUID: [ReapRecord]] = [:]
