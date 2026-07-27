@@ -202,13 +202,15 @@ the same.
   dialog from outside — that the design refuses on principle, for the same reason it refuses
   to keystroke-drive the Channels consent prompt: it requires screen-scraping or blind key
   timing, and it defeats the dialog while leaving it in place. The design satisfies the
-  story's intent structurally instead. Tool-permission prompts are prevented at spawn: fleet
-  sessions run permission-skipped today, and if non-skip spawns ever ship, the operator's
-  allowlist is the agent's own permission config, delivered through the existing per-repo
-  settings overlay — the agent's engine enforces it, TBD invents no matching language.
-  Config-answerable dialogs are pre-answered by seeders before spawn. Whatever still stalls
-  is a genuine question and is escalated, never advanced. "Never past anything else" thus
-  holds because no advancement mechanism exists to gate. See the design doc §2.*
+  story's intent structurally instead. Permission behavior is decided at the source — the
+  agent's own config: the repo's committed settings plus the operator's per-repo settings
+  overlay, which TBD delivers and never counter-configures. The spawn-time bypass flag
+  removes only *default* permission checks; a repo's explicit `permissions.ask` rules still
+  prompt, deliberately, because they are that repo's chosen human gates. Those are escalated,
+  never advanced or auto-granted; if one shouldn't stall a night, the fix is a reviewable
+  change to that ask rule at its source, never a TBD-side grant list. Config-answerable
+  dialogs are pre-answered by seeders before spawn. "Never past anything else" thus holds
+  because no advancement mechanism exists to gate. See the design doc §2.*
 - **P2-4 [A]** As an operator, I want runaway agents — looping, burning quota without
   progress — detected and flagged (or paused, in autonomous mode), so that one wedged
   session doesn't eat the shift's budget.

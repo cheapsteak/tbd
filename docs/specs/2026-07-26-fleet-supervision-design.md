@@ -122,33 +122,56 @@ the mechanism. Advancing a rendered dialog from outside requires either
 scraping the screen to find it or timing keystrokes blind — the same mechanism
 §12 refuses for the Channels consent prompt, refused here for the same reason:
 auto-answering a dialog defeats it while leaving it in place as theater. The
-resolution is **prevention at spawn, never advancement from outside.**
+resolution is **prevention at the source, never advancement from outside** —
+and where the source deliberately wants a human, escalation.
 
 Start from what daemon-spawned fleet sessions actually face.
 `ClaudeSpawnCommandBuilder` hard-codes `--dangerously-skip-permissions` on both
 Claude spawn paths, and the Codex spawn passes
-`--dangerously-bypass-approvals-and-sandbox`. Tool-permission prompts therefore
-*cannot occur* in a fleet session as it is spawned today; the allowlist P2-3
-asks for would have nothing to match. What does still stall an agent is the
-residual dialog zoo: folder trust, `/login`, plan-mode approval,
-`AskUserQuestion`, and first-run dialogs. Folder trust looks solved and isn't:
-`ClaudeTrustSeeder` pre-answers it for scratch spaces only — its
-`guard worktree.isScratch else { return }` returns early for repo-backed
-worktrees — and a fleet worktree is a path Claude has never been trusted at,
-exactly as fresh and untrusted as a scratch dir. Seeding trust for non-scratch
-worktrees is prong 2's first piece of new work, not existing coverage. None of
-these dialogs has a machine answer path today, and none of them is a permission
-prompt.
+`--dangerously-bypass-approvals-and-sandbox`. Those flags remove the agent's
+*default* permission checks; they do not silence a repo's explicit ones. A
+repo's own committed Claude settings can carry `permissions.ask` rules, and an
+`ask` rule still prompts under the bypass flag — by design, because it is the
+repo deliberately requesting a human at a point it chose. This is real, not
+hypothetical: one target repo in the motivating fleet gates PR merges
+(`gh pr merge*`, plus the merge and auto-merge API routes) and
+production-credential fetches this way, precisely so an agent has to get a
+human before doing those things. So the allowlist P2-3 asks for *would* have
+something to match — and matching it is exactly what must not happen. An
+allowlist that auto-grants a repo's deliberate `ask` is the tool overruling the
+repo's own decision about when a human is required.
+
+Alongside those asks, the residual dialog zoo still stalls agents: folder
+trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.
+Folder trust looks solved and isn't: `ClaudeTrustSeeder` pre-answers it for
+scratch spaces only — its `guard worktree.isScratch else { return }` returns
+early for repo-backed worktrees — and a fleet worktree is a path Claude has
+never been trusted at, exactly as fresh and untrusted as a scratch dir. Seeding
+trust for non-scratch worktrees is prong 2's first piece of new work, not
+existing coverage. None of these dialogs has a machine answer path today.
+`ask`-rule prompts join the zoo as its one permission-shaped member — and they
+are the one member that is deliberate. The rest is friction to remove before it
+is ever drawn; an `ask` is a question to carry to a human.
 
 So the design answers the stall in three prongs, each at a different moment:
 
-1. **Tool-permission prompts — prevented by spawn configuration.** If
-   non-skip-permissions fleet spawns ever ship, the operator's allowlist is the
-   agent's *own* permission-rule syntax (for Claude, `permissions.allow`),
-   delivered per repo through the existing claude-settings overlay that already
-   deep-merges into the per-session `--settings` file. The agent's engine
-   enforces it. TBD invents no matching language, stores no conditions, and
-   evaluates nothing at runtime.
+1. **Tool-permission behavior is fixed at the source — TBD never
+   counter-configures it.** The one place that decides what prompts is the
+   agent's own permission config: the repo's committed settings, plus the
+   operator's per-repo claude-settings overlay, which already deep-merges into
+   the per-session `--settings` file at spawn. TBD delivers that overlay and
+   stops there. It grows no counter-setting that auto-answers what a repo's
+   settings deliberately ask about — "the repo says always ask before merging;
+   the tool says always grant merge requests" is two configs fighting each
+   other, and a standing waste of both tokens and the reader's trust in either
+   setting. TBD invents no matching language, stores no conditions, and
+   evaluates nothing at runtime; an `ask` that survives spawn is honored as an
+   escalation (prong 3). If overnight operation shouldn't stall on a given ask,
+   the fix is to change that ask rule at its source — a reviewable settings
+   change in the repo or in the operator's overlay — never a TBD-side grant
+   list. The same holds should non-skip-permissions fleet spawns ever ship:
+   the operator's allowlist is `permissions.allow` in that same config,
+   enforced by the agent's own engine.
 2. **Config-answerable dialogs — pre-answered by seeders before spawn**, one
    seeder per agent kind, following the `ClaudeTrustSeeder` precedent.
    `ClaudeTrustSeeder` is precedent for the *pattern* only — it seeds scratch
@@ -156,15 +179,19 @@ So the design answers the stall in three prongs, each at a different moment:
    non-scratch fleet worktrees is work this prong names, not work that already
    exists. A dialog that has a config answer is answered before it can ever be
    drawn.
-3. **Everything that still stalls is a genuine question** — definitionally not
-   routine, because the routine cases were removed by prongs 1 and 2. It
-   surfaces as an awaiting-input case and is escalated. It is never advanced.
+3. **Everything that still stalls is a genuine question** — either because it
+   was never routine, or because a repo's settings deliberately made it a
+   question and prong 1 declines to answer for them. A firing `ask` rule is not
+   noise to suppress; it is the repo asking for a human, and it lands here. It
+   surfaces as an awaiting-input case and is escalated. It is never advanced
+   and never auto-granted.
 
 The story's "never past anything else" clause is then enforced *structurally*
 rather than by an allowlist's precision: TBD has no prompt-advancing mechanism
-at all, so there is nothing to gate and nothing to get wrong. One consequence
-for the rest of this document: the `approve-a-prompt` verb is removed from the
-verb set (§3, §8).
+at all — not for the zoo, and not for the permission prompts a repo's `ask`
+rules deliberately raise — so there is nothing to gate and nothing to get
+wrong. One consequence for the rest of this document: the `approve-a-prompt`
+verb is removed from the verb set (§3, §8).
 
 None of this makes stalls cheap to ignore, and nothing above slows detection.
 The one-minute re-check (P1-6, §4 step 8, §12) still notices a stalled agent
@@ -180,7 +207,9 @@ screen-scraping babysitter (`~/.fleet/babysitter_daemon.py`) that typed
 approvals into panes. Both halves are instructive. The mechanism was typing
 into a rendered TUI — exactly what is refused here. And the list itself was too
 coarse to ratify: a bare `git` prefix would have waved through
-`git push --force`. An allowlist written in a vocabulary the tool invented,
+`git push --force`, and a bare `gh api` prefix would have auto-approved the
+very merge and auto-merge API calls a repo's `ask` rules deliberately gate. An
+allowlist written in a vocabulary the tool invented,
 matched against text the tool scraped, is two guesses stacked. That machine was
 checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
 `launchd` job remains.
