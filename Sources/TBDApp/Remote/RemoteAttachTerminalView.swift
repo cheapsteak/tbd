@@ -79,7 +79,14 @@ private struct RemoteAttachTerminalRepresentable: NSViewRepresentable {
             font: appearance.font,
             appearance: appearance
         )
-        tv.allowMouseReporting = false
+        // Unlike `TerminalPanelView`, this view installs no NSEvent
+        // scroll/click monitors, so SwiftTerm's native mouse reporting is
+        // the ONLY path that can deliver wheel/click events to the remote
+        // app at all. The remote side (tmux `mouse on` + the app's own
+        // mouse-tracking request) decides whether an event actually gets
+        // consumed there; SwiftTerm still falls back to local scrollback
+        // scrolling whenever the remote app hasn't requested mouse mode.
+        tv.allowMouseReporting = true
         tv.terminalDelegate = context.coordinator
         context.coordinator.terminalView = tv
         context.coordinator.onDetached = onDetached
