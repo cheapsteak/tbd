@@ -264,4 +264,25 @@ extension RPCRouter {
         }
         return .ok()
     }
+
+    /// Correlate an `attach` exit the APP observed with provider health.
+    /// `attach` is exec'd on a terminal's own TTY by the app, so this is the
+    /// only way that exit code ever reaches the daemon — and the exit code is
+    /// all there is, since attach's stdout is a PTY stream that MUST NOT be
+    /// parsed (`docs/remote-provider-contract.md` § `attach`).
+    ///
+    /// Purely additive: every classification decision (which classes move
+    /// health, preserving existing remediation, the single bounded re-probe)
+    /// lives in `RemoteProviderManager.recordAttachExit`. An unknown provider
+    /// throws `RemoteProviderError.unknownProvider` out of this handler and
+    /// surfaces through the router's catch-all, exactly like the `invoke`-based
+    /// handlers above.
+    func handleRemoteReportAttachExit(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteReportAttachExitParams.self, from: paramsData)
+        try await manager.recordAttachExit(provider: params.provider, exitCode: params.exitCode)
+        return .ok()
+    }
 }

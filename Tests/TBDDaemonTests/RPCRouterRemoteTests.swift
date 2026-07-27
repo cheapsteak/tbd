@@ -504,6 +504,69 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(rows.first?.pinnedAt == nil)
     }
 
+    // MARK: - remote.reportAttachExit
+
+    /// The wire path for attach-exit correlation: the app reports an
+    /// auth-class exit and provider health moves, with the out-of-band probe
+    /// supplying the remediation the exit code alone can't carry.
+    @Test func reportAttachExitMovesProviderHealthOverTheWire() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stderr: ""),
+        ])
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let r = router(manager: manager)
+
+        let response = await call(r, "remote.reportAttachExit",
+            #"{"provider": "fake", "sessionID": "a", "exitCode": 4}"#)
+
+        #expect(response.success)
+        let statuses = await manager.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.remediationCommand == "acme-provider login")
+    }
+
+    /// The non-auth branch over the wire: still a success response (the
+    /// report was accepted), but nothing about provider health moves.
+    @Test func reportAttachExitIgnoresNonAuthExitCodes() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [])
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let r = router(manager: manager)
+
+        let response = await call(r, "remote.reportAttachExit",
+            #"{"provider": "fake", "sessionID": "a", "exitCode": 137}"#)
+
+        #expect(response.success)
+        #expect(await manager.providerStatuses().first?.health == .ok)
+        #expect(invoker.callsSnapshot().isEmpty)
+    }
+
+    @Test func reportAttachExitForAnUnknownProviderErrors() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let response = await call(r, "remote.reportAttachExit",
+            #"{"provider": "nope", "sessionID": "a", "exitCode": 4}"#)
+        #expect(response.success == false)
+    }
+
+    @Test func reportAttachExitIsGatedByTheFlagInBothModes() async throws {
+        let params = #"{"provider": "fake", "sessionID": "x", "exitCode": 4}"#
+        let flagOff = await call(router(invoker: FakeProviderInvoker(script: [])), "remote.reportAttachExit", params)
+        #expect(flagOff.success == false)
+        #expect(flagOff.error == "remote backends disabled")
+
+        try await db.config.setRemoteBackendsEnabled(true)
+        let noManager = await call(router(manager: nil), "remote.reportAttachExit", params)
+        #expect(noManager.success == false)
+        #expect(noManager.error == "remote backends disabled")
+    }
+
     @Test func configToggleRoundTrips() async throws {
         let r = router(invoker: FakeProviderInvoker(script: []))
         let response = await call(r, "config.setRemoteBackends", #"{"enabled": true}"#)

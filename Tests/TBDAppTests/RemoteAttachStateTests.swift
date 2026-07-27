@@ -3,6 +3,20 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
+/// One recorded `remoteAttachExitReporter` invocation.
+struct ExitReport: Equatable {
+    let provider: String
+    let sessionID: String
+    let exitCode: Int32
+}
+
+/// MainActor-isolated collector for the injected reporter seam — the
+/// reporter closure is `@MainActor`, so no locking is needed.
+@MainActor
+final class ExitReportRecorder {
+    var calls: [ExitReport] = []
+}
+
 /// Integration-through-`AppState` tests for the remote attach-lifecycle
 /// wiring: `selectRemoteSession`/`activateRemoteSession` touching recency
 /// and clearing (or not clearing) the explicit-detach flag,
@@ -361,6 +375,242 @@ struct RemoteAttachStateTests {
             // selection plus the capped recency budget).
             let farFuture = Date().addingTimeInterval(10_000)
             #expect(state.attachedRemoteSelections(now: farFuture).count <= state.remoteAttachKeepAliveLimit + 1)
+        }
+    }
+
+    // MARK: - Auth-class exit (provider can't authenticate)
+
+    /// An auth-class exit takes the pending-reconnect path (so it clears
+    /// itself once the provider recovers) rather than the explicit-detach
+    /// path (which would demand a user gesture the user can't usefully make
+    /// while the provider is unauthenticated).
+    @Test func authExitRecordsAPendingReconnectEntryNotAnExplicitDetach() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.exitCode == 4)
+            #expect(state.explicitlyDetachedRemoteSessions[sel("acme", "s1")] == nil)
+        }
+    }
+
+    /// A FIRST auth exit starts at `attempts` 1, i.e. the short base
+    /// backoff — which is the only value the normal flow ever reaches,
+    /// since the health gate blocks every retry from here on.
+    @Test func firstAuthExitStartsAtAttemptsOne() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.attempts == 1)
+        }
+    }
+
+    /// Repeated auth exits escalate exactly like unexpected ones. That only
+    /// happens in the pathological case where a provider's `list`
+    /// authenticates (health clears, the session is re-admitted) but its
+    /// `attach` doesn't — an otherwise unbounded ~5s respawn loop, each
+    /// round costing a daemon probe. Escalation is the bound. See
+    /// `RemoteReconnectPolicy.nextPending`.
+    @Test func repeatedAuthExitsEscalateAttemptsLikeUnexpectedOnes() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.attempts == 3)
+        }
+    }
+
+    // MARK: - Local auth-exit knowledge (independent of daemon health)
+
+    /// The app's own half of the auth CTA's gate: it knows the attach exited
+    /// in the auth class without waiting for the fire-and-forget report to
+    /// come back as published provider health.
+    @Test func authExitIsVisibleLocallyWithoutAnyProviderHealthChange() {
+        withState { state in
+            // Provider is still `.ok` — nothing has told the daemon yet.
+            seedProvider(state, name: "acme", health: .ok)
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+
+            #expect(state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+        }
+    }
+
+    /// The other classes must not light it: a transport failure and a clean
+    /// detach are not authentication problems, and neither is a selection
+    /// with no pending entry at all.
+    @Test func nonAuthExitsAreNotLocalAuthExits() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 137)
+            state.markRemoteSessionDetached(sel("acme", "s2"), exitCode: 0)
+            state.markRemoteSessionDetached(sel("acme", "s3"), exitCode: nil)
+
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s2")))
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s3")))
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "never-attached")))
+        }
+    }
+
+    /// Reattach clears the pending entry outright, so the local signal goes
+    /// with it — the CTA must not outlive the state that justified it.
+    @Test func reattachClearsTheLocalAuthExitSignal() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+            #expect(state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+
+            state.reattachRemoteSession(sel("acme", "s1"))
+
+            #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+        }
+    }
+
+    // MARK: - Provider health gates first-ever attach
+
+    /// A NEVER-attached session under an already-`.needsAuth` provider must
+    /// not spawn a doomed attach. `pendingReconnectBlockedSelections` can't
+    /// cover this — it only inspects selections that already have a pending
+    /// entry, i.e. ones that already burned one.
+    @Test func needsAuthProviderExcludesANeverAttachedSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+            seedSession(state, provider: "acme", id: "s1")
+
+            #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// The asymmetry, pinned: `.stale` is ordinary transport flake on the
+    /// CONTROL path (`list`), which says nothing about whether `attach` can
+    /// connect. Blocking on it would turn one bad poll into "you can't open
+    /// your sessions".
+    @Test func staleProviderStillAllowsANeverAttachedSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .stale)
+            seedSession(state, provider: "acme", id: "s1")
+
+            #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// Same for `.error` — a `list` that fails permanently is a broken
+    /// control path, not proof that `attach` fails.
+    @Test func errorProviderStillAllowsANeverAttachedSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .error)
+            seedSession(state, provider: "acme", id: "s1")
+
+            #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// Recovery re-admits it with no user gesture — the gate is health, and
+    /// health is republished by the daemon's poll.
+    @Test func recoveryFromNeedsAuthReAdmitsTheSession() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+
+            seedProvider(state, name: "acme", health: .ok)
+
+            #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    @Test func repeatedUnexpectedExitsDoEscalateAttempts() {
+        withState { state in
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
+            #expect(state.pendingReconnectRemoteSessions[sel("acme", "s1")]?.attempts == 2)
+        }
+    }
+
+    /// `RemoteReconnectPolicy.isBlocked` already blocks on any health other
+    /// than `.ok`, so `.needsAuth` gates auto-reattach with NO second
+    /// mechanism — pinned here rather than adding one. The session is
+    /// re-admitted once health returns to `.ok` and backoff has elapsed.
+    @Test func needsAuthProviderBlocksAutoReattachUntilHealthReturns() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+
+            let pending = state.pendingReconnectRemoteSessions[sel("acme", "s1")]
+            #expect(pending != nil)
+            guard let pending else { return }
+
+            // Backoff long elapsed, but the provider still can't authenticate.
+            let farFuture = pending.nextEligibleAt.addingTimeInterval(10_000)
+            #expect(!state.attachedRemoteSelections(now: farFuture).contains(sel("acme", "s1")))
+
+            // A human re-authenticates; the daemon's next poll republishes `.ok`.
+            seedProvider(state, name: "acme", health: .ok)
+
+            #expect(state.attachedRemoteSelections(now: pending.nextEligibleAt).contains(sel("acme", "s1")))
+        }
+    }
+
+    /// The auth exit is additionally reported to the daemon so provider
+    /// health picks it up without waiting for the next poll. Fire-and-forget
+    /// through the injected reporter seam — tests must never reach the real
+    /// daemon socket.
+    @Test func authExitReportsTheExitCodeToTheDaemon() async {
+        let suiteName = "TBDAppTests.RemoteAttachState.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = AppState(userDefaults: defaults)
+        let recorder = ExitReportRecorder()
+        state.remoteAttachExitReporter = { provider, sessionID, exitCode in
+            recorder.calls.append(ExitReport(provider: provider, sessionID: sessionID, exitCode: exitCode))
+        }
+
+        state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
+
+        await waitUntil { recorder.calls.count == 1 }
+        #expect(recorder.calls == [ExitReport(provider: "acme", sessionID: "s1", exitCode: 4)])
+    }
+
+    /// The other two classes never report: a clean detach is not a failure
+    /// at all, and a transport failure is handled entirely app-side by
+    /// reconnect backoff.
+    @Test func cleanAndUnexpectedExitsDoNotReportToTheDaemon() async {
+        let suiteName = "TBDAppTests.RemoteAttachState.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = AppState(userDefaults: defaults)
+        let recorder = ExitReportRecorder()
+        state.remoteAttachExitReporter = { provider, sessionID, exitCode in
+            recorder.calls.append(ExitReport(provider: provider, sessionID: sessionID, exitCode: exitCode))
+        }
+
+        state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
+        state.markRemoteSessionDetached(sel("acme", "s2"), exitCode: 137)
+        state.markRemoteSessionDetached(sel("acme", "s3"), exitCode: nil)
+
+        // Give any (incorrectly) spawned report Task a chance to land before
+        // asserting the negative. A mis-route would enqueue its Task
+        // synchronously inside `markRemoteSessionDetached`, so one
+        // scheduling turn is enough to catch it — this window is generous.
+        await waitUntil({ !recorder.calls.isEmpty }, timeout: 0.5)
+        #expect(recorder.calls.isEmpty)
+    }
+
+    /// Bounded wait for a MainActor-isolated condition — the reporter fires
+    /// from a `Task`, so the assertion can't be made synchronously.
+    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 2) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
         }
     }
 

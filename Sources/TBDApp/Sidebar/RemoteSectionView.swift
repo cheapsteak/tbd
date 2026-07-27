@@ -146,6 +146,13 @@ struct RemoteSectionView: View {
 struct RemoteProviderHeaderRow: View {
     let provider: RemoteProviderStatus
     @State private var showingCreateSheet = false
+    /// Whether the auth CTA popover (opened from the `.needsAuth` indicator)
+    /// is showing.
+    @State private var showingAuthPopover = false
+    /// Non-nil while the provider's remediation command runs in its own PTY
+    /// sheet. Presented from the ROW, not from inside the popover — a
+    /// popover can't host a sheet of its own.
+    @State private var runningRemediation: RemoteRemediationRun?
 
     var body: some View {
         HStack(spacing: 4) {
@@ -174,6 +181,25 @@ struct RemoteProviderHeaderRow: View {
         .sheet(isPresented: $showingCreateSheet) {
             RemoteCreateSheet(provider: provider.config, describe: provider.describe, repoPrefill: nil)
         }
+        // No `if let authPresentation` inside: the run carries its own
+        // presentation, so health flipping off `.needsAuth` while the
+        // command is still running (the expected outcome!) can't collapse
+        // the sheet's content to an empty view while it stays presented.
+        .sheet(item: $runningRemediation) { run in
+            RemoteRemediationTerminalSheet(run: run)
+        }
+    }
+
+    /// The auth CTA for this provider, or nil when its health isn't
+    /// `.needsAuth` — the exact same pure decision the session detail pane
+    /// renders, so the two surfaces can't disagree.
+    ///
+    /// Provider-level chrome, so published health is the ONLY signal here.
+    /// The detail pane additionally passes its own session's attach-exit
+    /// class (`localAuthExit`); this row has no session in view and nothing
+    /// local to add.
+    private var authPresentation: RemoteProviderAuthPresentation? {
+        RemoteProviderAuthPresentation.make(from: provider)
     }
 
     @ViewBuilder
@@ -185,13 +211,36 @@ struct RemoteProviderHeaderRow: View {
                 .foregroundStyle(.secondary)
                 .help("Provider unreachable — sessions may be stale")
         case .needsAuth:
+            // The indicator is a BUTTON here (unlike the other health cases,
+            // which are passive): needing authentication is the one health
+            // state with an action attached, and the popover carries the
+            // same CTA the session detail pane shows.
+            //
             // Reuses the shared adaptive attention tint (`RowStatusIndicator.swift`)
             // rather than raw `.orange` — that pair was chosen for legibility
             // against this exact sidebar background in both appearances.
-            Image(systemName: "key.slash")
-                .font(.system(size: 11))
-                .foregroundStyle(SuffixRowIndicator.attention.color)
-                .help(provider.errorMessage ?? provider.remediationLabel ?? "Authentication needed")
+            Button {
+                showingAuthPopover = true
+            } label: {
+                Image(systemName: "key.slash")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SuffixRowIndicator.attention.color)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(provider.errorMessage ?? provider.remediationLabel ?? "Authentication needed")
+            .popover(isPresented: $showingAuthPopover, arrowEdge: .bottom) {
+                if let presentation = authPresentation {
+                    RemoteProviderAuthCTAView(
+                        presentation: presentation,
+                        onRun: {
+                            showingAuthPopover = false
+                            runningRemediation = RemoteRemediationRun(presentation)
+                        }
+                    )
+                    .padding(14)
+                }
+            }
         case .error:
             // Reuses the shared suffix error tint rather than raw `.red`.
             Image(systemName: "exclamationmark.triangle")

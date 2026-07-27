@@ -1,23 +1,25 @@
 import Foundation
 import TBDShared
 
-/// Backoff bookkeeping for one remote session whose attach terminal ended
-/// UNEXPECTEDLY (`RemoteAttachTerminalView.isUnexpectedExit`) — distinct
-/// from `RemoteAttachDetachInfo`/`explicitlyDetachedRemoteSessions`, which
-/// tracks a CLEAN exit the user chose (never auto-resumed). An unexpected
-/// exit is presumed to be the transport's fault (unreachable host, dropped
-/// SSM/ssh connection, failed credential mid-session) rather than the user
-/// leaving, so it's eligible to come back on its own once the provider is
-/// healthy again — see `RemoteReconnectPolicy.isBlocked`.
+/// Backoff bookkeeping for one remote session whose attach terminal ended in
+/// a NON-CLEAN class (`RemoteAttachExitClass.unexpected` or `.authNeeded`) —
+/// distinct from `RemoteAttachDetachInfo`/`explicitlyDetachedRemoteSessions`,
+/// which tracks a CLEAN exit the user chose (never auto-resumed). Neither
+/// non-clean class is the user leaving — one is the transport's fault
+/// (unreachable host, dropped connection), the other the provider's
+/// credentials — so both are eligible to come back on their own once the
+/// provider is healthy again; see `RemoteReconnectPolicy.isBlocked`.
 struct RemotePendingReconnect: Equatable {
     /// The exit code that caused this entry (always non-zero — see
-    /// `isUnexpectedExit` — since a `nil`/`0` exit routes to the
+    /// `RemoteAttachExitClass` — since a `nil`/`0` exit routes to the
     /// clean-detach path instead).
     let exitCode: Int32?
-    /// How many consecutive unexpected exits this selection has racked up
-    /// without a clean run in between. Starts at 1 on the first unexpected
-    /// exit, incremented each time `markRemoteSessionDetached` sees another
-    /// one for a selection that already has a pending entry.
+    /// How many consecutive NON-CLEAN exits this selection has racked up
+    /// without a clean run in between. Starts at 1 on the first one,
+    /// incremented each time `markRemoteSessionDetached` sees another for a
+    /// selection that already has a pending entry. Both non-clean classes
+    /// count the same way — see `RemoteReconnectPolicy.nextPending` for why
+    /// auth exits escalate too.
     let attempts: Int
     /// Earliest instant an automatic reattach may be attempted again.
     let nextEligibleAt: Date
@@ -77,11 +79,31 @@ enum RemoteReconnectPolicy {
     }
 
     /// The next pending-reconnect entry for a selection that just had
-    /// ANOTHER unexpected exit, given whatever entry (if any) already
-    /// existed for it. Increments `attempts` on top of the prior value
-    /// (starting at 1 for a fresh entry) so a session that keeps failing
-    /// immediately after each automatic retry backs off further each time,
-    /// rather than retrying at the same short interval forever.
+    /// ANOTHER non-clean exit, given whatever entry (if any) already existed
+    /// for it. Increments `attempts` on top of the prior value (starting at
+    /// 1 for a fresh entry) so a session that keeps failing immediately
+    /// after each automatic retry backs off further each time, rather than
+    /// retrying at the same short interval forever.
+    ///
+    /// **Both non-clean classes come through here**, including
+    /// `RemoteAttachExitClass.authNeeded`. A separate non-escalating auth
+    /// variant existed and was removed, for two reasons:
+    ///
+    /// - It inherited whatever `attempts` earlier `.unexpected` exits had
+    ///   already escalated, so its "stays at 1" promise was only true on a
+    ///   pristine history.
+    /// - Escalation is the only bound on a real respawn loop. In the normal
+    ///   flow there is exactly ONE auth exit — health flips to `.needsAuth`
+    ///   and `isBlocked` refuses every retry from then on, so `attempts`
+    ///   never leaves 1 and re-authentication is still followed by a prompt
+    ///   automatic reattach. `attempts` only ever climbs in the pathological
+    ///   case where a provider's `list` authenticates but its `attach` does
+    ///   not: health clears to `.ok`, the session is re-admitted, attach
+    ///   dies at 4, repeat — every ~5s forever, each round also costing a
+    ///   daemon `list` probe. That is precisely when a bound is wanted.
+    ///
+    /// The user is never stuck behind a grown backoff either way: Reattach
+    /// clears the entry outright.
     static func nextPending(exitCode: Int32?, previous: RemotePendingReconnect?, now: Date) -> RemotePendingReconnect {
         let attempts = (previous?.attempts ?? 0) + 1
         return RemotePendingReconnect(

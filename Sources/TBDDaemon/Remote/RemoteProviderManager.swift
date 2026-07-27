@@ -344,12 +344,82 @@ public actor RemoteProviderManager {
         }
     }
 
+    /// Correlates a locally-spawned `attach` exit (the app execs the provider
+    /// on a terminal's own TTY, so its exit code never passes through this
+    /// actor's runner) with provider health.
+    ///
+    /// `attach`'s stdout is a PTY byte stream and MUST NOT be parsed
+    /// (`docs/remote-provider-contract.md` § `attach`), so the exit code is
+    /// the only signal — hence `error: nil` in the classification below.
+    ///
+    /// - Non-auth classes are deliberately ignored: an attach that died for
+    ///   transport reasons is already covered app-side by pending-reconnect
+    ///   backoff, and letting every dropped connection rewrite provider
+    ///   health would make one flaky viewer speak for the whole provider.
+    /// - The auth class marks the provider `.needsAuth` while PRESERVING any
+    ///   message/remediation already on file: an attach exit carries none of
+    ///   its own, and clobbering a parsed remediation with `nil` would
+    ///   downgrade a good CTA to a bare "authentication needed". Preservation
+    ///   is limited to an already-`.needsAuth` provider, for the reason
+    ///   spelled out in `recordFailure`'s auth branch — text written under
+    ///   `.stale`/`.error` explains a different condition and must not be
+    ///   relabelled as an authentication explanation. Carrying it here would
+    ///   also survive the probe below, which inherits from the state this
+    ///   line writes.
+    /// - It then triggers exactly ONE out-of-band `list` so the state is
+    ///   either confirmed with a freshly parsed remediation or cleared
+    ///   outright by a success. That probe is bounded by the
+    ///   already-`.needsAuth` check: at most one extra `list` per health
+    ///   transition, so a session flapping through repeated auth exits can
+    ///   never turn into a poll flood.
+    func recordAttachExit(provider name: String, exitCode: Int32) async throws {
+        guard let config = providers[name] ?? loadAdHoc(named: name) else {
+            throw RemoteProviderError.unknownProvider(name)
+        }
+        guard ProviderFailureClass.classify(exitCode: exitCode, error: nil) == .authNeeded else { return }
+        let previous = health[name]
+        let inheritable = previous?.state == .needsAuth ? previous : nil
+        setHealth(provider: name, to: (.needsAuth, inheritable?.message, inheritable?.remediation))
+        guard previous?.state != .needsAuth else { return }
+        await pollOnce(provider: config)
+    }
+
     private func recordFailure(provider: String, class failureClass: ProviderFailureClass,
                                result: ProviderResult) {
         let error = result.decodedError
         switch failureClass {
         case .authNeeded:
-            setHealth(provider: provider, to: (.needsAuth, error?.message, error?.remediation))
+            // Preserve what's already on file when the new error supplies
+            // nothing — but ONLY while staying within `.needsAuth`.
+            //
+            // Why inherit at all: `recordAttachExit` deliberately keeps the
+            // existing message/remediation (an attach exit carries none of
+            // its own) and then fires a `list` probe through here — a probe
+            // that itself exits 4 with unparseable stdout would otherwise
+            // clobber that preserved remediation back to `nil`, downgrading
+            // a good CTA to a bare "authentication needed". A freshly parsed
+            // value still wins, so recovery-with-new-detail is unaffected.
+            //
+            // Why the asymmetry: text on file under `.ok`/`.stale`/`.error`
+            // describes a DIFFERENT condition. Inheriting it across a
+            // transition INTO `.needsAuth` would render, say, a transport
+            // timeout as the provider's authentication explanation — wrong
+            // words in the one string this CTA exists to deliver. On such a
+            // transition the fields go `nil` and the app renders its neutral
+            // fallback CTA instead. This still covers the path the
+            // inheritance was added for: `recordAttachExit` sets `.needsAuth`
+            // BEFORE firing its probe, so the probe's `recordFailure` sees a
+            // previous state of `.needsAuth`.
+            //
+            // Only this class inherits at all: `.stale`/`.error` messages
+            // describe THIS invocation and go stale the moment it changes.
+            let previous = health[provider]
+            let inheritable = previous?.state == .needsAuth ? previous : nil
+            setHealth(provider: provider, to: (
+                .needsAuth,
+                error?.message ?? inheritable?.message,
+                error?.remediation ?? inheritable?.remediation
+            ))
         case .transient:
             setHealth(provider: provider, to: (.stale, error?.message ?? result.stderr, nil))
         case .permanent, .contractBug:
@@ -361,11 +431,25 @@ public actor RemoteProviderManager {
         setHealth(provider: provider, to: (.ok, nil, nil))
     }
 
+    /// Records a provider's health and broadcasts when ANY of the three
+    /// fields the app renders changed — state, message, or remediation.
+    ///
+    /// State alone is not enough: the auth path routinely transitions
+    /// `.needsAuth` → `.needsAuth` while ADDING detail (`recordAttachExit`
+    /// flips health off a bare exit code with no message, then its probe
+    /// lands the parsed message + remediation). Broadcasting on state alone
+    /// dropped that payload on the floor and left the app rendering a
+    /// command-less fallback CTA for the whole outage, since every later
+    /// poll is also `.needsAuth` → `.needsAuth`.
+    ///
+    /// Equally deliberately, it does NOT broadcast unconditionally: a
+    /// healthy provider re-setting `(.ok, nil, nil)` every 60s poll would
+    /// otherwise put a delta on the wire per provider per minute forever.
     private func setHealth(provider: String,
                            to new: (ProviderHealth, String?, ProviderRemediation?)) {
         let old = health[provider]
         health[provider] = new
-        if old?.state != new.0 {
+        if old?.state != new.0 || old?.message != new.1 || old?.remediation != new.2 {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
     }

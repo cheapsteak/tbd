@@ -45,6 +45,64 @@ public enum ProviderHealth: String, Codable, Sendable {
     case error
 }
 
+/// How a failing provider invocation is classified
+/// (`docs/remote-provider-contract.md` § Error model). Lives here rather
+/// than daemon-side because the app classifies exits too: an `attach`
+/// process is spawned locally by the app, so its exit code never passes
+/// through the daemon's runner.
+public enum ProviderFailureClass: Sendable, Equatable {
+    case permanent, contractBug, transient, authNeeded
+
+    /// The contract's classification of record: the exit code alone.
+    /// `nil` for exit 0 — a success is not a failure of any class.
+    public init?(exitCode: Int32) {
+        switch exitCode {
+        case 0: return nil
+        case 2: self = .contractBug
+        case 3: self = .transient
+        case 4: self = .authNeeded
+        default: self = .permanent   // 1 and anything undeclared
+        }
+    }
+
+    /// The contract's well-known `error.code` values that mean the PROVIDER
+    /// itself can no longer authenticate — the codes whose remedy is "a
+    /// human re-authenticates", regardless of which exit code the provider
+    /// happened to pair them with.
+    ///
+    /// Deliberately does NOT include `credential_unresolvable`: per the
+    /// contract that code means a `credential_ref` didn't resolve against
+    /// the provider's own secret store, whose remedy is provisioning on the
+    /// provider side, not re-authentication. It is a distinct code and stays
+    /// a distinct state.
+    ///
+    /// This set is contract-derived and provider-agnostic — TBD never
+    /// interprets any other part of a provider's error object.
+    public static let authErrorCodes: Set<String> = ["auth_expired", "auth_missing"]
+
+    /// Classifies a failing invocation from BOTH available signals,
+    /// preferring the error object's `code` for precision while keeping the
+    /// exit class authoritative.
+    ///
+    /// The rule, in one line: **auth-needed is the UNION of "exit class is
+    /// `.authNeeded`" and "`error.code` is one of `authErrorCodes`";
+    /// otherwise the exit class alone decides.** It is a union, not an
+    /// override, because the two signals are independently informative — a
+    /// provider may exit 4 while emitting a `code` TBD has never heard of
+    /// (the exit class is the contract's classification of record and still
+    /// wins), and a provider may exit 1 while naming `auth_expired`
+    /// precisely (the code adds precision the exit class lacks).
+    ///
+    /// Exit 0 is success and returns `nil` whatever the stdout happens to
+    /// decode as: a verb that exited 0 did not fail, so there is no failure
+    /// to classify.
+    public static func classify(exitCode: Int32, error: ProviderErrorObject?) -> ProviderFailureClass? {
+        guard let exitClass = ProviderFailureClass(exitCode: exitCode) else { return nil }
+        if let code = error?.code, authErrorCodes.contains(code) { return .authNeeded }
+        return exitClass
+    }
+}
+
 /// The contract's Session object. Timestamps stay ISO-8601 strings — TBD
 /// displays them and compares equality; it never does date math on them.
 public struct RemoteSessionPayload: Codable, Sendable, Equatable {
@@ -186,7 +244,11 @@ public struct ProviderErrorObject: Codable, Sendable {
     public let remediation: ProviderRemediation?
 }
 
-public struct ProviderRemediation: Codable, Sendable {
+/// `Equatable` because the daemon diffs it: `RemoteProviderManager.setHealth`
+/// broadcasts on any change to the (state, message, remediation) triple, not
+/// just the state, so a probe that lands a remediation onto an already-
+/// `needs_auth` provider still reaches the app.
+public struct ProviderRemediation: Codable, Sendable, Equatable {
     public let label: String
     public let command: String?
 }
