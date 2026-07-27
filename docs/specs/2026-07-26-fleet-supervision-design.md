@@ -280,7 +280,108 @@ anything; wrongness causes wrong retellings, not wrong actions) versus
 Net property: **supervision adds one column to TBD's database.** Everything
 else it knows is in files a human can open.
 
-## 8. Capacity awareness (P1-1, decomposed)
+## 8. Remembered things: three kinds, three homes
+
+Naming this precisely because the categories blur easily:
+
+1. **Binding rules** — enforced by the daemon at the verb gate, no model in the
+   loop: `~/tbd/supervision/standing-rules.json`. Structured because prose
+   cannot be enforced without interpretation; operator-local because a rule
+   that binds the operator's daemon must be ratified by the operator ("repos
+   advise; operators bind"). Created only by gestures: approval
+   generalization, prose promotion, CLI. Inspectable in a small settings
+   surface (a window onto the file — list, origin links, revoke; the file
+   stays the truth).
+2. **The playbook** — advisory prose, human-curated, travels with the repo
+   (`.agents/supervision.md`, three-tier). The tool never writes it after
+   seeding.
+3. **Learned knowledge (P2-1)** — machine-appended prose, raw and uncurated:
+   `~/tbd/repos/<id>/learnings.md`, appended via `tbd supervise learn`,
+   ledger line per append, included in every future work order for that repo.
+   Effective immediately; promoted by a *human commit* into the repo playbook
+   when an entry proves out. The tool freely rewrites only files it owns;
+   the supervisor's desk has no repo checkouts and the daemon never commits
+   to repos.
+
+The interlock: a learning is considered; if it keeps mattering and is
+rule-shaped, the supervisor proposes making it binding; one approval turns it
+into a standing rule. Prose knowledge and binding rules connect through the
+single ratification gesture.
+
+### Prior art in the current system (and what #509 changed)
+
+The pre-redesign system handled these as: a hardcoded `STANDING_RULE` prompt
+string (one team's closeout command and review-bot name compiled into the app
+— the brief's cautionary tale, verbatim); the merge gate's `clearance` table
+(per-PR, SHA-pinned, mechanically enforced operator authorizations); an
+`approved-prs.jsonl` the desk agent was *asked by prompt* to consult (binding
+until the model forgets — the P0-3 label-lie at the decision layer); and the
+desk's own notes file as both memory and action log (hence P1-7's
+"self-report").
+
+PR #509 (merged 2026-07-26) deleted the merge gate and the clearance/audit
+stores with it — correctly, since their authority (may this merge?) was
+delegated to GitHub branch protection. Consequence one: the clearance table is
+lineage, not substrate — its shape was right (scoped, enforced, voidable,
+auditable) and its layer was wrong; standing rules revive the shape at the
+layer TBD legitimately owns (what the supervisor may do to sessions), which no
+forge can absorb. Consequence two: post-#509 there is **no** enforced
+operator-decision mechanism in the system at all — the verb gate + standing
+rules is the first, not an upgrade.
+
+## 9. Shift lifecycle (P2-2)
+
+- **A shift is born from the posture switch, and only from it.** off →
+  supervised/autonomous mints a shift id, creates `~/tbd/shifts/<id>/`, writes
+  the opening ledger line, stands up the supervisor. Supervised ↔ autonomous
+  mid-shift is the *same* shift with a posture-change ledger line (every
+  action line already records its posture). Only off ends a shift.
+- **The desk is a scratch space, tracked by ID** (never display string), with
+  the supervision skill via the plugin mechanism. Its opening briefing is its
+  first delivered message: posture, standing-rules summary, and anything
+  unresolved from the previous shift, replayed from that shift's ledger —
+  escalations never die silently with a shift.
+- **Shift end is a teardown with a caller.** Stop sweep → bounded request for
+  a closing note (color, not a dependency — a dead supervisor doesn't block
+  close) → final `account.md` render → closing ledger line → dispose of the
+  desk (session ended, scratch worktree deleted). Everything durable already
+  lives outside it. The old system's desks accumulated because cleanup had no
+  caller; here the caller is the same gesture that ends the shift.
+- **Each shift starts fresh on purpose.** No resumed supervisor context.
+  Continuity lives in artifacts (playbook, standing rules, learnings, prior
+  ledgers) — the *system* learns, not one session's context. A supervisor
+  that dies mid-shift: anomaly line, replacement spawned into the same shift,
+  briefed with the account so far.
+- **Off is meaningful**: no shift exists, nothing observes the fleet, the last
+  shift's residue is fully on disk. No half-on states.
+
+## 10. Operator surfaces (intent, not screens)
+
+Principle: **you act where you already read.**
+
+- **The account panel is also the inbox.** The "needs you" section of the live
+  `account.md` *is* the queue: proposals (target, verbatim message, supervisor
+  reasoning, state freshness) with approve/reject inline. Approve offers
+  generalization inline — this once / this shift / always for this repo —
+  which is the standing-rules mechanism's only creation UI. Reject takes an
+  optional one-liner, delivered to the supervisor in its next work order.
+  Escalations: exact item, exact command, recommendation, answer box. Every
+  action is also a CLI verb (`tbd supervise queue/approve/reject/answer`);
+  nothing exists only as a button.
+- **The supervisor's tab stays a plain conversation.** Typed instructions are
+  conversation — steering, not policy. The two durable channels for rules are
+  the playbook (advisory) and standing rules (binding); the chat is neither.
+  If you type something rule-shaped, the supervisor may propose making it
+  standing through the normal ratification path.
+- **Standing rules get a boring inspection surface** — list, scope, origin
+  (linking to the creating shift's ledger), revoke. File-backed pattern:
+  tilde path + copy button, hand-edits respected. Its job is that "why did
+  the daemon do that on its own?" is answerable at a glance.
+- **Morning flow**: open TBD → last shift's account → answered down the
+  needs-you batch in minutes (P0-10), each answer a decision line, each
+  "never again" a scope choice on an answer already being given.
+
+## 11. Capacity awareness (P1-1, decomposed)
 
 - **P0 — never poke a rate-limited agent**: free; that's session state.
 - **P1 — fleet-wide hold**: several agents capped at once → hold interventions
@@ -290,12 +391,8 @@ else it knows is in files a human can open.
   a multi-account topology and is a workflow judgment. If it exists, it is a
   playbook instruction to a supervisor that already has the usage facts.
 
-## 9. Not yet walked
+## 12. Not yet walked
 
-- **Shift lifecycle (P2-2)** — who creates the supervisor session, shift start,
-  clean handover, disposal of the desk worktree. *(not yet walked)*
-- **Operator surfaces** — posture control, queue intake, escalation UX sketch.
-  *(not yet walked)*
 - **Delivery acknowledgement** — how the design observes that a dispatched
   message actually landed (the brief allows relying on targeted, draft-safe
   delivery but not on send-success; the answer will be an observation, likely
