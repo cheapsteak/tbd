@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let remoteAttachLogger = Logger(subsystem: "com.tbd.app", category: "remoteAttach")
 
 /// Wiring between `RemoteAttachLifecycle`'s pure decision and live
 /// `AppState` state — see that type's doc comment for the policy itself.
@@ -32,6 +35,30 @@ extension AppState {
             }
             return RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)
         })
+    }
+
+    /// Tells the daemon the exit code of an `attach` process the APP spawned,
+    /// so an auth-class exit can move provider health without waiting for the
+    /// next 60s `list` poll to independently rediscover it. Fire-and-forget:
+    /// the daemon's own poll remains the authoritative path, so a failed
+    /// report costs freshness, never correctness — it's logged, never
+    /// surfaced.
+    ///
+    /// `nil` exit codes are never reported: there is nothing to classify.
+    func reportRemoteAttachExit(_ selection: RemoteSessionSelection, exitCode: Int32?) {
+        guard let exitCode else { return }
+        let report = remoteAttachExitReporter
+        Task {
+            do {
+                try await report(selection.provider, selection.sessionID, exitCode)
+            } catch {
+                remoteAttachLogger.debug(
+                    """
+                    reportRemoteAttachExit failed for \(selection.provider, privacy: .public)/\
+                    \(selection.sessionID, privacy: .public): \(error, privacy: .public)
+                    """)
+            }
+        }
     }
 
     /// Pending-reconnect selections that are STILL blocked as of `now` —

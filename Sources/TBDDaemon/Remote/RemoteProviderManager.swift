@@ -344,6 +344,39 @@ public actor RemoteProviderManager {
         }
     }
 
+    /// Correlates a locally-spawned `attach` exit (the app execs the provider
+    /// on a terminal's own TTY, so its exit code never passes through this
+    /// actor's runner) with provider health.
+    ///
+    /// `attach`'s stdout is a PTY byte stream and MUST NOT be parsed
+    /// (`docs/remote-provider-contract.md` § `attach`), so the exit code is
+    /// the only signal — hence `error: nil` in the classification below.
+    ///
+    /// - Non-auth classes are deliberately ignored: an attach that died for
+    ///   transport reasons is already covered app-side by pending-reconnect
+    ///   backoff, and letting every dropped connection rewrite provider
+    ///   health would make one flaky viewer speak for the whole provider.
+    /// - The auth class marks the provider `.needsAuth` while PRESERVING any
+    ///   message/remediation already on file: an attach exit carries none of
+    ///   its own, and clobbering a parsed remediation with `nil` would
+    ///   downgrade a good CTA to a bare "authentication needed".
+    /// - It then triggers exactly ONE out-of-band `list` so the state is
+    ///   either confirmed with a freshly parsed remediation or cleared
+    ///   outright by a success. That probe is bounded by the
+    ///   already-`.needsAuth` check: at most one extra `list` per health
+    ///   transition, so a session flapping through repeated auth exits can
+    ///   never turn into a poll flood.
+    func recordAttachExit(provider name: String, exitCode: Int32) async throws {
+        guard let config = providers[name] ?? loadAdHoc(named: name) else {
+            throw RemoteProviderError.unknownProvider(name)
+        }
+        guard ProviderFailureClass.classify(exitCode: exitCode, error: nil) == .authNeeded else { return }
+        let previous = health[name]
+        setHealth(provider: name, to: (.needsAuth, previous?.message, previous?.remediation))
+        guard previous?.state != .needsAuth else { return }
+        await pollOnce(provider: config)
+    }
+
     private func recordFailure(provider: String, class failureClass: ProviderFailureClass,
                                result: ProviderResult) {
         let error = result.decodedError

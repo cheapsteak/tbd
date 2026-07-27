@@ -243,6 +243,8 @@ The caller execs the provider directly on the controlling TTY of a terminal pane
 
 **Pane exit means the viewer detached — it never means the session is dead.** The only source of truth for whether a session is still alive is `list` (or `events`); `attach` exiting is purely a local, viewer-side event.
 
+**`attach`'s stdout is a PTY byte stream and MUST NOT be parsed.** Unlike every other verb, there is no JSON object — not even the error object — to read here. A pre-connection auth failure still exits 4 per the error model below, and that **exit code alone** is what the caller correlates. A caller that wants the accompanying `message`/`remediation` gets it from a subsequent structured verb (`list`), never by reading attach's bytes.
+
 (An alternative design where the provider prints a command line for the caller to exec instead was considered and rejected: it freezes credentials at print time, gives the provider no reconnect or cleanup hook once running, and leaks provider-internal argv into the caller's process table.)
 
 ## `events` (optional)
@@ -313,6 +315,16 @@ Well-known `code` values in v1: `auth_expired`, `auth_missing`, `not_found`, `al
 ```
 
 If stdout on failure is not parseable JSON, the caller falls back to exit-code class plus the last few lines of stderr. On exit 4, a caller should present one actionable banner (for example, offering to run `remediation.command`) rather than a fresh error on every poll; any later invocation that succeeds clears that banner.
+
+### Auth-needed state
+
+The exit-4 row above is a per-invocation rule; this section specifies the state it puts the caller in, which the rest of the table doesn't need.
+
+- **Auth-needed is a state of the PROVIDER, not of a session.** Exit class 4 from **any** verb — including `attach`, whose exit code is the only signal it has — means this provider cannot authenticate. It says nothing about whether any session is alive; per Identity & drift, only `list`/`events` speak to that.
+- **Which signal wins when both are available:** prefer the error object's `code`, fall back to the exit class. A caller classifies as auth-needed on the **union** of the two — exit class 4, **or** a parseable `code` of `auth_expired` / `auth_missing` — so a provider that exits 1 while naming `auth_expired` is still handled as auth-needed with its remediation, and a provider that exits 4 with a `code` the caller doesn't recognize is too. `credential_unresolvable` is **not** in this set: its remedy is provisioning, not re-authentication.
+- **`remediation` is opaque.** A caller displays `label` and `command` verbatim and MAY offer to run the command, but MUST NOT interpret, parse, rewrite, or split it, and MUST NOT infer anything about the backend from it.
+- **While auth-needed, keep polling.** "Pause further calls until one succeeds" (exit-4 row) means *stop starting new work* — in particular a caller SHOULD NOT spawn new `attach` processes, which would only die on connect. It does **not** mean going silent: the caller MUST keep its low-frequency `list` poll running, because that poll is the entire recovery mechanism. Pausing it would leave the state stuck until the user did something.
+- **Recovery: the first subsequent SUCCESSFUL verb clears the state**, with no user gesture and nothing persisted. Auth-needed is runtime health only; it never survives across a caller restart on its own, it is simply rediscovered.
 
 ## Versioning
 

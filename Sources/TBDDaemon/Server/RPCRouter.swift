@@ -410,6 +410,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteDismiss(request.paramsData)
             case RPCMethod.remoteSetPin:
                 return try await handleRemoteSetPin(request.paramsData)
+            case RPCMethod.remoteReportAttachExit:
+                return try await handleRemoteReportAttachExit(request.paramsData)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.gcList:

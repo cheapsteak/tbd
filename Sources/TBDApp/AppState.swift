@@ -764,32 +764,47 @@ final class AppState: ObservableObject {
     /// `remoteSessions`/`gone` remain the only authoritative source for the
     /// session's actual fate.
     ///
-    /// Branches on `RemoteAttachTerminalView.isUnexpectedExit(exitCode:)` —
-    /// the same classification that already drove the overlay's wording —
-    /// to decide which of the two "don't respawn yet" mechanisms applies:
+    /// Branches on `RemoteAttachExitClass.classify(exitCode:)` — the
+    /// three-way split of the contract's error model — to decide which
+    /// "don't respawn yet" mechanism applies:
     ///
-    /// - **Clean exit** (0, the user deliberately detached) →
+    /// - **Clean exit** (0 or unreadable, the user deliberately detached) →
     ///   `explicitlyDetachedRemoteSessions`, cleared only by an explicit
     ///   gesture (see `activateRemoteSession` in `AppState+Navigation.swift`,
     ///   and `reattachRemoteSession` below).
-    /// - **Unexpected exit** (nonzero/unreadable — a network drop, failed
-    ///   credential, or crashed shim, not a user choice) →
-    ///   `pendingReconnectRemoteSessions`, which clears ITSELF once the
-    ///   provider is healthy again and this entry's backoff window has
+    /// - **Unexpected exit** (a network drop or crashed shim, not a user
+    ///   choice) → `pendingReconnectRemoteSessions`, which clears ITSELF once
+    ///   the provider is healthy again and this entry's backoff window has
     ///   elapsed (`RemoteReconnectPolicy`) — no Reattach click required. Any
     ///   pre-existing pending entry for this selection has its `attempts`
     ///   incremented (a session that keeps failing immediately after each
     ///   automatic retry backs off further each time).
+    /// - **Auth-needed exit** (exit class 4 — the provider can't
+    ///   authenticate) → also `pendingReconnectRemoteSessions`, so it still
+    ///   self-clears once health recovers with no user gesture, but WITHOUT
+    ///   escalating `attempts`: retrying was never the problem here, and the
+    ///   provider-health gate in `RemoteReconnectPolicy.isBlocked` (which
+    ///   blocks on any health other than `.ok`) is what actually holds the
+    ///   session back. Escalating backoff on top of that would only delay the
+    ///   reattach that should follow re-authentication. It additionally
+    ///   reports the exit to the daemon (fire-and-forget) so provider health
+    ///   picks up the auth state without waiting for the next 60s poll.
     ///
     /// Either way `selection` is excluded from `attachedRemoteSelections`
     /// until its respective clearing condition is met — the rule that
     /// prevents a respawn loop while the row stays selected.
     func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?) {
-        if RemoteAttachTerminalView.isUnexpectedExit(exitCode: exitCode) {
+        switch RemoteAttachExitClass.classify(exitCode: exitCode) {
+        case .unexpected:
             pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
                 exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
             )
-        } else {
+        case .authNeeded:
+            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.authNeededPending(
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+            )
+            reportRemoteAttachExit(selection, exitCode: exitCode)
+        case .clean:
             explicitlyDetachedRemoteSessions[selection] = RemoteAttachDetachInfo(exitCode: exitCode)
             // A clean detach always wins over any stale pending-reconnect
             // bookkeeping from an earlier flapping run — the user's clean
@@ -1054,6 +1069,16 @@ final class AppState: ObservableObject {
         { [daemonClient] provider, sessionID, pinned in
             try await daemonClient.setRemoteSessionPin(
                 provider: provider, sessionID: sessionID, pinned: pinned)
+        }
+    /// How `reportRemoteAttachExit` tells the daemon an app-spawned `attach`
+    /// exited — injectable for the same reason as `remoteSessionPinSetter`
+    /// (`DaemonClient` is concrete, no protocol), so the auth-exit routing
+    /// tests can assert the report fires without a real daemon (tests must
+    /// never touch `~/tbd`).
+    lazy var remoteAttachExitReporter: @MainActor (String, String, Int32) async throws -> Void =
+        { [daemonClient] provider, sessionID, exitCode in
+            try await daemonClient.reportRemoteAttachExit(
+                provider: provider, sessionID: sessionID, exitCode: exitCode)
         }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the

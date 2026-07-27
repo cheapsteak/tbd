@@ -4,26 +4,18 @@ import TBDShared
 
 private let remoteLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
-public enum ProviderFailureClass: Sendable, Equatable {
-    case permanent, contractBug, transient, authNeeded
-
-    init?(exitCode: Int32) {
-        switch exitCode {
-        case 0: return nil
-        case 2: self = .contractBug
-        case 3: self = .transient
-        case 4: self = .authNeeded
-        default: self = .permanent   // 1 and anything undeclared
-        }
-    }
-}
-
 public struct ProviderResult: Sendable {
     public let exitCode: Int32
     public let stdout: Data
     public let stderr: String
 
-    public var failureClass: ProviderFailureClass? { ProviderFailureClass(exitCode: exitCode) }
+    /// Classified from the exit code AND the error object's `code`, so a
+    /// provider that names `auth_expired` while exiting 1 still lands in
+    /// `.authNeeded` with its remediation — see
+    /// `ProviderFailureClass.classify(exitCode:error:)` for the union rule.
+    public var failureClass: ProviderFailureClass? {
+        ProviderFailureClass.classify(exitCode: exitCode, error: decodedError)
+    }
     /// The contract error object, when the failing verb emitted one. A verb
     /// SHOULD emit this on stdout but may not — unparseable stdout decodes to
     /// `nil` rather than throwing, so callers always have the exit-code

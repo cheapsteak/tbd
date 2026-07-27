@@ -18,6 +18,15 @@ struct RemoteAttachTerminalViewTests {
         #expect(RemoteAttachTerminalView.isUnexpectedExit(exitCode: 137) == true)
     }
 
+    /// An auth-class exit is its OWN thing, not an unexpected session exit:
+    /// framing "the provider's credentials expired" as a surprise crash
+    /// sends the user to Reattach, which cannot work. It gets the auth CTA
+    /// instead (`RemoteProviderAuthPresentation`).
+    @Test func authClassExitIsNotFramedAsUnexpected() {
+        #expect(RemoteAttachTerminalView.isUnexpectedExit(exitCode: 4) == false)
+        #expect(RemoteAttachExitClass.classify(exitCode: 4) == .authNeeded)
+    }
+
     @Test func unreadableExitCodeIsNotTreatedAsUnexpected() {
         // No exit code available isn't proof of failure — stays in the
         // non-alarming "Detached" framing rather than guessing.

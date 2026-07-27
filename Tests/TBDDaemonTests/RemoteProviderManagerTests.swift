@@ -128,7 +128,7 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "aws sso login"}}}"#.utf8),
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "acme-provider login"}}}"#.utf8),
                 stderr: ""),
             providerOK(#"{"sessions": []}"#),
         ])
@@ -137,10 +137,129 @@ struct RemoteProviderManagerTests {
         await m.pollOnce(provider: provider)
         var statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .needsAuth)
-        #expect(statuses.first?.remediationCommand == "aws sso login")
+        #expect(statuses.first?.remediationCommand == "acme-provider login")
         await m.pollOnce(provider: provider)
         statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .ok)
+    }
+
+    /// The error object's `code` adds precision the exit class lacks: a
+    /// provider that names `auth_expired` while exiting 1 must still land in
+    /// `needs_auth` WITH its remediation, not in the dead-end `error` state
+    /// exit 1 alone would produce.
+    @Test func nonFourExitCarryingAnAuthCodeStillLandsNeedsAuthWithRemediation() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "credentials expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.errorMessage == "credentials expired")
+        #expect(statuses.first?.remediationLabel == "Sign in")
+        #expect(statuses.first?.remediationCommand == "acme-provider login")
+    }
+
+    /// A non-auth `code` on a non-auth exit must NOT be widened into an auth
+    /// state — the union rule only covers the contract's auth codes.
+    @Test func nonAuthCodeOnExitOneStaysErrorNotNeedsAuth() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "credential_unresolvable", "message": "no such credential"}}"#.utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .error)
+        #expect(statuses.first?.errorMessage == "no such credential")
+    }
+
+    // MARK: - attach-exit correlation
+
+    /// An auth-class `attach` exit (reported by the app, since the daemon
+    /// never spawns attach itself) marks the provider `needs_auth` and fires
+    /// exactly ONE out-of-band `list` — the authoritative probe that turns a
+    /// bare exit code into a message + remediation.
+    @Test func authAttachExitMarksNeedsAuthAndProbesOnce() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        try await m.recordAttachExit(provider: "fake", exitCode: 4)
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.remediationCommand == "acme-provider login",
+                "the out-of-band probe is what turns an exit code into a remediation")
+        #expect(invoker.calls == [["list"]], "exactly one probe per health transition")
+    }
+
+    /// The other branch of the same gate: an attach exit arriving while the
+    /// provider is ALREADY `needs_auth` must not fire another probe (a
+    /// flapping session would otherwise turn into a poll flood), and must
+    /// preserve the remediation already on file rather than clobbering it
+    /// with the nothing an attach exit carries.
+    @Test func authAttachExitWhileAlreadyNeedsAuthPreservesRemediationAndDoesNotReprobe() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 4,
+                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        #expect(invoker.calls == [["list"]])
+
+        try await m.recordAttachExit(provider: "fake", exitCode: 4)
+
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .needsAuth)
+        #expect(statuses.first?.errorMessage == "expired", "must not clobber a parsed message with nil")
+        #expect(statuses.first?.remediationCommand == "acme-provider login")
+        #expect(invoker.calls == [["list"]], "no second probe while already needs_auth")
+    }
+
+    /// Non-auth attach exits are the app's business (reconnect backoff), not
+    /// provider health's: one flaky viewer must never speak for the whole
+    /// provider.
+    @Test func nonAuthAttachExitChangesNothing() async throws {
+        let invoker = FakeProviderInvoker(script: [])
+        let m = manager(invoker)
+        try await m.recordAttachExit(provider: "fake", exitCode: 1)
+        let statuses = await m.providerStatuses()
+        #expect(statuses.first?.health == .ok)
+        #expect(invoker.calls.isEmpty, "a transport-class attach exit must not trigger a probe")
+    }
+
+    /// Recovery: the poll loop keeps running while `needs_auth`, and the
+    /// first successful `list` clears the state — no user gesture, no
+    /// persisted flag.
+    @Test func successfulPollAfterAnAttachAuthExitClearsNeedsAuth() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),   // the probe confirms
+            providerOK(#"{"sessions": []}"#),                          // the next poll succeeds
+        ])
+        let m = manager(invoker)
+        try await m.recordAttachExit(provider: "fake", exitCode: 4)
+        #expect(await m.providerStatuses().first?.health == .needsAuth)
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        #expect(await m.providerStatuses().first?.health == .ok)
+    }
+
+    @Test func attachExitForAnUnknownProviderThrows() async throws {
+        let m = manager(FakeProviderInvoker(script: []))
+        await #expect(throws: (any Error).self) {
+            try await m.recordAttachExit(provider: "nope", exitCode: 4)
+        }
     }
 
     @Test func transientFailureMarksStaleNotAuth() async throws {

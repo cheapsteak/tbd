@@ -992,6 +992,18 @@ actor DaemonClient {
         )
     }
 
+    /// Report the exit code of an `attach` process this app spawned, so the
+    /// daemon can correlate an auth-class exit with provider health. The
+    /// daemon ignores every non-auth class (transport failures are already
+    /// handled app-side by reconnect backoff) — see
+    /// `RemoteProviderManager.recordAttachExit`.
+    func reportRemoteAttachExit(provider: String, sessionID: String, exitCode: Int32) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteReportAttachExit,
+            params: RemoteReportAttachExitParams(provider: provider, sessionID: sessionID, exitCode: exitCode)
+        )
+    }
+
     /// Set the remote-agent-backends master switch.
     func setRemoteBackends(enabled: Bool) async throws {
         try await callVoidAsync(

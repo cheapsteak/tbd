@@ -228,6 +228,7 @@ public enum RPCMethod {
     public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
     public static let remoteSetPin = "remote.setPin"
+    public static let remoteReportAttachExit = "remote.reportAttachExit"
     public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
@@ -1129,6 +1130,23 @@ public struct RemoteSetPinParams: Codable, Sendable {
     public let pinned: Bool
     public init(provider: String, sessionID: String, pinned: Bool) {
         self.provider = provider; self.sessionID = sessionID; self.pinned = pinned
+    }
+}
+
+/// Params for `remote.reportAttachExit` — the app reporting the exit code of
+/// an `attach` process IT spawned (the provider is exec'd on a terminal's own
+/// TTY, so the daemon never sees that exit itself).
+///
+/// The exit code is the ONLY thing reported: `attach`'s stdout is a PTY byte
+/// stream and MUST NOT be parsed (`docs/remote-provider-contract.md` §
+/// `attach`), so there is no error object to carry. The daemon classifies it
+/// and, for the auth class only, moves provider health.
+public struct RemoteReportAttachExitParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let exitCode: Int32
+    public init(provider: String, sessionID: String, exitCode: Int32) {
+        self.provider = provider; self.sessionID = sessionID; self.exitCode = exitCode
     }
 }
 

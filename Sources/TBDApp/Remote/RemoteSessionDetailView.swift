@@ -43,6 +43,9 @@ struct RemoteSessionDetailView: View {
     @State private var selectedTab: RemoteSessionDetailTab = .attach
     @State private var showStopConfirm = false
     @State private var logRefreshToken = 0
+    /// Non-nil while the provider's remediation command is running in its
+    /// own PTY sheet.
+    @State private var runningRemediation: RemoteRemediationCommandItem?
 
     private var session: RemoteSessionInfo? {
         appState.remoteSessions.first {
@@ -339,7 +342,15 @@ struct RemoteSessionDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 if effectiveTab == .attach, availableTabs.contains(.attach), !isAttached {
-                    detachedPrompt
+                    // The auth CTA REPLACES the detached prompt rather than
+                    // stacking with it: while the provider can't
+                    // authenticate, "Reattach" is an action that cannot
+                    // succeed, so offering it at all is the misleading part.
+                    if let authPresentation {
+                        authPrompt(authPresentation)
+                    } else {
+                        detachedPrompt
+                    }
                 }
                 if effectiveTab == .log, availableTabs.contains(.log) {
                     RemoteLogTabView(
@@ -361,6 +372,36 @@ struct RemoteSessionDetailView: View {
     /// or interact with.
     private var showsAttachSlot: Bool {
         effectiveTab == .attach && availableTabs.contains(.attach) && isAttached
+    }
+
+    /// The provider-authentication CTA for this session's provider, when its
+    /// health says it can't authenticate. Derived purely from published
+    /// provider health, so it appears and disappears with the daemon's poll
+    /// — no local state to get stuck.
+    private var authPresentation: RemoteProviderAuthPresentation? {
+        RemoteProviderAuthPresentation.make(from: providerStatus)
+    }
+
+    /// Shown in place of `detachedPrompt` while the provider can't
+    /// authenticate. Explains that the PROVIDER (not this session) is what
+    /// needs attention, keeps the contract's "the session keeps running
+    /// remotely" framing, and offers the provider's own remediation as the
+    /// primary action.
+    private func authPrompt(_ presentation: RemoteProviderAuthPresentation) -> some View {
+        VStack {
+            Spacer()
+            RemoteProviderAuthCTAView(
+                presentation: presentation,
+                showsSessionReassurance: true,
+                onRun: { runningRemediation = presentation.command.map(RemoteRemediationCommandItem.init) }
+            )
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+        .sheet(item: $runningRemediation) { command in
+            RemoteRemediationTerminalSheet(presentation: presentation, command: command.value)
+        }
     }
 
     /// Shown in place of the pager slot once `selection` has detached
