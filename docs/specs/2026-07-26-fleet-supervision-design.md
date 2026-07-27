@@ -309,7 +309,8 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    **delivers** the message through the adapter and **writes the ledger line
    itself**.
 8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
-   memory). The result is added to the action's ledger line. A new blocked state
+   memory). The result is recorded as an outcome line referencing the action
+   (§6). A new blocked state
    becomes a new case within one minute instead of fifteen (P1-6).
 9. **Everything else costs nothing.** The other agents: zero tokens, zero sends.
 
@@ -430,8 +431,12 @@ attention — it never changes what any verb is allowed to do.
   standing rule created from any source. **anomaly** records an unknown state,
   an old premise found during send-time verification, a failed fetch, or a dark
   supervisor. Deliberate inaction is recorded as seriously as action. **note**
-  is the only kind the supervisor writes. It is attributed prose added with
-  `tbd supervise note`. It may reference other lines but can never change them.
+  and **learning** are the two kinds whose content is supervisor-authored prose
+  — a note is attributed prose added with `tbd supervise note`, and a learning
+  records an append to a repo's learnings file made with `tbd supervise learn`
+  (§8). Both are written by the daemon's verb handlers like every other line,
+  and neither can change any other line. The supervisor may reference lines and
+  contribute prose; it can never author an action, an outcome, or the account.
 - Its structure prevents several false claims: an action nobody performed
   because only verb handlers write action lines; an outcome nobody observed
   because outcomes come from the re-check; and certainty the system did not
@@ -466,6 +471,7 @@ this section plain queries: filter by kind, window by `ts`, group by `shift`.
 | `decision` | The rule created, its lifetime (shift or always), and its origin |
 | `anomaly` | The category and the detail |
 | `note` | The author, the text, and optional references to other lines |
+| `learning` | The target repo and the appended text — the durable content lives in `~/tbd/repos/<id>/learnings.md` (§8); this line is the record of the append |
 | `lifecycle` | Opening, closing, posture change, or desk recycle — this is the kind behind every line §9 describes |
 
 Two representative lines, an action and the outcome that later references it:
@@ -816,8 +822,8 @@ The design already has a later observation that can confirm delivery:
 **the one-minute re-check also checks acknowledgement.** Every sent message
 includes its ledger ID as a marker. During the re-check, the daemon reads two
 machine facts: whether the session transcript contains the marker, and whether
-the session state changed to `working`. It records one of three results on the
-action's ledger line:
+the session state changed to `working`. It records one of three results as an
+outcome line referencing the action:
 
 - *Landed and acting* — done.
 - *Landed but still blocked* — a fresh case within a minute (P1-6).
