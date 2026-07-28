@@ -26,7 +26,7 @@ archived  stale-owl   [tbd/stale-owl @ abc1234, sessions A, B]   ← untouched
    │  "Revive this session · on fresh main"   (session A)
    ▼
 active    stale-owl (revived)   [tbd/brisk-elk off origin/main @ def5678]
-          └─ primary  claude --resume A --fork-session '<context prompt>'  → new id A'
+          └─ primary  claude --resume A --fork-session   → new id A', idle at the composer
           └─ Notes    provenance block
           └─ (plus whatever the repo's setup/preSession hooks normally add)
 ```
@@ -270,7 +270,9 @@ Daemon:
 - Fork reaches the spawn command on the **inline** create branch.
 - Fork reaches the spawn command on the **`preSession` hook** branch — the
   no-op-on-one-path trap.
-- The built command carries `--fork-session` and the context prompt.
+- The built command carries `--fork-session` and **no** trailing prompt argument,
+  asserted as a whitelist on the composed command rather than a
+  `!contains(phrase)` check, which would pass for the wrong reasons.
 - The archived row is byte-identical afterwards: status, `branch`,
   `archivedHeadSHA`, `archivedClaudeSessions`.
 - The source transcript is reachable from the new worktree's derived project dir
