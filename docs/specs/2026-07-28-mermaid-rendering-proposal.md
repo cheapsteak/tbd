@@ -1,7 +1,8 @@
 # Mermaid Rendering — Proposal
 
 **Date:** 2026-07-28
-**Status:** **Proposal. Decisions open — a human has not yet chosen an option.**
+**Status:** Approach chosen (**Option 7**, 2026-07-28). Secondary decisions still open — see
+"Open decisions". Requires amendments to the committed markdown display spec.
 **Relates to:** [`2026-07-28-markdown-display-options-design.md`](2026-07-28-markdown-display-options-design.md),
 which lists mermaid as explicitly out of scope. This document works out how it comes back in.
 
@@ -177,11 +178,16 @@ would be "safe because of navigation ordering in the current WebKit," which is p
 of guarantee that rots silently.
 
 Additionally, GitHub's actual defense — a separate origin in a separate context — does not
-translate. A nested iframe shares the parent's `WKWebViewConfiguration`, process pool, and
-`tbd-md://` scheme handler, so a compromised mermaid could read repo files through the handler
-and exfiltrate them via the allowed remote-subresource path. It would run the most vulnerable
-component with strictly *more* privilege than Option 1 grants it, abandon the spec's headline
-invariant, and break the standalone export.
+translate. A nested iframe shares the parent's `WKWebViewConfiguration`, process pool, and scheme
+handler registrations, so a compromised mermaid would run with more reach than Option 1 grants
+it, while abandoning the spec's headline invariant and breaking the standalone export.
+
+**Scope note on that escalation.** An earlier draft claimed a compromised iframe "could fetch
+repo files through the handler and exfiltrate them." That overstates it: a cross-origin `fetch()`
+to a custom scheme is very likely CORS-blocked from reading the response, and a path-validating
+handler with an image-extension allowlist serves nothing else. `<script src="tbd-md://…">`
+remains a convoluted vector. The verdict is unchanged, but it rests on the mechanics above, not
+on this.
 
 ### Option 3 — Second webview positioned inline in the document flow — **dead**
 
@@ -220,6 +226,39 @@ This is not an alternative to Option 1; it is Option 1's **mandatory substrate**
 state, the per-block timeout and verifier-rejection fallback, and the unsupported-diagram-type
 fallback. Building it first makes Option 1 a pure enhancement over a working degradation path.
 
+### Option 7 — In-page mermaid, JS-enabled display, no scheme handler — **CHOSEN**
+
+Selected by Chang, 2026-07-28, over Option 1. This is the option that delivers in-page rendering
+without a pre-render pipeline, once Option 2 is off the table.
+
+**Mechanism.** The display webview enables JavaScript and loads a vendored `mermaid.min.js`. The
+`tbd-md://` scheme handler is **dropped entirely**; repo-local images are inlined as `data:` URIs
+during document assembly instead. Mermaid renders in-page, as on GitHub. There is no hidden
+webview, no async render coordination, no SVG cache, and no second WebContent process.
+
+**Configuration.** JS is enabled only when `renderMermaidDiagrams` is on; with the flag off the
+display view keeps the JS-free posture of the markdown spec. The image strategy is uniform
+(`data:` URIs) in both states, so there is one image path rather than two.
+
+**Security.** Weaker than Option 1, and the trade is explicit. comrak's safe mode becomes the
+*single* layer preventing script injection from markdown, rather than one of two — though it is
+the load-bearing one either way, and it is well tested. A mermaid exploit lands in a page with no
+scheme handler, no message handlers, no persistent state, and an opaque origin
+(`loadHTMLString(baseURL: nil)`); it reaches the network and the README the user is already
+viewing. Dropping the scheme handler is what keeps that blast radius small, so it is a
+requirement of this option, not an incidental simplification.
+
+**Export.** Serialize the live DOM after render completes
+(`document.documentElement.outerHTML`), strip the mermaid `<script>` tag, and filter mermaid's
+leaked temp containers. Diagrams are already inline `<svg>` and images are already `data:` URIs,
+so the result is self-contained and contains no JavaScript. No separate pre-render path is
+needed. The export must await render completion or it will snapshot unrendered blocks.
+
+**Costs.** The 3.5 MB bundle loads in the display path. `data:` URIs inflate image-heavy
+documents, and unlike the scheme-handler design there is no streaming fallback for very large
+local images — a size cap with a placeholder is needed. Vendoring still makes patch latency
+TBD's responsibility.
+
 ### Option 6 — Mermaid as a `WKUserScript` in the display webview — **rejected**
 
 Superficially coherent, since user scripts run even with content JS disabled and `innerHTML`-sunk
@@ -228,45 +267,81 @@ markup is inert. But mermaid and d3 construct their DOM through exactly the API 
 component inside the webview holding the `tbd-md://` handler, giving it repo file access — the
 same escalation as Option 2 — while saving only the second process's memory. Strictly dominated.
 
-## Recommendation
+## Decision
 
-**Option 1, with Option 5 as its permanent built-in floor, behind a new default-off flag.**
+**Option 7, with Option 5 as its permanent built-in floor, behind a new default-off flag.**
 
-The spikes removed the real unknowns: windowless rendering works in this exact unbundled
-environment, the strict configuration's output is verifiably clean, per-diagram cost is
-single-digit-to-low-double-digit milliseconds, and the SVG displays correctly under the JS-free
-display posture. It is the only option that simultaneously preserves the "display runs no JS"
-invariant, matches GitHub fidelity, keeps the export portable, works offline, and confines
-mermaid to a privilege-free throwaway context. Options 2 and 3 are dead on verified mechanics,
-4 is a fidelity treadmill, 6 is dominated.
+Chosen 2026-07-28 over Option 1, which this document originally recommended. The deciding factor
+was avoiding the hidden-webview pre-render pipeline — its lifecycle, async coordination, cache,
+and second WebContent process — in exchange for accepting a JS-enabled display view.
+
+The analysis that led to Option 1 still stands on its own terms: it has the stronger security
+posture, and it keeps the "display runs no JS" invariant. **Option 7 trades that invariant for
+substantially less machinery.** The trade is defensible because comrak's safe mode is the
+load-bearing layer under either design, and because dropping the `tbd-md://` handler keeps a
+mermaid exploit's blast radius to the network plus the document already on screen.
+
+Options 2 and 3 are dead on verified mechanics, 4 is a fidelity treadmill, 6 is dominated by 7.
 
 Per CLAUDE.md this is a new subsystem executing a large third-party engine against untrusted
-input, so it ships behind its own default-off flag (proposed: `renderMermaidDiagrams`,
-`UserDefaults`), with both branches tested, graduating only after a soak.
+input, so it ships behind its own default-off flag (`renderMermaidDiagrams`, `UserDefaults`),
+with both branches tested, graduating only after a soak.
+
+### Required amendments to the markdown display spec
+
+Option 7 contradicts two settled decisions in
+[`2026-07-28-markdown-display-options-design.md`](2026-07-28-markdown-display-options-design.md).
+That spec must be amended before implementation:
+
+1. **"The display webview runs no JavaScript"** becomes conditional — JS is enabled when
+   `renderMermaidDiagrams` is on.
+2. **The `tbd-md://` `WKURLSchemeHandler` is removed.** Repo-local images become `data:` URIs in
+   both flag states. The spike that verified `<base>` resolution through a custom scheme handler
+   remains valid but is no longer used.
+
+Consequences that follow: the browser export's `data:`-URI logic moves from an export-only step
+to the main assembly path, and the export gains the DOM-serialization step described above.
 
 ## Open decisions
 
 **A human must answer these. They are not settled.**
 
-1. **Dark mode.** SVG colors bake at render time, but the markdown spec's theming is live
-   `@media (prefers-color-scheme)` CSS. Options: render each diagram twice and emit both behind
-   media-gated wrappers (~2× cost, both cached, roughly doubles inline SVG bytes, correct in both
-   modes and in the export); or pick a single neutral theme (half the cost, but diagrams will
-   visibly mismatch the page in one mode). This is the one open question with real UX weight.
-2. **Scoping.** Separate follow-up spec, fold into the committed markdown spec, or ship only the
-   Option 5 floor now and defer pre-rendering.
-3. **`click … href` policy.** Strip `<a>` wrappers from rendered SVG, or keep them and rely on
-   the display view's navigation denial.
-4. **Diagram size cap**, given the non-shrinking 528 MB peak. What limit, and what does the
-   user see when a diagram exceeds it?
+1. **Diagram size cap — now more urgent than under Option 1.** The 300-edge render peaked its
+   WebContent process at 528 MB and did not shrink back. Under Option 1 that process was a
+   throwaway sandbox that could simply be recycled. Under Option 7 it is **the webview the user
+   is reading**, so the memory cannot be reclaimed without reloading the document and losing
+   scroll position. A pre-render size check on the fence source (before handing it to mermaid) is
+   the cheap mitigation. What limit, and what does the user see when a diagram exceeds it?
+2. **`data:` URI size cap.** With the scheme handler gone there is no streaming path for large
+   local images. What is the threshold, and does an oversized image show a placeholder, a link,
+   or a broken-image affordance?
+3. **`click … href` policy.** Strip `<a>` wrappers from rendered output, or keep them. Note the
+   calculus changed: under Option 1 the display view denied navigation. Under Option 7 the
+   display view runs JS, so this needs restating against the new posture rather than inheriting
+   the old answer.
+4. **Error display escaping.** Mermaid's parse errors echo attacker source verbatim. Confirm
+   whether errors surface in the UI at all, and if so that the escaping requirement is specced
+   and tested.
 
-## To spike before committing
+**Resolved by the move to Option 7:** dark mode. Colors no longer bake at render time — mermaid
+re-initializes with a theme chosen from `prefers-color-scheme` at runtime, so diagrams follow
+appearance with no dual render, no doubled bytes, and no media-gated wrappers. This was the
+open question with the most UX weight under Option 1.
 
-- Dual-theme rendering: does mermaid re-`initialize` theme switching behave mid-session, and does
-  it cost what is expected?
-- A real 20-diagram README end-to-end through the actual pipeline: first-paint latency and
-  sandbox memory over time.
-- The `WKContentRuleList` egress block inside the sandbox — confirm mermaid needs zero network.
-- The mermaid.live deflate deep-link round-trip.
-- Reconfirm windowless behavior inside the real `scripts/restart.sh`-bundled `.app`. Spikes ran as
-  bare executables; transfer is likely but unverified, and this is cheap to check.
+## To spike before implementing
+
+Revised for Option 7. The windowless-rendering and offscreen-throttling spikes no longer apply —
+mermaid runs in a visible webview.
+
+- **Runtime theme switching**: mermaid re-`initialize` on a `prefers-color-scheme` change, with
+  diagrams already on screen. This is what replaces the dual-render design, so it should be
+  confirmed rather than assumed.
+- **A real 20-diagram README end-to-end**: first-paint latency with the 3.5 MB bundle in the
+  display path, and whether diagrams appearing after initial paint cause visible reflow or
+  scroll jump.
+- **`data:` URI cost** on an image-heavy README: document string size, parse time, memory.
+- **DOM-serialization export**: confirm the snapshot is self-contained, contains no `<script>`,
+  and excludes mermaid's leaked temp containers.
+- **The mermaid.live deflate deep-link round-trip** (Option 5 floor).
+- **Bundled-app behavior**: confirm the JS-enabled display view works inside the real
+  `scripts/restart.sh`-bundled `.app`, not just a bare executable.

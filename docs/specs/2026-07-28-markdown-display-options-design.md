@@ -125,9 +125,21 @@ Scope is global. No per-repo override and no repo-local config file.
 
 ### Security posture
 
-The display webview runs **no JavaScript** (`allowsContentJavaScript = false`), uses a
-`.nonPersistent()` data store, installs **no script message handlers**, and denies in-place
-navigation — link clicks route to `NSWorkspace`.
+> **Amended 2026-07-28** by
+> [`2026-07-28-mermaid-rendering-proposal.md`](2026-07-28-mermaid-rendering-proposal.md).
+> JavaScript is no longer unconditionally disabled: it is **enabled when the
+> `renderMermaidDiagrams` flag is on**, so that mermaid can render in-page. With that flag off,
+> the posture below applies unchanged. The nested-iframe alternative that would have preserved
+> an always-JS-free display was proven mechanically impossible — `allowsContentJavaScript =
+> false` strips `srcdoc` and blocks scripting in every frame.
+>
+> Consequence: comrak's safe mode becomes the single layer preventing script injection from
+> markdown when mermaid is enabled, rather than one of two. It remains the load-bearing layer in
+> both designs.
+
+The display webview uses a `.nonPersistent()` data store, installs **no script message
+handlers**, and denies in-place navigation — link clicks route to `NSWorkspace`. JavaScript is
+disabled (`allowsContentJavaScript = false`) unless `renderMermaidDiagrams` is enabled.
 
 **Remote subresources are allowed.** Badges and remote images load normally. The accepted
 consequence is that opening an unaudited README issues requests to whatever hosts it names,
@@ -139,6 +151,20 @@ ever revisited, note that navigation policy alone is insufficient — only a con
 blocks subresource loads.
 
 ### Local file resolution
+
+> **Superseded 2026-07-28** by
+> [`2026-07-28-mermaid-rendering-proposal.md`](2026-07-28-mermaid-rendering-proposal.md).
+> **The `tbd-md://` scheme handler is not implemented.** Because JavaScript is enabled when
+> mermaid is on, a registered scheme handler would be reachable from any script running in the
+> page, so it is dropped entirely rather than made conditional. Repo-local images are inlined as
+> `data:` URIs during document assembly instead, in both flag states, giving one image path
+> rather than two.
+>
+> New requirement this creates: `data:` URIs have no streaming path for large images, so a size
+> cap with a placeholder is needed. Tracked as an open decision in the mermaid proposal.
+>
+> The record below is retained because the spike result is sound and would be the right design
+> if the display view were ever returned to a permanently JS-free posture.
 
 Relative images resolve through a `WKURLSchemeHandler` registered for `tbd-md://`. The generated
 document is loaded with `loadHTMLString(_:baseURL: nil)` and carries a `<base>` whose href is
@@ -222,12 +248,13 @@ FilePreviewView  (existing FileWatcher -> revision)
   `WebviewPaneView`'s find bar and Cmd+R handling; WebKit's native
   `find(_:configuration:)` works with JavaScript disabled.
 - **Settings** — a Markdown section: theme picker, reveal-in-Finder, and the soak toggle.
-- **Open in Browser** — writes HTML to a temp file, then `NSWorkspace.open`. The export differs
-  from the in-app document in two ways, because a browser cannot resolve `tbd-md://`: CSS is
-  inlined into a `<style>` block, and repo-local images are re-encoded as `data:` URIs. Remote
-  image URLs are left untouched. Documents whose local images exceed a size threshold fall back
-  to absolute `file://` URLs, which render in a browser opened from the same machine but do not
-  survive being moved elsewhere.
+- **Open in Browser** — writes HTML to a temp file, then `NSWorkspace.open`. Since local images
+  are already `data:` URIs in the live document and CSS is inlined at assembly, the export is
+  self-contained with no re-encoding step. Remote image URLs are left untouched. When mermaid is
+  enabled the export serializes the live DOM after render completes
+  (`document.documentElement.outerHTML`), strips the mermaid `<script>` tag, and filters
+  mermaid's leaked temp containers — so diagrams ship as inline `<svg>` and the exported file
+  contains no JavaScript.
 
 ### Error handling
 
@@ -245,12 +272,14 @@ toolchain and the tests exercise what actually ships.
 - Golden-output tests: alerts, tables, task lists, footnotes, autolinks.
 - Safe-mode invariants asserted explicitly: raw HTML clobbered, `javascript:` emptied.
 - CSS resolution: bundled default, user stylesheet, missing-file fallback.
-- Scheme handler: containment enforced, `..` traversal rejected, symlink escape rejected,
-  extension allowlist enforced.
-- Webview configuration: `allowsContentJavaScript == false`, no script message handlers
-  installed.
-- Browser export: CSS inlined, repo-local images become `data:` URIs, remote URLs untouched, and
-  no `tbd-md://` reference survives into the exported file.
+- Image inlining: repo-local images become `data:` URIs with correct MIME types; containment
+  enforced against the document's directory; `..` traversal and symlink escapes rejected;
+  oversized images fall back to the placeholder rather than being inlined.
+- Webview configuration: no script message handlers installed in either state;
+  `allowsContentJavaScript == false` when `renderMermaidDiagrams` is off and `true` when it is
+  on; the data store is non-persistent in both.
+- Browser export: CSS inlined, remote URLs untouched, and the exported file contains no
+  `<script>` element.
 - **Both flag branches**, per CLAUDE.md: flag off renders through MarkdownUI unchanged; flag on
   takes the webview path.
 
@@ -279,11 +308,11 @@ Commit `4fc71bcc` moved only the *code* path off-main. The new pipeline fixes th
 ## Explicitly out of scope
 
 - The transcript renderer, and any migration of it.
-- Mermaid diagram rendering. If specced later, the pattern is generation-time pre-rendering to
-  inline SVG with `htmlLabels: false` plus an SVG sanitize pass — a pre-rendered diagram still
-  carries attacker-controlled `<img src>` into the output, which was confirmed empirically.
-  Note that `securityLevel: 'sandbox'` returns a base64 `data:` iframe rather than SVG and is
-  incompatible with that pipeline.
+- Mermaid diagram rendering — **now specced separately** in
+  [`2026-07-28-mermaid-rendering-proposal.md`](2026-07-28-mermaid-rendering-proposal.md), which
+  amends this document's JavaScript posture and replaces the `tbd-md://` handler with `data:`
+  URIs. It ships behind its own default-off `renderMermaidDiagrams` flag and graduates
+  independently, so this document's flag can flip without waiting on it.
 - Raw HTML support and any allowlist sanitizer.
 - Blocking remote subresources.
 - A local HTTP server or live browser preview.
