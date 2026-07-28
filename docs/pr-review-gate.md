@@ -26,8 +26,10 @@
    directly. Two implementation notes: on a **public** repo the endpoint returns
    `read` for a total stranger rather than 404, so `read` and `none` are both
    untrusted; and the probe runs on every event (its result is ignored for same-repo
-   PRs) so each run logs whether the App token can read collaborator permissions.
-   A failed probe is untrusted for forks and harmless for same-repo branches.
+   PRs) so each run logs the permission it resolved. A failed probe is untrusted for
+   forks and harmless for same-repo branches. The default `GITHUB_TOKEN` reads this
+   endpoint with only `contents: read` — verified in Actions — so the reviewer App
+   token is still minted after the gate rather than before it.
 3. **Verdict.** The reviewer writes a single token — exactly `APPROVE` or `REJECT`
    — to `claude-verdict.txt`. A `Stop` hook
    ([`claude-review-hooks/verdict-gate.sh`](../.github/workflows/claude-review-hooks/verdict-gate.sh))
