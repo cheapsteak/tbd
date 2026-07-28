@@ -306,22 +306,95 @@ to the main assembly path, and the export gains the DOM-serialization step descr
 
 **A human must answer these. They are not settled.**
 
-1. **Diagram size cap — now more urgent than under Option 1.** The 300-edge render peaked its
-   WebContent process at 528 MB and did not shrink back. Under Option 1 that process was a
-   throwaway sandbox that could simply be recycled. Under Option 7 it is **the webview the user
-   is reading**, so the memory cannot be reclaimed without reloading the document and losing
-   scroll position. A pre-render size check on the fence source (before handing it to mermaid) is
-   the cheap mitigation. What limit, and what does the user see when a diagram exceeds it?
-2. **`data:` URI size cap.** With the scheme handler gone there is no streaming path for large
-   local images. What is the threshold, and does an oversized image show a placeholder, a link,
-   or a broken-image affordance?
-3. **`click … href` policy.** Strip `<a>` wrappers from rendered output, or keep them. Note the
-   calculus changed: under Option 1 the display view denied navigation. Under Option 7 the
-   display view runs JS, so this needs restating against the new posture rather than inheriting
-   the old answer.
-4. **Error display escaping.** Mermaid's parse errors echo attacker source verbatim. Confirm
-   whether errors surface in the UI at all, and if so that the escaping requirement is specced
-   and tested.
+**Direction set 2026-07-28: copy GitHub's limits rather than invent our own.** Values below were
+extracted from GitHub's shipped `mermaidMarkdown-*.js` bundle and probed against production.
+
+### Mermaid caps — copy exactly, by not overriding
+
+GitHub's verbatim `initialize` call, from the shipped bundle:
+
+```js
+mermaid.initialize({
+  startOnLoad: false,
+  secure: ["secure","securityLevel","startOnLoad","maxTextSize"],
+  securityLevel: "antiscript",
+  flowchart: { diagramPadding: 48 },
+  gantt: { useWidth: 1200 }, pie: { useWidth: 1200 },
+  sequence: { diagramMarginY: 40 },
+  theme: <html data-color-mode> === "dark" ? "dark" : "default"
+});
+```
+
+**GitHub overrides neither cap** — it inherits mermaid's defaults, so we get the same behavior by
+also not overriding them:
+
+- **`maxTextSize` = 50,000.** Measured on the diagram source as `String.length`, i.e. **UTF-16
+  code units** — in Swift that is `source.utf16.count`, not `source.count`. It does not throw: it
+  replaces the diagram with a single-node flowchart reading "Maximum text size in diagram
+  exceeded". That message is fixed text, not echoed source, so it is safe to display and does not
+  reopen the deferred error-escaping question.
+- **`maxEdges` = 500.** Flowchart diagrams only; the 501st edge throws. Sequence, class, and
+  others do not enforce it.
+- **Neither is raisable from inside a diagram.** Mermaid unions the `secure` arrays rather than
+  replacing them, so the effective secure set covers both keys and a `%%{init}%%` directive is
+  dropped with "Denied attempt to modify a secure key". (VERIFIED in shipped code.)
+- **No per-file diagram-count limit.** 300 fences in one document all rendered.
+
+**Deliberate divergence:** GitHub runs `securityLevel: "antiscript"` and leaves `htmlLabels` on.
+We run **`strict` with `htmlLabels: false`**, which is stricter and is what the spike verified
+produces clean output. Do not copy GitHub here — its looser config is what reproduced
+`<foreignObject>` and a surviving attacker `<img src>` in the control run.
+
+**Validation of the dark-mode approach:** GitHub switches `theme` at runtime from a DOM attribute,
+exactly as this document proposes doing from `prefers-color-scheme`.
+
+### Residual gap — GitHub's caps do not solve our memory finding
+
+**The 300-edge diagram that peaked a WebContent process at 528 MB is within GitHub's limits**
+(300 < 500 edges, and well under 50,000 characters). Copying GitHub's numbers therefore does not
+address the finding that motivated the cap.
+
+That is survivable for GitHub because the diagram renders in a disposable cross-origin iframe. It
+is not obviously survivable for us, because under Option 7 the memory lands in the webview the
+user is reading and cannot be reclaimed without a reload that loses scroll position.
+
+**Still open:** whether to accept GitHub parity and treat the memory peak as tolerable, or set a
+tighter `maxEdges` than GitHub's 500. Recommend shipping at parity, measuring against real
+documents during the soak, and tightening only if it bites — the flag is default-off precisely to
+make that safe.
+
+### `data:` URI cap — no GitHub value exists to copy
+
+**GitHub strips `data:` URIs entirely.** `![x](data:image/png;base64,…)` renders as an `<img>`
+with **no `src` attribute at all** (VERIFIED). There is no GitHub inline-image cap, because
+GitHub does not support inline images.
+
+So this number must be invented. The nearest defensible analogue is **camo's 5 MiB per-image
+limit** — verified against production: 5,237,557 bytes returns 200, 5,250,068 returns 404 with
+body `Content length exceeded`, bracketing `CAMO_LENGTH_LIMIT` at 5,242,880.
+
+Note that 5 MiB of image becomes roughly 6.7 MiB of base64 in the document string, so a
+per-document budget likely matters more than a per-image one. **Open:** the per-image threshold,
+whether a per-document total also applies, and whether an oversized image shows a placeholder, a
+link, or a broken-image affordance.
+
+### For reference — other GitHub limits found
+
+Not needed for this document, but recorded so nobody re-researches them: the REST Markdown API
+caps at exactly 409,600 bytes; the web UI gates on **rendered HTML size** (~505 KB, best estimate
+512,000) rather than source size; files above ~2 MiB are not displayed at all. GitHub's
+cmark-gfm carries `MAX_LIST_DEPTH` 100, `MAX_LINK_LABEL_LENGTH` 1000, `MAXBACKTICKS` 80.
+**Decided 2026-07-28:**
+
+- **`click … href` — allowed.** Rendered `<a xlink:href>` wrappers are kept. A clickable link in
+  a diagram is treated exactly like a link in prose: the display view's navigation policy sends
+  it to `NSWorkspace` rather than following it in place, so the reachable outcome is "opens in
+  the user's browser," which markdown links already do. `click A "javascript:..."` is stripped by
+  mermaid before this point, verified.
+- **Error display — deferred.** Not specced in this round. The escaping requirement stands
+  whenever it is: mermaid's parse errors echo attacker source verbatim, and comrak never sees
+  that string, so escaping is ours. Until errors surface in the UI, a failed render falls back to
+  the Option 5 source block with no mermaid-authored text displayed.
 
 **Resolved by the move to Option 7:** dark mode. Colors no longer bake at render time — mermaid
 re-initializes with a theme chosen from `prefers-color-scheme` at runtime, so diagrams follow
