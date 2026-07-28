@@ -26,6 +26,28 @@
 The verdict file is deleted after checkout, before the review runs, so a PR cannot
 pre-commit `claude-verdict.txt=APPROVE` to approve itself.
 
+## Trusted fork PRs need `allow-unsafe-pr-checkout`
+
+`actions/checkout` v7.0.0 added a hard refusal to check out a fork PR head under
+`pull_request_target` (and `workflow_run`), and **backported it to the floating
+`v4` tag in v4.4.0 on 2026-07-20** — so a workflow pinned to `actions/checkout@v4`
+picked up the breaking change without any edit. Its condition is purely
+`event_name` plus `head.repo != base.repo`; it has no view of the author-trust step
+that precedes it. The result was that *every* fork PR — including a
+`COLLABORATOR`'s — failed the required `claude-review` check at checkout (PR #545).
+
+The checkout step therefore sets `allow-unsafe-pr-checkout: true`. Because that
+step is already gated on `trusted == true`, the opt-in restores exactly the
+pre-v4.4.0 behavior and adds no new exposure: untrusted fork code still never
+reaches the checkout. The residual risk is the one this design accepted from the
+start — a trusted collaborator's fork code runs in a job holding
+`CLAUDE_CODE_OAUTH_TOKEN` and the reviewer App's private key.
+
+**Land changes to this workflow from a branch in this repo, never from a fork.**
+Under `pull_request_target` the workflow config is read from the *base* branch, so
+a fork PR that fixes the review workflow is still reviewed by the unfixed version
+and blocks itself. (Same root cause as the trigger-change bootstrap gap above.)
+
 ## Changing the workflow's trigger needs an admin merge
 
 GitHub picks the workflow version to run from different refs per event: a

@@ -61,6 +61,16 @@ jobs:
           # that impossible — PR #434 diagnostics), and git log/blame for
           # premise-audit checks. The repo packs to ~10 MB; the cost is seconds.
           fetch-depth: 0
+          # actions/checkout v7.0.0 (backported to the floating v4 tag in v4.4.0,
+          # 2026-07-20) refuses to check out a fork PR head under
+          # pull_request_target unless this opt-in is set. Its check is purely
+          # event_name + head.repo != base.repo — it cannot see the author-trust
+          # step above, so without this EVERY fork PR fails the required
+          # claude-review check even from a COLLABORATOR (PR #545). This step is
+          # already gated on trusted == true, so the opt-in restores exactly the
+          # pre-v4.4.0 behavior and adds no exposure. Untrusted forks are still
+          # blocked before reaching here. See docs/pr-review-gate.md.
+          allow-unsafe-pr-checkout: true
 
       - name: Reset any pre-committed verdict file
         if: steps.trust.outputs.trusted == 'true'
