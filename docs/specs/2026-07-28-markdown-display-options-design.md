@@ -161,7 +161,16 @@ blocks subresource loads.
 > rather than two.
 >
 > New requirement this creates: `data:` URIs have no streaming path for large images, so a size
-> cap with a placeholder is needed. Tracked as an open decision in the mermaid proposal.
+> cap is needed. **Decided 2026-07-28: 2 MiB per image, 16 MiB total inlined per document.**
+> An image over the per-image limit, or any image once the document budget is exhausted, renders
+> as a placeholder showing the filename with a click-to-open affordance rather than being
+> inlined. Two MiB of image is roughly 2.7 MiB of base64, so the document budget is the binding
+> constraint on image-heavy READMEs.
+>
+> These numbers are invented, not copied: **GitHub strips `data:` URIs entirely** — it renders
+> `<img>` with no `src` at all — so there is no GitHub behavior to match here. The nearest
+> analogue is camo's per-image limit, verified in production at 5 MiB, which we deliberately
+> undercut because inlining and proxying have different cost profiles.
 >
 > The record below is retained because the spike result is sound and would be the right design
 > if the display view were ever returned to a permanently JS-free posture.

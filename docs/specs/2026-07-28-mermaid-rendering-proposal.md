@@ -240,6 +240,31 @@ webview, no async render coordination, no SVG cache, and no second WebContent pr
 display view keeps the JS-free posture of the markdown spec. The image strategy is uniform
 (`data:` URIs) in both states, so there is one image path rather than two.
 
+**Per-document gating (decided 2026-07-28).** Assembly already scans the source for mermaid
+fences, so a document containing none loads **neither the bundle nor JavaScript**:
+`allowsContentJavaScript` is set per navigation via
+`decidePolicyFor(_:preferences:decisionHandler:)`, enabled only for loads whose source contains
+at least one fence. Most documents therefore keep the JS-free posture even with the flag on,
+recovering most of what Option 7 concedes.
+
+Requires a spike: earlier research established that `allowsContentJavaScript` is a **single
+per-page field consulted live** (`m_allowsContentJavaScriptFromMostRecentNavigation`) and that a
+subframe grant retroactively re-armed the main frame. Per-main-frame-navigation toggling is the
+API's intended use, but the behavior on a **reused** webview alternating between mermaid and
+non-mermaid documents must be verified, not assumed.
+
+**Bundle delivery (decided 2026-07-28).** A narrow `WKURLSchemeHandler` serves exactly one
+bundled resource — the vendored mermaid asset — with **no path parameterization and no
+filesystem access**. This is a categorically different object from the removed `tbd-md://`
+handler, which was dangerous precisely because it was parameterized over repo paths. A
+compromised page that requests this handler receives the library it is already running, so the
+information gain is nil.
+
+Rejected: inlining the 3.5 MB bundle into the document string, which pays a fresh compile per
+load and leaks into the export; and `WKUserScript`, because user scripts execute **even when
+`allowsContentJavaScript` is false**, which would run mermaid inside documents the gating above
+declares JS-free — a sharp edge in exactly the place the design depends on JS being off.
+
 **Security.** Weaker than Option 1, and the trade is explicit. comrak's safe mode becomes the
 *single* layer preventing script injection from markdown, rather than one of two — though it is
 the load-bearing one either way, and it is well tested. A mermaid exploit lands in a page with no
@@ -369,14 +394,16 @@ make that safe.
 with **no `src` attribute at all** (VERIFIED). There is no GitHub inline-image cap, because
 GitHub does not support inline images.
 
-So this number must be invented. The nearest defensible analogue is **camo's 5 MiB per-image
+So this number had to be invented. The nearest defensible analogue is **camo's 5 MiB per-image
 limit** — verified against production: 5,237,557 bytes returns 200, 5,250,068 returns 404 with
 body `Content length exceeded`, bracketing `CAMO_LENGTH_LIMIT` at 5,242,880.
 
-Note that 5 MiB of image becomes roughly 6.7 MiB of base64 in the document string, so a
-per-document budget likely matters more than a per-image one. **Open:** the per-image threshold,
-whether a per-document total also applies, and whether an oversized image shows a placeholder, a
-link, or a broken-image affordance.
+**Decided 2026-07-28: 2 MiB per image, 16 MiB total per document**, deliberately undercutting
+camo because inlining and proxying have different cost profiles — 2 MiB of image is ~2.7 MiB of
+base64 carried in the document string. Oversized images render as a placeholder with the filename
+and a click-to-open affordance. Recorded in the
+[markdown display spec](2026-07-28-markdown-display-options-design.md), where image handling
+lives.
 
 ### For reference — other GitHub limits found
 
@@ -406,6 +433,11 @@ open question with the most UX weight under Option 1.
 Revised for Option 7. The windowless-rendering and offscreen-throttling spikes no longer apply —
 mermaid runs in a visible webview.
 
+- **Per-navigation JS toggling on a reused webview.** Load a mermaid document, then a plain one,
+  then a mermaid one again, and confirm `allowsContentJavaScript` actually tracks each
+  navigation — that JS is genuinely off for the plain document and genuinely on again afterward.
+  This is load-bearing for the per-document gating and the field is known to have surprising
+  live-consultation semantics.
 - **Runtime theme switching**: mermaid re-`initialize` on a `prefers-color-scheme` change, with
   diagrams already on screen. This is what replaces the dual-render design, so it should be
   confirmed rather than assumed.
