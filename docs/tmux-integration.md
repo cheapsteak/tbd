@@ -145,3 +145,24 @@ This is the key feature that makes embedding work — multiple viewers can look 
 - [Windows Terminal control mode request](https://github.com/microsoft/terminal/issues/5612) — more discussion of challenges
 - [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) — the terminal emulator library we use
 - [tmux man page](https://man.openbsd.org/tmux.1) — authoritative reference
+
+## Known issues
+
+### `terminal send` silently no-ops on dead panes
+
+`tbd terminal send --terminal <id> --text "..." --submit` reports **"Text sent"**
+even when the target tmux pane is dead (`pane_dead=1`). The text goes nowhere and
+the caller gets no failure signal. During a 2026-07-01 multi-session rescue this
+masked five dead Claude sessions — every nudge "succeeded" while none delivered.
+
+Related trap: a pane can be alive (`pane_dead=0`) after its Claude process exits,
+leaving a bare `zsh` prompt — `send` then types into a shell, not a session.
+Ground truth today requires raw tmux:
+
+```sh
+tmux -L <server> list-panes -a -F '#{pane_id} dead=#{pane_dead} cmd=#{pane_current_command}'
+```
+
+Suggested fix: check `#{pane_dead}` before sending and exit non-zero with a
+respawn hint when dead; surface `pane_current_command` in `terminal list`/`output`
+so callers can tell "Claude running" from "shell prompt" without raw tmux.
