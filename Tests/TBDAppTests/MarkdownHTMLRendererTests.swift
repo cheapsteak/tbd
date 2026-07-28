@@ -51,13 +51,20 @@ struct MarkdownHTMLRendererTests {
     @Test("clobbers inline script tags")
     func clobbersScript() throws {
         let html = try #require(MarkdownHTMLRenderer.renderBody("<script>alert(1)</script>"))
-        #expect(!html.contains("<script"))
+        // Positive sentinel, matching clobbersRawHTML's rigor: assert the node
+        // was replaced, not merely that one spelling of the tag is absent.
+        #expect(html.contains("raw HTML omitted"))
+        #expect(!html.lowercased().contains("<script"))
     }
 
     @Test("empties javascript: link destinations")
     func stripsJavascriptURLs() throws {
         let html = try #require(MarkdownHTMLRenderer.renderBody("[bad](javascript:alert(1))"))
-        #expect(!html.lowercased().contains("javascript:"))
+        // Whitelist the exact composed output. comrak empties the destination
+        // entirely rather than masking it. A !contains("javascript:") check
+        // would pass just as happily if a future comrak percent-encoded the
+        // colon while leaving a live scheme behind.
+        #expect(html.contains(#"<a href="">bad</a>"#))
     }
 
     @Test("link destinations cannot break out of the href attribute")
