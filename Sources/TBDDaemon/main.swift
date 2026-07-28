@@ -6,6 +6,12 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 
+// Augment PATH with standard macOS tool directories when spawned from GUI app.
+// The GUI app launches the daemon with a minimal LaunchServices PATH that excludes
+// Homebrew tools, causing git-lfs and other subprocesses to fail. Set a full PATH
+// once at startup so all child processes inherit it (see ToolPathAugmenter for details).
+let augmentedPath = ToolPathAugmenter.augmentPath(ProcessInfo.processInfo.environment["PATH"])
+setenv("PATH", augmentedPath, 1)
 logger.info("tbdd v\(TBDConstants.version, privacy: .public) starting...")
 
 let daemon = Daemon()

@@ -1797,7 +1797,44 @@ final class AppState: ObservableObject {
     /// client). Tombstone it and drop the row so it cannot be resurrected by a
     /// poll snapshot that predates the archive.
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
+        // Check if this was a .creating worktree that failed to complete.
+        // Look it up before it gets removed so we can detect the failure.
+        let worktree = findWorktreeInState(id: delta.worktreeID)
+        let failureMessage = Self.creationFailureMessageIfCreating(worktree)
+
         removeArchivedWorktreeFromState(id: delta.worktreeID)
+
+        // If it was still creating when it disappeared, its creation failed.
+        // Show an error alert instead of silently redirecting the user.
+        // Note: when THIS client archives a still-.creating worktree, the row
+        // is already removed by removeArchivedWorktreeFromState, so the lookup
+        // will fail and no false alert fires.
+        if let message = failureMessage {
+            showAlert(message, isError: true)
+        }
+    }
+
+    /// Returns a failure alert message if the worktree was in `.creating` status
+    /// when it disappeared, or nil if it was in any other status or unknown.
+    /// Pure static helper for testability — both branches are unit-testable
+    /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
+    nonisolated static func creationFailureMessageIfCreating(_ worktree: Worktree?) -> String? {
+        guard let worktree, worktree.status == .creating else {
+            return nil
+        }
+        return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
+               "See Console (log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
+    }
+
+    /// Finds a worktree by ID in the current state (both repo-based and scratch).
+    /// Returns nil if not found. Used for checking properties before removal.
+    private func findWorktreeInState(id: UUID) -> Worktree? {
+        for repoWorktrees in worktrees.values {
+            if let wt = repoWorktrees.first(where: { $0.id == id }) {
+                return wt
+            }
+        }
+        return scratchWorktrees.first(where: { $0.id == id })
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)

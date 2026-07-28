@@ -440,6 +440,8 @@ extension WorktreeLifecycle {
         // Try with origin/<default> first, then local <default>
         let baseBranches = ["origin/\(defaultBranch)", defaultBranch]
 
+        var lastError: Error? = nil
+
         for baseBranch in baseBranches {
             do {
                 try await git.worktreeAdd(
@@ -450,6 +452,8 @@ extension WorktreeLifecycle {
                 )
                 return (name: name, branch: branch, path: worktreePath)
             } catch {
+                lastError = error
+                logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 // Clean up the directory if it was partially created
                 try? FileManager.default.removeItem(atPath: worktreePath)
             }
@@ -457,8 +461,9 @@ extension WorktreeLifecycle {
 
         // Fail immediately if user specified the folder — can't silently change it
         if userSpecifiedFolder {
+            let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
-                "git worktree add failed — the folder or branch may already exist"
+                "git worktree add failed — the folder or branch may already exist\(errorDetail)"
             )
         }
 
@@ -482,13 +487,36 @@ extension WorktreeLifecycle {
                 )
                 return (name: retryName, branch: retryBranch, path: retryPath)
             } catch {
+                lastError = error
+                logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 try? FileManager.default.removeItem(atPath: retryPath)
             }
         }
 
+        let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
         throw WorktreeLifecycleError.createFailed(
-            "git worktree add failed after all attempts"
+            "git worktree add failed after all attempts\(errorDetail)"
         )
+    }
+
+    /// Formats an error for inclusion in a user-facing message, truncated to ~500 chars.
+    private func formatErrorForMessage(_ error: Error) -> String {
+        var detail = ""
+        if let gitError = error as? GitError {
+            let stderr = gitError.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            detail = stderr
+        } else {
+            detail = error.localizedDescription
+        }
+        if detail.isEmpty {
+            return ""
+        }
+        // Truncate to ~500 chars and clean up
+        let maxLen = 500
+        if detail.count > maxLen {
+            detail = String(detail.prefix(maxLen)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+        }
+        return "\nDetails: \(detail)"
     }
 
     private func resolvePrimaryTerminalKind(
