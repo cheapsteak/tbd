@@ -283,12 +283,16 @@ public actor LimitResumeScheduler {
         for row in rows {
             guard await actuator.userAlreadyContinued(row) else { continue }
             inFlightOrFired.insert(row.id)
+            // Log only on a write that actually landed — a row whose retries
+            // all failed was NOT cancelled in the store. The failure itself is
+            // already logged at `.error` inside `setStatusWithRetry`, so
+            // there's no else branch here (same shape as `fire`).
             if await setStatusWithRetry(
                 id: row.id, status: .cancelled, terminalID: row.terminalID,
                 context: "early transcript growth") {
                 inFlightOrFired.remove(row.id)
+                logger.info("runLoop: cancelled pending resume early — transcript grew for terminal \(row.terminalID.uuidString, privacy: .public)")
             }
-            logger.info("runLoop: cancelled pending resume early — transcript grew for terminal \(row.terminalID.uuidString, privacy: .public)")
         }
     }
 
