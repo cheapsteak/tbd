@@ -190,10 +190,12 @@ struct WorktreeReviveFreshTests {
 
         #expect(try await db.worktrees.list() == rowsBefore)
         #expect(try await db.notes.list().isEmpty)
+        // A failed revive must leave no spawned conversation behind. Asserted
+        // on the claude invocation itself rather than on any prompt wording —
+        // the carryover spawn no longer sends a prompt, so a text-based check
+        // here would pass for the wrong reason.
         #expect(
-            recorder.snapshot().flatMap { $0 }.contains {
-                $0.contains("You have been moved to a fresh worktree.")
-            } == false
+            recorder.snapshot().compactMap(\.last).contains { $0.contains("claude ") } == false
         )
         let worktreeRoot = try #require(repo.worktreeRoot)
         let createdPaths = try FileManager.default.contentsOfDirectory(atPath: worktreeRoot)
@@ -324,10 +326,13 @@ struct WorktreeReviveFreshTests {
         )
         #expect(claudeCommand.contains("--resume A"))
         #expect(claudeCommand.contains("--fork-session"))
-        #expect(claudeCommand.contains("branch tbd/stale-owl (archived 2026-06-01)"))
-        #expect(claudeCommand.contains("You are now on \(created.branch)"))
-        #expect(claudeCommand.contains("branched from origin/main (\(shortRemoteSHA))"))
-        #expect(claudeCommand.contains("re-read any file before editing it"))
+        // The revived session opens idle at the composer — no trailing prompt
+        // argument, so Claude does not start an unrequested turn. Provenance
+        // lives in the seeded Notes tab asserted below, not in a prompt.
+        #expect(
+            isPromptFreeForkResumeInvocation(claudeCommand),
+            "fresh revive must spawn with no trailing prompt argument: \(claudeCommand)"
+        )
 
         let note = try #require(try await db.notes.list(worktreeID: created.id).first)
         #expect(note.title == "Notes")
@@ -692,6 +697,31 @@ struct WorktreeReviveFreshTests {
         )
         #expect(claudeCommand.contains("--resume A"))
         #expect(claudeCommand.contains("--fork-session"))
+        #expect(
+            isPromptFreeForkResumeInvocation(claudeCommand),
+            "fresh revive must spawn with no trailing prompt argument: \(claudeCommand)"
+        )
+    }
+
+    /// Self-test for the guard below: a whitelist that cannot fail would make
+    /// every use of it vacuous.
+    @Test func promptFreeGuardRejectsATrailingPromptArgument() {
+        let base = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
+            + " --fork-session --dangerously-skip-permissions --settings '/tmp/overlay.json'"
+        #expect(isPromptFreeForkResumeInvocation(base))
+        #expect(!isPromptFreeForkResumeInvocation(base + " 'You have been moved.'"))
+    }
+
+    /// Whitelists the permitted invocation shape instead of blacklisting the
+    /// removed prompt's wording: only the resume/fork/permission flags plus the
+    /// optional file-path flags may appear. Any trailing positional argument
+    /// fails, whatever it says.
+    private func isPromptFreeForkResumeInvocation(_ command: String) -> Bool {
+        guard let start = command.range(of: "claude --resume") else { return false }
+        let invocation = String(command[start.lowerBound...])
+        let permitted = "^claude --resume [-0-9A-Za-z]+ --fork-session"
+            + " --dangerously-skip-permissions( --settings '[^']*')?( --plugin-dir '[^']*')?$"
+        return invocation.range(of: permitted, options: .regularExpression) != nil
     }
 
     /// `isolateTBDHome()` plus `TBD_CLAUDE_HOST_HOME`: the spawn (and now the

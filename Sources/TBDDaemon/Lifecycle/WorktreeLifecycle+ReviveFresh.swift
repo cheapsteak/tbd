@@ -95,9 +95,8 @@ extension WorktreeLifecycle {
             repoID: repo.id,
             displayName: "\(archived.displayName) (revived)"
         )
-        let contextPrompt = """
-        You have been moved to a fresh worktree. This conversation previously worked on branch \(archived.branch) (archived \(archivedDate)). You are now on \(pending.branch), branched from \(baseRef) (\(abbreviatedBaseSHA)). The working tree does NOT match what you last saw — re-read any file before editing it.
-        """
+        // No context prompt is built or sent: the revived session opens idle at
+        // the composer. The Notes seed below is the sole provenance surface.
         let notesSeed = """
         # Revived conversation
 
@@ -113,7 +112,6 @@ extension WorktreeLifecycle {
         """
         let carryover = ConversationCarryover(
             sourceSessionID: sessionID,
-            contextPrompt: contextPrompt,
             notesSeed: notesSeed
         )
         let completion = try await completeCreateWorktree(

@@ -46,7 +46,7 @@ and still restores session A.
 | Naming | Fresh auto-name; display name marks the origin | Branch names stay clean and collision-free; the sidebar says where it came from |
 | Fetch failure | Create anyway, warn visibly | Offline should not cost you the conversation, but "latest" must not be a silent lie |
 | Provenance | Seeded Notes tab + display name | No audit-log table exists, and this needs no schema change |
-| Agent context | Initial prompt delivered with the resume | Otherwise the agent edits files against a remembered state that no longer exists |
+| Agent context | **None** — the revived session opens idle at the composer (*reversed 2026-07-27, see below*) | The original decision sent a context prompt with the resume; because it is delivered atomically, Claude answered it immediately and burned an unwanted turn on every revive. Provenance now lives solely in the seeded Notes tab |
 | Feature flag | None | See "Conventions" below |
 
 ## RPC
@@ -125,7 +125,6 @@ New file `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+ReviveFresh.swift`.
 /// Everything the revive-fresh flow injects into an otherwise ordinary create.
 struct ConversationCarryover: Sendable {
     let sourceSessionID: String
-    let contextPrompt: String
     /// Markdown seeded into the worktree's initial Notes tab.
     let notesSeed: String
 }
@@ -148,9 +147,8 @@ present, `spawnPrimaryTerminals`:
   from the *new* path's derived project dir — this is what makes a conversation
   path-independent, and it is already used on every resume;
 - builds with `resumeID: sourceSessionID`, `forkSession: true`,
-  `initialPrompt: contextPrompt`, `appendSystemPrompt: nil`. The builder appends
-  the prompt atomically with the resume, so it can never land in the wrong
-  process;
+  `initialPrompt: nil`, `appendSystemPrompt: nil` — no trailing prompt argument,
+  so the revived session opens idle at the composer like any other resume;
 - stores `claudeSessionID = sourceSessionID` provisionally.
 
 ### Both create branches must carry it
@@ -223,16 +221,20 @@ the archived list; here the archived row stays exactly where it is. Instead the
 button shows in-flight state locally, and on success the new worktree is selected
 in the sidebar.
 
-## Context prompt
+## Context prompt — removed 2026-07-27
 
-Delivered as the resume's trailing prompt argument:
+The original design delivered a "you have been moved to a fresh worktree"
+paragraph as the resume's trailing prompt argument. Dogfooding killed it: that
+argument is delivered atomically with the resume, so Claude **immediately starts
+a turn** answering it — unexpected, and paid for in tokens on every revive.
 
-```
-You have been moved to a fresh worktree. This conversation previously worked on
-branch tbd/stale-owl (archived 2026-06-01). You are now on tbd/brisk-elk,
-branched from origin/main (def5678). The working tree does NOT match what you
-last saw — re-read any file before editing it.
-```
+Nothing replaced it. A carryover spawn now passes no initial prompt at all, and
+the revived session opens idle at the composer. Provenance is discoverable
+through the seeded Notes tab below, which is unchanged.
+
+Regression guards whitelist the permitted invocation shape (resume + fork +
+permission flags, plus the optional file-path flags) rather than blacklisting the
+old wording, which would pass vacuously now the string no longer exists.
 
 ## Notes seed
 

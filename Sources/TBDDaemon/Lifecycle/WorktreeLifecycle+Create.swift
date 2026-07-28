@@ -19,14 +19,19 @@ public enum WorktreeCreateCompletion: Sendable {
     case preSessionPending(phase3: Task<Void, Never>)
 }
 
+/// Carries an archived conversation onto a freshly created worktree.
+///
+/// Deliberately carries no prompt: a carryover spawn opens idle at the
+/// composer, exactly like an ordinary resume. An earlier revision passed a
+/// "you have been moved" context prompt as the spawn's trailing argument,
+/// which Claude answered immediately — an unwanted turn on every revive.
+/// Provenance lives solely in `notesSeed`, which seeds the Notes tab.
 public struct ConversationCarryover: Sendable {
     let sourceSessionID: String
-    let contextPrompt: String
     let notesSeed: String
 
-    init(sourceSessionID: String, contextPrompt: String, notesSeed: String) {
+    init(sourceSessionID: String, notesSeed: String) {
         self.sourceSessionID = sourceSessionID
-        self.contextPrompt = contextPrompt
         self.notesSeed = notesSeed
     }
 }
@@ -738,7 +743,12 @@ extension WorktreeLifecycle {
                 forkSession: carryover != nil,
                 freshSessionID: isResume ? nil : sessionUUID,
                 appendSystemPrompt: appendPrompt,
-                initialPrompt: carryover?.contextPrompt ?? (isResume ? nil : initialPrompt),
+                // A carryover spawn sends NO initial prompt — it must open idle
+                // at the composer like any other resume. `isResume` is true
+                // whenever a carryover is present, so this expression also
+                // preserves the pre-existing behavior for plain resumes (never
+                // a prompt) and fresh creates (the caller's prompt).
+                initialPrompt: isResume ? nil : initialPrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,

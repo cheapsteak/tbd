@@ -11,9 +11,6 @@ import Testing
 extension TBDHomeSerialized {
 @Suite("Worktree conversation carryover")
 struct WorktreeConversationCarryoverTests {
-    private let contextPrompt =
-        "You have been moved to a fresh worktree. Re-read files before editing."
-
     @Test func inlineCreateCarriesConversationIntoForkedClaudePrimary() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
@@ -34,7 +31,6 @@ struct WorktreeConversationCarryoverTests {
         let notesSeed = "# Revived conversation\n\nSource session: `\(sourceSessionID)`\n"
         let carryover = ConversationCarryover(
             sourceSessionID: sourceSessionID,
-            contextPrompt: contextPrompt,
             notesSeed: notesSeed
         )
         try writeSourceTranscript(
@@ -81,7 +77,6 @@ struct WorktreeConversationCarryoverTests {
         let notesSeed = "# Revived conversation\n\nSource session: `\(sourceSessionID)`\n"
         let carryover = ConversationCarryover(
             sourceSessionID: sourceSessionID,
-            contextPrompt: contextPrompt,
             notesSeed: notesSeed
         )
         try writeSourceTranscript(
@@ -138,6 +133,115 @@ struct WorktreeConversationCarryoverTests {
         #expect(note.content.isEmpty)
     }
 
+    /// An ordinary archived-session resume never carried an initial prompt, and
+    /// still must not — even when the caller supplies one. Guards the
+    /// precedence in `spawnPrimaryTerminals`, which is the expression the
+    /// carryover-prompt removal edited.
+    @Test func archivedSessionResumeStillSendsNoInitialPrompt() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
+        let lifecycle = makeCarryoverLifecycle(
+            db: db, recorder: recorder, claudeHome: claudeHome
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "resume-source",
+            branch: "tbd/resume-source",
+            path: tempDir.appendingPathComponent("resume-source").path,
+            tmuxServer: "tbd-test"
+        )
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: worktree,
+            repo: repo,
+            skipClaude: false,
+            archivedClaudeSessions: ["ARCHIVED-1"],
+            initialPrompt: "caller prompt that a resume must ignore",
+            preSessionTerminalID: nil
+        )
+
+        let command = try #require(
+            recorder.snapshot()
+                .filter { $0.contains("new-window") }
+                .compactMap(\.last)
+                .first { $0.contains("claude ") }
+        )
+        #expect(command.contains("--resume ARCHIVED-1"))
+        #expect(!command.contains("--fork-session"))
+        #expect(
+            isPromptFreeResumeInvocation(command, forkSession: false),
+            "archived-session resume must carry no trailing prompt argument: \(command)"
+        )
+    }
+
+    /// The other side of the same expression: a fresh Claude create still
+    /// delivers the caller's initial prompt as its trailing argument.
+    @Test func freshClaudeCreateStillSendsItsInitialPrompt() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeCarryoverLifecycle(
+            db: db,
+            recorder: recorder,
+            claudeHome: tempDir.appendingPathComponent("claude-home", isDirectory: true)
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+
+        _ = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id,
+            initialPrompt: "do the thing",
+            carryover: nil
+        )
+
+        let command = try #require(
+            recorder.snapshot()
+                .filter { $0.contains("new-window") }
+                .compactMap(\.last)
+                .first { $0.contains("claude ") }
+        )
+        #expect(command.contains("--session-id "))
+        #expect(!command.contains("--resume "))
+        #expect(command.hasSuffix(" 'do the thing'"))
+    }
+
+    /// Self-test for the guard below: it must actually reject a trailing
+    /// prompt, or the two assertions above would pass vacuously.
+    @Test func promptFreeGuardRejectsATrailingPromptArgument() {
+        let base = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume ABC-123"
+            + " --fork-session --dangerously-skip-permissions --settings '/tmp/overlay.json'"
+        #expect(isPromptFreeResumeInvocation(base, forkSession: true))
+        #expect(!isPromptFreeResumeInvocation(base + " 'You have been moved.'", forkSession: true))
+        #expect(!isPromptFreeResumeInvocation(base + " 'anything at all'", forkSession: true))
+    }
+
+    /// Whitelists the permitted shape rather than blacklisting a phrase: the
+    /// claude invocation may consist only of its resume/fork/permission flags
+    /// plus the optional file-path flags. Any trailing positional argument —
+    /// whatever its wording — falls outside the shape and fails.
+    private func isPromptFreeResumeInvocation(
+        _ command: String, forkSession: Bool
+    ) -> Bool {
+        guard let start = command.range(of: "claude --resume") else { return false }
+        let invocation = String(command[start.lowerBound...])
+        let fork = forkSession ? " --fork-session" : ""
+        let permitted = "^claude --resume [-0-9A-Za-z]+\(fork) --dangerously-skip-permissions"
+            + "( --settings '[^']*')?( --plugin-dir '[^']*')?$"
+        return invocation.range(of: permitted, options: .regularExpression) != nil
+    }
+
     private func makeCarryoverLifecycle(
         db: TBDDatabase,
         recorder: PreSessionRecordedCommands,
@@ -192,7 +296,12 @@ struct WorktreeConversationCarryoverTests {
         let command = try #require(claudeCommands.first)
         #expect(command.contains("--resume \(sourceSessionID)"))
         #expect(command.contains("--fork-session"))
-        #expect(command.contains(contextPrompt))
+        // The revived session must open idle at the composer: no trailing
+        // prompt argument, so Claude does not immediately start a turn.
+        #expect(
+            isPromptFreeResumeInvocation(command, forkSession: true),
+            "carryover spawn must carry no trailing prompt argument: \(command)"
+        )
 
         let destination = TranscriptProjectDirSync.derivedProjectDir(
             worktreePath: worktree.path,
