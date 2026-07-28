@@ -10,11 +10,24 @@
    base-repo context with repository secrets — the only way a public repo can run
    a token-bearing review on a fork PR. It fires for same-repo and fork PRs alike.
 2. **Trust gate (per-step).** A PR is *trusted* when the branch was pushed to this
-   repo, or the author is an `OWNER` / `MEMBER` / `COLLABORATOR`. Only trusted PRs
-   have their head checked out and reviewed. An **untrusted fork** never has its
-   code checked out or executed, and it produces a **failing** `claude-review`
+   repo, or the author has **push access** to it (`admin` / `maintain` / `write`
+   from `GET /repos/{owner}/{repo}/collaborators/{user}/permission`). Only trusted
+   PRs have their head checked out and reviewed. An **untrusted fork** never has
+   its code checked out or executed, and it produces a **failing** `claude-review`
    check (not a skipped one that would silently satisfy the required gate). To get
    an untrusted fork reviewed, a maintainer pushes the branch to this repo.
+
+   The gate deliberately checks *effective permission*, not the PR's
+   `author_association`. `COLLABORATOR` is handed to anyone invited to collaborate
+   at **any** level — read-only and triage included — and `MEMBER` would cover every
+   org member if this repo ever moved under an org. Because a trusted author gets
+   their branch's tooling executed next to the review secrets (see below), the gate
+   must admit only people who could already push a branch here and run this workflow
+   directly. Two implementation notes: on a **public** repo the endpoint returns
+   `read` for a total stranger rather than 404, so `read` and `none` are both
+   untrusted; and the probe runs on every event (its result is ignored for same-repo
+   PRs) so each run logs whether the App token can read collaborator permissions.
+   A failed probe is untrusted for forks and harmless for same-repo branches.
 3. **Verdict.** The reviewer writes a single token — exactly `APPROVE` or `REJECT`
    — to `claude-verdict.txt`. A `Stop` hook
    ([`claude-review-hooks/verdict-gate.sh`](../.github/workflows/claude-review-hooks/verdict-gate.sh))
@@ -39,9 +52,36 @@ that precedes it. The result was that *every* fork PR — including a
 The checkout step therefore sets `allow-unsafe-pr-checkout: true`. Because that
 step is already gated on `trusted == true`, the opt-in restores exactly the
 pre-v4.4.0 behavior and adds no new exposure: untrusted fork code still never
-reaches the checkout. The residual risk is the one this design accepted from the
-start — a trusted collaborator's fork code runs in a job holding
-`CLAUDE_CODE_OAUTH_TOKEN` and the reviewer App's private key.
+reaches the checkout.
+
+### What a trusted author's branch can execute
+
+The opt-in is only defensible because of the push-access gate above, so it is worth
+being explicit that "we never build the PR" does **not** mean "we never run its
+code." The review job runs on `ubuntu-latest` and never invokes `swift build`, but
+the checked-out tree still reaches three execution paths:
+
+- **`.mcp.json`.** `claude-code-action` unconditionally sets
+  `enableAllProjectMcpServers = true` when it writes its settings file, so MCP
+  servers declared in a repo-root `.mcp.json` are launched at startup with no
+  approval step. A branch that adds one gets arbitrary command execution directly.
+- **Project hooks.** `.claude/settings.json` is tracked here and registers a
+  `PreToolUse` hook running `.claude/hooks/guardrails/dispatch.py` on every `Bash`
+  and `Skill` call. Both files come from the checked-out branch, and the reviewer
+  always runs `Bash`. Restoring `claude-review-hooks/` from base does not prevent
+  this: the action merges the `settings:` input into `~/.claude/settings.json` (the
+  *user* layer, lowest priority) rather than passing `--settings`, and hooks merge
+  additively across layers — so the base-branch Stop hook cannot displace or
+  suppress a project-layer hook the branch adds.
+- **`CLAUDE.md`.** Every tracked `CLAUDE.md` is auto-loaded as instructions and is
+  branch-controlled, against an allowlist that includes `Bash(gh api:*)`.
+
+The job holds `CLAUDE_CODE_OAUTH_TOKEN`, the minted reviewer App token, and
+default-branch cache scope. The accepted residual risk is therefore precisely: an
+author who already has push access can run code beside those secrets — which they
+could equally do by pushing a branch. Anyone below push access cannot reach any of
+it. Keep that equivalence intact when editing the trust step; it is the entire
+argument for the opt-in.
 
 **Land changes to this workflow from a branch in this repo, never from a fork.**
 Under `pull_request_target` the workflow config is read from the *base* branch, so
