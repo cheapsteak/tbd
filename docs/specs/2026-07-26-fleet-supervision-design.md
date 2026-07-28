@@ -33,17 +33,24 @@ places. Each place has its own test:
   disguised as judgment.
 
 The requirements brief names six specific items and asks where each one landed.
-The applications appear throughout this document; this table collects them for
+The applications appear throughout this document; this list collects them for
 a quick audit:
 
-| Named item | Home | Where argued |
-| --- | --- | --- |
-| State derivation | Compiled. It is fact; a wrong answer poisons everything downstream, and it runs for the whole fleet every cycle. | §2 |
-| Intervention thresholds | Compiled default numbers, global. Per-repo tuning is deliberately deferred (§15). Crossing a threshold produces a case; the response is judged. | §2, §13 |
-| Cooldowns and dedup | Excluded by the brief (solved elsewhere). The sliver in this design — "intervention already in flight" and "re-check pending" checks — is compiled into the sweep. | §4 |
-| Per-repo policy | Authored, and resolved per **supervision project** (§5): the playbook (advisory prose) plus standing rules (binding, operator-ratified). | §5, §8 |
-| Mode enforcement (P0-3) | Compiled: the verb gate. Capability gating, never prompt wording. | §3 |
-| The shift/morning account | Compiled: a ledger written by the verb handlers; views are queries; the supervisor adds attributed notes only. | §6 |
+- **State derivation** — compiled (§2). It is fact; a wrong answer poisons
+  everything downstream, and it runs for the whole fleet every cycle.
+- **Intervention thresholds** — compiled default numbers, global (§2, §13).
+  Per-repo tuning is deliberately deferred (§15). Crossing a threshold produces
+  a case; the response is judged.
+- **Cooldowns and dedup** — excluded by the brief (solved elsewhere). The sliver
+  in this design — "intervention already in flight" and "re-check pending"
+  checks — is compiled into the sweep (§4).
+- **Per-repo policy** — authored, and resolved per **supervision project** (§5,
+  §8): the playbook (advisory prose) plus standing rules (binding,
+  operator-ratified).
+- **Mode enforcement (P0-3)** — compiled: the verb gate (§3). Capability gating,
+  never prompt wording.
+- **The shift/morning account** — compiled: a ledger written by the verb
+  handlers; views are queries; the supervisor adds attributed notes only (§6).
 
 **This placement means the daemon, not the supervisor, drives the loop.** A
 compiled sweep follows the same pattern as the existing hibernation sweep: a
@@ -506,23 +513,35 @@ execute and questions are collected into escalation batches. Standing rules
 
 ### The verbs (normative)
 
-This table is the single normative inventory of the supervisor's capabilities.
+This list is the single normative inventory of the supervisor's capabilities.
 Every other mention of a verb in this document defers to it.
 
-| Verb | What it does | Gated? | Attended mode | Autonomous mode |
-| --- | --- | --- | --- | --- |
-| `drive` | Act on a fleet agent's session (the send path of §4 step 7), in one of two payload variants. `--text` delivers a re-verified message — also how an agent's `AskUserQuestion` is answered, the adapter clearing a machine-known dialog first (§2). `--keys` sends named keys the desk chose after reading the screen; nothing to re-verify, so the ledger line carries the capture it read instead (§2, §6) | gated | Becomes a proposal showing exactly what will happen: the message text, or the keys and the screen they aim at [^ask] | Executes; ledger line |
-| `wake` | Unpark and resume a parked session | gated | Becomes a proposal | Executes; ledger line |
-| `pause` | Halt a runaway session (§13) | gated | Becomes a proposal | Executes; ledger line |
-| `escalate` | Queue an exact question for the operator | ungated | Ledger line; appears in the queue immediately | Ledger line; batched for morning |
-| `note` | Attributed prose into the account | ungated | Ledger line | Ledger line |
-
-[^ask]: When the target has a pending question, that proposal *is* the relayed
-    question: the agent's questions and options verbatim, plus the supervisor's
-    proposed response and reasoning. The operator approves it or answers
-    differently themselves. No separate verb marks this — the action's state
-    snapshot is the question (§6), so the record and the queue can both tell an
-    answer from an unprompted nudge without the vocabulary growing (§2).
+- **`drive`** — **gated.** Act on a fleet agent's session (the send path of §4
+  step 7), in one of two payload variants.
+  - `--text` delivers a re-verified message — also how an agent's
+    `AskUserQuestion` is answered, the adapter clearing a machine-known dialog
+    first (§2).
+  - `--keys` sends named keys the desk chose after reading the screen; nothing
+    to re-verify, so the ledger line carries the capture it read instead (§2,
+    §6).
+  - *Attended:* becomes a proposal showing exactly what will happen — the
+    message text, or the keys and the screen they aim at. When the target has a
+    pending question, that proposal *is* the relayed question: the agent's
+    questions and options verbatim, plus the supervisor's proposed response and
+    reasoning, so the operator approves it or answers differently themselves. No
+    separate verb marks this — the action's state snapshot is the question (§6),
+    so the record and the queue can both tell an answer from an unprompted nudge
+    without the vocabulary growing (§2).
+  - *Autonomous:* executes; ledger line.
+- **`wake`** — **gated.** Unpark and resume a parked session. *Attended:*
+  becomes a proposal. *Autonomous:* executes; ledger line.
+- **`pause`** — **gated.** Halt a runaway session (§13). *Attended:* becomes a
+  proposal. *Autonomous:* executes; ledger line.
+- **`escalate`** — ungated. Queue an exact question for the operator.
+  *Attended:* ledger line; appears in the queue immediately. *Autonomous:*
+  ledger line; batched for morning.
+- **`note`** — ungated. Attributed prose into the account. Ledger line in both
+  modes.
 
 Every verb is both a `tbd supervise <verb>` CLI command and an RPC method, so
 nothing exists only as a button (§10). `approve-a-prompt` is deliberately
@@ -904,17 +923,33 @@ without being split into per-project files. Lines the daemon writes on its own
 behalf rather than a desk's — shift open and close, sweep-level anomalies —
 carry a null project, which is the accurate answer and not a gap.
 
-| Kind | Payload carries |
-| --- | --- |
-| `action` | The verb, the target (worktree / terminal / repo), the payload (message text for `drive --text`, the named keys for `drive --keys`), and the state snapshot — with its source and observed-at — that justified it. For `drive --keys`, that snapshot includes **the screen capture the desk read when choosing those keys** — the evidence that stands in for send-time re-verification (§2). When a drive answers a pending question, the snapshot **is** the question payload, verbatim: no separate line records the question (a pending question is a fact, and facts are not ledgered), and no separate verb marks the answer — reading the snapshot is what distinguishes a reply from an unprompted nudge (§2) |
-| `outcome` | A reference to the action, one of the three §12 results, and the observed-at of that observation |
-| `proposal` | Everything an `action` carries, plus the supervisor's reasoning and the age of the state it reasoned from |
-| `resolution` | A reference to the proposal or escalation, the result (approved / rejected / answered / expired), the scope choice if one was made, and the operator's optional explanation |
-| `escalation` | The exact item, the exact proposed command, and the recommendation |
-| `decision` | The rule created, its lifetime (shift or always), and its origin |
-| `anomaly` | The category and the detail |
-| `note` | The author, the text, and optional references to other lines |
-| `lifecycle` | Opening, closing, posture change, or desk recycle — this is the kind behind every line §9 describes |
+What each kind's payload carries:
+
+- **`action`** — the verb, the target (worktree / terminal / repo), the payload
+  (message text for `drive --text`, the named keys for `drive --keys`), and the
+  state snapshot — with its source and observed-at — that justified it. For
+  `drive --keys`, that snapshot includes **the screen capture the desk read when
+  choosing those keys**, the evidence that stands in for send-time
+  re-verification (§2). When a drive answers a pending question, the snapshot
+  **is** the question payload, verbatim: no separate line records the question
+  (a pending question is a fact, and facts are not ledgered), and no separate
+  verb marks the answer — reading the snapshot is what distinguishes a reply
+  from an unprompted nudge (§2).
+- **`outcome`** — a reference to the action, one of the three §12 results, and
+  the observed-at of that observation.
+- **`proposal`** — everything an `action` carries, plus the supervisor's
+  reasoning and the age of the state it reasoned from.
+- **`resolution`** — a reference to the proposal or escalation, the result
+  (approved / rejected / answered / expired), the scope choice if one was made,
+  and the operator's optional explanation.
+- **`escalation`** — the exact item, the exact proposed command, and the
+  recommendation.
+- **`decision`** — the rule created, its lifetime (shift or always), and its
+  origin.
+- **`anomaly`** — the category and the detail.
+- **`note`** — the author, the text, and optional references to other lines.
+- **`lifecycle`** — opening, closing, posture change, or desk recycle; this is
+  the kind behind every line §9 describes.
 
 Two representative lines, an action and the outcome that later references it:
 
@@ -1420,7 +1455,7 @@ Principle: **you take action where you already read the relevant information.**
 
 ### The CLI surface (normative)
 
-This table is the complete `tbd supervise` surface. It is **normative for names
+This is the complete `tbd supervise` surface. It is **normative for names
 and shapes**: exact flag spellings may grow, command and subcommand names may
 not drift. Everything the app can do appears here, because nothing exists only
 as a button.

@@ -65,13 +65,16 @@ flowchart TB
 
 From the outside in:
 
-| Layer | Pieces | What it does |
-|---|---|---|
-| **UI / CLI** | `NightwatchModeToggle` (sidebar footer), `NightwatchStatusItem` (menu bar), `NightwatchDeskStatusBanner`, Settings toggle; `tbd nightwatch set/status/report` | Set/display the mode; read the audit log. App surfaces are gated on the `nightwatchExperimentalEnabled` UserDefaults key (default false). |
-| **RPC** | `nightwatch.setMode`, `nightwatch.report` (`RPCProtocol.swift:207-208`, params at `:344-359`); `nightwatchMode` rides the `Config` payload (`RPCProtocol.swift:570`) | Persist the mode, apply it to the runner, broadcast a config-changed delta; serve audit rows. |
-| **Daemon control plane** | `DaywatchRunner` (loop + mode transitions), `DeskSessionManager` (desk lifecycle + tmux injection), `ProcessDaywatchExecutor` (tick subprocess), the `MergeGate` hook on `PRStatusManager` | Owns *when* things happen. Owns almost nothing about *what* happens. |
-| **Policy / desk agent** | `NightwatchSkillContent.swift` (1528 lines of Swift string literals: SKILL.md, four Python scripts, two shell scripts, three config files), `NightwatchDeskPrompts.swift`, written to disk by `PluginDirWriter.writeNightwatch()` | Owns *what* happens: classification rules, safety rules, escalation etiquette, the merge policy the desk actually follows. All of it is prompt/script text. |
-| **Fleet** | Every other TBD-managed session, reached via `sqlite3 ~/tbd/state.db`, `tmux capture-pane`, `gh`, and the `tbd` CLI | The thing being babysat. |
+- **UI / CLI** — `NightwatchModeToggle` (sidebar footer), `NightwatchStatusItem` (menu bar), `NightwatchDeskStatusBanner`, Settings toggle; `tbd nightwatch set/status/report`
+  - *Does:* Set/display the mode; read the audit log. App surfaces are gated on the `nightwatchExperimentalEnabled` UserDefaults key (default false).
+- **RPC** — `nightwatch.setMode`, `nightwatch.report` (`RPCProtocol.swift:207-208`, params at `:344-359`); `nightwatchMode` rides the `Config` payload (`RPCProtocol.swift:570`)
+  - *Does:* Persist the mode, apply it to the runner, broadcast a config-changed delta; serve audit rows.
+- **Daemon control plane** — `DaywatchRunner` (loop + mode transitions), `DeskSessionManager` (desk lifecycle + tmux injection), `ProcessDaywatchExecutor` (tick subprocess), the `MergeGate` hook on `PRStatusManager`
+  - *Does:* Owns *when* things happen. Owns almost nothing about *what* happens.
+- **Policy / desk agent** — `NightwatchSkillContent.swift` (1528 lines of Swift string literals: SKILL.md, four Python scripts, two shell scripts, three config files), `NightwatchDeskPrompts.swift`, written to disk by `PluginDirWriter.writeNightwatch()`
+  - *Does:* Owns *what* happens: classification rules, safety rules, escalation etiquette, the merge policy the desk actually follows. All of it is prompt/script text.
+- **Fleet** — Every other TBD-managed session, reached via `sqlite3 ~/tbd/state.db`, `tmux capture-pane`, `gh`, and the `tbd` CLI
+  - *Does:* The thing being babysat.
 
 Note what is *not* a layer: there is no daemon-side enforcement between the desk agent and the fleet. Once nudged, the desk is an ordinary Claude session with whatever permissions its profile grants.
 
@@ -416,16 +419,22 @@ flowchart TB
 
 The floor is not missing. `checkSafetyFloor` is correct code enforcing approved-review-on-current-head-SHA, SHA match, and no-draft. It is simply wired to an observation hook instead of to a merge request, so it escalates unconditionally and writes a row nobody reads. The net inversion: **the enforcement layer became a passive observer, and the policy layer became the actuator** — the exact opposite of the spec's "policy can only ever make the gate *more* conservative, never less." Today policy is the only gate.
 
-| Spec says | Code does |
-|---|---|
-| §2: policy lives in *editable* skill files, iterated "instantly — edit a file, next tick picks it up" | Policy is compiled into `NightwatchSkillContent.swift` and destructively rewritten from the binary every boot. An edit survives until the next restart. This inverts the spec's single most important architectural decision. |
-| §2/§16: the skill *requests*, the daemon *re-verifies and executes or refuses* (two-layer contract; "a plain text file the daemon acts on is unsafe") | The desk agent holds `gh`/`tbd`/tmux directly; no request/verify RPC exists. The compiled floor (`MergeGate`) is not in the desk's action path at all. |
-| §7: safety floor with merge-time re-fetch, cache bypass, zero-required-checks refusal | The floor exists as code but its production inputs are placeholders (`headSHA: "unknown"`, `hasApprovedReview: false`, `Daemon.swift:415-427`); the only production outcome is `.escalate`. |
-| §7.3: clearance ledger written by pre-flight/grants, voided on SHA change, read by wrap-up | The table and store exist; nothing writes or reads them (Phase 1.5+ never happened). |
-| §5.2/§9.1: HTML pre-flight; wrap-up as a schema'd, rendered report ("the report is the product") | Neither exists. Wrap-up is a pasted prompt asking the agent to type 3–5 bullets (`NightwatchDeskPrompts.swift:73-87`). |
-| §5.4: Back = freeze merges/spawns, generate report, keep maintaining until told to stop | Off = cancel loop + paste wrap-up. Nothing keeps maintaining; nothing is frozen because nothing was gated. |
-| §6: spawn tree with depth/fan-out caps, `HostResourceProbe`, fail-closed backpressure probe | None of it exists. The desk is a single session; backpressure lives as prompt text and `tick.py` heuristics. |
-| §17 must-address gate: "auto-merge must not ship until items 1–8 are built" | Honored in the narrow sense (System A merges nothing) — but the desk path routes *around* the gate rather than through it, which the spec did not contemplate. |
+- **Spec says:** §2: policy lives in *editable* skill files, iterated "instantly — edit a file, next tick picks it up"
+  - **Code does:** Policy is compiled into `NightwatchSkillContent.swift` and destructively rewritten from the binary every boot. An edit survives until the next restart. This inverts the spec's single most important architectural decision.
+- **Spec says:** §2/§16: the skill *requests*, the daemon *re-verifies and executes or refuses* (two-layer contract; "a plain text file the daemon acts on is unsafe")
+  - **Code does:** The desk agent holds `gh`/`tbd`/tmux directly; no request/verify RPC exists. The compiled floor (`MergeGate`) is not in the desk's action path at all.
+- **Spec says:** §7: safety floor with merge-time re-fetch, cache bypass, zero-required-checks refusal
+  - **Code does:** The floor exists as code but its production inputs are placeholders (`headSHA: "unknown"`, `hasApprovedReview: false`, `Daemon.swift:415-427`); the only production outcome is `.escalate`.
+- **Spec says:** §7.3: clearance ledger written by pre-flight/grants, voided on SHA change, read by wrap-up
+  - **Code does:** The table and store exist; nothing writes or reads them (Phase 1.5+ never happened).
+- **Spec says:** §5.2/§9.1: HTML pre-flight; wrap-up as a schema'd, rendered report ("the report is the product")
+  - **Code does:** Neither exists. Wrap-up is a pasted prompt asking the agent to type 3–5 bullets (`NightwatchDeskPrompts.swift:73-87`).
+- **Spec says:** §5.4: Back = freeze merges/spawns, generate report, keep maintaining until told to stop
+  - **Code does:** Off = cancel loop + paste wrap-up. Nothing keeps maintaining; nothing is frozen because nothing was gated.
+- **Spec says:** §6: spawn tree with depth/fan-out caps, `HostResourceProbe`, fail-closed backpressure probe
+  - **Code does:** None of it exists. The desk is a single session; backpressure lives as prompt text and `tick.py` heuristics.
+- **Spec says:** §17 must-address gate: "auto-merge must not ship until items 1–8 are built"
+  - **Code does:** Honored in the narrow sense (System A merges nothing) — but the desk path routes *around* the gate rather than through it, which the spec did not contemplate.
 
 The desk itself ("Phase A visible worker", referenced in comments at `DaywatchRunner.swift:83-87`, `Daemon.swift:747`) comes from a later plan that is not in `docs/specs/`; the shipped code is the only authority on its behavior.
 
