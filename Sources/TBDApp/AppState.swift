@@ -1799,7 +1799,7 @@ final class AppState: ObservableObject {
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
         // Check if this was a .creating worktree that failed to complete.
         // Look it up before it gets removed so we can detect the failure.
-        let worktree = findWorktreeInState(id: delta.worktreeID)
+        let worktree = findWorktree(id: delta.worktreeID)
         let failureMessage = Self.creationFailureMessageIfCreating(worktree)
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
@@ -1824,17 +1824,6 @@ final class AppState: ObservableObject {
         }
         return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
                "See Console (log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
-    }
-
-    /// Finds a worktree by ID in the current state (both repo-based and scratch).
-    /// Returns nil if not found. Used for checking properties before removal.
-    private func findWorktreeInState(id: UUID) -> Worktree? {
-        for repoWorktrees in worktrees.values {
-            if let wt = repoWorktrees.first(where: { $0.id == id }) {
-                return wt
-            }
-        }
-        return scratchWorktrees.first(where: { $0.id == id })
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)

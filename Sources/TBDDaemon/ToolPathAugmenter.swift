@@ -30,7 +30,7 @@ public struct ToolPathAugmenter {
         ]
 
         let existingParts = (currentPath ?? "")
-            .split(separator: ":", omittingEmptySubsequences: false)
+            .split(separator: ":", omittingEmptySubsequences: true)
             .map { String($0) }
 
         var toAdd: [String] = []

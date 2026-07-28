@@ -453,7 +453,7 @@ extension WorktreeLifecycle {
                 return (name: name, branch: branch, path: worktreePath)
             } catch {
                 lastError = error
-                logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 // Clean up the directory if it was partially created
                 try? FileManager.default.removeItem(atPath: worktreePath)
             }
@@ -488,7 +488,7 @@ extension WorktreeLifecycle {
                 return (name: retryName, branch: retryBranch, path: retryPath)
             } catch {
                 lastError = error
-                logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 try? FileManager.default.removeItem(atPath: retryPath)
             }
         }

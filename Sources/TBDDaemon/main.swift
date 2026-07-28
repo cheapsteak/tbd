@@ -13,6 +13,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 let augmentedPath = ToolPathAugmenter.augmentPath(ProcessInfo.processInfo.environment["PATH"])
 setenv("PATH", augmentedPath, 1)
 logger.info("tbdd v\(TBDConstants.version, privacy: .public) starting...")
+logger.info("Daemon PATH: \(augmentedPath, privacy: .public)")
 
 let daemon = Daemon()
 
