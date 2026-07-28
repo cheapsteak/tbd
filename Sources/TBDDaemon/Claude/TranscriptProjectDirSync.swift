@@ -98,8 +98,10 @@ enum TranscriptProjectDirSync {
         guard sourceDir.resolvingSymlinksInPath().standardizedFileURL.path
                 != destDir.resolvingSymlinksInPath().standardizedFileURL.path else { return }
 
-        let entries = (try? fm.contentsOfDirectory(
-            at: sourceDir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        // Symlink-following listing: a `sourceDir` that IS a symlink lists as
+        // empty through `contentsOfDirectory`. See SymlinkedDirectoryListing.
+        let entries = SymlinkedDirectoryListing.entries(
+            of: sourceDir, includingPropertiesForKeys: [.isDirectoryKey]) ?? []
         for entry in entries {
             let destination = destDir.appendingPathComponent(entry.lastPathComponent)
             let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
@@ -137,8 +139,12 @@ enum TranscriptProjectDirSync {
     /// derived from a path that no longer exists.
     static func locateSessionTranscript(sessionID: String, projectsRoot: URL) -> URL? {
         let fm = FileManager.default
-        guard let dirs = try? fm.contentsOfDirectory(
-            at: projectsRoot, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
+        // Symlink-following listing: a profile's `projects` root IS a symlink
+        // into the host store, and listing it directly yields zero entries —
+        // which used to make every profile-bound resume start fresh. See
+        // SymlinkedDirectoryListing.
+        guard let dirs = SymlinkedDirectoryListing.entries(
+            of: projectsRoot, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
         var best: (url: URL, mtime: Date)?
         for dir in dirs {
             let values = try? dir.resourceValues(forKeys: [.isDirectoryKey])

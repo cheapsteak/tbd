@@ -87,6 +87,21 @@ New file `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+ReviveFresh.swift`.
    (`"no source transcript found for session … — fork will start fresh"`).
    Failing early is the difference between an error message and a worktree that
    quietly contains the wrong thing.
+
+   **Post-ship correction — validate against the root the spawn will use.** As
+   shipped, this step scanned the *ambient* projects root while the spawn synced
+   from the resolved model profile's root
+   (`spawnPrimaryTerminals` → `ClaudeProfileConfigDirManager.resolveConfigDir`).
+   Validation passing therefore proved nothing about the spawn, and the first
+   real use surfaced as Claude's own
+   `No conversation found with session ID: …` — the exact outcome this step
+   exists to prevent. Validation now resolves the profile the same way the spawn
+   does (profile-resolution failure falls back to ambient, matching it). Any
+   pre-flight check must read the same input as the operation it is guarding.
+   (Compounding it: `FileManager.contentsOfDirectory(at:)` lists a *symlinked*
+   directory URL as EMPTY, and profile config dirs symlink their `projects` slot
+   at the host store — so the by-session-ID scan had been silently finding
+   nothing for every profile-bound resume, not just this feature.)
 3. **Fetch.** `git.fetch(repoPath:branch:timeout:)` on `<defaultBranch>` with a
    15-second timeout, called directly rather than through `FetchCache` — this is
    an explicit user gesture asking for latest, so a cached answer defeats the

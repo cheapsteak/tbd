@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
 
 extension WorktreeLifecycle {
     public func reviveConversationOnFreshBranch(
@@ -24,7 +27,27 @@ extension WorktreeLifecycle {
                 "Cannot revive a conversation on a fresh branch without a repository."
             )
         }
-        let projectsRoot = claudeProjectsRoot(profileConfigDirPath: nil)
+        // Validate against the SAME projects root the spawn will sync from.
+        // `spawnPrimaryTerminals` resolves the worktree's model profile and
+        // syncs under that profile's config dir; validating against the
+        // ambient root instead proved nothing — a session present ambiently
+        // but absent from the profile root passed here and then failed inside
+        // Claude with "No conversation found with session ID". Profile
+        // resolution failures fall back to nil (ambient), matching the spawn.
+        var resolvedProfile: ResolvedModelProfile?
+        if let resolver = modelProfileResolver {
+            do {
+                resolvedProfile = try await resolver.resolve(repoID: repo.id, override: nil)
+            } catch {
+                logger.warning(
+                    "fresh revive: model profile resolution failed; validating against the ambient projects root")
+                resolvedProfile = nil
+            }
+        }
+        let projectsRoot = claudeProjectsRoot(
+            profileConfigDirPath: ClaudeProfileConfigDirManager.resolveConfigDir(
+                for: resolvedProfile)
+        )
         guard TranscriptProjectDirSync.locateSessionTranscript(
             sessionID: sessionID,
             projectsRoot: projectsRoot

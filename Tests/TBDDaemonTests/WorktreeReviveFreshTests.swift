@@ -573,10 +573,174 @@ struct WorktreeReviveFreshTests {
         #expect(try await db.worktrees.list() == rowsBefore)
     }
 
+    /// Validation must consult the projects root the SPAWN will sync from —
+    /// the resolved model profile's — not the ambient one. Checking ambient
+    /// let a session that only exists there sail past validation and fail
+    /// inside Claude with "No conversation found with session ID", leaving a
+    /// fresh worktree with a blank agent behind.
+    @Test func rejectsSessionMissingFromProfileResolvedProjectsRoot() async throws {
+        let (home, cleanup) = isolateTBDHomeAndClaudeHost()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await seedDefaultOAuthProfile(db: db)
+        let lifecycle = makeReviveFreshLifecycle(
+            db: db,
+            modelProfileResolver: ModelProfileResolver(
+                profiles: db.modelProfiles, repos: db.repos, config: db.config
+            )
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db,
+            repo: repo,
+            tempDir: tempDir,
+            sessions: ["A"],
+            archivedHeadSHA: try await GitManager().headSHA(repoPath: repoDir.path)
+        )
+        // Session A exists in the AMBIENT root only. The profile's mirrored
+        // store — where the spawn looks — holds an unrelated session.
+        try writeSourceTranscript(sessionID: "A")
+        try writeHostStoreTranscript(home: home, slug: "-other-worktree", sessionID: "B")
+        // Guard the fixture: the ambient root genuinely has A, so a rejection
+        // can only come from consulting the profile root.
+        #expect(
+            TranscriptProjectDirSync.locateSessionTranscript(
+                sessionID: "A", projectsRoot: ambientProjectsRoot()
+            ) != nil
+        )
+        let rowsBefore = try await db.worktrees.list()
+
+        do {
+            _ = try await lifecycle.reviveConversationOnFreshBranch(
+                archivedWorktreeID: archived.id,
+                sessionID: "A",
+                date: operationDate
+            )
+            Issue.record("expected profile-root transcript rejection")
+        } catch let error as WorktreeLifecycleError {
+            guard case .invalidOperation(let message) = error else {
+                Issue.record("wrong WorktreeLifecycleError case: \(error)")
+                return
+            }
+            #expect(
+                message == "Cannot revive conversation: no transcript found for session A."
+            )
+        }
+
+        #expect(try await db.worktrees.list() == rowsBefore)
+    }
+
+    /// The end-to-end shape of the shipped defect: the transcript lives in the
+    /// host store, which the profile config dir reaches through a SYMLINKED
+    /// `projects` slot. Validation must find it there and the spawn must
+    /// mirror it into the new worktree's derived project dir.
+    @Test func revivesSessionReachableOnlyThroughProfileProjectsSymlink() async throws {
+        let (home, cleanup) = isolateTBDHomeAndClaudeHost()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let profileID = try await seedDefaultOAuthProfile(db: db)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeReviveFreshLifecycle(
+            db: db,
+            recorder: recorder,
+            modelProfileResolver: ModelProfileResolver(
+                profiles: db.modelProfiles, repos: db.repos, config: db.config
+            )
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db,
+            repo: repo,
+            tempDir: tempDir,
+            sessions: ["A"],
+            archivedHeadSHA: try await GitManager().headSHA(repoPath: repoDir.path)
+        )
+        // Only the host store has session A — nothing ambient.
+        try writeHostStoreTranscript(home: home, slug: "-archived-slug", sessionID: "A")
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id,
+            sessionID: "A",
+            date: operationDate
+        )
+        guard case .ready = outcome.completion else {
+            Issue.record("expected inline fresh revive to complete synchronously")
+            return
+        }
+
+        let profileRoot = home
+            .appendingPathComponent("profiles/\(profileID.uuidString.lowercased())", isDirectory: true)
+            .appendingPathComponent("claude/projects", isDirectory: true)
+        #expect(
+            (try? FileManager.default.destinationOfSymbolicLink(atPath: profileRoot.path)) != nil
+        )
+        let derived = TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: outcome.result.worktree.path, projectsRoot: profileRoot)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: derived.appendingPathComponent("A.jsonl").path)
+        )
+        let claudeCommand = try #require(
+            recorder.snapshot()
+                .filter { $0.contains("new-window") }
+                .compactMap(\.last)
+                .first { $0.contains("claude ") }
+        )
+        #expect(claudeCommand.contains("--resume A"))
+        #expect(claudeCommand.contains("--fork-session"))
+    }
+
+    /// `isolateTBDHome()` plus `TBD_CLAUDE_HOST_HOME`: the spawn (and now the
+    /// validation) resolves the profile config dir through
+    /// `ClaudeProfileConfigDirManager.resolveConfigDir`, which builds a DEFAULT
+    /// manager — the env var is the only seam that keeps its mirrored
+    /// `projects` slot off the developer's real `~/.claude`.
+    private func isolateTBDHomeAndClaudeHost() -> (home: URL, cleanup: () -> Void) {
+        let (home, cleanup) = isolateTBDHome()
+        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        return (home, {
+            unsetenv("TBD_CLAUDE_HOST_HOME")
+            cleanup()
+        })
+    }
+
+    private func seedDefaultOAuthProfile(db: TBDDatabase) async throws -> UUID {
+        let profile = try await db.modelProfiles.create(name: "Revive Profile", kind: .oauth)
+        try await db.config.setDefaultProfileID(profile.id)
+        return profile.id
+    }
+
+    /// The root `makeReviveFreshLifecycle`'s injected config-dir manager falls
+    /// back to when no profile resolves.
+    private func ambientProjectsRoot() -> URL {
+        TBDConstants.configDir
+            .appendingPathComponent("claude-home/projects", isDirectory: true)
+    }
+
+    /// Writes a transcript into the host store that a profile config dir
+    /// mirrors via its symlinked `projects` slot.
+    private func writeHostStoreTranscript(home: URL, slug: String, sessionID: String) throws {
+        let file = home
+            .appendingPathComponent("claude-host/projects", isDirectory: true)
+            .appendingPathComponent(slug, isDirectory: true)
+            .appendingPathComponent("\(sessionID).jsonl")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try #"{"type":"user","message":{"content":"host store conversation"}}"#
+            .write(to: file, atomically: true, encoding: .utf8)
+    }
+
     private func makeReviveFreshLifecycle(
         db: TBDDatabase,
         recorder: PreSessionRecordedCommands? = nil,
-        subscriptions: StateSubscriptionManager? = nil
+        subscriptions: StateSubscriptionManager? = nil,
+        modelProfileResolver: ModelProfileResolver? = nil
     ) -> WorktreeLifecycle {
         let claudeHome = TBDConstants.configDir
             .appendingPathComponent("claude-home", isDirectory: true)
@@ -596,6 +760,7 @@ struct WorktreeReviveFreshTests {
             tmux: tmux,
             hooks: HookResolver(),
             subscriptions: subscriptions,
+            modelProfileResolver: modelProfileResolver,
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: claudeHome

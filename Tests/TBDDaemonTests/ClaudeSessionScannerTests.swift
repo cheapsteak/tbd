@@ -91,6 +91,32 @@ struct ClaudeSessionScannerTests {
         #expect(resolved?.lastPathComponent == encoded)
     }
 
+    /// Tier 3 (the cwd content scan) enumerates the projects base, and a
+    /// model profile's `projects` slot IS a symlink into the host store —
+    /// `contentsOfDirectory` lists such a URL as empty, so the scan used to
+    /// come up dry for every profile-bound session whose path had moved.
+    /// Tiers 1 and 2 are unaffected (`fileExists` follows the symlink).
+    @Test("directory resolution: cwd scan follows a symlinked projects root")
+    func cwdScanThroughSymlinkedProjectsBase() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let worktreePath = "/Users/test/symlink-scan-\(UUID().uuidString.prefix(8))"
+        let hostBase = tmp.appendingPathComponent("host-projects", isDirectory: true)
+        // Slug deliberately unrelated to the worktree path so tiers 1 and 2 miss.
+        let staleSlug = "-moved-elsewhere-\(UUID().uuidString.prefix(8))"
+        let dir = hostBase.appendingPathComponent(staleSlug, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try "{\"type\":\"user\",\"cwd\":\"\(worktreePath)\",\"message\":{\"content\":\"hi\"}}\n"
+            .write(to: dir.appendingPathComponent("sess.jsonl"), atomically: true, encoding: .utf8)
+        let profileBase = tmp.appendingPathComponent("profile-projects", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: profileBase, withDestinationURL: hostBase)
+
+        let resolved = ClaudeProjectDirectory.resolve(
+            worktreePath: worktreePath, projectsBase: profileBase)
+
+        #expect(resolved?.lastPathComponent == staleSlug)
+    }
+
     // MARK: - isSessionBlank
 
     /// Build a tmp projects-base + per-worktree subdirectory so tests can
