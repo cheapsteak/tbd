@@ -206,18 +206,22 @@ the same.
   agent's own config: the repo's committed settings plus the operator's per-repo settings
   overlay, which TBD delivers and never counter-configures. The spawn-time bypass flag
   removes only *default* permission checks; a repo's explicit `permissions.ask` rules still
-  prompt, deliberately, because they are that repo's chosen human gates. Those are escalated,
-  never advanced or auto-granted; if one shouldn't stall a night, the fix is a reviewable
-  change to that ask rule at its source, never a TBD-side grant list. Config-answerable
-  dialogs are pre-answered by seeders before spawn. What still stalls is then governed by the
-  design's machine-interface test rather than by an allowlist: a dialog may be driven only when
-  its existence, its verbatim content, and its outcome are all known from machine interfaces.
-  One qualifies today — an agent's `AskUserQuestion`, answered through the gated `intervene`
-  verb: the delivery adapter dismisses the machine-known dialog, then replies as ordinary
-  composer text. (No separate verb; answering *is* the send path.) Everything that fails the test is
-  escalated unadvanced; a repo's `ask` rules are refused even if they were ever to pass it, on
-  the authority ruling above. "Never past anything else" thus holds by that test and that
-  ruling, not by an allowlist's precision. See the design doc §2.*
+  prompt, deliberately, because they are that repo's chosen human gates. Config-answerable
+  dialogs are pre-answered by seeders before spawn. The precise scope of "never advanced,
+  never auto-granted" is what the story most needs restated: it binds **compiled machinery**.
+  TBD builds no per-project prompt-approval layer — no matcher, no allowlist, no auto-grant,
+  nothing standing beside a repo's permission config and contradicting it — and never will.
+  What still happens is *judgment*: a stalled prompt reaches the supervisor as a case (via
+  Claude Code's `Notification` hook event), and answering it is an ad hoc act through the
+  gated `drive` verb, guided by the playbook, which advises escalating when unsure and treats
+  prompts guarding merges or credentials as deserving a human. Nothing about that act
+  accumulates into a standing approval. Recurrence is the signal: when the account shows the
+  same prompt driven night after night, the fix is a reviewed change to the repo's own
+  permission config — the tangle removed where it was created, complexity draining toward the
+  source instead of pooling in TBD. A repo that means "a literal human, never a model" says so
+  in its playbook, or the operator binds a scoped `deny` rule on `drive`. "Never past anything
+  else" thus holds where it must — in the machinery — without pretending a delegate cannot
+  exercise judgment. See the design doc §2.*
 - **P2-4 [A]** As an operator, I want runaway agents — looping, burning quota without
   progress — detected and flagged (or paused, in autonomous mode), so that one wedged
   session doesn't eat the shift's budget.

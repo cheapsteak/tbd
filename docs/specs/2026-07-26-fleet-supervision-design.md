@@ -75,19 +75,24 @@ classification of the end of the transcript identifies rate limits.
 `hibernatedAt`/`hibernateReason` identifies parked agents. tmux pane and process
 liveness identifies gone agents. This design adds two things:
 
-1. **Verify before intervening, not before displaying.** Hook events are
+1. **Verify before acting, not before displaying.** Hook events are
    accurate enough for the user interface (UI). Before using a state to justify
-   an intervention, however, the daemon checks the pane's live process once.
+   any gated verb, however, the daemon checks the pane's live process once.
    This requires one tmux subprocess. If the event and live process disagree,
    the result is loudly reported as `unknown`. The daemon never silently picks
    one input.
-2. **Install Claude Code's Notification hook** so "awaiting input" carries a
-   structured reason. That reason has two consumers. It rides along in the
-   escalation payload, so an operator carrying a stall sees exactly what was
-   asked, verbatim — including the prompts a repo's deliberate `ask` rules
-   raise, which are escalated rather than answered ("Prompt stalls (P2-3)"
-   below). The one-minute re-check (P1-6) also uses it to answer, "Did the agent
-   advance past the prompt?"
+2. **Install Claude Code's `Notification` hook event** so "awaiting input"
+   carries a structured reason. The event fires when a permission prompt is
+   shown, and its payload carries the "needs your permission" message. It is not
+   `PreToolUse`, which fires before *every* tool call and is where an
+   agent-native hook can decide a permission itself — that is at-the-source
+   configuration (prong 1 below), and it cannot tell anyone that a prompt is
+   currently on screen. Only `Notification` can. The event has three consumers.
+   It rides along in the escalation payload, so an operator carrying a stall
+   sees exactly what was asked, verbatim. It makes a stalled prompt a **case**,
+   on the same pipeline `AskUserQuestion` uses ("Prompt stalls (P2-3)" below).
+   And the one-minute re-check (P1-6) uses it to answer, "Did the agent advance
+   past the prompt?"
 
 One more session-state fact comes free from the same source: **context load** —
 the tokens currently in a session's context window, read from the last
@@ -130,29 +135,47 @@ fused two separate things into one prohibition, and pulling them apart is the
 actual rule.
 
 **Scraping is a way of *knowing*. Keystrokes are a way of *acting*.** The ban
-belongs on the knowing, and there it is unmoved: reading a rendered terminal to
-learn what is on the screen breaks silently when the agent changes its copy,
-couples TBD to one agent version, and sits at the wrong layer. Typing into a
-pane is a different thing, and it is not exotic — it is how *everything* in
-this design is delivered. `intervene` types. The fleet delivery adapter types
-(§12). The rate-limit actuator types. A rule that forbade keystrokes would
-forbid the system's only way to reach an agent at all.
+belongs on the knowing, and there it is unmoved for *compiled code*: TBD's own
+logic must never reach a determination by reading rendered text, because that
+breaks silently when the agent changes its copy, couples TBD to one agent
+version, and sits at the wrong layer. Typing into a pane is a different thing,
+and it is not exotic — it is how *everything* in this design is delivered.
+`drive` types. The fleet delivery adapter types (§12). The rate-limit actuator
+types. A rule that forbade keystrokes would forbid the system's only way to
+reach an agent at all.
 
-So the rule is not "never advance a dialog." It is a three-condition test:
+**The screen is judgment's to read, never code's to interpret.** This is the
+sharper form of the no-scraping rule, and stating it here resolves what would
+otherwise read as a contradiction later in this section. Rendered terminal text
+is a perfectly legitimate input to *judgment*: the operator reads it with their
+eyes; a desk can read it with `tbd terminal output <id>`, the raw capture that
+already exists; a project's playbook may even ship an advisory script that
+classifies that repo's tool prompts and hands the result to the model (§5) — TBD
+neither runs nor interprets such a script, it is the desk's to invoke and the
+desk's to weigh. What must never happen is TBD's *compiled logic* branching on
+that text. Same surface, two consumers, opposite rules: a model may look at the
+screen and decide; the daemon may not look at the screen and decide.
 
-> **TBD may drive a dialog if and only if (1) its existence is known from a
-> machine interface, (2) its content is known verbatim from a machine
-> interface, and (3) its outcome is verifiable from a machine interface. The
-> screen is never consulted for any of the three.**
+Everything below that says "the screen is never consulted" is speaking about the
+automatic path — the things TBD does with no judgment in the loop.
+
+So the rule is not "never advance a dialog." For anything TBD does *on its own*,
+it is a three-condition test:
+
+> **TBD's compiled machinery may advance a dialog if and only if (1) its
+> existence is known from a machine interface, (2) its content is known verbatim
+> from a machine interface, and (3) its outcome is verifiable from a machine
+> interface. The screen is never consulted for any of the three.**
 
 The conditions are conjunctive, and the third is not decoration: acting without
 a machine-readable record of what came of it is how an automated answer becomes
-unaccountable. Anything that fails any condition is not driven — it is
-prevented at the source, or carried to a human. Today exactly one dialog
-passes: Claude Code's `AskUserQuestion`.
+unaccountable. Anything that fails any condition is never advanced automatically
+— it is prevented at the source, carried to a human, or handed to judgment,
+which acts under a different discipline (`drive --keys`, below). Today exactly
+one dialog passes the test: Claude Code's `AskUserQuestion`.
 
-**A repo's `ask` rules fail the test, and would be refused even if they
-passed.** Start from what daemon-spawned fleet sessions actually face.
+**TBD builds no per-project prompt-approval layer.** Start from what
+daemon-spawned fleet sessions actually face.
 `ClaudeSpawnCommandBuilder` hard-codes `--dangerously-skip-permissions` on both
 Claude spawn paths, and the Codex spawn passes
 `--dangerously-bypass-approvals-and-sandbox`. Those flags remove the agent's
@@ -164,17 +187,41 @@ hypothetical: one target repo in the motivating fleet gates PR merges
 (`gh pr merge*`, plus the merge and auto-merge API routes) and
 production-credential fetches this way, precisely so an agent has to get a
 human before doing those things. So the allowlist P2-3 asks for *would* have
-something to match — and matching it is exactly what must not happen. An
-allowlist that auto-grants a repo's deliberate `ask` is the tool overruling the
-repo's own decision about when a human is required.
+something to match — and building the thing that matches it is exactly what must
+not happen. Nothing may stand beside a repo's permission configuration and
+contradict it.
 
-That is an **authority** ruling, not a mechanical one, and it must be stated in
-a form the test cannot erode. Should some future agent version ship hooks and
-records that put permission prompts squarely inside all three conditions,
-`ask`-rule prompts would *still* not be auto-answered. The repo asked for a
-human; TBD's job is to fetch one. If a given ask fires too often to survive a
-night, the fix is at its source — a reviewable settings change in the repo or
-in the operator's overlay — never a TBD-side grant list.
+The ruling, precisely scoped: **TBD ships no prompt-approval machinery, ever.**
+No matcher, no allowlist, no auto-grant, no per-project table of "prompts we say
+yes to." That is what "never advanced, never auto-granted" binds — *compiled
+machinery* — and no future agent version changes it. Should hooks and records
+someday put permission prompts squarely inside all three conditions, TBD still
+would not grow the layer, because the objection was never that the facts were
+unavailable. It is that a grant list here is the tool overruling the repo's own
+decision about when a human is required.
+
+What is emphatically *not* forbidden is a human's delegate exercising judgment.
+Answering a permission prompt is an **ad hoc judgment act**: the desk reads the
+situation, decides, and acts through the gated `drive` verb under posture and
+standing rules, guided by its playbook — whose shipped default advises escalating
+when unsure, and says plainly that prompts guarding merges, credentials, or
+anything irreversible deserve a human (§5). Crucially, **nothing about that act
+accumulates.** There is no memory of "we approved this one before," because
+there is no approval layer to remember it in. Every prompt is judged when it
+appears, on its own facts, by something that can be asked why.
+
+**Recurrence is a signal, not a workload to automate.** When the morning account
+shows the same prompt driven night after night, that is not an argument for
+building a rule engine — it is the repo telling you its permission config does
+not match how it is actually used. The fix is a reviewed change at the source, in
+that repo's settings or the operator's overlay. The tangle gets removed where it
+was created, and complexity drains toward the source instead of pooling in TBD.
+That is the whole reason to decline the layer: a grant list here would let the
+misconfiguration live forever, quietly, in a second place that nobody reviews.
+
+A repo that means "a literal human, never a model" writes that in its playbook;
+an operator who wants it enforced binds a scoped `deny` rule on `drive` for that
+repo (§8). One sentence each — neither needs machinery.
 
 Alongside those asks, the residual dialog zoo still stalls agents: folder
 trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.
@@ -219,7 +266,7 @@ observes neither. Getting it wrong does not fail loudly — it selects the
 neighboring option and reports success. Choosing "B" by counting keystrokes is
 scraping with the reading step replaced by a guess.
 
-So there is no per-dialog key choreography anywhere in this design. The
+So the automatic path contains no per-dialog key choreography at all. Its
 sequence is one shape for every question:
 
 1. **Dismiss with Escape.** Escape closes the picker and can never select — the
@@ -238,13 +285,34 @@ not a compromise. "B, but only after you have checked X" costs nothing extra;
 neither does "none of these — here is the thing you did not consider." A picker
 can only return one of its own options. The composer can return judgment.
 
-**This needs no verb of its own — it is `intervene` (§3).** Answering a question
-is mechanically the send path this design already has: clear the way, deliver
-composer text, verify it landed, write the action line, re-check. Two things
-about it look like they might warrant their own verb. Neither survives contact.
+**The screen-informed variant: `drive --keys`.** Not every stalled dialog is an
+`AskUserQuestion`, and the ones that are not cannot be answered with composer
+text — a permission prompt wants a keypress. That path exists. It is
+deliberately *not* automatic: it is a desk that has read the screen with
+`tbd terminal output <id>`, chosen keys, and sent them through the same gate as
+everything else. The three-condition test does not license it and does not
+forbid it; the test governs what the daemon does unattended, and this is
+judgment acting, which is the distinction drawn at the top of this section.
+
+Because keys make no claims about the world, there is nothing in them to
+re-verify at send time — the `--text` variant's send-time integrity check has
+nothing to check. **Evidence takes its place**: the action's ledger line records
+the screen capture the desk was looking at when it chose those keys (§6). If a
+sequence turns out to have been wrong, the record shows exactly what was on the
+screen and exactly what was sent, which is the same accountability the
+three-condition test buys for the automatic path, obtained a different way.
+Sends are named-key and paced, following the rate-limit actuator's precedent.
+In attended mode the proposal shows the operator the keys *and* the screen they
+aim at, so approving is not an act of faith.
+
+**This needs no verb of its own — it is `drive --text` (§3).** Answering a
+question is mechanically the send path this design already has: clear the way,
+deliver composer text, verify it landed, write the action line, re-check. Two
+things about it look like they might warrant their own verb. Neither survives
+contact.
 
 The first is **the dismissal, which is a delivery-adapter concern rather than a
-supervisory act.** *Any* `intervene` aimed at a session sitting on a dialog needs
+supervisory act.** *Any* `drive` aimed at a session sitting on a dialog needs
 that dialog gone before composer text can land — whether the case was raised by a
 pending question or by an idle timer that happened to fire while a picker was up.
 So the adapter does ESC-then-paste, under one strict guard: **it dismisses only
@@ -271,12 +339,13 @@ always addressed to. In autonomous mode it executes through the standing-rules
 gate and writes its action line. The response need not be an answer at all:
 "these options are underspecified — work through the tradeoffs and ask me again"
 is a legitimate reply, and so is a redirect. Which one a question warrants is
-playbook judgment (§5); the mechanism is `intervene` either way.
+playbook judgment (§5); the mechanism is `drive` either way.
 
 *What collapsing it costs* is recorded in §15 rather than hidden: a standing rule
-can no longer say "may answer when asked, but may not nudge unprompted," because
-both are one verb. That distinction is speculative until a real shift asks for
-it, and splitting the verb later is a conscious amendment, not a migration.
+can no longer say "may answer when asked, but may not nudge unprompted" — nor
+"text yes, keys no" — because all of it is one verb. Those distinctions are
+speculative until a real shift asks for one, and the amendment path is a subverb
+namespace in the rule vocabulary (`drive.keys`), never condition language.
 
 **How the question becomes a case.** The hook stays an unconditional dumb
 reporter — no posture check on the agent side, ever. It reports; the daemon
@@ -291,8 +360,22 @@ ordinary tick, holding the same one playbook. **The work order carries the
 question payload verbatim out of the daemon's store**, so the supervisor fetches
 nothing — which dissolves the need for any new read surface. Nothing is
 ledgered for the question itself; facts are not ledger lines. The question
-snapshot rides in the `intervene` action's line as the state that justified it,
+snapshot rides in the `drive` action's line as the state that justified it,
 or in the escalation line if the supervisor punts.
+
+**Permission prompts reach a desk the same way.** The `Notification` event
+(above) rides the identical pipeline: an unconditional dumb-reporter hook, the
+daemon holding the fact, and — with a shift active and the terminal's project in
+automation — a **case** plus an event-hastened mini-tick. One pipeline, two
+sources; the only difference is what the case carries and therefore what
+judgment it warrants.
+
+Two words earn their precision here, because the rest of this document leans on
+them. A **case** is daemon → desk: a fact the sweep or an event surfaced, with
+no claim about what should happen. An **escalation** is desk → operator: a
+judgment that a human is needed, with an exact item and a recommendation (§3).
+A permission-prompt case is *not* automatically an escalation. Whether it
+becomes one is exactly the judgment the desk is there to make.
 
 **Store hygiene, and what a restart costs.** The pending store's time-to-live
 is a garbage-collection backstop for stranded entries, not a dialog's clock. It
@@ -335,24 +418,25 @@ So the design answers the stall in three prongs, each at a different moment:
    question and prong 1 declines to answer for them. Genuine questions are not
    noise to suppress; they are routed, and the test decides where. A question
    that passes all three conditions becomes a case the supervisor answers with
-   `intervene` — today that is `AskUserQuestion` and nothing else. Everything
-   that fails surfaces as an awaiting-input case and is escalated to the operator,
-   unadvanced and never auto-granted. A firing `ask` rule always lands in the
-   second group, by the authority ruling above, however good its machine
-   interfaces ever get.
+   `drive --text` — today that is `AskUserQuestion` and nothing else. Everything
+   that fails the test still becomes a case, by the `Notification` event that
+   reports it: it is never *automatically* advanced, and it reaches a desk, which
+   escalates it or judges it and acts with `drive --keys`. A firing `ask` rule
+   lands here, and no compiled grant list ever answers it — see the
+   no-approval-layer ruling above.
 
 The story's "never past anything else" clause is then enforced *structurally*
-rather than by an allowlist's precision — enforced by the test rather than by
-the absence of a mechanism. A dialog TBD cannot see through a machine interface
-is a dialog TBD cannot drive, and no prompt wording or operator list can change
-that, because the gap is in the facts and not in the policy. One consequence
-for the rest of this document: the `approve-a-prompt` verb stays removed from
-the verb set (§3, §8), and nothing here restores it under another name.
-`approve-a-prompt` was a blanket, model-free auto-grant of permission prompts —
-the tool deciding in advance that a whole class of questions needed no human.
-What replaces it is one judged response to one question whose text the daemon
-holds verbatim, gated by posture, delivered as ordinary text through `intervene`,
-and recorded. It grants nothing.
+rather than by an allowlist's precision — and the structure is the absence of an
+approval layer, not the absence of an actuator. Nothing TBD compiles ever decides
+that a class of prompts may be granted; there is no list to be wrong, because
+there is no list. What can advance a prompt is a judgment, made once, about one
+prompt, by a delegate operating under a posture gate and leaving a record. One
+consequence for the rest of this document: the `approve-a-prompt` verb stays
+removed from the verb set (§3, §8), and nothing here restores it under another
+name. `approve-a-prompt` was a blanket, model-free auto-grant — the tool deciding
+in advance that a whole class of questions needed no human. `drive` decides
+nothing in advance and grants nothing at all; it delivers one act that a
+judgment chose and the record can be audited against.
 
 None of this makes stalls cheap to ignore, and nothing above slows detection.
 The one-minute re-check (P1-6, §4 step 8, §12) still notices a stalled agent
@@ -376,7 +460,7 @@ and it was too coarse to ratify — a bare `git` prefix would have waved through
 merge and auto-merge API calls a repo's `ask` rules deliberately gate. A list
 written in a vocabulary the tool invented, matched against text the tool
 scraped, is two guesses stacked. Note what the new rule does *not* rescue here:
-`intervene` shares the typing with that machine, and nothing else. That machine was
+`drive` shares the typing with that machine, and nothing else. That machine was
 checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
 `launchd` job remains.
 
@@ -427,7 +511,7 @@ Every other mention of a verb in this document defers to it.
 
 | Verb | What it does | Gated? | Attended mode | Autonomous mode |
 | --- | --- | --- | --- | --- |
-| `intervene` | Deliver a re-verified message to a fleet agent (the send path of §4 step 7). Also the way an agent's `AskUserQuestion` is answered — the adapter clears a machine-known dialog first (§2) | gated | Becomes a proposal [^ask] | Executes; ledger line |
+| `drive` | Act on a fleet agent's session (the send path of §4 step 7), in one of two payload variants. `--text` delivers a re-verified message — also how an agent's `AskUserQuestion` is answered, the adapter clearing a machine-known dialog first (§2). `--keys` sends named keys the desk chose after reading the screen; nothing to re-verify, so the ledger line carries the capture it read instead (§2, §6) | gated | Becomes a proposal showing exactly what will happen: the message text, or the keys and the screen they aim at [^ask] | Executes; ledger line |
 | `wake` | Unpark and resume a parked session | gated | Becomes a proposal | Executes; ledger line |
 | `pause` | Halt a runaway session (§13) | gated | Becomes a proposal | Executes; ledger line |
 | `escalate` | Queue an exact question for the operator | ungated | Ledger line; appears in the queue immediately | Ledger line; batched for morning |
@@ -446,15 +530,24 @@ absent, and nothing here restores it under another name: see §2's prompt-stalls
 subsection for the difference between a blanket auto-grant and one judged reply
 delivered as text.
 
-There are **three gated verbs** — `intervene`, `wake`, `pause` — and **two
-ungated** ones, `escalate` and `note`. Two verbs were removed from earlier
-drafts, each for its own reason. `answer` collapsed into `intervene`, because
+There are **three gated verbs** — `drive`, `wake`, `pause` — and **two ungated**
+ones, `escalate` and `note`.
+
+*Lineage, recorded once so a returning reader is not confused by older drafts.*
+The send verb was called `send`, then `intervene`, and is now `drive`; `answer`
+was collapsed into it, and `learn` was removed outright. `answer` went because
 answering *is* the send path and neither of its apparent differences needed a
-verb (§2). `learn` was removed with the whole machine-appended memory tier it
-served: same-shift memory is a `note`, and durable cross-shift knowledge is
-repo advisory content, which already has a home and a change process (§8). The
-operator's side of the queue is a separate surface with its own command
-(`resolve`, §10), not a verb the supervisor holds.
+verb (§2). The `intervene` → `drive` rename came with a second collapse: an
+earlier plan split text-sending from key-sending into two verbs, on the theory
+that a message was the lighter act. It is not — a message to an agent running
+with permissions bypassed is arbitrary instruction injection (§8, reason 4), so
+the split encoded a safety boundary that does not exist, and with one gate
+stance covering both there was nothing left for two verbs to say. Same collapse
+test as `answer`: identical gate semantics means one verb. `learn` went with the
+whole machine-appended memory tier — same-shift memory is a `note`, durable
+cross-shift knowledge is repo advisory content with a home and a change process
+already (§8). The operator's side of the queue is a separate surface with its own
+command (`resolve`, §10), not a verb the supervisor holds.
 
 Every gated verb is additionally bound to its desk's project (§5): a verb whose
 target lies outside the calling desk's project is refused before posture or
@@ -489,10 +582,13 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
 6. **Judgment.** The supervisor reads the transcript and writes a specific next
    step. It never sends only "continue" (P0-7). This is the loop's only model
    reasoning.
-7. **Act through the daemon, never around it.** `tbd supervise intervene …`.
-   The daemon performs three steps. First, it **re-verifies** every external
-   claim in the message against live sources at send time. An old premise stops
-   the send and returns the conflicting facts (P0-8). Second, it **checks
+7. **Act through the daemon, never around it.** `tbd supervise drive …`.
+   The daemon performs three steps. First, for a `--text` payload it
+   **re-verifies** every external claim in the message against live sources at
+   send time; an old premise stops the send and returns the conflicting facts
+   (P0-8). (A `--keys` payload asserts nothing, so there is nothing to
+   re-verify — its integrity requirement is the screen capture recorded on the
+   ledger line instead, §2.) Second, it **checks
    posture**. In attended mode, a consequential action becomes a proposal.
    The supervisor uses the same code path in either mode. Third, the daemon
    **delivers** the message through the adapter and **writes the ledger line
@@ -542,7 +638,7 @@ question becomes a case and **hastens an immediate mini-tick for that
 terminal**, running the same pure decision function the clock would have run
 minutes later. The work order carries the question payload verbatim from the
 daemon's store, so the supervisor fetches nothing and needs no new read
-surface. From there it is an ordinary case: judgment, then `intervene` through
+surface. From there it is an ordinary case: judgment, then `drive` through
 the same gate as every other verb. Full mechanics, including the
 dismiss-and-reply actuation and what a mid-shift restart costs, are in §2's
 prompt-stalls subsection.
@@ -693,14 +789,28 @@ policies — that is the invariant the project exists to create.
   it but to ask the agent that raised it to think through the tradeoffs of its
   own options in more detail, so the eventual decision is better informed.**
   That is advice, which is why it is prose here and not compiled — §2's
-  `intervene` carries a redirect exactly as readily as an answer, and the
+  `drive` carries a redirect exactly as readily as an answer, and the
   playbook is where the choice between them belongs. A second universal covers
   the chat channel: **when an operator answers an escalation by typing in the
   desk's tab, proceed on that guidance, and say so — "acting on this now;
   record it from the queue so it sticks."** The desk cannot resolve its own
   escalation (§10), so without that nudge the answer is real for one context and
-  absent from the record. The default contains no commands, bot names, or
-  organization-specific content.
+  absent from the record. A third covers permission prompts, since answering one
+  is an ad hoc judgment with no approval layer behind it (§2): **escalate when
+  unsure, and treat prompts guarding merges, credentials, or anything
+  irreversible as deserving a human.** The default contains no commands, bot
+  names, or organization-specific content.
+
+**A playbook may ship advisory scripts, and TBD never runs them.** A project
+that wants its own tool prompts classified can put a script in its `.agents/`
+directory and tell the desk, in playbook prose, to run it — typically over
+`tbd terminal output <id>`, the raw capture that already exists — and weigh what
+it returns. This stays on the right side of the screen rule (§2) precisely
+because TBD is not in the loop: the daemon neither invokes the script nor
+interprets its output, and no compiled behavior branches on it. It is one more
+input to a model's judgment, in the tier that is allowed to read screens. A
+script that wanted to *bind* behavior would have to become a standing rule
+through the usual ratification path, where a human reads it first.
 
 **There is no `supervision.json`.** An earlier draft included a small,
 structured policy file for the daemon to enforce. It would have held overrides
@@ -749,8 +859,8 @@ attention — it never changes what any verb is allowed to do.
 - `~/tbd/shifts/<shift-id>/ledger.jsonl` — an append-only file with one
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
-  **action** records an intervention, wake, or pause, including the message
-  text, the state snapshot that justified it, and the posture. A separate
+  **action** records a drive, wake, or pause, including the payload, the state
+  snapshot that justified it, and the posture. A separate
   **outcome** line references the action's ID and records what was observed.
   **lifecycle** records shift open, shift close, posture changes, and desk
   recycles (§9). **proposal** and
@@ -796,7 +906,7 @@ carry a null project, which is the accurate answer and not a gap.
 
 | Kind | Payload carries |
 | --- | --- |
-| `action` | The verb, the target (worktree / terminal / repo), the message text, and the state snapshot — with its source and observed-at — that justified it. When the intervention answers a pending question, that snapshot **is** the question payload, verbatim: no separate line records the question (a pending question is a fact, and facts are not ledgered), and no separate verb marks the answer — reading the snapshot is what distinguishes a reply from an unprompted nudge (§2) |
+| `action` | The verb, the target (worktree / terminal / repo), the payload (message text for `drive --text`, the named keys for `drive --keys`), and the state snapshot — with its source and observed-at — that justified it. For `drive --keys`, that snapshot includes **the screen capture the desk read when choosing those keys** — the evidence that stands in for send-time re-verification (§2). When a drive answers a pending question, the snapshot **is** the question payload, verbatim: no separate line records the question (a pending question is a fact, and facts are not ledgered), and no separate verb marks the answer — reading the snapshot is what distinguishes a reply from an unprompted nudge (§2) |
 | `outcome` | A reference to the action, one of the three §12 results, and the observed-at of that observation |
 | `proposal` | Everything an `action` carries, plus the supervisor's reasoning and the age of the state it reasoned from |
 | `resolution` | A reference to the proposal or escalation, the result (approved / rejected / answered / expired), the scope choice if one was made, and the operator's optional explanation |
@@ -809,7 +919,7 @@ carry a null project, which is the accurate answer and not a gap.
 Two representative lines, an action and the outcome that later references it:
 
 ```json
-{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","posture":"autonomous","project":"acme-web","kind":"action","verb":"intervene","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
+{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","posture":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
 {"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","posture":"autonomous","project":"acme-web","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
 ```
 
@@ -924,17 +1034,17 @@ rule. A single confirmation connects prose to enforcement.
 ### Why the binding tier is structured at all (post-#509 accounting)
 
 GitHub now has merge authority, so few verbs remain behind the gate:
-`intervene`, `wake`, and `pause` (§3). A fourth, `approve-a-prompt`, was removed
+`drive`, `wake`, and `pause` (§3). A fourth, `approve-a-prompt`, was removed
 along with the P2-3 resolution (§2) and stays removed: it was a blanket,
 model-free auto-grant of permission prompts, and nothing in this design grants a
 permission on an agent's behalf. Answering an agent's question does not restore
 it and did not earn a verb of its own — it advances exactly one dialog, the one
 whose existence, verbatim content, and outcome all reach the daemon through
-machine interfaces, by dismissing it and replying as text through `intervene`.
+machine interfaces, by dismissing it and replying as text through `drive`.
 That is judgment delivered on the ordinary send path, never an auto-grant, which
 is why it sits behind this same gate rather than beside it. It is reasonable to
-ask whether prose could replace the binding tier. It cannot, for exactly four reasons. The design must not grow beyond what
-these reasons require:
+ask whether prose could replace the binding tier. It cannot, for exactly four
+reasons. The design must not grow beyond what these reasons require:
 
 1. **The attended-mode promise (P0-3).** The verb gate consults posture and
    rules without using a model. If prose could relax them, the system would
@@ -946,10 +1056,13 @@ these reasons require:
    3 a.m., 4 a.m., and 5 a.m.
 3. **Never-lists must hold when nobody is watching.** When the model is the
    only active decision-maker, a binding rule cannot depend on a prompt.
-4. **`intervene` injects instructions.** Fleet agents run with permission
-   checks skipped. A supervisor message can contain any instruction for an agent
-   with full tool access — and a reply to a question is the same text arriving
-   through the same composer, which is one more reason the two are one verb.
+4. **`drive` injects instructions — in either variant.** Fleet agents run with
+   permission checks skipped, so a supervisor message can carry any instruction
+   at all to an agent with full tool access. A reply to a question is the same
+   text through the same composer; and keys are, if anything, *less* constrained
+   — a keypress can accept a permission prompt the repo raised precisely to stop
+   an agent. This is the argument that collapsed the two into one verb (§3), and
+   it cuts the same way here: both need the gate, neither is the lighter act.
    Merge authority could move to the code-hosting service, but only TBD controls
    this action. No other system can enforce the gate in front of it.
 
@@ -1002,7 +1115,7 @@ storage. With tens of rules and one writer at a time, a database adds nothing.
   "rules": [
     {
       "id": "<uuid>",
-      "verb": "intervene",
+      "verb": "drive",
       "scope": { "project": "acme-checkout" },
       "stance": "allow",
       "origin": { "shift": "<shift-id>", "ledger": "<line-id>" },
@@ -1317,15 +1430,19 @@ as a button.
 project (§5).
 
 ```
-tbd supervise intervene --terminal <id> --text "…"
-tbd supervise wake      --worktree <id>
-tbd supervise pause     --terminal <id> [--reason "…"]
+tbd supervise drive --terminal <id> --text "…"
+tbd supervise drive --terminal <id> --keys "…"
+tbd supervise wake  --worktree <id>
+tbd supervise pause --terminal <id> [--reason "…"]
 ```
 
-`intervene` delivers a re-verified message; when the target sits on a dialog the
-adapter clears it first, but **only a dialog the daemon machine-knows** — an
-unidentified one makes the delivery refuse and write an anomaly (§2). `wake`
-unparks a session with outstanding work. `pause` halts a runaway (§13).
+`drive --text` delivers a re-verified message; when the target sits on a dialog
+the adapter clears it first, but **only a dialog the daemon machine-knows** — an
+unidentified one makes the delivery refuse and write an anomaly (§2).
+`drive --keys` sends named keys the desk chose after reading the screen: nothing
+to re-verify, so the ledger line records the capture it read instead, and sends
+are paced (§2, §6). `wake` unparks a session with outstanding work. `pause`
+halts a runaway (§13). Exactly one payload flag per call.
 
 **Desk verbs — ungated** (ledger line only).
 
@@ -1374,8 +1491,12 @@ tbd supervise rules revoke <rule-id>
 
 - **`learn`** — no machine-appended memory tier; same-shift memory is a `note`,
   cross-shift memory is a reviewed playbook PR (§8).
-- **`answer --terminal`** — answering an agent is `intervene`; the operator's
-  `resolve --answer` is a different surface with a different actor (§2, §10).
+- **`intervene`, `send`, `answer --terminal`** — all three are earlier names or
+  splittings of what is now `drive`. The lineage, once, so an older draft does
+  not confuse anyone: `send` → `intervene` → `drive`, with `answer` collapsed in
+  (answering is the send path, §2) and the text/keys split collapsed in as well
+  (a message is not the lighter act, §3). The operator's `resolve --answer` is
+  unrelated — different surface, different actor (§10).
 - **`approve-a-prompt`** — no blanket auto-grant of permission prompts exists,
   and nothing restores one under another name (§2).
 - **Per-desk lifecycle commands** (spawn, recycle, dispose) — desks are daemon
@@ -1479,13 +1600,20 @@ options, none decided here:
 4. **Fallback, always available: typing.** If every route fails, that desk
    runs on `terminal.send` like the fleet, and the account says so.
 
-**Driving the consent prompt with keystrokes is refused**, whatever the
-options above yield: it fails all three conditions of §2's machine-interface
-test — no hook announces it, no payload carries its text, and no record shows
-what was answered — so finding it requires scraping the screen or timing
-keystrokes blind, and auto-typing "yes" into a consent dialog defeats the
-dialog while leaving it in place as theater. Degraded delivery is the honest
-failure mode.
+**TBD never drives this consent prompt automatically**, whatever the options
+above yield. It fails all three conditions of §2's machine-interface test — no
+hook announces it, no payload carries its text, no record shows what was
+answered — so an automatic attempt would mean scraping the screen or timing
+keystrokes blind. And the deeper objection is not mechanical: auto-typing "yes"
+into a consent dialog *about the daemon's own right to inject turns* defeats the
+dialog while leaving it in place as theater. TBD does not consent to itself.
+Degraded delivery is the honest failure mode.
+
+The scope of that refusal is the automatic path, which is the only path that
+matters here: this prompt appears at desk spawn, before any desk exists to
+exercise judgment about it. §2's `drive --keys` is not a loophole back in — a
+desk cannot answer the consent that would have to be answered to create it, and
+no desk may drive another desk's spawn.
 
 ## 13. Runaway detection (P2-4)
 
@@ -1590,13 +1718,22 @@ to inaction at the largest scale.
   a home (the playbook) and a change process (a reviewed commit). Shift end
   proposes a capture worker that opens that PR instead. The cost — PR latency,
   and no silent adoption — is the feature. See §8.
-- **A separate `answer` verb** — replying to an agent's question is the send
-  path, so it is `intervene`; the dismissal is a delivery-adapter concern and the
-  "this is a response" quality is carried by the action's state snapshot (§2,
-  §6). The cost is real and accepted: a standing rule cannot distinguish
-  "may answer when asked" from "may nudge unprompted," because both are one verb.
-  That granularity is speculative until a shift asks for it; splitting the verb
-  then is a conscious amendment, not a migration. See §2.
+- **Separate verbs for answering, messaging, and key-sending** — all three are
+  one gated `drive` with payload variants. Replying to a question is the send
+  path (the dismissal is delivery-adapter behavior, the "this is a response"
+  quality rides in the action's state snapshot); and text is not a lighter act
+  than keys, since a message to a permissions-bypassed agent is arbitrary
+  instruction injection (§8, reason 4). Identical gate semantics, one verb. The
+  cost is real and accepted: a standing rule cannot distinguish "may answer when
+  asked" from "may nudge unprompted," nor "text yes, keys no." Those are
+  speculative until a shift asks for one, and the amendment path is a subverb
+  namespace in the rule vocabulary (`drive.keys`) — never condition language,
+  which §8 refuses on its own grounds. See §2, §3.
+- **A per-project prompt-approval layer** — no matcher, no allowlist, no
+  auto-grant, no table of prompts TBD says yes to. Answering a permission prompt
+  is an ad hoc judgment act through `drive`, and nothing about it accumulates.
+  Recurrence is a signal to fix the repo's own permission config, not a workload
+  to automate. See §2.
 - **Separate `approve` / `reject` / `answer` queue commands** — all three write
   one `resolution` kind differing only in `result`, so one `resolve` command
   names the category and a flag names the act. Scope attaches once; new outcomes

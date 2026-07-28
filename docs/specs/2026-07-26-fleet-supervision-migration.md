@@ -147,8 +147,11 @@ Each slice ships independently, compiles, tests both branches of anything it
 gates, and lands nothing autonomous outside the posture gate. Dependency order
 only — no slice needs a later one:
 
-- **Slice 1 — facts** (design §2). Install the Notification hook, add
-  verify-before-intervene, run the work-state sweep on the daemon's cadence,
+- **Slice 1 — facts** (design §2). Install Claude Code's **`Notification` hook
+  event** (fires when a permission prompt is shown, payload carries the
+  "needs your permission" message — not `PreToolUse`, which fires before every
+  tool call and cannot signal that a prompt is on screen), add
+  verify-before-acting, run the work-state sweep on the daemon's cadence,
   derive the context-load fact from the transcript tail. Pure observability;
   safe to ship while the old system runs because it acts on nothing.
 - **Slice 2 — posture, shift, ledger** (design §3, §7, §9). The
@@ -161,11 +164,14 @@ only — no slice needs a later one:
   ledger, and closes on its own; no slice needs a later one. Shift close gains
   its dispose-every-desk step in slice 4, when there are desks to dispose.
 - **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
-  supervision verbs as RPC behind the gate — **three gated** (`intervene`,
-  `wake`, `pause`) and **two ungated** (`escalate`, `note`). There is no
-  `answer` verb: replying to an agent's question is `intervene`, and the dialog
-  dismissal that makes it work is delivery-adapter behavior landing with the
-  adapter in slice 4 (design §2). There is no `learn` verb and no
+  supervision verbs as RPC behind the gate — **three gated** (`drive`, `wake`,
+  `pause`) and **two ungated** (`escalate`, `note`). `drive` takes exactly one
+  payload flag per call, `--text` or `--keys` (design §3); there is no `answer`
+  verb and no separate key-sending verb, and the dialog dismissal that makes
+  `--text` work is delivery-adapter behavior landing with the adapter in slice 4
+  (design §2). Standing-rule scope is per verb, so a rule on `drive` covers both
+  payloads — do **not** add condition language to distinguish them (design §8,
+  §15). There is no `learn` verb and no
   `learnings.md` plumbing either — the machine-appended memory tier was removed
   in favor of notes plus a reviewed playbook PR (design §8), so this slice
   builds neither, and the ledger has **nine** kinds, not ten. The standing-rules loader including automation
@@ -207,7 +213,8 @@ only — no slice needs a later one:
   resolver. For singleton projects the operator and repo levels are the existing
   per-repo paths, so the resolver's singleton path is the one that must match
   the old design byte for byte. This slice
-  also carries the **`AskUserQuestion` case flow** (design §2, §4): the
+  also carries the **two event-driven case flows** (design §2, §4). The
+  `AskUserQuestion` one: the
   daemon-side fork in the existing `terminal.askUserQuestionPending` handler —
   the hook itself stays an unconditional dumb reporter and is not touched — so
   that a pending question with a shift active and the terminal's project in
@@ -217,11 +224,22 @@ only — no slice needs a later one:
   and the store's TTL treated as a GC backstop that must not expire a still-live
   dialog during a shift (resolution comes from the `PostToolUse` clear, not the
   clock). The **dialog-dismissing delivery adapter** lands here too: an
-  `intervene` whose target sits on a dialog gets ESC-then-paste, but **only when
+  `drive --text` whose target sits on a dialog gets ESC-then-paste, but **only when
   the daemon machine-knows the dialog** (a pending `AskUserQuestion` in the
   store). Any other on-screen state must make the delivery refuse and write an
   anomaly — never a blind ESC. Test both branches; the refusal is the branch that
-  keeps the machine-interface test honest (design §2). Two non-blocking notes for
+  keeps the machine-interface test honest (design §2).
+
+  The **`Notification` case flow** is the same shape on slice 1's hook: dumb
+  reporter → daemon holds the fact → shift active and project in automation →
+  case for that project's desk, event-hastened mini-tick. A permission-prompt
+  case is *not* an escalation; whether it becomes one is desk judgment (design
+  §2), so build no auto-escalate path for it. The **`drive --keys` payload**
+  lands here as well: named-key, paced sends, and the action ledger line must
+  carry the screen capture the desk read when choosing the keys — that record is
+  the variant's integrity requirement, standing in for the send-time
+  re-verification that only `--text` can have, so a `--keys` action written
+  without it is a bug, not a thin log line. Two non-blocking notes for
   whoever picks this up: pending questions
   have no CLI read surface today (`terminal.transcript` is RPC-only, and the
   work-order carriage is what makes a read surface unnecessary — a
@@ -269,7 +287,7 @@ from real shifts, not against code review:
   permission prompts, seeders for config-answerable dialogs, and escalation for
   everything that fails the machine-interface test — with one implemented
   piece, the `AskUserQuestion` case flow and its dialog-dismissing delivery
-  adapter in slice 4 (answered through `intervene`, not a verb of its own).
+  adapter in slice 4 (answered through `drive --text`, not a verb of its own).
   What the story actually asked for (an allowlist matched against rendered
   prompts) ships in no slice and never will (design §2).
 - **Explicitly not blocking**: P3-1.
