@@ -1041,6 +1041,10 @@ final class AppState: ObservableObject {
     /// same reason as `controlModeSetter`.
     lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
+    /// How `setAutoTrustWorktrees` persists the flag — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
     /// Asks the user to confirm closing a note tab whose note has content —
     /// closing a note tab hard-deletes the note row (`closeTab` →
     /// `deleteNote`). Injectable so tests can exercise both branches without

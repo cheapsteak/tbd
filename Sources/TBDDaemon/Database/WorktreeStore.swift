@@ -31,6 +31,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
     var promotedToRepoID: String?  // set only on promoted scratch rows
     var pr_number: Int?  // number of the PR this worktree was created from, nil otherwise
+    // Contents checked out from an unvetted ref (fork PR head); nil on rows
+    // written before v67, which read as false.
+    var foreign_head: Bool?
     var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
     var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
     var pinSortOrder: Int?  // sidebar dock ordering; nil = falls back to pinnedAt
@@ -61,6 +64,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
         self.pr_number = wt.prNumber
+        self.foreign_head = wt.foreignHead
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
         self.pinnedAt = wt.pinnedAt
         self.pinSortOrder = wt.pinSortOrder
@@ -121,6 +125,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
             prStatus: pr,
             prNumber: pr_number,
+            foreignHead: foreign_head ?? false,
             pinnedAt: pinnedAt,
             pinSortOrder: pinSortOrder
         )
@@ -590,6 +595,19 @@ public struct WorktreeStore: Sendable {
             }
             record.branch = branch
             try record.update(db)
+        }
+    }
+
+    /// Record that this worktree's contents were checked out from an unvetted
+    /// ref (a PR head, whose commits may come from a third-party fork).
+    /// One-way: only ever sets the flag to `true`. Nothing clears it, because
+    /// the contents never stop being foreign-authored.
+    public func markForeignHead(id: UUID) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET foreign_head = ? WHERE id = ?",
+                arguments: [true, id.uuidString]
+            )
         }
     }
 

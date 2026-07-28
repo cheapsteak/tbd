@@ -390,6 +390,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
+            case RPCMethod.configSetAutoTrustWorktrees:
+                return try await handleConfigSetAutoTrustWorktrees(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -457,6 +459,7 @@ public final class RPCRouter: Sendable {
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
+            autoTrustWorktrees: config.autoTrustWorktrees,
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
             remoteBackendsLive: remoteManager != nil))

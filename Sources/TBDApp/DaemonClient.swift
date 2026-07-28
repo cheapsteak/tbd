@@ -900,6 +900,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the worktree auto-trust switch (default ON). Applies to the
+    /// next Claude spawn or wake.
+    func setAutoTrustWorktrees(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoTrustWorktrees,
+            params: ConfigSetAutoTrustWorktreesParams(enabled: enabled)
+        )
+    }
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(

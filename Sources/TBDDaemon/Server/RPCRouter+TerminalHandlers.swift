@@ -282,13 +282,19 @@ extension RPCRouter {
             ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
             : nil
 
-        // Pre-accept Claude Code's folder-trust dialog for scratch spaces so
-        // fresh, TBD-owned scratch dirs don't prompt on every launch. Only the
-        // claude path can trigger the dialog; self-gates on isScratch and is
-        // best-effort (never throws), so seeding on both fresh and resume is safe.
+        // Pre-accept Claude Code's folder-trust dialog: this worktree belongs to
+        // a registered repo, so the trust answer is known by construction, and
+        // the dialog blocks before SessionStart (a stall would be
+        // machine-invisible). The seeder still declines for `foreignHead` rows.
+        // Only the claude path can trigger it; best-effort (never throws), so
+        // seeding on fresh and resume is safe. `createConfig` is a `try?` read —
+        // falling back to `true` keeps the shipped default rather than silently
+        // reinstating the stall.
         if isClaudeType {
-            ClaudeTrustSeeder.ensureTrustedForScratch(
-                worktree: worktree, profileConfigDir: profileConfigDir)
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: createConfig?.autoTrustWorktrees ?? true,
+                profileConfigDir: profileConfigDir)
         }
 
         // Pre-resume freshness: `claude --resume` only looks in the project
@@ -579,8 +585,15 @@ extension RPCRouter {
                 resolvedProfile = nil
             }
             let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-            ClaudeTrustSeeder.ensureTrustedForScratch(
-                worktree: worktree, profileConfigDir: profileConfigDir)
+            // Reviving a closed terminal respawns claude in the same worktree,
+            // so the same trust argument applies — including the seeder's
+            // `foreignHead` refusal, which is why the flag lives on the row
+            // rather than in the create-time parameter list. `reviveConfig` is a
+            // `try?` read; fall back to the shipped default.
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: reviveConfig?.autoTrustWorktrees ?? true,
+                profileConfigDir: profileConfigDir)
             await TranscriptProjectDirSync.ensureSessionResumableDetached(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
@@ -1325,13 +1338,15 @@ extension RPCRouter {
             repo: repo?.envOverrides,
             profile: resolved?.envOverrides
         )
-        // Pre-accept the folder-trust dialog for scratch spaces before either
-        // swap spawn (resume or fresh) — a swap onto a new profile's isolated
-        // config dir would otherwise re-prompt. Both build calls below resolve
-        // the same `resolveConfigDir(for: resolved)`; seed it once here. This is
-        // a claude-only handler; the method self-gates on isScratch.
-        ClaudeTrustSeeder.ensureTrustedForScratch(
+        // Pre-accept the folder-trust dialog before either swap spawn (resume
+        // or fresh) — a swap onto a new profile's isolated config dir has never
+        // seen this path and would otherwise re-prompt. Both build calls below
+        // resolve the same `resolveConfigDir(for: resolved)`; seed it once here.
+        // Claude-only handler. `swapConfig` is a `try?` read; fall back to the
+        // shipped default.
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree,
+            autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
             profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved))
 
         let spawn: ClaudeSpawnCommandBuilder.Result

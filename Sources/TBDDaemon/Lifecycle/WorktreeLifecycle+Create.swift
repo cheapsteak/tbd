@@ -229,6 +229,12 @@ extension WorktreeLifecycle {
             // 2. git worktree add (fetch was run beforehand in the RPC handler)
             let worktreeAddStart = clock.now
             let resultPath: String
+            // Set by the PR-head branch below: this worktree's contents came
+            // from `refs/pull/<n>/head`, which a third-party fork may have
+            // authored. Persisted on the row so the five *later* trust-seeding
+            // call sites (wake, revive, terminal create, profile swap,
+            // extra-session restore) can see it too.
+            var checkedOutForeignHead = false
             if let ref = existingBranchRef {
                 // Existing-branch flow: check out the chosen ref. Local branches
                 // get `git worktree add <path> <branch>`; remote refs get
@@ -261,6 +267,10 @@ extension WorktreeLifecycle {
                         if localBranch != worktree.branch {
                             try await db.worktrees.updateBranch(id: worktreeID, branch: localBranch)
                         }
+                        // TBD made this directory but not its contents: stamp
+                        // the row so folder-trust is never pre-answered for it.
+                        checkedOutForeignHead = true
+                        try await db.worktrees.markForeignHead(id: worktreeID)
                     } else if ref.hasPrefix("origin/") {
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,
@@ -302,6 +312,14 @@ extension WorktreeLifecycle {
             let worktreeAddElapsedMs = worktreeAddStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(Int(worktreeAddElapsedMs))ms")
 
+            // The spawn paths below take this value rather than re-reading the
+            // row, so carry the `foreignHead` stamp onto the in-memory copy —
+            // otherwise the very first Claude spawn would still seed trust for
+            // a tree it just fetched from a fork.
+            var stamped = worktree
+            stamped.foreignHead = stamped.foreignHead || checkedOutForeignHead
+            let spawnWorktree = stamped
+
             // 3. Setup tmux terminals.
             let terminalSpawnStart = clock.now
             // 3a. Blocking preSession hook: spawn its terminal FIRST and gate
@@ -309,7 +327,7 @@ extension WorktreeLifecycle {
             // a background task so the caller's RepoSerializer lane is freed
             // immediately — never block it for the duration of the hook.
             if let preSession = try await spawnPreSessionTerminal(
-                worktree: worktree, repo: repo,
+                worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
                 cols: cols, rows: rows
             ) {
@@ -333,7 +351,7 @@ extension WorktreeLifecycle {
                 let phase3 = Task.detached { [self] in
                     await runPreSessionPhase3(
                         preSession: preSession,
-                        worktree: worktree, repo: repo,
+                        worktree: spawnWorktree, repo: repo,
                         worktreePath: resultPath,
                         skipClaude: skipClaude,
                         initialPrompt: initialPrompt,
@@ -356,7 +374,7 @@ extension WorktreeLifecycle {
             // 3b. No preSession hook: spawn primary terminals inline
             // (behavior identical to before the preSession hook existed).
             _ = try await spawnPrimaryTerminals(
-                worktree: worktree, repo: repo,
+                worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
                 skipClaude: skipClaude,
                 initialPrompt: initialPrompt,
@@ -623,11 +641,17 @@ extension WorktreeLifecycle {
                     scratchInstructions: config.scratchInstructions,
                     scratchRenamePrompt: config.scratchRenamePrompt)
             let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-            // Pre-accept Claude Code's folder-trust dialog for scratch spaces so
-            // fresh, TBD-owned scratch dirs don't prompt on every launch.
-            // Self-gates on isScratch; best-effort, never throws.
-            ClaudeTrustSeeder.ensureTrustedForScratch(
-                worktree: worktree, profileConfigDir: profileConfigDir)
+            // Pre-accept Claude Code's folder-trust dialog. TBD just created
+            // this worktree from a repo the operator registered, so the trust
+            // answer is known by construction — and the dialog blocks before
+            // SessionStart, so a stall here would be machine-invisible.
+            // Scratch always seeds; non-scratch honors the config flag and is
+            // skipped entirely when the row is `foreignHead` (PR-head checkout,
+            // possibly fork-authored contents). Best-effort, never throws.
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: config.autoTrustWorktrees,
+                profileConfigDir: profileConfigDir)
             if isResume {
                 // Pre-resume freshness: `claude --resume` only looks in the
                 // project dir derived from the current cwd. If the archived
@@ -818,10 +842,12 @@ extension WorktreeLifecycle {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
                 let restoreProfileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-                // Pre-accept the folder-trust dialog for scratch spaces so restoring
-                // an extra archived session onto a fresh profile dir doesn't re-prompt.
-                ClaudeTrustSeeder.ensureTrustedForScratch(
-                    worktree: worktree, profileConfigDir: restoreProfileConfigDir)
+                // Pre-accept the folder-trust dialog so restoring an extra
+                // archived session onto a fresh profile dir doesn't re-prompt.
+                await ClaudeTrustSeeder.ensureTrusted(
+                    worktree: worktree,
+                    autoTrustNonScratch: config.autoTrustWorktrees,
+                    profileConfigDir: restoreProfileConfigDir)
                 // Same pre-resume freshness sync as the primary terminal above.
                 await TranscriptProjectDirSync.ensureSessionResumableDetached(
                     sessionID: sessionID,

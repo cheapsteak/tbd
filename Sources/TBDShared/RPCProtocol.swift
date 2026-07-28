@@ -215,6 +215,7 @@ public enum RPCMethod {
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
+    public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
     public static let gcList = "gc.list"
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
@@ -1644,6 +1645,15 @@ public struct ConfigSetAutoCloseSetupParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setAutoTrustWorktrees` — pre-accept Claude's folder-trust
+/// dialog for TBD-created worktrees (default ON). Read fresh at every Claude
+/// spawn/wake, so the change applies to the next one; no daemon restart needed.
+/// Turning it off never un-trusts an already-seeded path.
+public struct ConfigSetAutoTrustWorktreesParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCEnabled` — the orphan-GC master switch.
 public struct ConfigSetGCEnabledParams: Codable, Sendable {
     public var enabled: Bool
@@ -1788,6 +1798,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
+    /// Whether TBD pre-accepts Claude's folder-trust dialog for the worktrees of
+    /// registered repos — the ones TBD created plus the repo's own checkout, but
+    /// never a fork-PR-head checkout (default ON). Re-evaluated by the daemon on
+    /// every call.
+    public let autoTrustWorktrees: Bool
     /// Whether the daemon owns panel-surface state (`daemon_panel_surface_enabled`,
     /// spec C Phase 2 §8/§10). Default OFF while the feature soaks — the app
     /// uses this to decide whether `panel.get`/`panel.apply` are live or the
@@ -1818,6 +1833,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 controlModeSupported: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
+                autoTrustWorktrees: Bool = true,
                 panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 remoteBackendsLive: Bool = false) {
@@ -1826,6 +1842,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.autoTrustWorktrees = autoTrustWorktrees
         self.panelSurfaceEnabled = panelSurfaceEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.remoteBackendsLive = remoteBackendsLive
@@ -1842,6 +1859,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // New field for worktree auto-trust; absent from older daemons defaults
+        // to true, matching the column default (it is not a soak flag).
+        autoTrustWorktrees = try c.decodeIfPresent(Bool.self, forKey: .autoTrustWorktrees) ?? true
         // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
         panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
         // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).
