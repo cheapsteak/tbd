@@ -19,9 +19,13 @@ cargo build --release --manifest-path "$CRATE_DIR/Cargo.toml"
 mkdir -p "$OUT_DIR"
 cp "$CRATE_DIR/target/release/libcomrak_ffi.a" "$OUT_DIR/libcomrak_ffi.a"
 
-# Stamp = SHA-256 of the inputs that determine the archive's contents.
-# CI recomputes this and fails if it disagrees with the committed archive.
-shasum -a 256 "$CRATE_DIR/src/lib.rs" "$CRATE_DIR/Cargo.lock" \
+# Stamp = SHA-256 of every input that determines the archive's contents.
+# Cargo.toml is included deliberately: it carries [profile.release] and the
+# dependency feature flags. Flipping `default-features` back on would pull
+# syntect in and change the archive without touching Cargo.lock, so omitting
+# it here would leave the CI gate blind to exactly the regression it exists
+# to catch. Argument order is fixed, so the hash is deterministic.
+shasum -a 256 "$CRATE_DIR/src/lib.rs" "$CRATE_DIR/Cargo.toml" "$CRATE_DIR/Cargo.lock" \
   | awk '{print $1}' | shasum -a 256 | awk '{print $1}' > "$OUT_DIR/.build-stamp"
 
 echo "built $(ls -lh "$OUT_DIR/libcomrak_ffi.a" | awk '{print $5}') -> $OUT_DIR/libcomrak_ffi.a"
