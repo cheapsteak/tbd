@@ -1,7 +1,7 @@
 # Revive a conversation on a fresh branch
 
 **Date:** 2026-07-27
-**Status:** Approved, not implemented
+**Status:** Implemented; see the post-ship correction in step 2 of "Daemon flow"
 
 ## Problem
 
