@@ -268,45 +268,55 @@ struct CodeViewerPaneView: View {
             }
 
             // Code preview
-            Group {
-                if selectedFiles.isEmpty {
-                    emptyState
-                } else if usesFullPaneWebView {
-                    // The webview scrolls itself; wrapping it in the pane's
-                    // ScrollView collapses it to zero height. See
-                    // `MarkdownPaneLayout`.
-                    FilePreviewView(
-                        filePath: selectedFiles[0],
-                        worktreePath: worktreePath,
-                        showSourceCode: showSourceCode,
-                        useWebViewMarkdown: true
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(selectedFiles, id: \.self) { filePath in
-                                if selectedFiles.count > 1 {
-                                    fileHeader(filePath)
+            if usesFullPaneWebView {
+                // Deliberately OUTSIDE the `.colorScheme(.dark)` forcing below:
+                // that modifier propagates into AppKit-hosted views (SwiftUI
+                // sets the hosted NSView's NSAppearance from it), which would
+                // make this WKWebView resolve `prefers-color-scheme: dark`
+                // regardless of the user's actual system setting. Leaving this
+                // branch on the ambient appearance lets the rendered document
+                // track light/dark live, the way `MarkdownWebView` intends.
+                //
+                // The webview scrolls itself; wrapping it in the pane's
+                // ScrollView collapses it to zero height. See
+                // `MarkdownPaneLayout`.
+                FilePreviewView(
+                    filePath: selectedFiles[0],
+                    worktreePath: worktreePath,
+                    showSourceCode: showSourceCode,
+                    useWebViewMarkdown: true
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Group {
+                    if selectedFiles.isEmpty {
+                        emptyState
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(selectedFiles, id: \.self) { filePath in
+                                    if selectedFiles.count > 1 {
+                                        fileHeader(filePath)
+                                    }
+                                    // Always the MarkdownUI renderer here: a
+                                    // webview nested in this ScrollView has no
+                                    // height. With the flag on, this is reached
+                                    // only by a multi-file selection — the known
+                                    // limitation named in `MarkdownPaneLayout`.
+                                    FilePreviewView(
+                                        filePath: filePath,
+                                        worktreePath: worktreePath,
+                                        showSourceCode: showSourceCode,
+                                        useWebViewMarkdown: false
+                                    )
                                 }
-                                // Always the MarkdownUI renderer here: a
-                                // webview nested in this ScrollView has no
-                                // height. With the flag on, this is reached
-                                // only by a multi-file selection — the known
-                                // limitation named in `MarkdownPaneLayout`.
-                                FilePreviewView(
-                                    filePath: filePath,
-                                    worktreePath: worktreePath,
-                                    showSourceCode: showSourceCode,
-                                    useWebViewMarkdown: false
-                                )
                             }
                         }
                     }
                 }
+                .background(highlightrBackgroundColor)
+                .colorScheme(.dark)
             }
-            .background(highlightrBackgroundColor)
-            .colorScheme(.dark)
         }
         .preference(key: HasRenderableContentKey.self, value: selectedFiles.contains(where: isRenderableFile))
         .onAppear {
