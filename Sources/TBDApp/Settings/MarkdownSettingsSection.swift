@@ -10,7 +10,9 @@ import TBDShared
 /// binds, calls, and re-enumerates.
 ///
 /// File-backed setting, so it carries the affordance CLAUDE.md requires for one:
-/// the tilde-abbreviated backing path, a copy-path button, and a reveal.
+/// the tilde-abbreviated backing path and a copy-path button. "Duplicate
+/// Default…" additionally reveals the file it just wrote in Finder, since
+/// that is the moment a new file exists to point at.
 struct MarkdownSettingsSection: View {
     @AppStorage(MarkdownViewerPreferences.useWebViewKey) private var useWebView: Bool = false
     /// `""` means "no selection" — the bundled default. `MarkdownStylesheet`
@@ -47,10 +49,7 @@ struct MarkdownSettingsSection: View {
 
             HStack {
                 Button("Duplicate Default…") { duplicateDefault() }
-                    .help("Copy TBD's bundled stylesheet into the folder below as a new theme and select it. The copy is a snapshot — it will not pick up later changes to the bundled sheet.")
-                Button("Reveal Bundled Stylesheet in Finder") { revealBundledStylesheet() }
-                    .help("Show the bundled default stylesheet's CSS file in Finder.")
-                    .disabled(MarkdownStylesheet.bundledURL == nil)
+                    .help("Copy TBD's bundled stylesheet into the folder below as a new theme, select it, and reveal the copy in Finder. The copy is a snapshot — it will not pick up later changes to the bundled sheet.")
                 Spacer()
             }
             .controlSize(.small)
@@ -73,7 +72,7 @@ struct MarkdownSettingsSection: View {
         .onChange(of: themeID) { refresh() }
     }
 
-    /// Backing path + copy + reveal, modelled on `RepoHooksSettingsView`.
+    /// Backing path + copy, modelled on `RepoHooksSettingsView`.
     @ViewBuilder
     private var themesDirectoryRow: some View {
         let path = themesDirectory.path
@@ -96,9 +95,6 @@ struct MarkdownSettingsSection: View {
             .help("Copy full path")
 
             Spacer()
-
-            Button("Reveal Themes Folder in Finder") { revealThemesDirectory() }
-                .controlSize(.small)
         }
     }
 
@@ -113,18 +109,9 @@ struct MarkdownSettingsSection: View {
         }
         themeID = id
         refresh()
-    }
-
-    private func revealThemesDirectory() {
-        // Created on demand rather than at launch, so people who never touch
-        // this setting get no stray folder in ~/tbd.
-        MarkdownStylesheet.ensureThemesDirectoryExists(themesDirectory)
-        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: themesDirectory.path)
-        refresh()
-    }
-
-    private func revealBundledStylesheet() {
-        guard let url = MarkdownStylesheet.bundledURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        // Reveal the file that was just written — not the themes folder in
+        // general — so the new copy is the thing selected in Finder.
+        let newFileURL = themesDirectory.appendingPathComponent("\(id).css")
+        NSWorkspace.shared.activateFileViewerSelecting([newFileURL])
     }
 }

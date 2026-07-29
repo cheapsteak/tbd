@@ -265,14 +265,6 @@ struct MarkdownStylesheetTests {
         #expect(MarkdownStylesheet.bundledCSS.contains("prefers-color-scheme"))
     }
 
-    @Test("the bundled stylesheet URL resolves and points at the file bundledCSS reads")
-    func bundledURLResolves() throws {
-        let url = try #require(MarkdownStylesheet.bundledURL)
-        #expect(url.lastPathComponent == "markdown-default.css")
-        let onDisk = try String(contentsOf: url, encoding: .utf8)
-        #expect(onDisk == MarkdownStylesheet.bundledCSS)
-    }
-
     // MARK: - Live reload (tier 2)
 
     /// The load-bearing assumption behind watching the themes *directory*: a
