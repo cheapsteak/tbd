@@ -78,16 +78,103 @@ struct MarkdownImageInlinerTests {
 
     @Test("rejects path traversal outside the document directory")
     func rejectsTraversal() throws {
-        let dir = try makeTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let secret = dir.deletingLastPathComponent().appendingPathComponent("secret.png")
+        // The secret lives in a per-test sandbox, NOT the shared temp root.
+        // A fixed name in NSTemporaryDirectory() races across concurrent
+        // `swift test` runs in sibling worktrees, and the loser's cleanup
+        // deletes the file — turning this security test into a FALSE PASS
+        // indistinguishable from `missingFile`.
+        let sandbox = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        let dir = sandbox.appendingPathComponent("doc")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let secret = sandbox.appendingPathComponent("secret.png")
         try Self.tinyPNG.write(to: secret)
-        defer { try? FileManager.default.removeItem(at: secret) }
+
+        // Guard against the false pass: the target must actually exist, so a
+        // non-inlined result means "rejected", not "not found".
+        #expect(FileManager.default.fileExists(atPath: secret.path))
 
         var inliner = MarkdownImageInliner(documentDirectory: dir)
         let out = inliner.inline(html: #"<img src="../secret.png" />"#)
 
         #expect(!out.contains("data:image"))
+    }
+
+    @Test("rejects a symlink that escapes the document directory")
+    func rejectsEscapingSymlink() throws {
+        let sandbox = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        let dir = sandbox.appendingPathComponent("doc")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let secret = sandbox.appendingPathComponent("secret.png")
+        try Self.tinyPNG.write(to: secret)
+        try FileManager.default.createSymbolicLink(
+            at: dir.appendingPathComponent("innocent.png"), withDestinationURL: secret
+        )
+        #expect(FileManager.default.fileExists(atPath: secret.path))
+
+        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        let out = inliner.inline(html: #"<img src="innocent.png" />"#)
+
+        #expect(!out.contains("data:image"))
+    }
+
+    @Test("a symlink cannot smuggle an oversized file past the caps")
+    func symlinkCannotBypassSizeCap() throws {
+        // attributesOfItem has lstat semantics and reports a symlink as ~10
+        // bytes while contents(atPath:) follows it. Reading size from the
+        // RESOLVED url is what keeps the cap honest.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let big = dir.appendingPathComponent("big.png")
+        try Data(repeating: 0x41, count: MarkdownImageInliner.perImageLimit + 1).write(to: big)
+        try FileManager.default.createSymbolicLink(
+            at: dir.appendingPathComponent("small-looking.png"), withDestinationURL: big
+        )
+
+        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        let out = inliner.inline(html: #"<img src="small-looking.png" />"#)
+
+        #expect(!out.contains("data:image"))
+        #expect(out.contains("tbd-oversized-image"))
+    }
+
+    @Test("does not inline non-image files")
+    func rejectsNonImage() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "secret key".write(to: dir.appendingPathComponent("notes.md"),
+                               atomically: true, encoding: .utf8)
+
+        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        let out = inliner.inline(html: #"<img src="notes.md" />"#)
+
+        #expect(!out.contains("data:"))
+    }
+
+    @Test("preserves alt text when inlining")
+    func preservesAlt() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Self.tinyPNG.write(to: dir.appendingPathComponent("pic.png"))
+
+        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        let out = inliner.inline(html: #"<img src="pic.png" alt="a diagram" />"#)
+
+        #expect(out.contains("data:image/png;base64,"))
+        #expect(out.contains(#"alt="a diagram""#))
+    }
+
+    @Test("resolves percent-encoded filenames")
+    func resolvesPercentEncoding() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Self.tinyPNG.write(to: dir.appendingPathComponent("my pic.png"))
+
+        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        let out = inliner.inline(html: #"<img src="my%20pic.png" />"#)
+
+        #expect(out.contains("data:image/png;base64,"))
     }
 
     @Test("leaves a missing file alone rather than crashing")

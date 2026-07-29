@@ -39,7 +39,9 @@ struct MarkdownImageInliner {
             guard let full = Range(match.range, in: result),
                   let srcRange = Range(match.range(at: 2), in: result) else { continue }
             let src = String(result[srcRange])
-            guard let replacement = replacement(for: src, originalTag: String(result[full])) else {
+            let prefix = Range(match.range(at: 1), in: result).map { String(result[$0]) } ?? " "
+            let suffix = Range(match.range(at: 3), in: result).map { String(result[$0]) } ?? ""
+            guard let replacement = replacement(for: src, prefix: prefix, suffix: suffix) else {
                 continue
             }
             result.replaceSubrange(full, with: replacement)
@@ -47,27 +49,56 @@ struct MarkdownImageInliner {
         return result
     }
 
-    private mutating func replacement(for src: String, originalTag: String) -> String? {
+    private mutating func replacement(
+        for src: String, prefix: String, suffix: String
+    ) -> String? {
         // Absolute URLs (remote, or already data:) are left as-is.
         if let url = URL(string: src), url.scheme != nil { return nil }
 
-        let candidate = documentDirectory.appendingPathComponent(src).standardizedFileURL
-        guard candidate.path.hasPrefix(documentDirectory.path + "/") else {
+        // comrak percent-encodes and entity-escapes destinations, so decode
+        // before doing anything else. This MUST precede the containment check:
+        // otherwise `%2e%2e%2fsecret.png` is a traversal vector that the
+        // lexical check never sees.
+        let decoded = (src.removingPercentEncoding ?? src)
+            .replacingOccurrences(of: "&amp;", with: "&")
+
+        // Resolve symlinks on BOTH sides. Resolving only the candidate breaks
+        // every repo that lives under a symlinked path; resolving neither lets
+        // a symlink inside the repo point anywhere on disk.
+        let resolvedRoot = documentDirectory.resolvingSymlinksInPath().path
+        let resolved = documentDirectory.appendingPathComponent(decoded)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard resolved.path.hasPrefix(resolvedRoot + "/") else {
             logger.debug("rejected image outside document dir: \(src, privacy: .public)")
             return nil
         }
-        guard let attrs = try? fileManager.attributesOfItem(atPath: candidate.path),
-              let size = attrs[.size] as? Int else { return nil }
+
+        // resourceValues on the RESOLVED url reports the target's size and
+        // type. `attributesOfItem` would not: it has lstat semantics and
+        // reports a symlink as ~10 bytes while `contents(atPath:)` follows it
+        // and reads the whole target — which silently defeats both caps.
+        guard let values = try? resolved.resourceValues(
+                  forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize else { return nil }
+
+        // Only real image types are inlined. Independently stops a README or
+        // a key from becoming a text/* data URI in the DOM.
+        guard let type = UTType(filenameExtension: resolved.pathExtension),
+              type.conforms(to: .image),
+              let mime = type.preferredMIMEType else { return nil }
 
         if size > Self.perImageLimit || spent + size > Self.perDocumentBudget {
-            return Self.placeholder(filename: candidate.lastPathComponent)
+            return Self.placeholder(filename: resolved.lastPathComponent)
         }
-        guard let data = fileManager.contents(atPath: candidate.path) else { return nil }
+        // Read from `resolved` so the stat and the read address the same file.
+        // A TOCTOU window remains; proportionate for a local viewer.
+        guard let data = fileManager.contents(atPath: resolved.path) else { return nil }
 
         spent += size
-        let mime = UTType(filenameExtension: candidate.pathExtension)?.preferredMIMEType
-            ?? "application/octet-stream"
-        return #"<img src="data:\#(mime);base64,\#(data.base64EncodedString())" />"#
+        // Preserve the tag's other attributes (alt, title) — rebuilding the
+        // tag from scratch would silently drop every image's alt text.
+        return #"<img\#(prefix)src="data:\#(mime);base64,\#(data.base64EncodedString())"\#(suffix)>"#
     }
 
     private static func placeholder(filename: String) -> String {
