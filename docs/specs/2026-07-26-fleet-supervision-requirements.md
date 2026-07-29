@@ -82,11 +82,35 @@ the same.
   fully autonomous — persisted in the daemon and settable from the app and the CLI, so that
   I can hand over or take back the fleet with one gesture, and a daemon restart resumes the
   same posture without me.
+
+  *Amended 2026-07-28: the one-gesture handover survives exactly as asked; the tri-state does
+  not. The persisted switch is **on/off** — one column, one gesture, one shift for the whole
+  fleet, resuming across restarts — and the supervised/autonomous distinction moves to
+  **per-project mode selection**, which is configuration rather than lifecycle (design §3).
+  The reason is that after the verb gate's removal (see P0-3 above) the daemon has no
+  behavioral fork on posture left to make: a mode is authored conduct, so it belongs with the
+  project whose conduct it describes, while the switch that starts and stops supervision
+  stays global.*
 - **P0-3 [both]** As an operator, I want the two modes to differ *mechanically*, not merely
   in prompt wording, so that the label's promise ("a human stays in the loop") is enforced
   by the system rather than requested of the supervisor. *(implied, not yet implemented —
   today the entire difference is one hint sentence in a prompt, and the conservative rule it
   states references a field the data doesn't even carry.)*
+
+  *Descoped 2026-07-28 by operator decision: **this story is not being implemented as
+  written.** The design's compiled verb gate — the mechanism that would have made the modes
+  differ mechanically — is removed in full as over-engineering. The models running the
+  supervisor desks are trusted to follow conduct instructions and are already resistant to
+  prompt injection, and TBD declines to build a second anti-injection layer on top of them.
+  What replaces enforcement is instruction plus visibility: a mode is authored conduct prose
+  telling the desk what to act on, propose, and escalate; the daemon delivers that conduct in
+  every work order, records which mode was active on every action line, and writes each
+  action to the ledger the instant it happens, with the account rendering it beside the
+  operator. So the label's promise is now honest rather than enforced — "attended" instructs
+  and shows you, it does not restrain. The original concern this story raised (a mode label
+  that is a false promise) is answered by refusing to claim enforcement at all, rather than
+  by building it. The bet this rests on is stated in design §3 and argued against itself in
+  design §16, which names the failure signature that would justify revisiting it.*
 - **P0-4 [both]** As an operator, I want the supervisor to be a visible, first-class session
   I can open, read, and type into at any time, so that supervision is inspectable and
   steerable, never a black box running somewhere I can't see.
@@ -213,7 +237,7 @@ the same.
   nothing standing beside a repo's permission config and contradicting it — and never will.
   What still happens is *judgment*: a stalled prompt reaches the supervisor as a case (via
   Claude Code's `Notification` hook event), and answering it is an ad hoc act through the
-  gated `drive` verb, guided by the playbook, which advises escalating when unsure and treats
+  `drive` verb, guided by its project's mode and playbook, which advise escalating when unsure and treat
   prompts guarding merges or credentials as deserving a human. Nothing about that act
   accumulates into a standing approval. Recurrence is the signal: when the account shows the
   same prompt driven night after night, the fix is a reviewed change to the repo's own

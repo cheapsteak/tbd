@@ -15,7 +15,7 @@ someone picks it up (those are never committed; see `docs/CLAUDE.md`).
 ## 1. Shape of the migration
 
 Almost none of the old code transforms into the new system. The new daemon
-loop, posture gate, ledger, and delivery layer are fresh builds; the old code's
+loop, on/off switch, ledger, and delivery layer are fresh builds; the old code's
 fate is deletion. What genuinely migrates is **state and knowledge**, in four
 kinds:
 
@@ -28,7 +28,7 @@ kinds:
    harvested before anything is deleted (§3), and any durable prose among them
    lands in the advisory PR rather than a learnings file (design §8).
 3. **Config state**: the `nightwatch_mode` column and the app's experimental
-   flag — superseded by the posture column, orphaned in place (§6).
+   flag — superseded by the supervision on/off column, orphaned in place (§6).
 4. **The desk worktree** — harvested, then archived by hand (§5).
 
 So the plan is: **build new alongside, carry those four across, cut over,
@@ -40,12 +40,13 @@ delete.**
   running until the new system passes the parity gate (§5). Something must
   keep working throughout; the freeze notice in the root `CLAUDE.md` keeps the
   old system bug-fix-only meanwhile.
-- **Mutual exclusion, compiled**: the daemon refuses to set the new posture
-  to anything but off while `nightwatch_mode ≠ off`, and vice versa, with an
-  error naming the other switch. Two supervisors driving one fleet is never
+- **Mutual exclusion, compiled**: the daemon refuses to turn the new
+  supervision switch on while `nightwatch_mode ≠ off`, and refuses to set
+  `nightwatch_mode` while supervision is on, each with an error naming the other
+  switch. Two supervisors driving one fleet is never
   valid, and operator discipline is not a mechanism.
-- **Default-off throughout**: the posture column ships defaulting to off and
-  is the master gate for every new behavior, satisfying the house
+- **Default-off throughout**: the supervision column ships defaulting to off and
+  is the master switch for every new behavior, satisfying the house
   default-off-flag rule. The Channels delivery adapter additionally gets its
   own default-off flag (§4, slice 4).
 - **Migrations are append-only.** `nightwatch_mode` is never dropped; code
@@ -89,7 +90,7 @@ by trusting this list.
   Code deleted at §6; DB column orphaned in place.
 - **App surfaces: `NightwatchModeToggle`, `NightwatchStatusItem`, status-bar
   tint/badge, Settings "Fleet Automation" section,
-  `nightwatchExperimentalEnabled` key** — Superseded by the new posture control
+  `nightwatchExperimentalEnabled` key** — Superseded by the new on/off control
   and the Fleet Supervision settings tab (design §10). Delete at §6.
 - **Tests (`DaywatchRunnerTests`, `DeskSessionManagerTests`,
   `NightwatchDeskPromptsTests`, `NightwatchModeTests`,
@@ -135,8 +136,10 @@ the target repos' `.nightwatch/policy.json` — into exactly one bucket:
 3. **Repo-specific advisory** — prose that belongs to one repo; lands as a PR
    to *that repo's* `.agents/supervision.md`, authored outside TBD's tree.
 4. **Operator-binding** — rules the daemon must enforce with no model in the
-   loop; seed `~/tbd/supervision/standing-rules.json`, each entry individually
-   confirmed by the operator ("repos advise; operators bind").
+   loop. **This bucket is now empty by construction**: the new design has no
+   rules of any kind (design §3), so a never-entry becomes either conduct prose
+   in a project's mode, or an automation-membership mark, or a never-touch flag
+   — sort it into bucket 2 or 3 and record which.
 5. **Stale snapshot / person-specific** — discard, with a line in the log.
 
 Expected dispositions per source (verify against content during execution;
@@ -165,7 +168,8 @@ citations are to the baseline doc's §5–§6):
   at most candidates for source-side allow rules — a repo's own settings or the
   operator's per-repo overlay — should an operator ever want them there, and the
   shipped list, which carried a bare `git` prefix, is too broad to have ever
-  been ratified. Nothing from it seeds standing rules.
+  been ratified. Nothing from it seeds anything in the new design — there are no
+  rules for it to seed (design §3).
 - **`dontTouchTxt`** — Never-list entries → operator-binding (4); the frozen
   pane-ID comment → discard (5).
 - **`NightwatchDeskPrompts`** — Claim-before-apply, escalation batching, the
@@ -185,8 +189,9 @@ citations are to the baseline doc's §5–§6):
   promotes to binding (4).
 
 **Step 3 — seed the destinations.** Open the `.agents/supervision.md` PR in
-the target repo; write the confirmed standing rules (never-entries, the
-automation-membership marks and default stance). There is no learnings file to
+the target repo; record the operator's selections in `supervision.json`
+(automation-membership marks and default stance, project topology, mode
+choices). There is no learnings file to
 append to — durable prose goes in the advisory PR.
 
 **Exit gate**: the disposition log accounts for every file in the inventory;
@@ -196,7 +201,7 @@ every binding entry.
 ## 4. Build slices
 
 Each slice ships independently, compiles, tests both branches of anything it
-gates, and lands nothing autonomous outside the posture gate. Dependency order
+gates, and lands nothing autonomous while supervision is off. Dependency order
 only — no slice needs a later one:
 
 - **Slice 1 — facts** (design §2). Install Claude Code's **`Notification` hook
@@ -206,55 +211,69 @@ only — no slice needs a later one:
   verify-before-acting, run the work-state sweep on the daemon's cadence,
   derive the context-load fact from the transcript tail. Pure observability;
   safe to ship while the old system runs because it acts on nothing.
-- **Slice 2 — posture, shift, ledger** (design §3, §7, §9). The
-  `supervision_posture` config column (migration + record type + Codable
-  model, one commit, per the house migration rule), the compiled interlock
-  with `nightwatch_mode`, the shift directory with `ledger.jsonl` and the
-  `account.md` renderer, shift open/close bound to the posture switch. Shift
+- **Slice 2 — the switch, shift, ledger** (design §3, §7, §9). The
+  `supervision_enabled` config column — a **boolean**, not the old tri-state
+  posture (migration + record type + Codable model, one commit, per the house
+  migration rule) — the compiled interlock with `nightwatch_mode`, the shift
+  directory with `ledger.jsonl` and the `account.md` renderer, shift open/close
+  bound to that switch. The ledger envelope carries `mode` per line from the
+  start, even though mode selection lands in slice 3; a shift with no selections
+  records `attended`. Shift
   open spawns no desks by design (design §9 — desks are lazy, born on their
   project's first case in slice 4), so this slice's shift opens, writes its
   ledger, and closes on its own; no slice needs a later one. Shift close gains
   its dispose-every-desk step in slice 4, when there are desks to dispose.
-- **Slice 3 — verb gate, standing rules, queue** (design §5, §8). The
-  supervision verbs as RPC behind the gate — **three gated** (`drive`, `wake`,
-  `pause`) and **two ungated** (`escalate`, `note`). `drive` takes exactly one
-  payload flag per call, `--text` or `--keys` (design §3); there is no `answer`
-  verb and no separate key-sending verb, and the dialog dismissal that makes
-  `--text` work is delivery-adapter behavior landing with the adapter in slice 4
-  (design §2). Standing-rule scope is per verb, so a rule on `drive` covers both
-  payloads — do **not** add condition language to distinguish them (design §8,
-  §15). There is no `learn` verb and no
-  `learnings.md` plumbing either — the machine-appended memory tier was removed
-  in favor of notes plus a reviewed playbook PR (design §8), so this slice
-  builds neither, and the ledger has **nine** kinds, not ten. The standing-rules loader including automation
-  membership and the default stance; the proposal queue as a ledger projection.
-  The operator's queue surface is **one command**, `tbd supervise queue
-  [--resolved|--all] [--type …] [--project …]` to read and
-  `tbd supervise resolve <id> --approve|--reject|--answer` to act (design §10) — all three flags construct the same `resolution` ledger kind, differing
-  only in `result`, so build it as one RPC with flag validation that teaches
-  ("that's a proposal — `--approve` or `--reject` it") rather than three
-  near-identical commands. `--scope` attaches to `resolve` itself, not to
-  individual flags. `resolve` is operator-only and must not be reachable from a
-  desk, which is what keeps resolutions off the self-report path (design §10).
-  The loader in this slice also owns the **`projects` object** (design §5, §8):
-  parse declared multi-repo projects and their designated policy source, reject
-  a file where any repo appears in two projects, and resolve every other repo to
-  its implicit singleton. Standing-rule `scope` gains the `{ "project": … }`
-  shape alongside `{}`/`{ "repo": … }`/`{ "worktree": … }`, and automation
-  membership moves to the project level with singletons keyed by their repo's
-  implicit name. Test the degenerate case explicitly: with an empty `projects`
-  object, resolution, membership, and scoping must behave exactly as the
-  per-repo design did — that collapse is a stated invariant, not an
-  implementation detail. Mutations apply on the **next tick**, and any live desk
-  whose project definition changed is recycled through the §9 replacement path
-  (design §5) — so the loader must expose "which projects changed" and not just
-  the new state; that recycle lands with desks in slice 4.
+- **Slice 3 — verbs, `supervision.json`, queue** (design §3, §5, §8, §10).
+  Much of what this slice once carried has evaporated with the verb gate; what
+  remains is smaller and simpler.
+  - **The verbs as RPC, none of them gated**: `drive`, `wake`, `pause`,
+    `escalate`, `note`. `drive` takes exactly one payload flag per call,
+    `--text` or `--keys` (design §3); there is no `answer` verb, no separate
+    key-sending verb, and no `learn` verb. The dialog dismissal that makes
+    `--text` work is delivery-adapter behavior landing with the adapter in
+    slice 4 (design §2). Around each verb the daemon does three things and no
+    more: send-time re-verification for `--text`, the daemon-written action line
+    carrying the active mode and state snapshot, and the one-minute re-check.
+    **Do not build a posture check, a rule lookup, or a proposal conversion** —
+    there are none (design §3), and the ledger has **nine** kinds.
+  - **The `supervision.json` loader**: project topology (declared multi-repo
+    projects and their designated policy source; reject a file where any repo
+    appears in two projects; resolve every other repo to its implicit
+    singleton), automation membership with its default stance at the project
+    level, and the per-project **mode selections**. No `rules` array, no scopes,
+    no stances. Test the degenerate case explicitly: with an empty `projects`
+    object, resolution, membership, and mode lookup must behave exactly as the
+    per-repo design did — that collapse is a stated invariant, not an
+    implementation detail. Mutations apply on the **next tick**, and any live
+    desk whose project definition changed is recycled through the §9 replacement
+    path (design §5), so the loader must expose "which projects changed" and not
+    just the new state; that recycle lands with desks in slice 4. A mode change
+    needs no recycle — conduct arrives with the next work order.
+  - **Mode selection and resolution**: `tbd supervise mode <project> <name>`
+    writes the selection and a ledger line. Resolving a mode means reading the
+    named section out of that project's resolved playbook (design §3, §5);
+    a selection naming a section the playbook does not define is an operator
+    error to report at set time, and at work-order time falls back to
+    `attended` with an anomaly line rather than silently running unconducted.
+  - **The queue**: the proposal/escalation projection over the ledger, plus one
+    operator command — `tbd supervise queue [--resolved|--all] [--type …]
+    [--project …]` to read and `tbd supervise resolve <id>
+    --approve|--reject|--answer` to act (design §10). All three flags construct
+    the same `resolution` kind differing only in `result`, so build one RPC with
+    flag validation that teaches ("that's a proposal — `--approve` or `--reject`
+    it") rather than three near-identical commands. `--scope` attaches to
+    `resolve` itself. A scoped resolution writes a `decision` line, and
+    **work-order composition must carry in-scope decisions** (design §8) — that
+    delivery, not any gate, is what satisfies P1-5. `resolve` is operator-only
+    and must not be reachable from a desk, which keeps resolutions off the
+    self-report path (design §10).
 - **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake
   decision from facts, work-order composition **grouped by project**, desks as
   first-class sessions **one per project, spawned lazily on that project's first
-  case and all disposed at shift close**, the compiled **desk→project gate
-  binding** (a verb whose target is outside the calling desk's project is
-  refused before posture and rules are consulted), `terminal.send` delivery for
+  case and all disposed at shift close**, the compiled **desk→project
+  addressing check** (a verb whose target is outside the calling desk's project
+  is refused as a routing error — correctness, not authority, design §3),
+  `terminal.send` delivery for
   the fleet, the Channels adapter for desks behind its own default-off flag with
   automatic degrade and a **per-desk-spawn handshake** (not per shift), the
   ledger-marker acknowledgement re-check, **per-desk** context recycling at the
@@ -303,36 +322,53 @@ only — no slice needs a later one:
 - **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
   tab — the **projects section** (declare a multi-repo project, pick members,
   designate the policy source, and list ungrouped repos as the singletons they
-  are), the per-project membership section, and standing-rules inspection — plus
-  the account panel as inbox, showing every desk's proposals and escalations in
+  are), the per-project **modes** section (active mode plus the choices its
+  playbook defines; no selection shows `attended` as the default rather than a
+  choice), and the per-project membership section — plus the account panel as
+  inbox, showing every desk's proposals and escalations in
   one project-labeled queue. CLI parity for every control — and the whole
-  `tbd supervise` surface is pinned as a normative table in design §10, so this
-  slice's exit check is that every command in that table exists with that name
-  and shape, and that nothing outside it shipped. Regrouping is
+  `tbd supervise` surface is pinned as a normative list in design §10, so this
+  slice's exit check is that every command in that list exists with that name
+  and shape, and that nothing outside it shipped — in particular no `rules`
+  commands and no `posture` command. Regrouping is
   `project move <repo> --to <project|singleton>` — no add/remove pair, because
   the pair can express states "exactly one project per repo" forbids.
 - **Slice 6 — hardening** (design §11, §13, §14). Capacity holds, runaway
   detection, the optional heartbeat. The heartbeat (P3-1) may be deferred past
   cutover without blocking it.
 
-Soak discipline: after slice 4, run real shifts on the new system in
-attended posture (the interlock means the old system is off for those
-shifts; alternate if the new system disappoints). At least one clean
-attended shift and one autonomous shift — scoped by automation membership to
-low-stakes projects — before the parity gate. **At least one of those shifts
-must exercise a declared multi-repo project**, and at least one must run with
-nothing declared at all: the singleton collapse and the grouped case are
-different code paths through the resolver, the gate binding, and desk spawning,
-and only the first is covered by every other shift by default. A night in which
-two projects both had cases is the cheapest evidence that per-project desks,
-the gate binding, and the shared queue actually hold.
+Soak discipline: after slice 4, run real shifts on the new system with projects
+on the `attended` mode (the interlock means the old system is off for those
+shifts; alternate if the new system disappoints). At least one clean `attended`
+shift and one `autonomous` shift — scoped by automation membership to low-stakes
+projects — before the parity gate. **At least one of those shifts must exercise a
+declared multi-repo project**, and at least one must run with nothing declared at
+all: the singleton collapse and the grouped case are different code paths through
+the resolver, the addressing check, and desk spawning, and only the first is
+covered by every other shift by default. A night in which two projects both had
+cases is the cheapest evidence that per-project desks, project addressing, and
+the shared queue actually hold.
+
+Because modes no longer change daemon behavior (design §3), an `autonomous`
+soak shift is evidence about *conduct* — did the desk act where the prose told
+it to act — not about a code path. Read those shifts' accounts for judgment
+quality, which is the thing the trust bet rests on and the only thing that can
+falsify it early.
 
 ## 5. Cutover
 
 The parity gate is the requirements doc's ID list, checked against evidence
 from real shifts, not against code review:
 
-- **Required green**: every P0 (P0-1 … P0-10) and every P1 (P1-1 … P1-7).
+- **Required green**: every P0 (P0-1 … P0-10) and every P1 (P1-1 … P1-7), with
+  one amendment. **P0-3 is evidenced against its descoped form**: the
+  requirements doc carries a dated amendment recording that mode enforcement was
+  removed with the verb gate, so what must be green is that a mode's conduct is
+  delivered in every work order, that every action line records the mode it ran
+  under, and that the account shows an act within seconds of it happening — not
+  that any act was prevented. P1-5 is likewise evidenced as *instruction
+  delivery*: a scoped resolution must reach later work orders, and the desk must
+  stop asking (design §8).
 - **Expected but not blocking**: P2-1, P2-2 (both are in the design and the
   slices above); P2-4 lands with slice 6. P2-3 is satisfied mostly
   structurally rather than by implementation — prevention at spawn for

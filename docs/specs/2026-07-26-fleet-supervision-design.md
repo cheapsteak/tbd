@@ -15,7 +15,7 @@ places. Each place has its own test:
 
 - **Compiled (daemon)** — facts and safeguards that must hold no matter what a
   model says. These include deriving state, gathering facts, enforcing the
-  operating posture, keeping the ledger, verifying facts before sending, and
+  which mode is active, keeping the ledger, verifying facts before sending, and
   scheduling. Ask two questions: *If this were wrong, would the rest of the
   system be built on a lie?* And: *Must it run for forty agents every cycle
   without calling a model?*
@@ -45,10 +45,11 @@ a quick audit:
   in this design — "intervention already in flight" and "re-check pending"
   checks — is compiled into the sweep (§4).
 - **Per-repo policy** — authored, and resolved per **supervision project** (§5,
-  §8): the playbook (advisory prose) plus standing rules (binding,
-  operator-ratified).
-- **Mode enforcement (P0-3)** — compiled: the verb gate (§3). Capability gating,
-  never prompt wording.
+  §8): the playbook (advisory prose, including mode definitions) plus the
+  operator's selections in `supervision.json`.
+- **Mode enforcement (P0-3)** — **descoped** (§3). There is no enforcement: a
+  mode is authored conduct, and what the daemon supplies is the record and the
+  operator's selection of which mode is active.
 - **The shift/morning account** — compiled: a ledger written by the verb
   handlers; views are queries; the supervisor adds attributed notes only (§6).
 
@@ -84,7 +85,7 @@ liveness identifies gone agents. This design adds two things:
 
 1. **Verify before acting, not before displaying.** Hook events are
    accurate enough for the user interface (UI). Before using a state to justify
-   any gated verb, however, the daemon checks the pane's live process once.
+   any verb, however, the daemon checks the pane's live process once.
    This requires one tmux subprocess. If the event and live process disagree,
    the result is loudly reported as `unknown`. The daemon never silently picks
    one input.
@@ -209,8 +210,8 @@ decision about when a human is required.
 
 What is emphatically *not* forbidden is a human's delegate exercising judgment.
 Answering a permission prompt is an **ad hoc judgment act**: the desk reads the
-situation, decides, and acts through the gated `drive` verb under posture and
-standing rules, guided by its playbook — whose shipped default advises escalating
+situation, decides, and acts through `drive`, guided by its project's active
+mode and playbook — whose shipped default advises escalating
 when unsure, and says plainly that prompts guarding merges, credentials, or
 anything irreversible deserve a human (§5). Crucially, **nothing about that act
 accumulates.** There is no memory of "we approved this one before," because
@@ -342,21 +343,22 @@ What the operator experiences is unchanged. In attended mode the proposal *is th
 relayed question* — the agent's questions and options verbatim, plus the proposed
 response and its reasoning — and the operator approves it or answers differently
 themselves. The queue entry is the dialog, delivered at last to the human it was
-always addressed to. In autonomous mode it executes through the standing-rules
-gate and writes its action line. The response need not be an answer at all:
+always addressed to. Under a bolder mode the desk simply acts, and the daemon
+writes its action line. The response need not be an answer at all:
 "these options are underspecified — work through the tradeoffs and ask me again"
 is a legitimate reply, and so is a redirect. Which one a question warrants is
 playbook judgment (§5); the mechanism is `drive` either way.
 
-*What collapsing it costs* is recorded in §15 rather than hidden: a standing rule
-can no longer say "may answer when asked, but may not nudge unprompted" — nor
-"text yes, keys no" — because all of it is one verb. Those distinctions are
-speculative until a real shift asks for one, and the amendment path is a subverb
-namespace in the rule vocabulary (`drive.keys`), never condition language.
+*What collapsing it costs* is now nearly nothing, and §15 records why. When the
+verb gate existed, one verb meant one rule stance covering answers and unprompted
+nudges alike. With no rules at all (§3), the distinction lives where it always
+belonged: a mode's conduct prose can tell a desk to answer questions freely and
+nudge sparingly, in a sentence, without any vocabulary growing.
 
 **How the question becomes a case.** The hook stays an unconditional dumb
-reporter — no posture check on the agent side, ever. It reports; the daemon
-owns posture and already receives every event. The fork lives in the daemon's
+reporter — no supervision check on the agent side, ever. It reports; the daemon
+knows whether a shift is running and already receives every event. The fork
+lives in the daemon's
 RPC handler: when a shift is active and the terminal's project resolves in
 automation (§8), a pending question becomes a case, and the event **hastens an
 immediate mini-tick for that terminal** instead of waiting for the next sweep.
@@ -437,7 +439,7 @@ rather than by an allowlist's precision — and the structure is the absence of 
 approval layer, not the absence of an actuator. Nothing TBD compiles ever decides
 that a class of prompts may be granted; there is no list to be wrong, because
 there is no list. What can advance a prompt is a judgment, made once, about one
-prompt, by a delegate operating under a posture gate and leaving a record. One
+prompt, by a delegate operating under an authored mode and leaving a record. One
 consequence for the rest of this document: the `approve-a-prompt` verb stays
 removed from the verb set (§3, §8), and nothing here restores it under another
 name. `approve-a-prompt` was a blanket, model-free auto-grant — the tool deciding
@@ -471,86 +473,139 @@ scraped, is two guesses stacked. Note what the new rule does *not* rescue here:
 checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
 `launchd` job remains.
 
-## 3. The two modes (P0-2, P0-3)
+## 3. Modes and the trust model (P0-2, P0-3)
 
-There is one operating posture: **off / attended / autonomous**. It is a
-configuration column in the daemon. It can be set from the app and CLI, is
-broadcast when it changes, and survives a restart, just like every other daemon
-toggle.
+### Three layers, and no fourth
 
-**A note on the name.** The requirements brief calls this posture
-"human-supervised" (P0-2). It is renamed here because "supervised" collided with
-the subsystem's own name: this subsystem *is* fleet supervision, and the
-supervisor supervises the fleet in both modes. The posture names the human's
-side of the relationship — an operator is in the loop, and consequential verbs
-queue for them — not the supervisor's. "Autonomous" is unchanged.
+Everything in this design sorts into three layers, and knowing which layer you
+are in answers most questions about where a behavior belongs:
 
-**Enforcement controls capabilities; it does not rely on prompt wording.** The
-supervisor acts only through daemon commands, called verbs. In attended mode,
-the daemon turns consequential verbs into proposals. The call succeeds, but
-the daemon adds the action to a queue instead of executing it. No prompt can
-confuse the supervisor into acting autonomously because the verb cannot execute
-in that mode. The verb handlers write ledger rows. The supervisor therefore
-cannot misreport its actions because it is not the reporter.
+- **Compiled TBD does facts, delivery, and the record.** It derives state,
+  gathers work facts, sweeps, composes work orders, delivers messages,
+  re-verifies stale claims at send time, and writes the ledger. All of it is
+  model-free, and none of it is a judgment.
+- **Conduct is authored.** Modes and playbooks — prose, versioned, and
+  project-definable — tell a desk what to act on, what to propose, what to
+  escalate, and how bold to be.
+- **Judgment is the desk's.** Reading a transcript and deciding what a situation
+  warrants is the model's work, and nothing else in the system attempts it.
 
-**The human-in-the-loop split: authored *what*, compiled *how*.**
-- *What is consequential* is policy (per project, per verdict) — two reasonable
-  projects can reasonably differ.
-- *How a human is involved* uses one compiled mechanism: the
-  **approve-before-act proposal queue**. The posture switch applies to the
-  entire fleet, so it must make the same promise everywhere. A single queue and
-  interaction pattern also let the operator clear the morning queue in minutes
-  (P0-10).
-- The veto-window variant (act after a cancellable delay) is rejected outright:
-  a missed veto allows an action that was never approved. That would silently
-  turn attended mode into autonomous mode, exactly the false promise P0-3 is
-  intended to prevent.
+**Enforcement appears nowhere on that list, deliberately.** There is no
+capability wall between a desk and its verbs: no allow rules, no deny rules, no
+proposal conversion, no gate. The operator's controls are **selection** — is
+supervision on, which mode each project runs, which projects are in automation,
+which sessions are never touched — and **visibility**: every act is a ledger
+line the moment it happens, and the account renders it beside you.
 
-Compiled defaults are as conservative as possible. In attended mode, every
-verb that affects the fleet becomes a proposal. In autonomous mode, verbs
-execute and questions are collected into escalation batches. Standing rules
-(§5) can relax these defaults. Files shipped by a repository cannot.
+This is a bet, and §16 records it as one so a future operator who gets burned
+knows exactly which paragraph to revisit. The models running these desks are
+trusted to follow conduct instructions and are already resistant to prompt
+injection; TBD declines to build a second anti-injection mechanism on top of
+them. An earlier draft of this document specified a compiled verb gate — posture
+consulted on every call, standing allow and deny rules, consequential verbs
+converted into proposals. **It is removed in full.** It was machinery built for
+a failure mode the operator does not expect these models to exhibit, and every
+line of it was weight the design carried for a hypothetical.
+
+### The switch: supervision is on, or off (P0-2)
+
+One configuration column in the daemon, on or off. Settable from the app and the
+CLI, broadcast when it changes, surviving restart like every other daemon
+toggle. That is P0-2's one-gesture handover for the whole fleet, unchanged in
+substance: one gesture, one shift, one ledger, one account, one queue.
+
+**`off` is not a mode.** It is the absence of supervision — no sweep, no desks,
+nothing observing — and it stays compiled. It is the only behavioral fork the
+switch has.
+
+### Modes are project-defined conduct profiles
+
+A **mode** is a named block of conduct prose: what to act on, what to propose,
+what to escalate, how bold to be. Nothing more — and the reason is worth stating,
+because it is the discovery that reshaped this section.
+
+**With the gate gone, the daemon has no behavioral fork on mode at all.** The old
+attended/autonomous split had exactly two mechanical consequences: consequential
+verbs became proposals, and escalations were "batched for morning." The first is
+the machinery just removed. The second was always presentation — an escalation is
+a ledger line the moment it is written, and "the morning batch" is a query over
+the shift window (§6); notifications are out of scope for this design. Nothing
+else in the daemon ever branched on posture. So there is no compiled behavior
+left for a mode to select, and a mode is free to be what it always effectively
+was: instructions.
+
+That is precisely what makes **project-defined modes safe by construction.** A
+mode definition is advisory content, and advisory content may travel with a repo
+under the standing authority principle — *repos advise; operators bind*. What
+binds is not the text. It is the operator's act of **selecting** which mode a
+project runs. A repo can ship a mode called `aggressive`; it cannot cause that
+mode to be active.
+
+The mechanics:
+
+- **Modes are named sections in the playbook** (§5), resolved per project. The
+  shipped default playbook defines `attended` and `autonomous`, so both are
+  available to every project without anyone authoring anything. A project may
+  define any number of others.
+- **Exactly one mode is active per project.** A project with no selection runs
+  `attended`, the conservative one.
+- **Selection is operator-only**: `tbd supervise mode <project> <mode-name>`, or
+  the Settings tab (§10). It is stored in `supervision.json` (§8).
+- **Switching is legal at any time, including mid-shift.** It takes effect on the
+  next work order, because conduct arrives with each order — no desk recycle is
+  needed. The switch writes a ledger line, and **every action line records the
+  mode it ran under** (§6), so the account can always answer "what conduct was
+  this desk operating under when it did that?"
+
+**What "attended" honestly promises now.** It instructs, and the system makes the
+desk's work visible: the ledger is written as each action happens, and the
+account panel sits open beside you. It does *not* enforce — nothing stops a desk
+running `attended` from driving a session. P0-3 asked for a mode that could not
+silently become autonomous; this design answers with immediacy and evidence
+rather than a capability wall, and the requirements doc carries a dated descope
+amendment saying exactly that.
 
 ### The verbs (normative)
 
-This list is the single normative inventory of the supervisor's capabilities.
-Every other mention of a verb in this document defers to it.
+This list is the single normative inventory of what a desk can do. Every other
+mention of a verb in this document defers to it. **None of them is gated.** What
+the daemon does around each one is accounting and freshness, never permission.
 
-- **`drive`** — **gated.** Act on a fleet agent's session (the send path of §4
-  step 7), in one of two payload variants.
-  - `--text` delivers a re-verified message — also how an agent's
+- **`drive`** — act on a fleet agent's session (the send path of §4 step 7), in
+  one of two payload variants.
+  - `--text` delivers a message. The daemon **re-verifies every external claim in
+    it against live sources at send time**; an old premise stops the send and
+    returns the conflicting facts (P0-8). That is freshness, not permission — it
+    protects an agent from being told something no longer true, and it would earn
+    its place in a system with no rules whatsoever. It is also how an agent's
     `AskUserQuestion` is answered, the adapter clearing a machine-known dialog
     first (§2).
-  - `--keys` sends named keys the desk chose after reading the screen; nothing
-    to re-verify, so the ledger line carries the capture it read instead (§2,
-    §6).
-  - *Attended:* becomes a proposal showing exactly what will happen — the
-    message text, or the keys and the screen they aim at. When the target has a
-    pending question, that proposal *is* the relayed question: the agent's
-    questions and options verbatim, plus the supervisor's proposed response and
-    reasoning, so the operator approves it or answers differently themselves. No
-    separate verb marks this — the action's state snapshot is the question (§6),
-    so the record and the queue can both tell an answer from an unprompted nudge
-    without the vocabulary growing (§2).
-  - *Autonomous:* executes; ledger line.
-- **`wake`** — **gated.** Unpark and resume a parked session. *Attended:*
-  becomes a proposal. *Autonomous:* executes; ledger line.
-- **`pause`** — **gated.** Halt a runaway session (§13). *Attended:* becomes a
-  proposal. *Autonomous:* executes; ledger line.
-- **`escalate`** — ungated. Queue an exact question for the operator.
-  *Attended:* ledger line; appears in the queue immediately. *Autonomous:*
-  ledger line; batched for morning.
-- **`note`** — ungated. Attributed prose into the account. Ledger line in both
-  modes.
+  - `--keys` sends named keys the desk chose after reading the screen. Keys
+    assert nothing, so there is nothing to re-verify; the ledger line carries the
+    screen capture the desk read instead (§2, §6).
+- **`wake`** — unpark and resume a parked session.
+- **`pause`** — halt a runaway session (§13).
+- **`escalate`** — put an exact item, proposed command, and recommendation in
+  front of the operator. This is how a desk asks; `resolve` is how the operator
+  answers (§10).
+- **`note`** — attributed prose into the account.
+
+Around every one of them the daemon does the same three things, none of which is
+a permission check. It **writes the action line itself**, so a desk cannot
+misreport what it did — it is not the reporter (P1-7). It **arms the one-minute
+re-check** (§12). And it **records the active mode and the state snapshot that
+justified the act** (§6).
+
+A desk's verbs are addressed to its own project (§5): a call naming a target
+outside it is a routing error and is refused as one. That is correctness, not
+authority — the desk holds exactly one project's playbook, so acting elsewhere
+would mean acting on conduct that does not apply.
 
 Every verb is both a `tbd supervise <verb>` CLI command and an RPC method, so
-nothing exists only as a button (§10). `approve-a-prompt` is deliberately
-absent, and nothing here restores it under another name: see §2's prompt-stalls
+nothing exists only as a button (§10). `approve-a-prompt` is deliberately absent,
+and nothing here restores it under another name: see §2's prompt-stalls
 subsection for the difference between a blanket auto-grant and one judged reply
 delivered as text.
-
-There are **three gated verbs** — `drive`, `wake`, `pause` — and **two ungated**
-ones, `escalate` and `note`.
 
 *Lineage, recorded once so a returning reader is not confused by older drafts.*
 The send verb was called `send`, then `intervene`, and is now `drive`; `answer`
@@ -559,18 +614,12 @@ answering *is* the send path and neither of its apparent differences needed a
 verb (§2). The `intervene` → `drive` rename came with a second collapse: an
 earlier plan split text-sending from key-sending into two verbs, on the theory
 that a message was the lighter act. It is not — a message to an agent running
-with permissions bypassed is arbitrary instruction injection (§8, reason 4), so
-the split encoded a safety boundary that does not exist, and with one gate
-stance covering both there was nothing left for two verbs to say. Same collapse
-test as `answer`: identical gate semantics means one verb. `learn` went with the
-whole machine-appended memory tier — same-shift memory is a `note`, durable
+with permissions bypassed is arbitrary instruction injection — so the split
+encoded a safety boundary that does not exist. `learn` went with the whole
+machine-appended memory tier: same-shift memory is a `note`, and durable
 cross-shift knowledge is repo advisory content with a home and a change process
 already (§8). The operator's side of the queue is a separate surface with its own
-command (`resolve`, §10), not a verb the supervisor holds.
-
-Every gated verb is additionally bound to its desk's project (§5): a verb whose
-target lies outside the calling desk's project is refused before posture or
-standing rules are consulted.
+command (`resolve`, §10), never a verb the supervisor holds.
 
 ## 4. The wake-to-action loop
 
@@ -588,10 +637,12 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    ledger line and stops. It must not guess.
 4. **Work order.** The daemon prepares a case file. It includes the agent's
    identity, session state and its age, work facts, the project's resolved
-   playbook, and the transcript path. Cases are grouped by project (§5): if one
-   tick finds several cases in the same project, they travel as one work order
-   and wake that project's desk once. Cases in different projects never share a
-   work order.
+   playbook **with its active mode's conduct** (§3), **any decisions in scope**
+   — answers the operator already gave, so the desk knows them and does not
+   re-ask (P1-5, §8) — and the transcript path. Cases are grouped by project
+   (§5): if one tick finds several cases in the same project, they travel as one
+   work order and wake that project's desk once. Cases in different projects
+   never share a work order.
 5. **Wake.** The daemon delivers the order through the adapter for that kind of
    agent, just as it would for any other session. If the project has no desk yet
    this shift, the daemon spawns one first — desks are lazy, so a project that
@@ -608,10 +659,10 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    (P0-8). (A `--keys` payload asserts nothing, so there is nothing to
    re-verify — its integrity requirement is the screen capture recorded on the
    ledger line instead, §2.) Second, it **checks
-   posture**. In attended mode, a consequential action becomes a proposal.
-   The supervisor uses the same code path in either mode. Third, the daemon
-   **delivers** the message through the adapter and **writes the ledger line
-   itself**.
+   **delivers** the payload through the adapter. Third, it **writes the ledger
+   line itself**, recording the active mode and the state snapshot that
+   justified the act. There is no posture check and no proposal conversion in
+   this path: a desk that calls `drive` has driven (§3).
 8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
    memory). The result is recorded as an outcome line referencing the action
    (§6). A new blocked state
@@ -650,8 +701,9 @@ spends a few supervisor tokens and ends in a note.
 
 **One case arrives by event rather than by tick: a pending `AskUserQuestion`.**
 The `PreToolUse` hook already reports every one of them to the daemon
-unconditionally, with no posture check on the agent side — the daemon owns
-posture and sees every event anyway. The fork is in the daemon's RPC handler:
+unconditionally, with no supervision check on the agent side — the daemon knows
+whether a shift is running and sees every event anyway. The fork is in the
+daemon's RPC handler:
 with a shift active and the terminal's repo in automation (§8), a pending
 question becomes a case and **hastens an immediate mini-tick for that
 terminal**, running the same pure decision function the clock would have run
@@ -714,7 +766,7 @@ feature.
 
 **The gate binds each desk to its project.** A verb arriving from a desk whose
 target worktree lies outside that desk's project is refused in compiled code,
-before posture or standing rules are consulted (§3, §8). This deserves stating
+as a routing error (§3). This deserves stating
 as a security property rather than as tidiness: the blast radius of a confused,
 mis-briefed, or prompt-injected supervisor shrinks from the whole fleet to one
 project. A desk that reads a hostile instruction in some agent's transcript can,
@@ -723,9 +775,10 @@ at worst, act on repos it was already supervising.
 **What stays global.** The project is the unit of judgment and action. It is
 deliberately not the unit of everything:
 
-- **One posture switch**, fleet-wide. P0-2 asks for a single gesture to hand the
-  fleet over; per-project switches would be N gestures and N chances to leave
-  one on.
+- **One on/off switch**, fleet-wide (§3). P0-2 asks for a single gesture to hand
+  the fleet over; per-project switches would be N gestures and N chances to
+  leave one on. Mode *selection* is per project — that is conduct, not
+  lifecycle.
 - **One shift, one `ledger.jsonl`, one `account.md`, one morning queue.**
   Escalations and proposals from every desk land in the same needs-you batch.
   The ledger envelope gains a project tag (§6), so every line says which desk
@@ -790,12 +843,14 @@ whichever member repo the project designated.
 exactly one project. There is no such thing as an order spanning two
 policies — that is the invariant the project exists to create.
 
-- **One playbook, not one per mode.** Mode arrives as context in the work
-  order; per-mode advice is a prose section ("When running autonomously: …").
-  Separate files for each mode would make prompt wording appear to enforce the
-  mode and would invite promises the daemon cannot enforce. Any mode-specific
-  behavior that must *bind* must become a standing rule that the daemon
-  enforces.
+- **One playbook, all of a project's modes inside it.** A mode is a named
+  section of this file (§3), and the active one's text arrives in every work
+  order. Keeping them together is what lets a reader see a project's whole
+  conduct — every posture it can take — in one place, and it is why selecting a
+  mode changes nothing about which file gets resolved. Separate files per mode
+  would split that view for no gain, and would invite the reader to imagine the
+  daemon choosing between them; it chooses nothing, it delivers the section the
+  operator selected.
 - **Seeding without overwriting:** tool-provided content lives only in the level
   the tool owns: the shipped default, which updates may freely replace. The
   operator and repository levels are written exactly once. An explicit
@@ -819,6 +874,13 @@ policies — that is the invariant the project exists to create.
   unsure, and treat prompts guarding merges, credentials, or anything
   irreversible as deserving a human.** The default contains no commands, bot
   names, or organization-specific content.
+- **The shipped default also defines the two baseline modes** (§3), so every
+  project has `attended` and `autonomous` available without authoring anything.
+  `attended` says: act on the unambiguous, propose anything consequential,
+  escalate anything you would want a human to see tonight. `autonomous` says:
+  act on your judgment, escalate what genuinely needs a decision, and batch the
+  rest for morning. Both are prose, and a project that wants different conduct
+  writes its own section rather than arguing with these.
 
 **A playbook may ship advisory scripts, and TBD never runs them.** A project
 that wants its own tool prompts classified can put a script in its `.agents/`
@@ -828,18 +890,18 @@ it returns. This stays on the right side of the screen rule (§2) precisely
 because TBD is not in the loop: the daemon neither invokes the script nor
 interprets its output, and no compiled behavior branches on it. It is one more
 input to a model's judgment, in the tier that is allowed to read screens. A
-script that wanted to *bind* behavior would have to become a standing rule
-through the usual ratification path, where a human reads it first.
+script's output is advice to a model, never an input to compiled behavior.
 
 **There is no `supervision.json`.** An earlier draft included a small,
 structured policy file for the daemon to enforce. It would have held overrides
 for consequential verbs, never-act lists, and thresholds. That content now
-lives in the standing-rules store, which the daemon needs anyway:
+lives in the operator's `supervision.json` and in mode prose (§8):
 
 1. **Compiled conservative defaults** cover a brand-new repo safely.
-2. **Operator actions become standing rules**: approving a proposal offers
-   "and everything like this" — scoped by verb / project / repo / worktree, for
-   the shift or forever. One row, one click.
+2. **Operator answers become durable decisions**: resolving a proposal offers
+   "and everything like this" — for the shift or for good — and the answer then
+   rides in every work order within that scope, so the desk knows it and stops
+   asking (P1-5, §8). One click, and it informs rather than permits.
 3. **Playbook prose promotes by one confirmation**: the first time the
    supervisor encounters a sentence that sounds like a hard rule ("never touch
    an open PR without a human"), it asks once, "make this standing?" A yes
@@ -879,13 +941,13 @@ attention — it never changes what any verb is allowed to do.
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
   **action** records a drive, wake, or pause, including the payload, the state
-  snapshot that justified it, and the posture. A separate
+  snapshot that justified it, and the active mode. A separate
   **outcome** line references the action's ID and records what was observed.
-  **lifecycle** records shift open, shift close, posture changes, and desk
+  **lifecycle** records shift open, shift close, mode changes, and desk
   recycles (§9). **proposal** and
   **resolution** record proposed actions and their results. **escalation** and
   **resolution** record questions and their answers. **decision** records a
-  standing rule created from any source. **anomaly** records an unknown state,
+  durable answer the operator gave (P1-5, §8). **anomaly** records an unknown state,
   an old premise found during send-time verification, a failed fetch, or a dark
   supervisor. Deliberate inaction is recorded as seriously as action. **note**
   is the one kind whose content is supervisor-authored prose — attributed prose
@@ -914,7 +976,7 @@ attention — it never changes what any verb is allowed to do.
 ### Ledger line shape
 
 Every line shares one envelope —
-`{ "id", "ts", "shift", "posture", "project", "kind" }` — plus a payload
+`{ "id", "ts", "shift", "mode", "project", "kind" }` — plus a payload
 determined by its kind. The envelope is what makes the views in this section
 plain queries: filter by kind, window by `ts`, group by `shift` or by
 `project`. The project tag is what lets one shared ledger stay honest about
@@ -944,18 +1006,19 @@ What each kind's payload carries:
   and the operator's optional explanation.
 - **`escalation`** — the exact item, the exact proposed command, and the
   recommendation.
-- **`decision`** — the rule created, its lifetime (shift or always), and its
-  origin.
+- **`decision`** — the answer the operator gave, its lifetime (shift or
+  always), its scope, and its origin. Delivered to desks in later work orders as
+  an instruction (§8), never consulted as a permission.
 - **`anomaly`** — the category and the detail.
 - **`note`** — the author, the text, and optional references to other lines.
-- **`lifecycle`** — opening, closing, posture change, or desk recycle; this is
+- **`lifecycle`** — opening, closing, mode change, or desk recycle; this is
   the kind behind every line §9 describes.
 
 Two representative lines, an action and the outcome that later references it:
 
 ```json
-{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","posture":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
-{"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","posture":"autonomous","project":"acme-web","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
+{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
+{"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
 ```
 
 Field lists beyond this are implementation detail and will grow. The envelope,
@@ -969,10 +1032,12 @@ changed by concurrent actors, and appears live. **Append-only history** is
 never used to allow or block behavior; an error there produces an inaccurate
 account, not a wrong action. The third category is **human-authored process**.
 
-- **DB: the posture. One config column. Nothing else supervision-specific.**
-  Every gated verb reads it. Both the app and CLI can set it, and all surfaces
-  must see the same value immediately after a change. That is the purpose of
-  the shared configuration object.
+- **DB: the on/off switch. One config column. Nothing else
+  supervision-specific.** The sweep reads it. Both the app and CLI can set it,
+  and all surfaces must see the same value immediately after a change — that is
+  the purpose of the shared configuration object. Mode selections are *not*
+  here; they are per-project operator choices in `supervision.json` (§8), which
+  keeps this column a single fleet-wide gesture (P0-2).
 - **Shift directory** (`~/tbd/shifts/<shift-id>/`): `ledger.jsonl` +
   `account.md`. The proposal queue is **not a separate data store**. It is an
   in-memory view of the ledger: created proposals minus resolved proposals.
@@ -982,21 +1047,17 @@ account, not a wrong action. The third category is **human-authored process**.
   between multiple writers and therefore the need for a table. Shift-scoped
   decisions are ledger events viewed in the same way. They end with the shift,
   and the shift directory contains everything needed for debugging or sharing.
-- **Durable files**: `~/tbd/supervision/standing-rules.json` — the rules
-  enforced at the command gate, plus the project definitions (§5) and the
-  automation membership and default stance that ride on them (§8). The operator
-  owns the file. It is atomically
-  rewritten after each operator action and can be edited by hand. The daemon
-  reloads it after a change because these are the operator's rules. It also
-  loads the file into memory for per-verb lookups. Every change appends a
-  ledger line. The current rules and the history of how they were created
-  therefore live in the appropriate places. The playbook tiers (§5) are also
+- **Durable files**: `~/tbd/supervision/supervision.json` — the project
+  definitions (§5), automation membership and its default stance, and the
+  per-project mode selections (§8). The operator owns the file. It is atomically
+  rewritten after each operator action and can be edited by hand; the daemon
+  reloads it after a change and holds it in memory for lookups. Every change
+  appends a ledger line, so the current selections and the history of how they
+  came about live in the appropriate places. The playbook tiers (§5) are also
   durable files.
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the sweep's temporary tracking. A daemon restart during a shift loses
-  them. The result is a one-cycle delay, not a broken promise. State used to
-  gate an action needs durability only when an operator or mode label has made
-  a promise about it.
+  them. The result is a one-cycle delay, not a broken promise.
 - **Crash rule** (replay finds an approved proposal with no action line):
   never automatically execute an old approval. Report it as an anomaly:
   "approved at 7:58, daemon restarted before acting; approve again if still
@@ -1006,44 +1067,63 @@ account, not a wrong action. The third category is **human-authored process**.
 Net property: **supervision adds one column to TBD's database.** Everything
 else it knows is in files a human can open.
 
-## 8. Remembered things: two kinds, two homes
+## 8. Remembered things: advice, selection, decisions
 
-There are exactly two places durable knowledge lives, and they need precise
-names because they are easy to confuse:
+Three things persist between shifts. They are easy to confuse because all three
+shape what a desk does — and none of them is a permission.
 
-1. **Binding rules** — enforced by the daemon at the verb gate, no model in the
-   loop: `~/tbd/supervision/standing-rules.json`. The format is structured
-   because prose cannot be enforced without interpretation. It is local to the
-   operator because the operator must approve any rule that binds their daemon
-   ("repos advise; operators bind"). Rules are created only by operator actions:
-   approval generalization, prose promotion, or CLI. A small settings surface
-   makes them inspectable. That surface is a view of the file with a list,
-   links to origins, and a revoke action. The file remains the source of truth.
-2. **The playbook** — advisory prose, human-curated, travels with the repo
-   (`.agents/supervision.md`, three-tier, resolved per project §5). The tool
-   never writes it after seeding.
+1. **Advice** — the playbook: prose, human-curated, travelling with the repo
+   (`.agents/supervision.md`, three-tier, resolved per project §5). It carries
+   both general guidance and the named **mode** sections a project can run (§3).
+   The tool never writes it after seeding.
+2. **Selection** — which mode each project runs, which projects are in
+   automation, and how repos group into projects. Operator-owned, stored in
+   `~/tbd/supervision/supervision.json`, and the entirety of what "operators
+   bind" now means.
+3. **Decisions** — answers the operator gave once and should not be asked for
+   again (P1-5). These are *instructions* carried to desks in work orders, not
+   permissions consulted by code.
+
+### Where P1-5 landed: decisions are instructions
+
+"Never re-ask me" was one of the arguments for a binding tier in an earlier
+draft: only a remembered approval at a gate, it said, could stop the queue asking
+again at 3 a.m., 4 a.m., and 5 a.m. With the gate gone the requirement remains
+and its mechanism gets simpler — because nothing needed permission in the first
+place. What the operator wanted was for the desk to *know the answer*.
+
+So `resolve --scope` survives with a smaller and clearer meaning. Answering a
+proposal or an escalation with `--scope this-shift` or `--scope always` writes a
+`decision` ledger line, and decisions are **carried in every subsequent work
+order within their scope**. The desk reads "the operator has already said:
+archive merged scratch worktrees without asking" and does not ask. It is not
+*stopped* from asking. It is informed, which is what actually prevents the
+repeat.
+
+This is a real reduction, not a relabeling. The old shape needed the same answer
+in two places — a rule the gate consulted and a fact the desk knew — and the two
+could drift. Now there is one: the record, projected into the work order.
 
 ### How a shift's experience reaches the playbook (P2-1)
 
-An earlier draft had a third kind: raw prose the machine appended to a
+An earlier draft had a further kind: raw prose the machine appended to a
 per-project `learnings.md` via a `learn` verb, included in every future work
 order, taking effect immediately. It is **removed**, because it was bridging two
 different needs and existing machinery serves each of them better.
 
 **Within a shift, a learning is a `note`.** Notes are in the shift record, and
-the shift record is what every replacement desk is briefed from (§9) and what
-the account renders. A desk that discovers at 1 a.m. that a repo's test suite
-needs a warm cache does not need a new file to tell its 4 a.m. successor —
-that was never the hard part.
+the shift record is what every replacement desk is briefed from (§9) and what the
+account renders. A desk that discovers at 1 a.m. that a repo's test suite needs a
+warm cache does not need a new file to tell its 4 a.m. successor — that was never
+the hard part.
 
 **Across shifts, a learning is repo advisory content, and that has a home and a
-change process already: the playbook, changed by a reviewed commit.** So at
-shift end, if learning-shaped notes exist, the desk's flush step (§9) **proposes
+change process already: the playbook, changed by a reviewed commit.** So at shift
+end, if learning-shaped notes exist, the desk's flush step (§9) **proposes
 spawning a capture worker** — an ordinary worker worktree, briefed to fold the
-shift's learnings into that project's `.agents/supervision.md` and open a PR.
-Spawning a worker is consequential, and it is deliberately *not* a verb: it
-arrives as a **proposal** in the same queue as everything else, survives shift
-end like every other unresolved item (§9), and is approved in the morning batch
+shift's learnings into that project's `.agents/supervision.md` and open a PR. It
+arrives as a **proposal** in the same queue as everything else, survives shift end
+like every other unresolved item (§9), and is resolved in the morning batch
 alongside the rest. Supervision uses the machinery it supervises — a worktree, an
 agent, a PR, a review — rather than inventing a private channel for its own
 memory.
@@ -1053,89 +1133,15 @@ already said a learning worth keeping was promoted into the playbook by "a human
 commit" — but named no mechanism, so it was a follow-up someone had to remember.
 Now the commit *is* the mechanism, and the curation step is ordinary PR review.
 
-**The trade-off, stated plainly.** Cross-shift learning now costs PR latency,
-and it cannot take effect silently. Both are the point. Nothing becomes standing
-advice for a repo without a human reading the diff — which is the same authority
-principle as "repos advise; operators bind," applied to the tool's own output.
-The gap this leaves — a lesson learned tonight does not steer tonight's other
-desks — is covered by notes within a shift and is not worth a file that every
-future work order must carry and no one ever reviews.
+**The trade-off, stated plainly.** Cross-shift learning costs PR latency, and it
+cannot take effect silently. Both are the point. Nothing becomes standing advice
+for a repo without a human reading the diff — the same authority principle as
+"repos advise; operators bind," applied to the tool's own output. The gap this
+leaves — a lesson learned tonight does not steer tonight's other desks — is
+covered by notes within a shift, and is not worth a file that every future work
+order must carry and no one ever reviews.
 
-The two remaining kinds connect in one controlled way. The supervisor
-encounters something in the shift record that keeps mattering and looks like a
-hard rule; it proposes making it binding; one approval turns it into a standing
-rule. A single confirmation connects prose to enforcement.
-
-### Why the binding tier is structured at all (post-#509 accounting)
-
-GitHub now has merge authority, so few verbs remain behind the gate:
-`drive`, `wake`, and `pause` (§3). A fourth, `approve-a-prompt`, was removed
-along with the P2-3 resolution (§2) and stays removed: it was a blanket,
-model-free auto-grant of permission prompts, and nothing in this design grants a
-permission on an agent's behalf. Answering an agent's question does not restore
-it and did not earn a verb of its own — it advances exactly one dialog, the one
-whose existence, verbatim content, and outcome all reach the daemon through
-machine interfaces, by dismissing it and replying as text through `drive`.
-That is judgment delivered on the ordinary send path, never an auto-grant, which
-is why it sits behind this same gate rather than beside it. It is reasonable to
-ask whether prose could replace the binding tier. It cannot, for exactly four
-reasons. The design must not grow beyond what these reasons require:
-
-1. **The attended-mode promise (P0-3).** The verb gate consults posture and
-   rules without using a model. If prose could relax them, the system would
-   either remain maximally conservative forever or let the supervisor control
-   its own capabilities by interpreting prose. The latter would make the mode
-   label a false promise again.
-2. **"Never re-ask me" (P1-5).** The daemon's queue would repeat the question.
-   Only a remembered approval at the gate can prevent it from asking again at
-   3 a.m., 4 a.m., and 5 a.m.
-3. **Never-lists must hold when nobody is watching.** When the model is the
-   only active decision-maker, a binding rule cannot depend on a prompt.
-4. **`drive` injects instructions — in either variant.** Fleet agents run with
-   permission checks skipped, so a supervisor message can carry any instruction
-   at all to an agent with full tool access. A reply to a question is the same
-   text through the same composer; and keys are, if anything, *less* constrained
-   — a keypress can accept a permission prompt the repo raised precisely to stop
-   an agent. This is the argument that collapsed the two into one verb (§3), and
-   it cuts the same way here: both need the gate, neither is the lighter act.
-   Merge authority could move to the code-hosting service, but only TBD controls
-   this action. No other system can enforce the gate in front of it.
-
-Because the scope is small, the rule store remains a flat list with scope,
-verb, stance, and lifetime. It has no language for conditions, no rule
-interactions, and no Secure Hash Algorithm (SHA) pinning. The remaining risks
-do not justify anything more complex.
-
-### What the gate is and is not protecting against
-
-This must be said plainly, because a gate invites the reader to assume more than
-it delivers. **Every process here runs as one user.** The daemon, the app, the
-fleet agents, and the desks share a uid, and desks have shells. Nothing at the
-operating-system level stops a desk from invoking an operator-only CLI command,
-calling any RPC method directly over the socket, or editing
-`standing-rules.json` on disk. A desk that decided to do those things could.
-
-So the gate, the daemon-only ledger write path, and the desk→project binding
-(§5) are protection against **confusion, drift, and prompt injection travelling
-the paved road** — the harness offers a desk verbs and nothing else, so the
-overwhelmingly likely failure (a model doing the wrong available thing, or a
-model talked into it by text it read in a transcript) has no path to the wrong
-outcome. They are emphatically *not* protection against an adversarial process
-running as the same user and deliberately going around them. That boundary would
-require OS-level sandboxing — separate uids, a restricted socket, or a broker
-process — which this design deliberately does not build and should not pretend
-to. Naming the limit is the point: the value of the four reasons above is
-undiminished by it, because every one of them is about what a *cooperating but
-fallible* supervisor can be relied upon to do.
-
-The storage decision is settled: standing rules are a **file**
-(`~/tbd/supervision/standing-rules.json`), loaded into memory at startup,
-checked in memory for every verb, atomically rewritten after each operator
-action, and reloaded after a manual edit. "Structured" describes the format and
-its reader: the gate cannot interpret sentences. It does not imply database
-storage. With tens of rules and one writer at a time, a database adds nothing.
-
-### The file shape
+### The supervision file
 
 ```json
 {
@@ -1147,118 +1153,106 @@ storage. With tens of rules and one writer at a time, a database adds nothing.
     }
   },
   "automation": { "default": "in", "projects": { "acme-checkout": "out" } },
-  "rules": [
-    {
-      "id": "<uuid>",
-      "verb": "drive",
-      "scope": { "project": "acme-checkout" },
-      "stance": "allow",
-      "origin": { "shift": "<shift-id>", "ledger": "<line-id>" },
-      "createdAt": "2026-07-27T03:12:00Z"
-    }
-  ]
+  "modes": { "acme-checkout": "autonomous" }
 }
 ```
 
 `projects` holds **only declared multi-repo projects.** A repo named in no
 project is its own singleton, implicitly named by the repo — so an installation
-that groups nothing has an empty (or absent) `projects` object, and the file
-looks exactly as it did before the grouping layer. Each declared project lists
-its member `repos` and designates one `policy` source: `{ "repo": … }` for a
-member repo's `.agents/supervision.md`, or `{ "operator": true }` for the
-operator-level file (§5). A repo may appear in at most one project; the loader
-rejects the file if one appears twice, because "exactly one" is the property the
-whole grouping rests on.
+that groups nothing has an empty (or absent) `projects` object. Each declared
+project lists its member `repos` and designates one `policy` source:
+`{ "repo": … }` for a member repo's `.agents/supervision.md`, or
+`{ "operator": true }` for the operator-level file (§5). A repo may appear in at
+most one project; the loader rejects the file if one appears twice, because
+"exactly one" is the property the whole grouping rests on.
 
-`scope` has exactly four shapes — `{}` (fleet-wide), `{ "project": … }`,
-`{ "repo": … }`, and `{ "worktree": … }` — and nothing richer; there is still no
-language for conditions, by the argument above. The project shape is a scope,
-not a condition: it names a set the operator already declared, and the gate
-resolves it by lookup rather than by evaluating anything. `stance` is `allow` or
-`deny`. `origin` links every rule to the ledger line that created it, which is
-what the inspection surface's "why" link resolves (§10): no rule exists without
-a recorded reason for existing.
+`automation` is the sweep's configuration: which projects generate cases at all
+(below). `modes` records the operator's mode selection per project — a project
+absent from the object runs `attended` (§3). Both are selections. Neither is a
+rule, and there is nothing in this file for code to evaluate: the loader reads
+topology and choices, and every consumer does a lookup.
 
-The file carries **only lifetime-always rules.** A shift-scoped rule is a
-decision line in that shift's ledger, projected into the same in-memory rule set
-the gate consults (§7), and gone when the shift ends. So the logical rule shape —
-scope, verb, stance, lifetime — is realized across two stores, split on the
-lifetime field, which is exactly why the file itself needs no lifetime field.
+**What is no longer here, and the reversal that deserves owning.** There is no
+`rules` array: no verbs, no scopes, no stances, no lifetimes, no origins. The
+verb gate that consumed them is gone (§3), so the vocabulary that fed it went
+with it. And the file's *name* is a reversal this document should state plainly
+rather than quietly perform: an earlier draft listed `supervision.json` under
+"Deliberately not built," on the grounds that its content had melted into the
+standing-rules store. The melting ran the other way in the end — the rules
+dissolved, and what was left was topology and selection, which is exactly the
+small structured file the earlier draft had rejected. §15 records the reversal.
 
-Automation membership is the dedicated `automation` object rather than a rule
-with a special verb: same file, same loader, same gate, but a distinct question
-("may the daemon act in this project at all?") that is asked before any verb is
-considered.
+The storage decision is otherwise unchanged: a **file** at
+`~/tbd/supervision/supervision.json`, loaded into memory at startup, rewritten
+atomically after each operator action, reloaded after a manual edit, and
+hand-editable throughout. With tens of entries and one writer at a time, a
+database adds nothing.
 
 ### Project automation membership (operator-configurable)
 
-Which projects the supervisor may act on is an operator setting, not a design
-constant. **Membership sits at the project level because the project is the
-acting unit** — a desk acts for a project, so "may the daemon act here" is a
-question about a project, and marking half of a declared project out of
-automation would mean a desk supervising repos it may not act on. It has two
-pieces:
+Which projects the supervisor watches is an operator setting, not a design
+constant, and it is **sweep configuration** — an input-side answer to "which
+projects generate cases," in the same family as the never-touch flags of §5.
+**Membership sits at the project level because the project is the acting unit**:
+a desk works for a project, so "should the daemon be working here" is a question
+about a project, and marking half a declared project out would mean a desk
+supervising repos it is meant to leave alone. It has two pieces:
 
 - **A default stance**, chosen by the operator: default-in (every project is
-  automatable unless marked out) or default-out (no project is automatable until
-  marked in). The system ships with default-in, because the autonomous posture
-  is already an explicit operator choice and this matches the old system's
-  watch-everything behavior; an operator who wants deliberate onboarding flips
-  one control.
-- **A per-project mark**: in, out, or follow-the-default. Only explicit marks
-  are stored; a project with no mark follows the default, so flipping the
-  default never requires touching individual entries. Singletons are marked by
-  their repo's implicit project name, so per-repo membership is still exactly
-  one mark per repo when nothing is declared.
+  supervised unless marked out) or default-out (none until marked in). The system
+  ships with default-in, because turning supervision on is already an explicit
+  operator choice and this matches the old system's watch-everything behavior; an
+  operator who wants deliberate onboarding flips one control.
+- **A per-project mark**: in, out, or follow-the-default. Only explicit marks are
+  stored, so flipping the default never requires touching individual entries.
+  Singletons are marked by their repo's implicit project name, so per-repo
+  membership is still exactly one mark per repo when nothing is declared.
 
-Both live in `standing-rules.json` in the same file as the verb rules and the
-project definitions — same loader, same gate, one source of truth for "may the
-daemon act here, and as whom." Membership is checked before any verb executes
-**and before proposals are created**: a project that resolves to *out* generates
-no proposals in attended mode and no actions in autonomous mode, and its desk is
-never spawned. It still appears in the fact sweep and the account —
-observability is never gated, and "project X needed attention but is out of
-automation" is the honest report. Because membership is enforced at the same
-model-free gate as the never-lists, it holds when nobody is watching (reason 3
-above).
+A project that resolves to *out* produces no cases, so no work orders, so no
+desk is ever spawned for it. It still appears in the fact sweep and the account —
+observability is never withheld, and "project X needed attention but is out of
+supervision" is the honest report.
 
 ### Prior art in the current system (and what #509 changed)
 
-Before the redesign, the system represented these concepts in four ways. It
-had a hardcoded `STANDING_RULE` prompt string, which compiled one team's
-closeout command and review-bot name into the app. This is the exact warning
-example from the brief. The merge gate had a `clearance` table with
-per-PR, SHA-pinned operator approvals that code enforced. A prompt asked the
-desk agent to consult `approved-prs.jsonl`, so it was binding only until the
-model forgot, which is the false mode promise described in P0-3. Finally, the
-desk's notes file served as both memory and action log, creating the
-"self-report" problem in P1-7.
+Before the redesign, the system represented these concepts in four ways. It had a
+hardcoded `STANDING_RULE` prompt string, which compiled one team's closeout
+command and review-bot name into the app — the exact warning example from the
+brief. The old merge gate had a `clearance` table of per-PR, SHA-pinned operator
+approvals that code enforced. A prompt asked the desk agent to consult
+`approved-prs.jsonl`, so it was binding only until the model forgot. And the
+desk's notes file served as both memory and action log, creating the "self-report"
+problem in P1-7.
 
-PR #509, merged on 2026-07-26, correctly deleted the merge gate and its
-clearance and audit stores because GitHub branch protection now decides whether
-a PR may merge. This has two consequences. First, the clearance table is
-history, not a reason for this design. Its shape happened to be useful: scoped,
-enforced, revocable, and auditable. But the four reasons above provide the full
-case for standing rules; deleted code does not. Second, after #509 the system
-has **no** enforced mechanism for operator decisions. The verb gate and
-standing rules will be the first such mechanism, not an upgrade.
+PR #509, merged on 2026-07-26, deleted the merge gate and its clearance and audit
+stores, because GitHub branch protection now decides whether a PR may merge. Two
+of those four defects are worth carrying forward as warnings rather than as
+requirements. The `STANDING_RULE` string is why conduct is authored per project
+here instead of compiled (§3). The self-report problem is why the daemon writes
+every action line itself (§6) — the one piece of this design that genuinely
+constrains a desk, and it constrains what a desk can *claim*, never what it can
+*do*.
+
+The clearance table is history, not a model. Its shape was scoped, enforced,
+revocable, and auditable — and this design keeps only the last of those, which is
+the one that survives contact with the trust bet (§3, §16).
 
 ## 9. Shift lifecycle (P2-2)
 
-- **A shift is born from the posture switch, and only from it.** off →
+- **A shift is born from the on/off switch, and only from it.** off →
   attended/autonomous creates a shift ID, creates `~/tbd/shifts/<id>/`, and
   writes the opening ledger line. It starts **no desks**: at shift open there is
   nothing yet to supervise, and a desk exists to hold one project's cases. A
   switch between attended ↔ autonomous during a shift keeps the *same* shift and
-  adds a posture-change ledger line. Every action line already records its
-  posture. Only switching to off ends a shift.
+  adds a mode-change ledger line. Every action line already records the mode it
+  ran under. Only switching supervision off ends a shift.
 - **Desks are born lazily, one per project, on that project's first case.**
   A project with a quiet night never gets a desk at all (§4). Each desk is a
   scratch space tracked by ID rather than by its display string, receives the
   supervision skill through the plugin mechanism, and is bound to its project at
-  the gate for its whole life (§5). Its first delivered message is an opening
-  briefing: the posture, the standing rules that apply to its project, its one
-  resolved playbook, and anything unresolved from the previous shift **for that
+  its project for its whole life (§5). Its first delivered message is an opening
+  briefing: its project's active mode and conduct, its one resolved playbook,
+  and anything unresolved from the previous shift **for that
   project**. The daemon gets those unresolved items by replaying the previous
   shift's ledger and filtering on the project tag (§6). Escalations never
   silently disappear when a shift ends — but an escalation whose project gets no
@@ -1274,15 +1268,16 @@ standing rules will be the first such mechanism, not an upgrade.
   deleting its scratch worktree. The capture proposal outlives the desk that
   raised it: it is an ordinary unresolved queue item, and unresolved items
   already survive shift end, so the operator approves or drops it in the morning
-  batch like everything else. Notes add context but are not required; a dead supervisor cannot
+  batch like everything else. Notes add context but are not required; a dead
+  supervisor cannot
   block closing, and neither can three of them. All durable data already lives
   outside the desks. Desks accumulated in the old system because nothing
   initiated cleanup. Here, the same operator action that ends the shift disposes
   of every desk the night created — a count the ledger knows, so none can be
   missed.
 - **Each shift starts fresh on purpose.** No resumed supervisor context.
-  Continuity lives in artifacts: the playbook, standing rules, and earlier
-  ledgers. The *system* learns; one session's context does not. If a
+  Continuity lives in artifacts: the playbook, the operator's selections, and
+  earlier ledgers. The *system* learns; one session's context does not. If a
   supervisor dies during a shift, the daemon writes an anomaly line, creates a
   replacement for that project in the same shift, and briefs it with its
   project's account so far.
@@ -1297,8 +1292,8 @@ context pays for that context on every turn. Waiting for auto-compaction is the
 expensive path. Instead, the daemon recycles a desk deliberately, using the
 mid-shift replacement path above. This works because of a decision already
 made: a supervisor externalizes everything durable as it goes (ledger,
-standing rules, notes, account, escalations). **Its handoff document
-already exists — it is the shift record.**
+notes, account, escalations). **Its handoff document already exists — it is the
+shift record.**
 
 Recycling is **per desk**, evaluated independently for each: a busy project's
 desk may recycle twice in a night while three quiet projects' desks never do.
@@ -1316,9 +1311,10 @@ The sequence, all daemon-driven:
    supervisor is wedged, the recycle proceeds without it — that is exactly the
    crash path, which was already designed to be survivable.
 4. **Recycle** — tear down that desk's session, spawn fresh into the same shift
-   and the same project, and deliver the standard replacement briefing (posture,
-   standing rules, that project's account so far, its open escalations, its one
-   playbook) **plus the predecessor's transcript path**. Anything that lived only in the old context — a hunch
+   and the same project, and deliver the standard replacement briefing (the
+   active mode, that project's account so far, its open escalations, its one
+   playbook) **plus the predecessor's transcript path**. Anything that lived
+   only in the old context — a hunch
    mid-investigation, steering the operator typed earlier — is not lost; it is
    demoted from context to disk, and the new supervisor can search its
    predecessor's transcript on demand without paying for that history on every
@@ -1330,7 +1326,7 @@ not. Recycling a desk touches no fleet agent and destroys no work state,
 because desks were built disposable — it is self-maintenance of the
 supervision machinery, not an act on the fleet. It appears in the account
 ("3:12 a.m. — acme-web desk recycled at 261k context, 4 notes flushed"), not
-in the proposal queue. If a recycle ever loses something that mattered, that
+in the queue. If a recycle ever loses something that mattered, that
 is an artifact-externalization bug to fix — the answer is "that should have
 been in the record," never "a human should have approved the recycle."
 
@@ -1400,16 +1396,16 @@ Principle: **you take action where you already read the relevant information.**
 - **A supervisor's tab stays a plain conversation.** Typed instructions are
   conversation. They steer the session but do not set policy. The two durable
   channels for rules are
-  the playbook (advisory) and standing rules (binding); the chat is neither.
-  If you type something rule-shaped, the supervisor may propose making it
-  standing through the normal ratification path.
+  the playbook and its mode sections (§3); the chat is neither. If you type
+  something conduct-shaped that should outlast the shift, it belongs in the
+  playbook, and the desk may propose a capture PR that puts it there (§8).
 - **Chat steers; the act resolves.** These are not two routes to the same
   place, and the difference is worth being exact about. Answering an escalation
   *from the queue* — the panel's Answer button, or `tbd supervise resolve <id>
   --answer "…"` — is a gesture that reaches the daemon, and the daemon then:
   appends the `resolution` ledger line; drops the item from the queue
   projection; turns any scope choice into a `decision` and, if it is
-  lifetime-always, a standing rule the gate will consult; carries the answer to
+  lifetime-always, a durable decision later work orders carry; delivers the answer to
   the owning desk in its next work order; and stops the next shift's briefing
   from raising it again. Typing the same words into a desk's tab does none of
   those five things. Three reasons this is a real distinction and not
@@ -1421,13 +1417,20 @@ Principle: **you take action where you already read the relevant information.**
   which is why **`resolve` is an operator command and appears nowhere in the
   supervisor's verb set (§3).** Give a desk any form of it and resolutions become
   self-report, the exact defect P1-7 names. Resolutions exist only as operator
-  gestures reaching the daemon, and that authorship *is* the evidence. The shipped playbook closes the loop
+  gestures reaching the daemon, and that authorship *is* the evidence. The
+  shipped playbook closes the loop
   from the other side (§5): a desk told something in chat acts on it and says
   "record it from the queue so it sticks."
+- **Attending the desk live is now trivial, which resolves a concern the gate
+  used to carry.** With no proposal conversion, watching a desk work is just
+  reading its tab and its account: you see what it did the instant the ledger
+  line lands, and if you want it to do something you type it. There is no
+  double-consent problem — no state where an operator has told a desk one thing
+  in chat while a queued proposal says another — because chat steers and the
+  record is written by the daemon either way (above).
 - **Fleet supervision gets its own Settings tab.** It replaces the current
   Settings section and holds three sections, all views of the one
-  `standing-rules.json`: **projects**, **automation membership**, and the
-  standing-rules inspection surface described next.
+  `supervision.json`: **projects**, **modes**, and **automation membership**.
   - The **projects** section declares multi-repo projects: name it, pick its
     member repos, designate its policy source (a member repo's
     `.agents/supervision.md`, or the operator-level file). Repos in no project
@@ -1435,19 +1438,22 @@ Principle: **you take action where you already read the relevant information.**
     shows the whole fleet's grouping rather than only the declared part — a
     reader must be able to answer "which desk would act on this repo?" without
     inferring anything.
+  - The **modes** section shows each project with its active mode and the modes
+    its resolved playbook defines, and lets the operator select among them (§3).
+    A project with no selection shows `attended` and says it is the default
+    rather than a choice, so "nobody has picked" never reads as "somebody picked
+    this."
   - **Automation membership** is the default-in/default-out control plus the
     per-project in/out/follow-default list (§8).
-  The tab takes the subsystem's name; "automation" survives only in the
-  membership setting's own name, where it is precise (in or out of automation =
-  may the daemon act here on its own). All three follow the house
-  file-backed-settings pattern: tilde-abbreviated path shown, copy button,
-  manual edits respected. Every control has a CLI twin
-  (`tbd supervise project ...`, `tbd supervise automation ...`).
-- **Standing rules get a simple inspection surface** with the rule list, scope,
-  origin, and a revoke action. The origin links to the ledger for the shift
-  that created the rule. The file-backed view shows the tilde path, provides a
-  copy button, and respects manual edits. Its purpose is to answer "why did the
-  daemon do that on its own?" at a glance.
+  All three follow the house file-backed-settings pattern: tilde-abbreviated
+  path shown, copy button, manual edits respected. Every control has a CLI twin
+  (`tbd supervise project ...`, `tbd supervise mode ...`,
+  `tbd supervise automation ...`).
+
+  There is deliberately **no rules-inspection surface**, because there are no
+  rules to inspect (§3). The question it existed to answer — "why did the daemon
+  do that on its own?" — is answered better by the account: every action line
+  carries the mode it ran under and the state snapshot that justified it.
 - **Morning flow**: open TBD → open the last shift's account → answer the
   needs-you batch in minutes (P0-10). Each answer creates a decision line.
   Each "never again" is a scope choice attached to an answer the operator is
@@ -1460,9 +1466,8 @@ and shapes**: exact flag spellings may grow, command and subcommand names may
 not drift. Everything the app can do appears here, because nothing exists only
 as a button.
 
-**Desk verbs — gated** (attended → proposal; autonomous → execute, ledger line,
-60-second re-check). All three are additionally bound to the calling desk's
-project (§5).
+**Desk verbs — acting** (execute, ledger line, 60-second re-check). None is
+gated; each is addressed to the calling desk's project (§3, §5).
 
 ```
 tbd supervise drive --terminal <id> --text "…"
@@ -1479,7 +1484,7 @@ to re-verify, so the ledger line records the capture it read instead, and sends
 are paced (§2, §6). `wake` unparks a session with outstanding work. `pause`
 halts a runaway (§13). Exactly one payload flag per call.
 
-**Desk verbs — ungated** (ledger line only).
+**Desk verbs — recording** (ledger line only).
 
 ```
 tbd supervise escalate --item "…" --command "…" --recommendation "…"
@@ -1489,18 +1494,23 @@ tbd supervise note     --text "…" [--ref <line-id>]
 **Operator — the queue.**
 
 ```
-tbd supervise queue   [--resolved|--all] [--type proposal|escalation] [--project <name>]
+tbd supervise queue   [--resolved|--all] [--type proposal|escalation] [--project
+<name>]
 tbd supervise resolve <id> --approve [--scope this-once|this-shift|always]
 tbd supervise resolve <id> --reject  [--reason "…"]
 tbd supervise resolve <id> --answer  "…" [--scope …]
 ```
 
-**Operator — posture.** `off → attended|autonomous` opens a shift;
-`attended|autonomous → off` closes it (§9).
+**Operator — the switch and the modes.** Turning supervision on opens a shift;
+turning it off closes it (§9). Mode selection is per project and takes effect on
+the next work order (§3).
 
 ```
-tbd supervise posture
-tbd supervise posture off|attended|autonomous
+tbd supervise on
+tbd supervise off
+tbd supervise status
+tbd supervise mode <project> <mode-name>
+tbd supervise mode <project>            # show the active mode and the choices
 ```
 
 **Operator — projects** (§5).
@@ -1512,14 +1522,12 @@ tbd supervise project delete <name>
 tbd supervise project move   <repo> --to <project|singleton>
 ```
 
-**Operator — automation membership and standing rules** (§8).
+**Operator — automation membership** (§8).
 
 ```
 tbd supervise automation default in|out
 tbd supervise automation set <project> in|out|follow-default
 tbd supervise automation list
-tbd supervise rules list
-tbd supervise rules revoke <rule-id>
 ```
 
 **Deliberately absent**, each with its argument elsewhere in this document:
@@ -1537,8 +1545,16 @@ tbd supervise rules revoke <rule-id>
 - **Per-desk lifecycle commands** (spawn, recycle, dispose) — desks are daemon
   self-maintenance, born on their project's first case and disposed at shift
   close; there is nothing for an operator to drive (§9).
-- **Per-project posture** — one switch, fleet-wide; "not this project" is an
-  automation mark, not a posture (§5, §8).
+- **Per-project on/off** — one switch, fleet-wide; "not this project" is an
+  automation mark (§5, §8). Mode is per project, but mode is conduct, not
+  lifecycle (§3).
+- **Rules of any kind — allow, deny, approve-lists, prompt-approvals.** No verb
+  is gated, so there is nothing to permit or forbid. The operator's controls are
+  selection and visibility; the reasoning, and the bet it rests on, are in §3
+  and §16.
+- **`posture`** — the tri-state switch became on/off plus per-project mode
+  selection (§3). An older draft's `tbd supervise posture attended` is now
+  `tbd supervise on` plus `tbd supervise mode <project> attended`.
 
 ## 11. Capacity awareness (P1-1, decomposed)
 
@@ -1659,8 +1675,8 @@ counted from appended transcript JSONL records without parsing their content;
 the rate of hook events; and whether commits or the diff stayed unchanged
 across N cycles, which the git sweep already knows. Each threshold is a
 compiled global default. Per-repository overrides are deliberately deferred
-(§15): the old system had none, numeric tuning does not fit the standing-rules
-shape (§8 deliberately has no language for parameters), and a new repo-table
+(§15): the old system had none, numeric tuning has no home in `supervision.json`
+(§8 holds topology and selection, not parameters), and a new repo-table
 column would quietly break §7's one-column property. If real shifts prove a
 repo needs different numbers, a repo-table column is the house pattern for it —
 added as a conscious amendment to §7, not a side effect.
@@ -1668,8 +1684,9 @@ added as a conscious amendment to §7, not a side effect.
 Crossing a threshold does not itself cause an action. It creates a case in the
 next work order, such as "agent Y: 31 turns, no commits in 90 minutes." The
 supervisor reads the transcript and decides. If the agent is truly looping, it
-uses `pause`. This is a consequential verb, so it becomes a proposal in
-attended mode and passes through the standing-rules gate in autonomous mode.
+uses `pause`, and what it does with that judgment is its mode's conduct to say —
+a cautious mode tells it to propose and escalate, a bolder one tells it to act
+(§3). Either way the daemon records the act, never arbitrates it.
 If the agent is making legitimate progress on a hard problem, the supervisor
 adds a note and leaves it alone.
 
@@ -1698,13 +1715,14 @@ preserves §7's one-column property, which is a real property of the design and
 not an accounting convenience: the moment numbers become columns, "where is this
 system's state?" stops having a one-line answer. If real shifts prove a number
 wrong, promoting that one number to a config column is a conscious amendment to
-§7, argued on its own merits — the same posture taken toward per-repo threshold
+§7, argued on its own merits — the same stance taken toward per-repo threshold
 overrides (§15).
 
 ## 14. Out-of-band heartbeat (P3-1)
 
 On every sweep tick, the daemon writes a small `status.json` file in the shift
-directory. It contains the posture and last-sweep timestamp. The watchdog is an
+directory. It contains whether supervision is on, each project's active mode,
+and the last-sweep timestamp. The watchdog is an
 optional `launchd` job with one rule: *if a shift claims to be active and the
 status file has not changed in about 10 minutes, raise a notification.* It
 reads a file instead of the socket or DB, so a dead daemon cannot make the
@@ -1718,13 +1736,31 @@ to inaction at the largest scale.
 - **A verdict enum / work-arc schema** — interpretations of work differ by
   repository, team, and person. A compiled classification would recreate the
   old system's defect.
-- **`supervision.json`** — melted into standing rules; repos advise, operators
-  bind.
-- **Per-mode playbooks** — one playbook receives the mode as context. Separate
-  files would invite promises the daemon does not enforce.
-- **The act-with-veto-window human-in-the-loop (HITL) variant** — a missed veto
-  allows an unapproved action. Attended mode must not silently become
-  autonomous mode.
+- ~~**`supervision.json`**~~ — **reversed, and the reversal is the honest
+  record.** An earlier draft rejected a small structured policy file on the
+  grounds that its content had melted into the standing-rules store. The melt
+  ran the other way: the rules dissolved entirely with the verb gate (§3), and
+  what remained — project topology, automation membership, per-project mode
+  selection — is exactly the small structured file that was rejected. It now
+  exists, under that name, holding only selections. See §8.
+- **The verb gate, and rules of every kind** — allow rules, deny rules, posture
+  consulted per call, consequential verbs converted into proposals. Removed in
+  full as over-engineering: it was machinery for a failure mode these models are
+  not expected to exhibit, and TBD declines to build a second anti-injection
+  layer on top of models already resistant to injection. What survives —
+  send-time re-verification, daemon-written ledger lines, the one-minute
+  re-check — survives because it is freshness and accounting, and would earn its
+  place in a system with no rules at all. The bet this rests on is named in §3
+  and revisited in §16.
+- **Per-mode playbook files** — a project's modes are named sections of its one
+  playbook (§3, §5), so a reader sees every posture a project can take in one
+  place. Splitting them across files would also invite the reader to imagine the
+  daemon choosing between them; it chooses nothing.
+- **The act-with-veto-window human-in-the-loop (HITL) variant** — historical:
+  it was rejected when the design still had a proposal queue that converted
+  verbs, on the grounds that a missed veto allows an action nobody approved.
+  With the gate gone (§3) there is no conversion to add a veto window to, so the
+  rejection stands for a mechanism that no longer exists.
 - **Cross-account rebalancing** — assumes one person's account arrangement. If
   it exists at all, it is playbook prose for a supervisor that already has the
   usage facts.
@@ -1739,7 +1775,7 @@ to inaction at the largest scale.
   permission config, delivered through the settings overlay), config-answerable
   dialogs pre-answered by seeders, and genuine questions escalated. See §2.
 - **Per-repo threshold overrides** — global compiled defaults only, at parity.
-  Numbers do not fit the standing-rules shape, and a repo-table column would
+  Numbers have no home in `supervision.json`, and a repo-table column would
   break the one-column property (§7); if operation proves the need, that
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
@@ -1754,16 +1790,14 @@ to inaction at the largest scale.
   proposes a capture worker that opens that PR instead. The cost — PR latency,
   and no silent adoption — is the feature. See §8.
 - **Separate verbs for answering, messaging, and key-sending** — all three are
-  one gated `drive` with payload variants. Replying to a question is the send
+  one `drive` with payload variants. Replying to a question is the send
   path (the dismissal is delivery-adapter behavior, the "this is a response"
   quality rides in the action's state snapshot); and text is not a lighter act
   than keys, since a message to a permissions-bypassed agent is arbitrary
-  instruction injection (§8, reason 4). Identical gate semantics, one verb. The
-  cost is real and accepted: a standing rule cannot distinguish "may answer when
-  asked" from "may nudge unprompted," nor "text yes, keys no." Those are
-  speculative until a shift asks for one, and the amendment path is a subverb
-  namespace in the rule vocabulary (`drive.keys`) — never condition language,
-  which §8 refuses on its own grounds. See §2, §3.
+  instruction injection (§3). Identical semantics, one verb. This cost almost
+  nothing to begin with and costs nothing now: with no rules to scope, a mode's
+  conduct prose draws whatever distinction a project wants — "answer questions
+  freely, nudge sparingly" is one sentence. See §2, §3.
 - **A per-project prompt-approval layer** — no matcher, no allowlist, no
   auto-grant, no table of prompts TBD says yes to. Answering a permission prompt
   is an ad hoc judgment act through `drive`, and nothing about it accumulates.
@@ -1773,8 +1807,8 @@ to inaction at the largest scale.
   one `resolution` kind differing only in `result`, so one `resolve` command
   names the category and a flag names the act. Scope attaches once; new outcomes
   are flags. The panel keeps three labeled buttons over the one RPC. See §10.
-- **Per-project shifts, postures, or ledgers** — the project is the unit of
-  judgment and action, not of lifecycle. One posture switch keeps P0-2's
+- **Per-project shifts, switches, or ledgers** — the project is the unit of
+  judgment and conduct, not of lifecycle. One on/off switch keeps P0-2's
   one-gesture handover; one shift, ledger, account, and morning queue keep every
   lifecycle surface single. "Not this project tonight" is already expressible as
   an automation mark (§8). See §5.
@@ -1783,13 +1817,14 @@ to inaction at the largest scale.
   a lifecycle other subsystems must respect. Graduating it is a conscious later
   step if another subsystem ever needs it. See §5.
 - **OS-level isolation of desks from the daemon** — everything runs as one
-  user, so the gate protects against confusion and injection through the paved
-  road, not against an adversarial same-uid process. Real isolation would need
-  separate uids or a broker; deliberately out of scope, and named rather than
-  implied. See §8.
-- **Repo-shipped binding rules** — binding requires approval from each
-  operator. If teams later require shared binding rules, the promotion flow is
-  where that capability can return.
+  user, and with the gate gone there is not even a paved-road constraint left to
+  circumvent: a desk has a shell and could call any RPC directly. Real isolation
+  would need separate uids or a broker. Deliberately out of scope, and named
+  rather than implied — it is the same bet as §3, seen from the operating
+  system's side.
+- **Repo-shipped binding rules** — nothing binds, so nothing can be shipped
+  that binds. A repo ships *modes* (§3), which are advice until an operator
+  selects one; that selection is what "operators bind" means now.
 - **DB tables for the queue, decisions, or ledger** — the queue is a view
   derived from the ledger, decisions live in a file, and each shift has its own
   JSONL ledger. Supervision adds one column to the database.
@@ -1830,8 +1865,8 @@ sweep, which measures but does not interpret, and the operator reading one
 account in the morning. The design has traded a cross-project view that was
 never reliable for an isolation guarantee that is.
 
-The design makes the system affordable (P0-6) and enforceable (P0-3) by limiting
-its only reasoning components to the facts that compiled code measures. If that
+The design makes the system affordable (P0-6) by limiting its only reasoning
+components to the facts that compiled code measures. If that
 limit is too restrictive, operators will ask, "Why didn't anyone notice X
 overnight?" The place to address that problem is the same deferred escape valve
 as before: a periodic, low-frequency digest work order presenting a fleet-wide
@@ -1844,11 +1879,46 @@ no verbs. That keeps "one desk per policy" intact while restoring the view.
 This document deliberately does not design that feature. It should be built
 only when the need is real.
 
+### The trust bet
+
+The second criticism is newer and larger, and it deserves to sit beside the
+first rather than under it. **This design has no enforcement.** No verb is
+gated; no rule can forbid an act; "attended" instructs but does not restrain.
+Everything that stops a desk from doing the wrong thing is either authored
+conduct it chooses to follow, or an operator noticing afterward in an account
+that is, admittedly, written the instant anything happens.
+
+That is a deliberate bet on model quality (§3), and it should be stated at its
+strongest against itself. If a desk misreads its mode, or reasons its way past
+conduct prose, or is talked into something by text in a transcript it was asked
+to read, there is no second line. The action lands, the ledger records it
+faithfully, and the operator finds out — with `drive` that may mean an
+instruction already delivered to an agent running with permissions bypassed. The
+old draft's gate would not have caught most of that either (it could forbid
+verbs by scope, not judge intentions), but it would have caught the blunt cases,
+and blunt cases are the ones that actually happen at 3 a.m.
+
+What makes the bet reasonable rather than reckless: the models are trusted to
+follow instructions and are already injection-resistant, so a second mechanism
+inside TBD would duplicate a defense that exists upstream and be weaker than it;
+the blast radius is bounded by project (§5) and by automation membership (§8),
+which are selection, not enforcement, but do limit *reach*; and the record is
+immediate and complete, so nothing is hidden, only late. The bet is that "late
+and visible" beats "prevented and complicated" for a single-operator tool whose
+worst outcome is a fleet agent given a bad instruction.
+
+**If it proves wrong, this is the paragraph to come back to.** The failure
+signature would be an account showing acts an operator would have refused, more
+than once, not attributable to a bad transcript or a stale premise. The
+minimum honest response is not to rebuild the gate but to make the mode's
+conduct sharper and the account louder; the gate returns only if that fails
+too, and it returns as what it always was — a blunt scope check, not a mind.
+
 Two secondary honest costs:
 
 - **Cold start.** Conservative defaults and operator approval make the first
   few nights heavy on approvals. The system becomes more useful only as
-  standing rules and playbook refinements accumulate. An operator who does not make that
+  playbook and mode refinements accumulate. An operator who does not make that
   investment will see a repetitive queue and may decide the subsystem is
   useless. The old system worked on the first night *for its one team* because
   its policy was built into the product. Supporting different teams introduces
