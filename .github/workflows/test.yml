@@ -186,9 +186,15 @@ jobs:
       # takes the complement of steps 1+3, the quiet pass takes
       # TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
       #
-      # Floors: today TBDDaemonTests is 2194, TBDAppTests 1725, TBDSharedTests
-      # 502, TBDCLITests 127, TBDDaemonLiveTests 57 (verified with
-      # `swift test --list-tests`). The floors sit well below each step's total
+      # Floors: `swift test --list-tests` today reports TBDDaemonTests 2194,
+      # TBDAppTests 1725, TBDSharedTests 502, TBDCLITests 127,
+      # TBDDaemonLiveTests 57 (4605 total). What actually EXECUTES is slightly
+      # lower for step 2 — 2342, not 1725+502+127=2354 — because a handful of
+      # tests are conditionally skipped at runtime. The floors are set against
+      # the executed counts (the summary line these steps grep), which is the
+      # only number the check can see; don't "correct" them to the listed
+      # totals. Observed in CI on this PR: 2194 / 2342 / 57.
+      # The floors sit well below each step's total
       # so ordinary test additions/removals never trip them. Their job is NOT
       # to catch an unlisted new target (the complement shape already does
       # that) — it is to catch a *collapse or rename* of a target that is

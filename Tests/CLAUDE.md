@@ -156,12 +156,17 @@ from).
 
 **Past that pair the margin is thin — 240 s is not roomy, and the real numbers
 are worth knowing before someone reaches for a raise.**
-`GatedIntervalSleepTests.returnsAfterExpectedPollCount` and
-`DaywatchRunnerTests.testSubsequentTicksAtInterval` each chain **5**
-`waitForSuspension` calls, i.e. 225 s of the 240 s ceiling. And counting
-`waitFor` at 90 s plus each clock wait at 45 s, **9 of the 13**
-`PaneRepairCoordinatorTests` have a worst case above 240 s — not just the
-6-deep chain (540 s) usually cited. Every one of those is still consistent with
+**Count `advanceWhenSuspended` as a `waitForSuspension`** — it opens with one
+(`await waitForSuspension(...)`, then `advance`), so it pays the full 45 s
+guard. Grepping only for the literal `waitForSuspension(` undercounts every
+chain below, which is exactly the miscount a PR #547 reviewer made.
+
+On that basis: `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
+(3 `advanceWhenSuspended` + 2 `waitForSuspension`) and
+`DaywatchRunnerTests.testSubsequentTicksAtInterval` (2 + 3) each pay **5**
+guards, i.e. 225 s of the 240 s ceiling. And counting `waitFor` at 90 s plus
+each clock wait at 45 s, **9 of the 13** `PaneRepairCoordinatorTests` have a
+worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
 the invariant, because only an already-failing test walks a full chain of
 timeouts and the first diagnostic is already recorded by then.
 

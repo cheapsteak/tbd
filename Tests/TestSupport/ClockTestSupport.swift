@@ -67,9 +67,15 @@ public extension Trait where Self == TimeLimitTrait {
     /// "240 s" as comfortable headroom — several existing chains sit near or
     /// past it, all consistent with the invariant (only an already-failing test
     /// ever pays a full chain of timeouts), but with nothing to spare:
-    /// - `GatedIntervalSleepTests.returnsAfterExpectedPollCount` and
-    ///   `DaywatchRunnerTests.testSubsequentTicksAtInterval` each chain **5**
-    ///   `waitForSuspension` calls: 225 s against a 240 s ceiling.
+    /// Count `advanceWhenSuspended` as a `waitForSuspension` when you tally a
+    /// chain — it *calls* one before advancing, so it pays the full guard.
+    /// Grepping only for the literal `waitForSuspension(` undercounts every
+    /// figure below (a PR #547 reviewer did exactly that and read these as
+    /// 2 and 3 rather than 5).
+    /// - `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
+    ///   (3 `advanceWhenSuspended` + 2 `waitForSuspension`) and
+    ///   `DaywatchRunnerTests.testSubsequentTicksAtInterval` (2 + 3) each pay
+    ///   **5** guards: 225 s against a 240 s ceiling.
     /// - In `PaneRepairCoordinatorTests`, **9 of 13** tests have a worst case
     ///   above 240 s (counting `waitFor` at 90 s and each clock wait at 45 s),
     ///   not just the one 6-deep chain (540 s) usually cited.
@@ -218,9 +224,12 @@ public extension TestClock {
     ///     returns in milliseconds, so the raise costs passing runs nothing.
     ///
     ///     What 45 s does **not** buy is a deep chain: at five of these waits
-    ///     the test is at 225 s of a 240 s limit, and two live tests are exactly
-    ///     there (`GatedIntervalSleepTests.returnsAfterExpectedPollCount`,
-    ///     `DaywatchRunnerTests.testSubsequentTicksAtInterval`). That is
+    ///     the test is at 225 s of a 240 s limit, and two tests in the fast
+    ///     pass are exactly there — `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
+    ///     and `DaywatchRunnerTests.testSubsequentTicksAtInterval` (both count
+    ///     `advanceWhenSuspended` toward the five; see `.clockDriven` above).
+    ///     ("Fast pass", not "live": tier-3 `TBDDaemonLiveTests` pins its own
+    ///     limit and is unaffected.) That is
     ///     consistent with the invariant — only a failing test walks the whole
     ///     chain — but it is not headroom. The remedy if it bites is to shorten
     ///     the chain (`Tests/CLAUDE.md`: keep advances in single digits; inject
