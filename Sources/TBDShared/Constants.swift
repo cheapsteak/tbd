@@ -133,6 +133,18 @@ public enum TBDConstants {
         claudeSettingsOverlayPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Directory holding user-authored markdown stylesheets for the file
+    /// viewer: `~/tbd/markdown-themes`. The selected theme is the file
+    /// `<themeID>.css` inside it, where `themeID` comes from the
+    /// `markdown.viewer.theme` user default. A user-authored editable blob, so
+    /// it is file-backed rather than a DB column. Honors TBD_HOME.
+    public static func markdownThemesDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("markdown-themes")
+    }
+    public static var markdownThemesDir: URL {
+        markdownThemesDir(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Base directory for per-note (tab) content files. Honors TBD_HOME.
     public static func noteContentDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("notes")

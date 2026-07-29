@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 @preconcurrency import Highlightr
 import MarkdownUI
+import TBDShared
 
 // MARK: - CodeViewerPaneView
 
@@ -445,6 +446,28 @@ private struct RenderedContentView: View {
     /// change because this view is not `.id(filePath)`-keyed, so without this
     /// a file switch would briefly paint the previous file's HTML.
     @State private var renderedPath: String?
+    /// Bumped when the resolved user stylesheet changes on disk, which
+    /// re-keys `loadContent`'s `.task(id:)` and re-renders the visible document.
+    @State private var cssRevision: Int = 0
+    /// The CSS actually inlined into `renderedHTML`. Compared against a fresh
+    /// resolution so a filesystem event that does not change the effective
+    /// stylesheet — a sibling theme file being written, or the second of the
+    /// two events an atomic rename-replace produces — costs no re-render.
+    @State private var appliedCSS: String?
+
+    /// Two watchers, deliberately: one on the stylesheet file (catches in-place
+    /// writes and, via `FileWatcher`'s own re-open, atomic rename-replace), one
+    /// on the themes directory (catches the file being *created* after the
+    /// viewer opened, which a file watcher cannot see because there is no inode
+    /// to open yet).
+    private let stylesheetWatcher = FileWatcher()
+    private let themesDirWatcher = FileWatcher()
+
+    /// Where the selected theme's stylesheet lives, or nil when no theme is
+    /// selected (the bundled default is in force and nothing can change it).
+    private var stylesheetPath: String? {
+        MarkdownStylesheet.userStylesheetURL()?.path
+    }
 
     var body: some View {
         Group {
@@ -477,9 +500,33 @@ private struct RenderedContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: "\(filePath)#\(revision)#\(useWebView)") {
+        .task(id: "\(filePath)#\(revision)#\(useWebView)#\(cssRevision)") {
             await loadContent()
         }
+        // Re-armed on every `cssRevision` bump, which is what recovers a watch
+        // whose stream finished because the stylesheet was deleted, and what
+        // picks up a file that did not exist when the viewer opened.
+        .task(id: "md-css-file#\(useWebView)#\(stylesheetPath ?? "")#\(cssRevision)") {
+            guard useWebView, let path = stylesheetPath else { return }
+            for await _ in stylesheetWatcher.changes(for: path) {
+                reloadStylesheetIfChanged()
+            }
+        }
+        .task(id: "md-css-dir#\(useWebView)#\(stylesheetPath ?? "")") {
+            guard useWebView, stylesheetPath != nil else { return }
+            let directory = TBDConstants.markdownThemesDir
+            guard MarkdownStylesheet.ensureThemesDirectoryExists(directory) else { return }
+            for await _ in themesDirWatcher.changes(for: directory.path) {
+                reloadStylesheetIfChanged()
+            }
+        }
+    }
+
+    /// Bump only when the stylesheet the next render would use actually differs
+    /// from the one already on screen.
+    private func reloadStylesheetIfChanged() {
+        guard MarkdownStylesheet.resolve() != appliedCSS else { return }
+        cssRevision &+= 1
     }
 
     private func loadContent() async {
@@ -500,10 +547,14 @@ private struct RenderedContentView: View {
         renderedPath = filePath
 
         if useWebView {
+            // Resolved per render, never cached: that is what lets an edit to
+            // the user stylesheet show up without relaunching the app.
+            let css = MarkdownStylesheet.resolve()
+            appliedCSS = css
             let html = await MarkdownRenderService.shared.render(
                 path: filePath,
                 worktreeRoot: worktreePath,
-                css: MarkdownDocumentBuilder.defaultCSS
+                css: css
             )
             guard !Task.isCancelled else { return }
             renderedHTML = html

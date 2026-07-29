@@ -38,12 +38,6 @@ struct MarkdownDocumentBuilderTests {
         #expect(!doc.contains("<script"))
     }
 
-    @Test("bundled default stylesheet loads and is non-empty")
-    func defaultCSSLoads() {
-        #expect(MarkdownDocumentBuilder.defaultCSS.contains("--md-fg"))
-        #expect(MarkdownDocumentBuilder.defaultCSS.contains("prefers-color-scheme"))
-    }
-
     @Test("returns nil when the renderer rejects the input")
     func nilOnRendererFailure() throws {
         let dir = try tempDir()

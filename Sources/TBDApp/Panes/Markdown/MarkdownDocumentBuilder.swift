@@ -1,7 +1,4 @@
 import Foundation
-import os
-
-private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 
 /// Assembles the full HTML document handed to the webview.
 ///
@@ -37,15 +34,4 @@ enum MarkdownDocumentBuilder {
         </html>
         """
     }
-
-    /// The bundled stylesheet. Falls back to an empty string if the resource
-    /// is missing, which renders unstyled rather than failing the document.
-    static let defaultCSS: String = {
-        guard let url = Bundle.module.url(forResource: "markdown-default", withExtension: "css"),
-              let css = try? String(contentsOf: url, encoding: .utf8) else {
-            logger.error("bundled markdown-default.css missing; rendering unstyled")
-            return ""
-        }
-        return css
-    }()
 }
