@@ -165,10 +165,17 @@ struct MarkdownWebView: NSViewRepresentable {
             return true
         }
 
+        /// The annotation set on `decisionHandler` must match WebKit's modern
+        /// declaration EXACTLY. A near-match compiles and still dispatches at
+        /// runtime, but emits a "nearly matches optional requirement" warning
+        /// whose two offered fix-its (`private`, or move-to-extension) would
+        /// drop the `@objc` exposure and turn this whole allowlist into dead
+        /// code — silently, since `decidePolicyFor` never fires under
+        /// `swift test`.
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+            decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
         ) {
             let url = navigationAction.request.url
             let isOwnLoad = consumeOwnLoad(for: url)
