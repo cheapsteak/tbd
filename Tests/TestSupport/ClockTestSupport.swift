@@ -25,12 +25,79 @@ public extension Trait where Self == TimeLimitTrait {
     /// test` run just stops. That is far worse than a red test, because CI
     /// burns its job timeout and the failure names no suite.
     ///
-    /// This bounds it. `.minutes(1)` is not a performance budget — it is
-    /// Swift Testing's floor granularity (time limits are expressed in whole
-    /// minutes), and it is a hang-catcher. A clock-driven tier-1 test should
-    /// finish in milliseconds; if it takes a minute, it is wedged, and you
-    /// want the failure attributed to the test rather than to the runner.
-    static var clockDriven: Self { .timeLimit(.minutes(1)) }
+    /// This bounds it. The value is not a performance budget — it is a
+    /// hang-catcher, and Swift Testing expresses time limits in whole minutes,
+    /// so the only dial available is an integer count of them. A clock-driven
+    /// tier-1 test should still finish in milliseconds; if it takes minutes, it
+    /// is wedged, and you want the failure attributed to the test rather than
+    /// to the runner.
+    ///
+    /// **Why 4 and no longer 1.** The floor argument (whole minutes) says the
+    /// limit cannot be *smaller* than a minute; it never argued that one minute
+    /// was right. What pins the value from below are the two wall-clock waits a
+    /// clock-driven test can sit on: this file's `waitForSuspension` (45 s,
+    /// re-derived below) and `ciSafeDeadline` (90 s,
+    /// `Tests/TBDDaemonTests/ControlModeTestSupport.swift`). Clock-driven
+    /// suites really do consume the latter — `AttachRPCOrchestrationTests` and
+    /// `PaneRepairCoordinatorTests` are both `.clockDriven, .serialized` and
+    /// between them hold 48 `waitFor` call sites — so the two values race and
+    /// must be derived together.
+    ///
+    /// The invariant is **not** "every chained wait in a test fits inside this
+    /// limit". `waitFor` is non-throwing on timeout, so chains are real, and the
+    /// deepest is 6 waits in one `PaneRepairCoordinator` test — unsatisfiable
+    /// then (6 x 30 s vs `.minutes(1)`) and unsatisfiable now. The invariant is:
+    /// **this limit must afford the first full deadline plus the rest of an
+    /// ordinary test.** The first timeout's `Issue.record` fires immediately
+    /// with its named diagnostic, so it survives even if this limit later
+    /// truncates the test; chains beyond the first belong to a test that is
+    /// already failing, and truncating those is deliberate.
+    ///
+    /// 4 minutes = 240 s satisfies that:
+    /// - one `waitFor` (90 s) + one `waitForSuspension` (45 s) = 135 s ✓
+    /// - two `waitFor` = 180 s ✓
+    /// - two `waitForSuspension` = 90 s ✓ — this keeps the original "a test that
+    ///   waits twice must afford both waits" property the one-minute pairing
+    ///   was reasoned from
+    ///
+    /// 240 s stays far above any legitimate clock-driven run, which finishes in
+    /// milliseconds.
+    ///
+    /// **The margin is thin, and it is worth naming how thin.** Do not read
+    /// "240 s" as comfortable headroom — several existing chains sit near or
+    /// past it, all consistent with the invariant (only an already-failing test
+    /// ever pays a full chain of timeouts), but with nothing to spare:
+    /// - `GatedIntervalSleepTests.returnsAfterExpectedPollCount` and
+    ///   `DaywatchRunnerTests.testSubsequentTicksAtInterval` each chain **5**
+    ///   `waitForSuspension` calls: 225 s against a 240 s ceiling.
+    /// - In `PaneRepairCoordinatorTests`, **9 of 13** tests have a worst case
+    ///   above 240 s (counting `waitFor` at 90 s and each clock wait at 45 s),
+    ///   not just the one 6-deep chain (540 s) usually cited.
+    ///
+    /// **If these start tripping, shorten the chain — do not raise this limit
+    /// again.** `Tests/CLAUDE.md` already requires advance chains to stay in
+    /// single digits, and a 5-deep chain is at the edge of that rule; injecting
+    /// pacing values to cross a threshold in 2–3 advances is the remedy. Raising
+    /// 240 s buys room for chains that only an already-failing test walks, and
+    /// costs every genuinely wedged test that much longer to be attributed.
+    ///
+    /// **Scope: this is sized for the fast parallel pass.** Every input above —
+    /// the ~4536-test population, the arming latency it inflates, the two
+    /// wall-clock waits it makes expensive — is a property of the in-process
+    /// parallel run. Tier-3 suites in `Tests/TBDDaemonLiveTests` execute in the
+    /// quiet pass (`--filter '^TBDDaemonLiveTests\.' --no-parallel`, idle
+    /// machine), where arming latency is milliseconds and none of that applies.
+    ///
+    /// So a tier-3 suite whose time limit is its **regression detector** rather
+    /// than a hang guard must pin its own `.timeLimit` instead of inheriting
+    /// this one — a raise here would silently disarm the proof, with nothing
+    /// going red to say so. Precedent, all pinned to `.timeLimit(.minutes(1))`
+    /// with the reasoning in their suite docs:
+    /// `SubprocessTimeoutStarvationTests` (a `sleep 90` child must outlive the
+    /// limit), `GitManagerTimeoutTests` and `SubprocessTimeoutTests` (a
+    /// regressed EOF-waiting drain must outlive it). Don't widen those to
+    /// `.clockDriven` for consistency's sake.
+    static var clockDriven: Self { .timeLimit(.minutes(4)) }
 }
 
 // MARK: - TestClock
@@ -114,24 +181,58 @@ public extension TestClock {
     /// means a megaYield-free virtual clock replacing `TestClock`, which is a
     /// shared-contract change and deliberately not bundled here.
     ///
+    /// Lowering the megaYield count is **refuted** as a remedy at CI's regime,
+    /// and this closes the open question in issue #496. `TASK_MEGA_YIELD_COUNT=1`
+    /// was measured against an unset baseline across interleaved runs under
+    /// induced load, population held constant: p90 26.5 s / 31.2 s -> 26.0 s /
+    /// 29.4 s, p99 26.6 s -> 27.0 s. That is noise. The megaYield is a real but
+    /// **secondary** contributor; the dominant term is the number of runnable
+    /// tasks in the process (see the population note on `timeout` below), which
+    /// is why CI shards the fast pass in two rather than tuning this knob.
+    ///
     /// - Parameters:
     ///   - timeout: hang guard, and the value is a two-sided constraint. It must
-    ///     stay well under `.clockDriven`'s one-minute limit (Swift Testing's
-    ///     floor granularity) — a test that waits twice has to afford both waits
-    ///     and still get this helper's diagnostic, rather than tripping the
-    ///     suite limit first and reporting an uninformative "wedged". But it
-    ///     must also clear the worst-case real arming latency: at 5 s, the
-    ///     appearance suite failed 4 of 6 full-target runs on this handshake.
-    ///     15 s is ~10x the observed healthy-path arming cost inside a
-    ///     1332-test target while still leaving half the per-test budget for a
-    ///     twice-waiting test. Only a genuinely un-armed timer ever pays it.
+    ///     stay well under `.clockDriven`'s limit — a test that waits twice has
+    ///     to afford both waits and still get this helper's diagnostic, rather
+    ///     than tripping the suite limit first and reporting an uninformative
+    ///     "wedged". But it must also clear the worst-case real arming latency:
+    ///     at 5 s, the appearance suite failed 4 of 6 full-target runs on this
+    ///     handshake.
+    ///
+    ///     The pair is therefore derived together, and 15 s / `.minutes(1)` was
+    ///     derived against a 1332-test target inside a ~3000-test process. What
+    ///     invalidated it is population growth: 3013 -> 4536 tests in three
+    ///     weeks. Swift Testing runs every non-serialized test in one process
+    ///     with no concurrency cap, so real arming latency scales with the
+    ///     process-wide runnable-task count, not with the suite under test —
+    ///     mined CI runs show p50 per-test reported duration at ~1/3 of total
+    ///     wall time even on green runs, i.e. tests spend most of their
+    ///     "duration" suspended waiting for a turn.
+    ///
+    ///     Re-derived for the current population: 45 s here, so a twice-waiting
+    ///     test needs 90 s, inside `.clockDriven`'s 4-minute (240 s) limit with
+    ///     room for the rest of the test — and 45 s plus one 90 s
+    ///     `ciSafeDeadline` wait is 135 s, also inside it. See `.clockDriven`
+    ///     above for the full triple and the invariant that licenses it. Only a
+    ///     genuinely un-armed timer ever pays this timeout — a healthy handshake
+    ///     returns in milliseconds, so the raise costs passing runs nothing.
+    ///
+    ///     What 45 s does **not** buy is a deep chain: at five of these waits
+    ///     the test is at 225 s of a 240 s limit, and two live tests are exactly
+    ///     there (`GatedIntervalSleepTests.returnsAfterExpectedPollCount`,
+    ///     `DaywatchRunnerTests.testSubsequentTicksAtInterval`). That is
+    ///     consistent with the invariant — only a failing test walks the whole
+    ///     chain — but it is not headroom. The remedy if it bites is to shorten
+    ///     the chain (`Tests/CLAUDE.md`: keep advances in single digits; inject
+    ///     pacing), not to raise 240 s. Re-derive all three numbers again if the
+    ///     population moves materially.
     ///   - pollInterval: how long to step aside between probes. Each probe costs
     ///     a megaYield, so probing tightly floods the pool with background tasks
     ///     and starves the very task being waited for — lazier is better.
     /// Note both are `Swift.Duration`, not this clock's generic `Duration`: they
     /// are real wall-clock quantities for the scheduling handshake, deliberately
     /// unrelated to the virtual time the clock hands out.
-    func waitForSuspension(timeout: Swift.Duration = .seconds(15),
+    func waitForSuspension(timeout: Swift.Duration = .seconds(45),
                            pollInterval: Swift.Duration = .milliseconds(25),
                            sourceLocation: SourceLocation = #_sourceLocation) async {
         let deadline = ContinuousClock.now.advanced(by: timeout)

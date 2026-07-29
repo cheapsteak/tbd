@@ -85,6 +85,123 @@ in the parallel pass is merely the status quo, but moving a fast
 deterministic suite into the serial pass taxes every PR forever. When in
 doubt, leave it in the parallel pass.
 
+## Population is the scheduler, and it is a moving target
+
+Swift Testing runs every non-serialized test in **one process with no
+concurrency cap**, and all targets compile into that process. So per-test
+scheduling latency scales with the *total* population, not with the suite you
+are looking at. Mined CI runs put p50 per-test reported duration at ~1/3 of
+total wall time on green runs as well as red — a trivial test "takes" 16–29 s
+because it is mostly suspended waiting for a turn. Population went 3013 → 4536
+in three weeks. Two consequences, both load-bearing.
+
+**The fast pass is two sequential steps in one job.** `test.yml` runs
+`--filter '^TBDDaemonTests\.'` then
+`--skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'`, sharing one build.
+Halving the in-flight population halves the tail: measured under induced load
+with arms interleaved, means over 5 iterations, p90 26.4 s → 14.6 s and p50
+8.8 s → 7.6 s, for **+26 s** of wall time (56 s → 82 s — the second invocation
+re-pays SPM's no-op build check and process startup). Quote that figure, not the
++6 s a single iteration showed; it did not survive the other four. This is not
+the "sharding across runners" that
+`docs/specs/2026-07-24-test-hardening-design.md` §1 rejected and §2 lists as a
+non-goal — that was about extra *jobs* paying the 5-concurrent-macOS-job cap and
+a second ~2 min build. **Step 2 is a complement, not an enumeration, and that
+is deliberate.** Two `--filter` lists would have reintroduced the hazard the
+spec's §3 names when it calls the target boundary "compiler-enforced, cannot
+silently zero-match like a `--filter` regex": `swift test --filter` exits GREEN
+on zero matches, so a new `TBDFooTests` named in neither list would run in
+**neither** pass with nothing going red — and the floors could not catch that,
+because adding a target reduces no existing step's count. Written as a
+complement, step 2 absorbs any new target automatically, and the three passes
+partition the package by construction. The per-step floors have a narrower job:
+catching a target that *is* named in one of these regexes collapsing or being
+renamed, where the regex would zero-match or over-skip its way to a green run
+of nothing. Keep them updated.
+
+**Wall-clock handshake deadlines are hang-catchers sized against the population
+of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`)
+and `waitForSuspension`'s `timeout` / `.clockDriven`'s limit
+(`Tests/TestSupport/ClockTestSupport.swift`) bound a hang; they assert nothing
+and cost passing runs nothing. They are the first things to re-derive when the
+population moves materially — that is what turned the `ControlModeInputHealth`,
+`ControlModeInputRouter` and "Archived search debounce" reds into a ~42% red
+rate on `main` with **zero** logic assertions failing.
+
+**Derive the three together, and know the invariant.** They are currently
+`ciSafeDeadline` 90 s, `waitForSuspension` 45 s, `.clockDriven`
+`.timeLimit(.minutes(4))` = 240 s. The suite limit and the two wait deadlines
+race each other for real: `AttachRPCOrchestrationTests` and
+`PaneRepairCoordinatorTests` are both `.clockDriven` **and** consume
+`ciSafeDeadline`, across 48 `waitFor` call sites. Every one of those sites is
+unguarded — `waitFor` is `@discardableResult` and non-throwing on timeout, so
+the test continues and chained waits are real (the `try` covers only the inner
+`Task.sleep`).
+
+The rule is **not** "all N chained waits must fit inside the suite limit". That
+was never satisfiable — the deepest chain is 6 waits in one
+`PaneRepairCoordinator` test, and 6 × 30 s already blew the old one-minute
+limit. The rule is:
+
+> The suite limit must afford the **first** full deadline plus the rest of an
+> ordinary test. The first timeout's `Issue.record` fires immediately and
+> carries the named diagnostic, so it always survives even if the limit later
+> truncates the test. Chains beyond the first belong to a test that is already
+> failing; truncating those is acceptable and deliberate.
+
+Checked against 240 s: one `waitFor` + one `waitForSuspension` = 135 s ✓; two
+`waitFor` = 180 s ✓; two `waitForSuspension` = 90 s ✓ (this is the "a test that
+waits twice must afford both waits" property the old pairing was reasoned
+from).
+
+**Past that pair the margin is thin — 240 s is not roomy, and the real numbers
+are worth knowing before someone reaches for a raise.**
+`GatedIntervalSleepTests.returnsAfterExpectedPollCount` and
+`DaywatchRunnerTests.testSubsequentTicksAtInterval` each chain **5**
+`waitForSuspension` calls, i.e. 225 s of the 240 s ceiling. And counting
+`waitFor` at 90 s plus each clock wait at 45 s, **9 of the 13**
+`PaneRepairCoordinatorTests` have a worst case above 240 s — not just the
+6-deep chain (540 s) usually cited. Every one of those is still consistent with
+the invariant, because only an already-failing test walks a full chain of
+timeouts and the first diagnostic is already recorded by then.
+
+**The remedy if they start tripping is to shorten the chain, not to raise the
+limit again.** "Keep advance chains short — single digits" below is already the
+rule, and a 5-deep chain sits at its edge; inject pacing values and cross the
+threshold in 2–3 advances. Raising 240 s buys room only for tests that are
+already failing, and taxes every genuinely wedged test with a longer wait
+before it gets attributed.
+
+**All three are sized for the fast parallel pass, so tier 3 opts out.** The
+quiet pass (`--no-parallel`, idle machine) never sees the saturation that forced
+`.clockDriven` up, and a tier-3 suite whose time limit is its *regression
+detector* rather than a hang guard is actively harmed by the raise — it disarms
+a mutation-verified proof with nothing going red. Those pin their own
+`.timeLimit(.minutes(1))`: `SubprocessTimeoutStarvationTests` (a `sleep 90`
+child must outlive the limit), `GitManagerTimeoutTests` and
+`SubprocessTimeoutTests` (a regressed EOF-waiting drain must outlive it). Don't
+"tidy" them back to `.clockDriven`; the residual — that 45 s makes two chained
+`waitForSuspension`s exceed 60 s — is acceptable only because none of those
+suites chains two and a healthy handshake there returns in milliseconds.
+
+Three remedies are already refuted; don't re-litigate them.
+
+- **Per-suite `.serialized`.** "Archived search debounce" is already
+  `.clockDriven, .serialized` and still failed twice in CI. The contention is
+  process-global, so serializing one suite does not shrink the queue its waiter
+  sits behind. (The advice under "Clock and date seams" still holds for its own
+  case — a suite starving *itself*.)
+- **`TASK_MEGA_YIELD_COUNT=1`.** Measured across interleaved runs: p90
+  26.5/31.2 → 26.0/29.4, p99 26.6 → 27.0. Noise. Real but secondary
+  contributor; resolves the open question in issue #496.
+- **Blanket retry.** Banned in every tier — see "Quarantine" below.
+
+**The measurement method is the transferable part.** Arms must be
+**interleaved, not batched**, with population held constant. An earlier attempt
+at this same comparison ran each arm as a block and was invalidated by
+uncontrolled load drift from sibling agents on the shared box — the arms
+measured different machines, not different configurations.
+
 New tests should state their tier. Tier-1 tests put no real sleep in the
 *behaviour under test* — the code under test is driven entirely by virtual
 time. The scheduling handshake that observes it may still sleep; see "Clock and
@@ -243,6 +360,11 @@ other. If a clock-driven suite fails on the arming handshake, reach for
 suite rather than the target, and measured on the appearance suite it was both
 reliable *and* faster.
 
+That advice covers a suite starving **itself**. It does not cover
+process-global saturation, where a suite starves on the other 4000 tests — see
+"Population is the scheduler" above, where an already-`.serialized` suite still
+flaked and the remedy was population, not suite ordering.
+
 **Keep advance chains short — single digits.** If crossing a threshold would
 take many production-sized intervals, **inject the pacing values** (that is
 what the interval init parameters are for) and cross it in 2–3 advances rather
@@ -314,8 +436,12 @@ Two shapes, also not interchangeable:
 Don't roll your own test clock wrapper, advance helper, `.timeLimit` default,
 or date box. This file is the whole shared surface:
 
-- `@Suite(.clockDriven)` — a one-minute time limit (Swift Testing's floor
-  granularity). A hang-catcher, not a perf budget.
+- `@Suite(.clockDriven)` — a four-minute time limit (Swift Testing expresses
+  limits in whole minutes, so that is the dial). A hang-catcher, not a perf
+  budget; sized against the wall-clock waits a clock-driven test can sit on in
+  the **fast parallel pass** — see "Population is the scheduler" above for the
+  triple, its invariant, and the three tier-3 live suites that pin their own
+  `.timeLimit` instead because their limit is a regression detector.
 - `await clock.advanceWhenSuspended(by:)` — the one you want by default.
 - `await clock.waitForSuspension()` — the same wait without advancing.
 - `TestDateSource` — a lock-guarded box behind the `now: @Sendable () -> Date`
@@ -331,7 +457,7 @@ unblocks**, not in a setup block far away.
 
 **`.clockDriven` is not a reliable backstop on its own** — known limitation,
 measured: a desynced advance chain hung past 10 minutes with the trait applied
-and the one-minute limit never fired (the hung work most likely sits in a
+and the then one-minute limit never fired (the hung work most likely sits in a
 detached task the time limit cannot cancel). It usually works and is worth
 keeping. Do not make it your *only* hang guard: stress harnesses, corpus
 runners and fuzzers need an outer timeout of their own.
@@ -350,8 +476,9 @@ collected one event instead of two, the discarded `false` return let the test
 carry on, and the visible failure was `[42] == [42, 42]` — which reads as a
 generation-numbering bug and sends the reader to the wrong line entirely. A
 crash announces itself; this does not. **The tell was the duration**: 62 s for
-what should have been a fast assertion failure, i.e. two ~30 s bounded waits
-timing out back to back. When an assertion failure took far longer than an
+what should have been a fast assertion failure, i.e. two bounded waits timing
+out back to back against the 30 s `ciSafeDeadline` of the day (90 s now, so the
+same signature is ~180 s). When an assertion failure took far longer than an
 assertion failure should, suspect a swallowed waiter before you believe the
 message.
 

@@ -44,39 +44,43 @@ import TestSupport
 /// | `poll` / `writeUntilArmed` default | 8 s | task scheduling, `AsyncStream` delivery, `clock.sleep` entry |
 /// | `fdCloseTimeout` | 25 s | `close(fd)` in a GCD **cancel handler on a utility-QoS global queue** |
 /// | `withWatchedFile` FD quiescence | 12 s | same cancel handler, but not an assertion |
-/// | `advanceWhenSuspended` | 15 s | fixed by `ClockTestSupport`, not ours to set |
+/// | `advanceWhenSuspended` | 45 s | fixed by `ClockTestSupport`, not ours to set |
 ///
 /// **The criterion these are sized against** is: the FIRST guard to fire must
-/// get its named diagnostic out inside `.clockDriven`'s 60 s per-test limit,
+/// get its named diagnostic out inside `.clockDriven`'s 240 s per-test limit,
 /// otherwise the limit kills the test and reports an unnamed "wedged" instead
 /// of observed state (rule 4). Healthy prefix ~0.6 s + the largest single
-/// deadline (25 s) = well under half the limit, for every test here.
+/// deadline (45 s, the fixed handshake guard) = well under a quarter of the
+/// limit, for every test here.
 ///
 /// It is deliberately *not* "the sum of every deadline in a test stays under
-/// 60 s", because for three tests that is unachievable at any non-thin value —
-/// `ClockTestSupport`'s fixed 15 s handshake guard is used 2–3× per test, and
-/// its own docstring only budgets for a test that waits **twice**:
+/// the limit". That framing was unachievable when the limit was 60 s and
+/// `ClockTestSupport`'s handshake guard was 15 s used 2–3× per test; it is a
+/// weak criterion rather than a wrong one, and it is not what these values are
+/// sized against. Worst-case cascades, at the current 45 s handshake guard:
 ///
 /// | Test | Worst-case cascade (all guards fire) |
 /// |---|---|
 /// | `liveStreamCountReturnsToBaselineAfterIteratorDrops` | 8 + 25 = 33 s |
 /// | `cancellingConsumingTaskTerminatesStream` | 2×8 + 25 = 41 s |
 /// | `nonExistentPathFinishesStreamImmediately` | 8 s |
-/// | `writesWithinOneWindowCollapseToOneNotification` | 3×8 + 15 + 8 + 12 = 59 s |
-/// | `nothingFiresUntilTheFullIntervalElapsed` | 8 + 15 + 8 + 12 = 43 s |
-/// | `lateWriteRestartsTheWindow` | 2×8 + **2×15** + 8 + 12 = 66 s |
-/// | `separatedWritesNotifyTwice` | 2×8 + **2×15** + 2×8 + 12 = 74 s |
-/// | `atomicSaveReopensAndKeepsStreamLive` | 2×8 + **3×15** + 3×8 + 25 + 12 = 122 s |
+/// | `writesWithinOneWindowCollapseToOneNotification` | 3×8 + 45 + 8 + 12 = 89 s |
+/// | `nothingFiresUntilTheFullIntervalElapsed` | 8 + 45 + 8 + 12 = 73 s |
+/// | `lateWriteRestartsTheWindow` | 2×8 + **2×45** + 8 + 12 = 126 s |
+/// | `separatedWritesNotifyTwice` | 2×8 + **2×45** + 2×8 + 12 = 134 s |
+/// | `atomicSaveReopensAndKeepsStreamLive` | 2×8 + **3×45** + 3×8 + 25 + 12 = 212 s |
 /// | `terminationWithAPendingDebounceStillClosesTheFD` | 8 + 8 + 25 + 12 = 53 s |
 /// | `defaultClockDeliversOneRealDebouncedNotification` | ~1.8 + 8 = 10 s |
 ///
-/// The three over-limit rows are dominated by the bolded fixed term (30 s,
-/// 30 s, 45 s) — `atomicSaveReopensAndKeepsStreamLive` cleared 60 s even at the
-/// thin 4 s deadlines this budget replaced (73 s then). Cutting the guards is
-/// therefore not what buys the property; only the first-diagnostic criterion
-/// above is actually satisfiable, and it is satisfied with room to spare. The
-/// remaining lever, if a full cascade ever needs to fit, is the suite's time
-/// limit, not the guards.
+/// Both inputs moved together (handshake guard 15 s → 45 s, suite limit 60 s →
+/// 240 s; see `ClockTestSupport`), and the limit outgrew the cascades: every
+/// row now fits, where three used to blow it. The docstring's own prediction —
+/// "the remaining lever, if a full cascade ever needs to fit, is the suite's
+/// time limit, not the guards" — is what happened, incidentally rather than by
+/// design. Do not start relying on it: the worst row (212 s) clears 240 s by
+/// only 28 s, so it would go back over on any further handshake-guard raise,
+/// and the first-diagnostic criterion above remains the property these values
+/// are actually sized against.
 @MainActor
 @Suite("FileWatcher", .clockDriven, .serialized)
 struct FileWatcherTests {

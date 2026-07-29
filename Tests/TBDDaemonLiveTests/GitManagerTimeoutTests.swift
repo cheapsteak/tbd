@@ -24,10 +24,37 @@ import TestSupport
 /// - Timeout-path tests advance virtual time at the assertion that needs it.
 ///
 /// The production `SubprocessWatchdog` thread still arms the same deadline in
-/// parallel; a 600 s timeout is simply unreachable inside `.clockDriven`'s
+/// parallel; a 600 s timeout is simply unreachable inside the suite's
 /// one-minute limit, so the injected clock is the only armer that can fire here.
 /// `SubprocessTimeoutStarvationTests` covers the watchdog on a real clock.
-@Suite(.clockDriven)
+///
+/// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Do not
+/// "tidy" this back to the shared trait — the two halves below are why.
+///
+/// 1. **60 s is this suite's detector, not a hang guard.**
+///    `timeoutThrowsPromptlyWhenGrandchildHoldsPipeOpen` and
+///    `returnsOutputWithoutWaitingForGrandchildEOF` prove promptness
+///    *structurally*: their grandchildren hold the pipe write ends open for 120 s
+///    and 30 s of REAL time, and the only thing that distinguishes "returned
+///    without waiting for EOF" from "regressed into an EOF-waiting drain" is that
+///    the latter blocks past the limit. At 240 s a regressed 120 s drain finishes
+///    inside the budget and the test goes green — mutation-verified proof,
+///    silently disarmed, with nothing going red to tell you.
+/// 2. **It does not need the raised budget.** `.clockDriven` was raised to
+///    4 minutes to absorb the arming latency of the fast parallel pass, whose
+///    ~4536-test population is what makes a `TestClock` handshake take tens of
+///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
+///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
+///    machine, so real arming latency here is milliseconds.
+///
+/// One residual, stated rather than glossed: `waitForSuspension`'s default is
+/// now 45 s, so a test that waited **twice** would need 90 s and would trip this
+/// 60 s limit, where at the old 15 s default two waits cost only 30 s. No test
+/// here chains two — the suite's two `advanceWhenSuspended` sites are in
+/// different `@Test`s, one each — and in the quiet pass a healthy handshake
+/// returns in milliseconds, so only a genuine hang ever pays the timeout, which
+/// is exactly what this limit is here to catch.
+@Suite(.timeLimit(.minutes(1)))
 struct GitManagerTimeoutTests {
 
     /// Far enough out that the real watchdog cannot reach it inside the suite's
@@ -71,8 +98,8 @@ struct GitManagerTimeoutTests {
         // surface as a spurious GitTimeoutError. `GitManager.run` drains
         // incrementally via readabilityHandler + PipeDataAccumulator; lock down
         // that a 100KB emitter completes and returns its FULL output (no dropped
-        // trailing chunk). A deadlocked drain now hangs into `.clockDriven`
-        // rather than being masked as a timeout.
+        // trailing chunk). A deadlocked drain now hangs into the suite's time
+        // limit rather than being masked as a timeout.
         let bytes = 102_400
         let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
         let out = try await git.runForTimeoutTesting(
@@ -114,7 +141,7 @@ struct GitManagerTimeoutTests {
         // call resolves after 600 VIRTUAL seconds while the grandchild holds the
         // pipe for 120 REAL ones, so returning at all proves nothing waited for
         // EOF. A regressed EOF-waiting drain would block ~120 real seconds and
-        // trip `.clockDriven`'s 60 s limit. This replaces a wall-clock upper
+        // trip the suite's 60 s limit. This replaces a wall-clock upper
         // bound that had been RAISED TWICE after measured breaches
         // (4s → 15s → 60s, the last at 19.4s on a 2-core runner) — tolerance
         // widening is the flake shape hygiene rule 2 exists to forbid.
@@ -142,7 +169,7 @@ struct GitManagerTimeoutTests {
         // drain that waits for pipe EOF stalls until the grandchild exits.
         // Previously that surfaced as a spurious GitTimeoutError (timeout 3s <<
         // grandchild 30s); with the deadline virtual and never advanced, a
-        // regression can only present as a hang caught by `.clockDriven`, and
+        // regression can only present as a hang caught by the suite's limit, and
         // the 3 s margin that a loaded runner could blow is gone. The
         // `sleep 30 &` grandchild may linger up to 30s — tolerable orphanage.
         let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())

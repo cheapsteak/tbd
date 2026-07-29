@@ -1,7 +1,6 @@
 import Clocks
 import Foundation
 import Testing
-import TestSupport
 @testable import TBDDaemonLib
 
 /// Regression coverage for the dispatch-pool-starvation flake behind three CI
@@ -39,8 +38,8 @@ import TestSupport
 /// A never-advanced `TestClock` disables that armer, leaving the deadline REAL
 /// and the satisfier set exactly as it was before the clock seam existed.
 ///
-/// HOW THIS SUITE DISCRIMINATES THE WATCHDOG — `sleep 90` + `.clockDriven`, and
-/// both halves are load-bearing. A THIRD mechanism can also report `.timedOut`:
+/// HOW THIS SUITE DISCRIMINATES THE WATCHDOG — `sleep 90` + a 60 s time limit,
+/// and both halves are load-bearing. A THIRD mechanism can also report `.timedOut`:
 /// the completion path's AUTHORITY check
 /// (`ContinuousClock.now - start >= timeout`). With the watchdog deleted, the
 /// child runs to natural completion and the authority check then reports
@@ -55,7 +54,7 @@ import TestSupport
 /// had neither.
 ///
 /// The fix is to make the authority path TOO SLOW to satisfy the test: a 90s
-/// child outlives `.clockDriven`'s 60s limit, so a broken watchdog surfaces as a
+/// child outlives the suite's 60s limit, so a broken watchdog surfaces as a
 /// time-limit failure, while a working one still SIGKILLs at ~100ms and the
 /// suite costs exactly what it did before. A hang-catcher, not a wall-clock
 /// tolerance — the distinction that keeps this out of hygiene rule 2.
@@ -64,7 +63,26 @@ import TestSupport
 /// time limit (the authority path would simply take 90s and pass), and the time
 /// limit alone changes nothing with a 3s child. Verified by mutation: deleting
 /// the watchdog armer turns both tests RED.
-@Suite("Subprocess timeout under dispatch-pool starvation", .serialized, .clockDriven)
+///
+/// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Do not
+/// "tidy" this back to the shared trait — the two halves below are why.
+///
+/// 1. **60 s is this suite's detector, not a hang guard.** The mutation proof
+///    above works only because 60 s sits between the working watchdog's ~100 ms
+///    SIGKILL and the 90 s child that a broken watchdog leaves running. Inherit
+///    `.clockDriven`'s 240 s and the `sleep 90` child finishes comfortably
+///    inside the limit, the authority check reports `.timedOut` on its own, and
+///    both tests go green with the watchdog armer deleted. The proof silently
+///    disarms; nothing goes red to tell you.
+/// 2. **It does not need the raised budget.** `.clockDriven` was raised to
+///    4 minutes to absorb the arming latency of the fast parallel pass, whose
+///    ~4536-test population is what makes a `TestClock` handshake take tens of
+///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
+///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
+///    machine, so real arming latency here is milliseconds and the saturation
+///    that motivated the raise never occurs. This suite never advances its
+///    `TestClock` at all, so it does not even pay the handshake.
+@Suite("Subprocess timeout under dispatch-pool starvation", .serialized, .timeLimit(.minutes(1)))
 struct SubprocessTimeoutStarvationTests {
 
     /// Number of blocking work items to flood the default-QoS pool with. The
