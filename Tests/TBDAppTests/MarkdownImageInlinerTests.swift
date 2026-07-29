@@ -139,6 +139,31 @@ struct MarkdownImageInlinerTests {
         #expect(out.contains("tbd-oversized-image"))
     }
 
+    @Test("works when the document directory is reached through a symlink")
+    func worksUnderSymlinkedRoot() throws {
+        // Pins the ROOT-side resolvingSymlinksInPath(). Dropping it would make
+        // every image in every repo under a symlinked path silently stop
+        // rendering — and no other test in this suite would notice, because
+        // NSTemporaryDirectory() already equals its own realpath (Foundation
+        // strips /private), so temp paths cannot expose a one-sided
+        // resolution. Only a user-created symlink does.
+        let sandbox = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        let real = sandbox.appendingPathComponent("real/doc")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try Self.tinyPNG.write(to: real.appendingPathComponent("pic.png"))
+        try FileManager.default.createSymbolicLink(
+            at: sandbox.appendingPathComponent("link"),
+            withDestinationURL: sandbox.appendingPathComponent("real")
+        )
+
+        let viaLink = sandbox.appendingPathComponent("link/doc")
+        var inliner = MarkdownImageInliner(documentDirectory: viaLink)
+        let out = inliner.inline(html: #"<img src="pic.png" />"#)
+
+        #expect(out.contains("data:image/png;base64,"))
+    }
+
     @Test("does not inline non-image files")
     func rejectsNonImage() throws {
         let dir = try makeTempDir()
