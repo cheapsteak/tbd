@@ -10,9 +10,16 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 /// browser export.
 enum MarkdownDocumentBuilder {
 
-    static func build(markdown: String, documentDirectory: URL, css: String) -> String? {
+    /// - Parameters:
+    ///   - documentDirectory: what relative image `src` values resolve against.
+    ///   - worktreeRoot: the containment boundary for those resolved paths.
+    static func build(
+        markdown: String, documentDirectory: URL, worktreeRoot: URL, css: String
+    ) -> String? {
         guard let body = MarkdownHTMLRenderer.renderBody(markdown) else { return nil }
-        var inliner = MarkdownImageInliner(documentDirectory: documentDirectory)
+        var inliner = MarkdownImageInliner(
+            documentDirectory: documentDirectory, worktreeRoot: worktreeRoot
+        )
         let inlined = inliner.inline(html: body)
         return """
         <!DOCTYPE html>

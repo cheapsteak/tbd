@@ -27,10 +27,23 @@ actor MarkdownRenderService {
     /// Matches the existing viewer guard.
     private static let maxFileSize = 1024 * 1024
 
-    func render(path: String, css: String) async -> String? {
+    /// - Parameter worktreeRoot: trust boundary for local image inlining.
+    ///   Empty falls back to the document's own directory — the narrower of
+    ///   the two, so an unknown root can only ever reject more.
+    func render(path: String, worktreeRoot: String, css: String) async -> String? {
         let url = URL(fileURLWithPath: path)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? Int else {
+        // Read size and type from the RESOLVED url. `attributesOfItem` would
+        // not: it has lstat semantics and reports a symlink as the length of
+        // its target *string* (~6 bytes) while `String(contentsOf:)` follows
+        // the link and reads the whole target — measured at 6 bytes reported
+        // for 1,600,000 characters read. `README.md -> huge-file` is a thing a
+        // repo can check in. Same defect, same shape of fix, as
+        // `MarkdownImageInliner`.
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard let values = try? resolved.resourceValues(
+                  forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize else {
             logger.debug("markdown file unreadable: \(path, privacy: .public)")
             return nil
         }
@@ -38,11 +51,16 @@ actor MarkdownRenderService {
             logger.debug("markdown file too large: \(size, privacy: .public) bytes")
             return nil
         }
-        guard let markdown = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        // Read from `resolved` so the stat and the read address the same file.
+        guard let markdown = try? String(contentsOf: resolved, encoding: .utf8) else { return nil }
 
+        let documentDirectory = url.deletingLastPathComponent()
         return MarkdownDocumentBuilder.build(
             markdown: markdown,
-            documentDirectory: url.deletingLastPathComponent(),
+            documentDirectory: documentDirectory,
+            worktreeRoot: worktreeRoot.isEmpty
+                ? documentDirectory
+                : URL(fileURLWithPath: worktreeRoot),
             css: css
         )
     }

@@ -18,7 +18,7 @@ struct MarkdownDocumentBuilderTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let doc = try #require(MarkdownDocumentBuilder.build(
-            markdown: "# Hi", documentDirectory: dir, css: "body{color:red}"
+            markdown: "# Hi", documentDirectory: dir, worktreeRoot: dir, css: "body{color:red}"
         ))
         #expect(doc.contains("<!DOCTYPE html>"))
         #expect(doc.contains(#"<meta charset="utf-8">"#))
@@ -33,7 +33,7 @@ struct MarkdownDocumentBuilderTests {
 
         let doc = try #require(MarkdownDocumentBuilder.build(
             markdown: "<script>alert(1)</script>\n\n# Safe",
-            documentDirectory: dir, css: ""
+            documentDirectory: dir, worktreeRoot: dir, css: ""
         ))
         #expect(!doc.contains("<script"))
     }
@@ -50,7 +50,7 @@ struct MarkdownDocumentBuilderTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         #expect(MarkdownDocumentBuilder.build(
-            markdown: "bad\u{0}input", documentDirectory: dir, css: ""
+            markdown: "bad\u{0}input", documentDirectory: dir, worktreeRoot: dir, css: ""
         ) == nil)
     }
 }

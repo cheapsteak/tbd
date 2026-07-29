@@ -243,7 +243,11 @@ struct CodeViewerPaneView: View {
                                 if selectedFiles.count > 1 {
                                     fileHeader(filePath)
                                 }
-                                FilePreviewView(filePath: filePath, showSourceCode: showSourceCode)
+                                FilePreviewView(
+                                    filePath: filePath,
+                                    worktreePath: worktreePath,
+                                    showSourceCode: showSourceCode
+                                )
                             }
                         }
                     }
@@ -323,6 +327,8 @@ private func isTextFile(_ path: String) -> Bool {
 /// cancel handler. SwiftUI just observes the `revision` Int.
 private struct FilePreviewView: View {
     let filePath: String
+    /// Trust boundary for local image inlining in the rendered markdown path.
+    let worktreePath: String
     let showSourceCode: Bool
 
     @State private var revision: Int = 0
@@ -331,7 +337,9 @@ private struct FilePreviewView: View {
     var body: some View {
         Group {
             if !showSourceCode && isRenderableFile(filePath) {
-                RenderedContentView(filePath: filePath, revision: revision)
+                RenderedContentView(
+                    filePath: filePath, worktreePath: worktreePath, revision: revision
+                )
             } else if isImageFile(filePath) {
                 ImagePreviewView(filePath: filePath, revision: revision)
             } else if isTextFile(filePath) {
@@ -359,6 +367,7 @@ private struct FilePreviewView: View {
 
 private struct RenderedContentView: View {
     let filePath: String
+    let worktreePath: String
     let revision: Int
     @State private var content: String?
     @State private var loadError: String?
@@ -424,7 +433,9 @@ private struct RenderedContentView: View {
 
         if useWebView {
             let html = await MarkdownRenderService.shared.render(
-                path: filePath, css: MarkdownDocumentBuilder.defaultCSS
+                path: filePath,
+                worktreeRoot: worktreePath,
+                css: MarkdownDocumentBuilder.defaultCSS
             )
             guard !Task.isCancelled else { return }
             renderedHTML = html

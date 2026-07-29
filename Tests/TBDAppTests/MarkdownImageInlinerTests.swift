@@ -23,7 +23,7 @@ struct MarkdownImageInlinerTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         try Self.tinyPNG.write(to: dir.appendingPathComponent("pic.png"))
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="pic.png" alt="x" />"#)
 
         #expect(out.contains("data:image/png;base64,"))
@@ -35,7 +35,7 @@ struct MarkdownImageInlinerTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="https://example.com/b.png" />"#)
 
         #expect(out.contains("https://example.com/b.png"))
@@ -49,7 +49,7 @@ struct MarkdownImageInlinerTests {
         let big = Data(repeating: 0x41, count: MarkdownImageInliner.perImageLimit + 1)
         try big.write(to: dir.appendingPathComponent("big.png"))
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="big.png" />"#)
 
         #expect(!out.contains("data:image"))
@@ -68,7 +68,7 @@ struct MarkdownImageInlinerTests {
         }
         let html = (0..<9).map { #"<img src="i\#($0).png" />"# }.joined()
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: html)
 
         let inlined = out.components(separatedBy: "data:image").count - 1
@@ -76,16 +76,22 @@ struct MarkdownImageInlinerTests {
         #expect(out.contains("tbd-oversized-image"))
     }
 
-    @Test("rejects path traversal outside the document directory")
+    @Test("rejects path traversal outside the worktree root")
     func rejectsTraversal() throws {
         // The secret lives in a per-test sandbox, NOT the shared temp root.
         // A fixed name in NSTemporaryDirectory() races across concurrent
         // `swift test` runs in sibling worktrees, and the loser's cleanup
         // deletes the file — turning this security test into a FALSE PASS
         // indistinguishable from `missingFile`.
+        //
+        // The document sits one level DOWN from the root, so the `..` that
+        // `inlinesParentRelativeImage` now permits is exercised here climbing
+        // one level too far. Both tests must hold: `..` inside the root is
+        // allowed, `..` past it is not.
         let sandbox = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: sandbox) }
-        let dir = sandbox.appendingPathComponent("doc")
+        let root = sandbox.appendingPathComponent("repo")
+        let dir = root.appendingPathComponent("docs")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let secret = sandbox.appendingPathComponent("secret.png")
         try Self.tinyPNG.write(to: secret)
@@ -94,13 +100,13 @@ struct MarkdownImageInlinerTests {
         // non-inlined result means "rejected", not "not found".
         #expect(FileManager.default.fileExists(atPath: secret.path))
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
-        let out = inliner.inline(html: #"<img src="../secret.png" />"#)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: root)
+        let out = inliner.inline(html: #"<img src="../../secret.png" />"#)
 
         #expect(!out.contains("data:image"))
     }
 
-    @Test("rejects a symlink that escapes the document directory")
+    @Test("rejects a symlink that escapes the worktree root")
     func rejectsEscapingSymlink() throws {
         let sandbox = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: sandbox) }
@@ -113,7 +119,7 @@ struct MarkdownImageInlinerTests {
         )
         #expect(FileManager.default.fileExists(atPath: secret.path))
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="innocent.png" />"#)
 
         #expect(!out.contains("data:image"))
@@ -132,7 +138,7 @@ struct MarkdownImageInlinerTests {
             at: dir.appendingPathComponent("small-looking.png"), withDestinationURL: big
         )
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="small-looking.png" />"#)
 
         #expect(!out.contains("data:image"))
@@ -158,7 +164,10 @@ struct MarkdownImageInlinerTests {
         )
 
         let viaLink = sandbox.appendingPathComponent("link/doc")
-        var inliner = MarkdownImageInliner(documentDirectory: viaLink)
+        var inliner = MarkdownImageInliner(
+            documentDirectory: viaLink,
+            worktreeRoot: sandbox.appendingPathComponent("link")
+        )
         let out = inliner.inline(html: #"<img src="pic.png" />"#)
 
         #expect(out.contains("data:image/png;base64,"))
@@ -171,7 +180,7 @@ struct MarkdownImageInlinerTests {
         try "secret key".write(to: dir.appendingPathComponent("notes.md"),
                                atomically: true, encoding: .utf8)
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="notes.md" />"#)
 
         #expect(!out.contains("data:"))
@@ -183,7 +192,7 @@ struct MarkdownImageInlinerTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         try Self.tinyPNG.write(to: dir.appendingPathComponent("pic.png"))
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="pic.png" alt="a diagram" />"#)
 
         #expect(out.contains("data:image/png;base64,"))
@@ -196,8 +205,27 @@ struct MarkdownImageInlinerTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         try Self.tinyPNG.write(to: dir.appendingPathComponent("my pic.png"))
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="my%20pic.png" />"#)
+
+        #expect(out.contains("data:image/png;base64,"))
+    }
+
+    @Test("inlines a parent-relative image that stays inside the worktree root")
+    func inlinesParentRelativeImage() throws {
+        // `docs/guide.md` referencing `../images/x.png` is a mainstream repo
+        // layout. The trust boundary is the worktree root, not the document's
+        // own directory.
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let docs = root.appendingPathComponent("docs")
+        let images = root.appendingPathComponent("images")
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+        try Self.tinyPNG.write(to: images.appendingPathComponent("x.png"))
+
+        var inliner = MarkdownImageInliner(documentDirectory: docs, worktreeRoot: root)
+        let out = inliner.inline(html: #"<img src="../images/x.png" />"#)
 
         #expect(out.contains("data:image/png;base64,"))
     }
@@ -207,7 +235,7 @@ struct MarkdownImageInlinerTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        var inliner = MarkdownImageInliner(documentDirectory: dir)
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
         let out = inliner.inline(html: #"<img src="nope.png" />"#)
 
         #expect(!out.contains("data:image"))

@@ -281,9 +281,12 @@ toolchain and the tests exercise what actually ships.
 - Golden-output tests: alerts, tables, task lists, footnotes, autolinks.
 - Safe-mode invariants asserted explicitly: raw HTML clobbered, `javascript:` emptied.
 - CSS resolution: bundled default, user stylesheet, missing-file fallback.
-- Image inlining: repo-local images become `data:` URIs with correct MIME types; containment
-  enforced against the document's directory; `..` traversal and symlink escapes rejected;
-  oversized images fall back to the placeholder rather than being inlined.
+- Image inlining: repo-local images become `data:` URIs with correct MIME types; relative `src`
+  values resolve against the document's directory but containment is enforced against the
+  **worktree root**, matching "Local file resolution" above (this bullet previously said
+  "document's directory", which broke the mainstream `docs/guide.md` → `../images/x.png`
+  layout); `..` traversal past the root and symlink escapes rejected; oversized images fall
+  back to the placeholder rather than being inlined.
 - Webview configuration: no script message handlers installed in either state;
   `allowsContentJavaScript == false` when `renderMermaidDiagrams` is off and `true` when it is
   on; the data store is non-persistent in both.

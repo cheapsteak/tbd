@@ -18,11 +18,25 @@ struct MarkdownImageInliner {
     static let perDocumentBudget = 16 * 1024 * 1024
 
     private let documentDirectory: URL
+    /// Symlink-resolved path the candidate must live under.
+    private let containmentRoot: String
     private let fileManager: FileManager
     private var spent = 0
 
-    init(documentDirectory: URL, fileManager: FileManager = .default) {
+    /// - Parameters:
+    ///   - documentDirectory: what a relative `src` is *resolved against* —
+    ///     the markdown file's own directory.
+    ///   - worktreeRoot: the trust boundary the resolved candidate must stay
+    ///     inside. Deliberately NOT the document directory: `docs/guide.md`
+    ///     referencing `../images/x.png` is a mainstream repo layout, and the
+    ///     spec's "Local file resolution" section requires containment under
+    ///     the repo root.
+    init(documentDirectory: URL, worktreeRoot: URL, fileManager: FileManager = .default) {
         self.documentDirectory = documentDirectory.standardizedFileURL
+        // Resolve symlinks on BOTH sides. Resolving only the candidate breaks
+        // every repo that lives under a symlinked path; resolving neither lets
+        // a symlink inside the repo point anywhere on disk.
+        self.containmentRoot = worktreeRoot.standardizedFileURL.resolvingSymlinksInPath().path
         self.fileManager = fileManager
     }
 
@@ -62,14 +76,13 @@ struct MarkdownImageInliner {
         let decoded = (src.removingPercentEncoding ?? src)
             .replacingOccurrences(of: "&amp;", with: "&")
 
-        // Resolve symlinks on BOTH sides. Resolving only the candidate breaks
-        // every repo that lives under a symlinked path; resolving neither lets
-        // a symlink inside the repo point anywhere on disk.
-        let resolvedRoot = documentDirectory.resolvingSymlinksInPath().path
+        // Resolved against the DOCUMENT directory (that is what `src` is
+        // relative to), contained against the WORKTREE ROOT. Both sides are
+        // symlink-resolved — see the initializer.
         let resolved = documentDirectory.appendingPathComponent(decoded)
             .standardizedFileURL.resolvingSymlinksInPath()
-        guard resolved.path.hasPrefix(resolvedRoot + "/") else {
-            logger.debug("rejected image outside document dir: \(src, privacy: .public)")
+        guard resolved.path.hasPrefix(containmentRoot + "/") else {
+            logger.debug("rejected image outside worktree root: \(src, privacy: .public)")
             return nil
         }
 
