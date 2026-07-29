@@ -362,6 +362,8 @@ private struct RenderedContentView: View {
     let revision: Int
     @State private var content: String?
     @State private var loadError: String?
+    @State private var renderedHTML: String?
+    private let useWebView = MarkdownViewerPreferences.useWebView()
 
     var body: some View {
         Group {
@@ -370,6 +372,12 @@ private struct RenderedContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(12)
+            } else if useWebView {
+                if let renderedHTML {
+                    MarkdownWebView(html: renderedHTML)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
             } else if let content {
                 Markdown(content, baseURL: URL(fileURLWithPath: filePath))
                     .markdownTheme(.codeViewer)
@@ -396,10 +404,20 @@ private struct RenderedContentView: View {
     private func loadContent() async {
         content = nil
         loadError = nil
+        renderedHTML = nil
         let fm = FileManager.default
         if let attrs = try? fm.attributesOfItem(atPath: filePath),
            let size = attrs[.size] as? UInt64, size > 1_048_576 {
             loadError = "File too large to preview (\(size / 1024)KB)"
+            return
+        }
+        if useWebView {
+            let html = await MarkdownRenderService.shared.render(
+                path: filePath, css: MarkdownDocumentBuilder.defaultCSS
+            )
+            guard !Task.isCancelled else { return }
+            renderedHTML = html
+            if html == nil { loadError = "Unable to render this file." }
             return
         }
         do {
