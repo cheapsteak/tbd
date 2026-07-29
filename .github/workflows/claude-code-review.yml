@@ -107,6 +107,12 @@ jobs:
           # base branch for `git diff origin/main...HEAD` (a shallow clone made
           # that impossible — PR #434 diagnostics), and git log/blame for
           # premise-audit checks. The repo packs to ~10 MB; the cost is seconds.
+          #
+          # NOT sufficient on its own for a FORK PR: the head SHA is not reachable
+          # from any base-repo branch, so checkout fetches it as a targeted fetch
+          # and the clone stays shallow regardless of this value. The "Ensure a
+          # merge-base" step below repairs that — don't delete it thinking
+          # fetch-depth covers it.
           fetch-depth: 0
           # actions/checkout v7.0.0 (backported to the floating v4 tag in v4.4.0,
           # 2026-07-20) refuses to check out a fork PR head under
@@ -128,6 +134,42 @@ jobs:
         # killed or timed out before writing its own, sail through the gate.
         run: rm -f "$GITHUB_WORKSPACE/claude-verdict.txt"
 
+      - name: Ensure a merge-base with the base branch
+        if: steps.trust.outputs.trusted == 'true'
+        # `fetch-depth: 0` does NOT give a fork PR full history. The head SHA
+        # isn't reachable from any base-repo branch, so checkout fetches just
+        # that commit and the clone stays shallow — `origin/<base>` ends up with
+        # a single commit and no common ancestor with HEAD.
+        #
+        # Measured on PR #545, the first fork PR through this gate:
+        #   git rev-parse --is-shallow-repository -> true
+        #   git diff origin/main...HEAD -> fatal: no merge base
+        # The reviewer silently fell back to `gh pr diff`, which still yields a
+        # diff but loses `git log`/`git blame` — exactly what the premise-audit
+        # instructions in the prompt below depend on. Same-repo PRs were never
+        # affected, which is why this survived until the gate admitted forks.
+        #
+        # `--unshallow` errors on an already-complete repo, hence the guard.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -uo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            echo "Shallow clone (expected on a fork PR) — unshallowing."
+            git fetch --no-tags --unshallow origin
+          else
+            echo "Clone already complete — nothing to unshallow."
+          fi
+
+          # Self-reporting check: if this ever regresses, the run says so rather
+          # than the reviewer quietly degrading to gh-pr-diff-only again.
+          if merge_base="$(git merge-base "origin/$BASE_REF" HEAD 2>&1)"; then
+            echo "Merge base with origin/$BASE_REF: $merge_base"
+          else
+            # git merge-base exits 1 with no output on unrelated histories.
+            echo "::warning::No merge base with origin/$BASE_REF (${merge_base:-unrelated histories}). The reviewer will fall back to \`gh pr diff\` and lose git log/blame for premise-audit checks."
+          fi
+
       - name: Restore review hooks from the base branch
         if: steps.trust.outputs.trusted == 'true'
         # The Stop hook + its settings.json must come from the BASE branch, not the PR
@@ -136,9 +178,8 @@ jobs:
         # (ENOENT) — this blocked pre-existing fork PRs; (2) a PR must not be able to
         # neuter the gate that reviews it. github.event.pull_request.base.ref is the
         # base branch under pull_request_target; FETCH_HEAD is its tip after the fetch.
-        # No --depth=1 on this fetch: a shallow fetch into the now-complete clone
-        # (checkout uses fetch-depth: 0) would write shallow grafts and break the
-        # merge-base the reviewer relies on for `git diff origin/main...HEAD`.
+        # No --depth=1 on this fetch: it would re-introduce shallow grafts and undo
+        # the unshallow the previous step just performed.
         run: |
           git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
           rm -rf "$GITHUB_WORKSPACE/.github/workflows/claude-review-hooks"

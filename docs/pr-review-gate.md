@@ -56,6 +56,33 @@ step is already gated on `trusted == true`, the opt-in restores exactly the
 pre-v4.4.0 behavior and adds no new exposure: untrusted fork code still never
 reaches the checkout.
 
+### A fork PR checkout is shallow even with `fetch-depth: 0`
+
+`fetch-depth: 0` does **not** give a fork PR full history. The head SHA is not
+reachable from any base-repo branch, so `actions/checkout` fetches that commit on
+its own and the clone stays shallow — `origin/<base>` ends up holding a single
+commit with no common ancestor with `HEAD`. Measured on PR #545, the first fork PR
+through this gate:
+
+```
+git rev-parse --is-shallow-repository   -> true
+git log --oneline origin/main | wc -l   -> 1
+git diff origin/main...HEAD             -> fatal: no merge base
+```
+
+The reviewer degrades quietly rather than failing: it falls back to `gh pr diff`,
+which still produces a diff but loses `git log` and `git blame` — precisely what
+the premise-audit instructions in the prompt rely on. Same-repo PRs were never
+affected, which is why this went unnoticed until the gate started admitting forks.
+
+The **Ensure a merge-base with the base branch** step repairs it, running
+`git fetch --unshallow origin` when (and only when) the clone is shallow —
+`--unshallow` errors on a complete repo. It then logs the resolved merge base, or
+emits a `::warning::` if there still isn't one, so a future regression reports
+itself instead of silently degrading the review again. Don't remove that step on
+the assumption `fetch-depth: 0` covers it; it doesn't, and the failure is invisible
+in the review output.
+
 ### What a trusted author's branch can execute
 
 The opt-in is only defensible because of the push-access gate above, so it is worth
