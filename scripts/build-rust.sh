@@ -19,14 +19,30 @@ cargo build --release --manifest-path "$CRATE_DIR/Cargo.toml"
 mkdir -p "$OUT_DIR"
 cp "$CRATE_DIR/target/release/libcomrak_ffi.a" "$OUT_DIR/libcomrak_ffi.a"
 
-# Stamp = SHA-256 of every input that determines the archive's contents.
-# Cargo.toml is included deliberately: it carries [profile.release] and the
+# Two-line stamp, both halves checked by the CI gate in .github/workflows/test.yml:
+#
+#   line 1 = SHA-256 of every input that determines the archive's contents
+#   line 2 = SHA-256 of the archive itself
+#
+# Line 1 alone catches "sources changed, archive not rebuilt". It cannot catch
+# stamp/archive desync — staging the stamp without the .a, or resolving a
+# binary merge conflict to the wrong side, leaves the gate green on a stale
+# archive. Line 2 closes that.
+#
+# Cargo.toml is in line 1 deliberately: it carries [profile.release] and the
 # dependency feature flags. Flipping `default-features` back on would pull
 # syntect in and change the archive without touching Cargo.lock, so omitting
 # it here would leave the CI gate blind to exactly the regression it exists
 # to catch. Argument order is fixed, so the hash is deterministic.
+#
+# THE FILE LIST BELOW IS DUPLICATED IN THE CI GATE. If the crate ever gains a
+# build.rs or a second .rs file, update BOTH in the same commit — a list that
+# drifts here makes the gate compare two different hashes and fail every PR;
+# a list that drifts there makes it silently stop covering the new input.
 shasum -a 256 "$CRATE_DIR/src/lib.rs" "$CRATE_DIR/Cargo.toml" "$CRATE_DIR/Cargo.lock" \
   | awk '{print $1}' | shasum -a 256 | awk '{print $1}' > "$OUT_DIR/.build-stamp"
+shasum -a 256 "$OUT_DIR/libcomrak_ffi.a" | awk '{print $1}' >> "$OUT_DIR/.build-stamp"
 
 echo "built $(ls -lh "$OUT_DIR/libcomrak_ffi.a" | awk '{print $5}') -> $OUT_DIR/libcomrak_ffi.a"
-echo "stamp $(cat "$OUT_DIR/.build-stamp")"
+echo "stamp sources $(sed -n 1p "$OUT_DIR/.build-stamp")"
+echo "stamp archive $(sed -n 2p "$OUT_DIR/.build-stamp")"
