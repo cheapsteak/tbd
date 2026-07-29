@@ -107,8 +107,13 @@ extension RPCRouter {
             } catch {
                 // completeCreateWorktree already deletes the DB row on failure.
                 // Broadcast an archive delta so clients remove the pending entry.
+                // `creationFailed: true` is set ONLY here — this is the single
+                // path where a row disappears because its creation actually
+                // failed, so it's the only place that can tell clients apart
+                // from a deliberate archive of a still-`.creating` row.
                 subs.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
-                    worktreeID: pending.id
+                    worktreeID: pending.id,
+                    creationFailed: true
                 )))
                 logger.error("background worktreeCreate failed for \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }

@@ -1797,7 +1797,41 @@ final class AppState: ObservableObject {
     /// client). Tombstone it and drop the row so it cannot be resurrected by a
     /// poll snapshot that predates the archive.
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
+        // Look the row up before it gets removed so we can name it in the alert.
+        let worktree = findWorktree(id: delta.worktreeID)
+        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+
         removeArchivedWorktreeFromState(id: delta.worktreeID)
+
+        // The daemon tells us whether creation actually failed; we never infer
+        // it from `.creating` status. A deliberate archive of a still-creating
+        // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
+        // pre-session hook — arrives with creationFailed == false and must stay
+        // silent, even though the row is `.creating` at this moment.
+        if let message = failureMessage {
+            showAlert(message, isError: true)
+        }
+    }
+
+    /// Returns a failure alert message when the daemon reported that this
+    /// worktree's *creation* failed, or nil otherwise (deliberate archive, or
+    /// an unknown row we can't name).
+    ///
+    /// `creationFailed` comes from the daemon via `WorktreeIDDelta`; status is
+    /// deliberately NOT consulted, because a `.creating` row can also be
+    /// archived on purpose from the CLI and the two are indistinguishable by
+    /// status alone.
+    ///
+    /// Pure static helper for testability — every branch is unit-testable
+    /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
+    nonisolated static func creationFailureMessage(
+        _ worktree: Worktree?, creationFailed: Bool
+    ) -> String? {
+        guard creationFailed, let worktree else {
+            return nil
+        }
+        return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
+               "See Console (log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)

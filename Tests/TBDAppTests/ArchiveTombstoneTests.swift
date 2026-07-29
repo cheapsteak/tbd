@@ -10,13 +10,15 @@ final class ArchiveTombstoneTests: XCTestCase {
     func makeWorktree(
         id: UUID,
         repoID: UUID? = nil,
-        status: WorktreeStatus = .active
+        status: WorktreeStatus = .active,
+        displayName: String? = nil
     ) -> Worktree {
-        Worktree(
+        let shortID = id.uuidString.prefix(8)
+        return Worktree(
             id: id,
             repoID: repoID ?? self.testRepoID,
-            name: "test-\(id.uuidString.prefix(8))",
-            displayName: "Test \(id.uuidString.prefix(8))",
+            name: "test-\(shortID)",
+            displayName: displayName ?? "Test \(shortID)",
             branch: "main",
             path: "/tmp/test",
             status: status,
@@ -262,6 +264,152 @@ final class ArchiveTombstoneTests: XCTestCase {
         )
         XCTAssertEqual(visible.count, 1, "Cleared tombstone should restore visibility")
         XCTAssertEqual(visible[0].id, wtID)
+    }
+
+    // MARK: - Failed creation alert: gated on the daemon's creationFailed flag
+
+    /// Test pure static helper: daemon-reported creation failure produces a message
+    func testCreationFailureMessageWhenDaemonReportsFailure() {
+        let wtID = UUID()
+        let creatingWt = makeWorktree(id: wtID, status: .creating, displayName: "MyNewWorktree")
+
+        let message = AppState.creationFailureMessage(creatingWt, creationFailed: true)
+
+        XCTAssertNotNil(message, "Message should be produced when the daemon reports a creation failure")
+        XCTAssertTrue(message?.contains("Couldn't create worktree") ?? false)
+        XCTAssertTrue(message?.contains("MyNewWorktree") ?? false)
+    }
+
+    /// A `.creating` row archived deliberately (creationFailed == false) must stay
+    /// silent — this is the CLI-cancel case, which status alone cannot distinguish.
+    func testCreationFailureMessageSilentForDeliberateArchiveOfCreatingWorktree() {
+        let wtID = UUID()
+        let creatingWt = makeWorktree(id: wtID, status: .creating, displayName: "MyNewWorktree")
+
+        let message = AppState.creationFailureMessage(creatingWt, creationFailed: false)
+
+        XCTAssertNil(message, "A deliberate archive of a .creating row must not claim creation failed")
+    }
+
+    /// Test pure static helper: .active worktree does not produce message
+    func testCreationFailureMessageForActiveWorktree() {
+        let wtID = UUID()
+        let activeWt = makeWorktree(id: wtID, status: .active)
+
+        let message = AppState.creationFailureMessage(activeWt, creationFailed: false)
+
+        XCTAssertNil(message, "No message should be produced for .active worktree")
+    }
+
+    /// Test pure static helper: nil worktree does not produce message
+    func testCreationFailureMessageForNilWorktree() {
+        XCTAssertNil(AppState.creationFailureMessage(nil, creationFailed: false))
+        XCTAssertNil(AppState.creationFailureMessage(nil, creationFailed: true),
+                     "An unknown row can't be named, so no alert even on a real failure")
+    }
+
+    /// A delta from an older daemon omits `creationFailed` entirely; it must
+    /// decode as false rather than throwing, and must not fire a false alert.
+    func testWorktreeIDDeltaDecodesLegacyPayloadWithoutCreationFailed() throws {
+        let wtID = UUID()
+        let legacy = #"{"worktreeID":"\#(wtID.uuidString)"}"#.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(WorktreeIDDelta.self, from: legacy)
+
+        XCTAssertEqual(decoded.worktreeID, wtID)
+        XCTAssertFalse(decoded.creationFailed, "Absent creationFailed must default to false")
+    }
+
+    func testWorktreeIDDeltaRoundTripsCreationFailed() throws {
+        let delta = WorktreeIDDelta(worktreeID: UUID(), creationFailed: true)
+
+        let decoded = try JSONDecoder().decode(
+            WorktreeIDDelta.self, from: JSONEncoder().encode(delta)
+        )
+
+        XCTAssertEqual(decoded.worktreeID, delta.worktreeID)
+        XCTAssertTrue(decoded.creationFailed)
+    }
+
+    @MainActor
+    func testArchivingCreatingWorktreeShowsErrorAlertWhenCreationFailed() {
+        let suite = "test-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+
+        let wtID = UUID()
+        let creatingWt = makeWorktree(id: wtID, status: .creating, displayName: "MyNewWorktree")
+        state.worktrees = [testRepoID: [creatingWt]]
+
+        // Alert should not be set initially
+        XCTAssertNil(state.alertMessage)
+        XCTAssertFalse(state.alertIsError)
+
+        // Apply the archive delta as the daemon sends it on a genuine failure
+        state.handleDelta(.worktreeArchived(
+            WorktreeIDDelta(worktreeID: wtID, creationFailed: true)
+        ))
+
+        // Alert should now be set and marked as error
+        XCTAssertNotNil(state.alertMessage, "Error alert should be shown")
+        XCTAssertTrue(state.alertIsError, "Alert should be marked as error")
+        XCTAssertTrue(state.alertMessage?.contains("Couldn't create worktree") ?? false)
+        XCTAssertTrue(state.alertMessage?.contains("MyNewWorktree") ?? false)
+    }
+
+    /// The regression this gating exists for: `tbd worktree archive <id>` on a
+    /// still-`.creating` row removes it without claiming creation failed.
+    @MainActor
+    func testCLIArchiveOfCreatingWorktreeShowsNoAlert() {
+        let suite = "test-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+
+        let wtID = UUID()
+        let creatingWt = makeWorktree(id: wtID, status: .creating, displayName: "MyNewWorktree")
+        state.worktrees = [testRepoID: [creatingWt]]
+
+        // A deliberate archive: same status, no creationFailed flag.
+        state.handleDelta(.worktreeArchived(WorktreeIDDelta(worktreeID: wtID)))
+
+        XCTAssertNil(state.alertMessage, "A deliberate CLI archive must not show a creation-failure alert")
+        XCTAssertFalse(state.alertIsError)
+    }
+
+    @MainActor
+    func testArchivingActiveWorktreeDoesNotShowAlert() {
+        let suite = "test-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+
+        let wtID = UUID()
+        let activeWt = makeWorktree(id: wtID, status: .active)
+        state.worktrees = [testRepoID: [activeWt]]
+
+        // Alert should not be set initially
+        XCTAssertNil(state.alertMessage)
+
+        // Apply the archive delta for an active (not .creating) worktree
+        state.handleDelta(.worktreeArchived(WorktreeIDDelta(worktreeID: wtID)))
+
+        // Alert should NOT be shown for an active worktree archive
+        XCTAssertNil(state.alertMessage, "No alert should be shown for active worktree archive")
+    }
+
+    @MainActor
+    func testArchivingUnknownWorktreeHandledGracefully() {
+        let suite = "test-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+
+        let unknownWtID = UUID()
+
+        // Apply archive delta for a worktree we don't know about
+        // (e.g., archived by another client)
+        state.handleDelta(.worktreeArchived(WorktreeIDDelta(worktreeID: unknownWtID)))
+
+        // Should not crash and should not show an alert
+        XCTAssertNil(state.alertMessage, "No alert for unknown worktree")
     }
 
 }
