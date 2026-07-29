@@ -188,7 +188,7 @@ Because `hasApprovedReview` is hardcoded `false` and the safety floor escalates 
 
 ### 4.1 `NightwatchMode`
 
-`off | daywatch | nightwatch` (`Models.swift:106-110`). Persisted in `config.nightwatch_mode` (migration `v38`, `Database.swift:693-695`; setter `ConfigStore.swift:225-232`; decode-with-default at `Models.swift:879` and `RPCProtocol.swift:615-616`). Semantically: *off* = no loop, no gate hook; *daywatch* = loop + gate hook, desk nudged with `act=false`; *nightwatch* = same with `act=true`.
+`off | daywatch | nightwatch` (`Models.swift:106-110`). Persisted in `config.nightwatch_mode` (migration `v38`, `Database.swift:690-692`; setter `ConfigStore.swift:227-234`; decode-with-default at `Models.swift:908-909` and `RPCProtocol.swift:621-622`). Semantically: *off* = no loop, no gate hook; *daywatch* = loop + gate hook, desk nudged with `act=false`; *nightwatch* = same with `act=true`.
 
 ### 4.2 Daywatch vs. Nightwatch is prompt text, nothing more
 
@@ -343,8 +343,8 @@ The hazard itself is unchanged: everything the agent learns that lands in a file
 - **`Database/ConfigStore.swift`** — `nightwatch_mode` column mapping (`:26`, `:53`) and `setNightwatchMode` (`:227-234`).
 - **`Database/AuditStore.swift`** — `AuditLogRecord` (`:7-42`), `logAction` (insert + mirrored `os.Logger` debug line, `:54-68`), `list` / `get` / `countByAction` (`:71-114`). No pruning.
 - **`Database/ClearanceStore.swift`** — `ClearanceRecord` (`:6-44`); `insert` / `voidByID` / `voidBySHA` / `listByPR` / `auditTrail` / `get` (`:55-116`). Fully built, entirely unused outside tests.
-- **`PR/PRStatusManager.swift`** — the seam System A hangs off: `setOnPRStatusComputed` (`:66-68`), fired from the two status-computation paths (`:254`, `:380`).
-- **`Daemon.swift`** — gate hook closure (`:400-454`); runner + desk construction and boot-reconcile (`:743-769`); shutdown `apply(.off)` (`:845-848`); plugin refresh (`:273`).
+- **`PR/PRStatusManager.swift`** — the seam System A hung off was `setOnPRStatusComputed`, *added by #342 for the gate hook and removed by #509 with it* — not renamed. The callbacks the file carries today (`setOnMergedTransition`, `:49`; `setOnStatusPersist`, `:58`) are separate, pre-existing seams that never fed the gate.
+- **`Daemon.swift`** — gate hook closure *(removed by #509; that range is now remote-backend and RPC-router wiring)*; runner + desk construction and boot-reconcile (`:740-765`); shutdown `apply(.off)` (`:893`); plugin refresh (`:286`).
 
 ### 6.4 App — all pixels gated on `nightwatchExperimentalEnabled`
 

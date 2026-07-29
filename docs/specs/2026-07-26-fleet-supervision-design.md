@@ -227,9 +227,14 @@ was created, and complexity drains toward the source instead of pooling in TBD.
 That is the whole reason to decline the layer: a grant list here would let the
 misconfiguration live forever, quietly, in a second place that nobody reviews.
 
-A repo that means "a literal human, never a model" writes that in its playbook;
-an operator who wants it enforced binds a scoped `deny` rule on `drive` for that
-repo (§8). One sentence each — neither needs machinery.
+A repo that means "a literal human, never a model" writes that in its playbook —
+one sentence, no machinery. And it is worth being blunt about what that does and
+does not buy, because the honest answer is the design's whole posture: it is
+**advice, like all conduct**, and nothing enforces it. There is no rule to bind,
+no scope to deny, no gate to refuse the act (§3). What stands behind that
+sentence is a desk that reads its playbook and follows it, and an account that
+shows the operator immediately if it did not. That is the trust bet, and §16
+argues it against itself rather than hiding it here.
 
 Alongside those asks, the residual dialog zoo still stalls agents: folder
 trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.

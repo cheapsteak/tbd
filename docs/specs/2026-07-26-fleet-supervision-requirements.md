@@ -87,7 +87,7 @@ the same.
   not. The persisted switch is **on/off** — one column, one gesture, one shift for the whole
   fleet, resuming across restarts — and the supervised/autonomous distinction moves to
   **per-project mode selection**, which is configuration rather than lifecycle (design §3).
-  The reason is that after the verb gate's removal (see P0-3 above) the daemon has no
+  The reason is that after the verb gate's removal (see P0-3 below) the daemon has no
   behavioral fork on posture left to make: a mode is authored conduct, so it belongs with the
   project whose conduct it describes, while the switch that starts and stops supervision
   stays global.*
@@ -243,9 +243,10 @@ the same.
   same prompt driven night after night, the fix is a reviewed change to the repo's own
   permission config — the tangle removed where it was created, complexity draining toward the
   source instead of pooling in TBD. A repo that means "a literal human, never a model" says so
-  in its playbook, or the operator binds a scoped `deny` rule on `drive`. "Never past anything
-  else" thus holds where it must — in the machinery — without pretending a delegate cannot
-  exercise judgment. See the design doc §2.*
+  in its playbook — advice, like all conduct, with nothing enforcing it (there are no rules of
+  any kind to bind; see the P0-3 descope above and design §3). "Never past anything else" thus
+  holds where it must — in the machinery, which ships no prompt-approval layer — without
+  pretending a delegate cannot exercise judgment. See the design doc §2.*
 - **P2-4 [A]** As an operator, I want runaway agents — looping, burning quota without
   progress — detected and flagged (or paused, in autonomous mode), so that one wedged
   session doesn't eat the shift's budget.

@@ -395,7 +395,8 @@ off for the last time, harvest the desk worktree once more (final `queue/`
 state and any last field learnings), archive it by hand, and run shifts only
 on the new system. Nothing in the old system needs to be deleted for cutover
 to be complete — deletion is a separate slice so that a disappointing first
-week can roll back by flipping two switches.
+week can roll back by flipping two switches: `supervision_enabled` off, and
+`nightwatch_mode` back on.
 
 ## 6. Deletion
 
