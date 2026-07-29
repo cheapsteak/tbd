@@ -2,6 +2,16 @@ import AppKit
 import SwiftUI
 import WebKit
 
+/// What to do with a navigation the webview is about to perform.
+enum MarkdownNavigationPolicy: Equatable {
+    /// Render in place: our own document load, or an in-page anchor.
+    case allowInPlace
+    /// Hand to `NSWorkspace` and cancel in place.
+    case openExternally(URL)
+    /// Drop silently.
+    case cancel
+}
+
 /// Hardened webview for rendered markdown.
 ///
 /// JavaScript is disabled, no script message handlers are installed, the data
@@ -18,6 +28,32 @@ enum MarkdownWebViewConfiguration {
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         return config
+    }
+
+    /// Pure navigation decision, extracted so the awkward URL shapes are
+    /// unit-testable instead of live-only.
+    ///
+    /// `isOwnLoad` is tracked by the coordinator around its own
+    /// `loadHTMLString` calls. It is NOT inferred from the URL's scheme:
+    /// with `baseURL: nil` our document is `about:blank`, and a
+    /// protocol-relative link resolves to `about://host/...`, so scheme
+    /// alone cannot tell our trusted load from attacker-influenced markup.
+    static func policy(for url: URL?, isOwnLoad: Bool) -> MarkdownNavigationPolicy {
+        if isOwnLoad { return .allowInPlace }
+        guard let url else { return .cancel }
+
+        // In-page anchor: about:blank#section — no host, has a fragment.
+        // README tables of contents depend on these scrolling in place.
+        if url.scheme == "about", url.host == nil, url.fragment != nil {
+            return .allowInPlace
+        }
+        // Anything still on the about: scheme is either a bare reload or a
+        // protocol-relative URL wearing about:// — neither is safe to hand
+        // to NSWorkspace.
+        guard let scheme = url.scheme?.lowercased(), scheme != "about" else {
+            return .cancel
+        }
+        return .openExternally(url)
     }
 }
 
@@ -72,21 +108,20 @@ struct MarkdownWebView: NSViewRepresentable {
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-            if awaitingOwnLoad {
-                awaitingOwnLoad = false
+            let isOwnLoad = awaitingOwnLoad
+            awaitingOwnLoad = false
+
+            switch MarkdownWebViewConfiguration.policy(
+                for: navigationAction.request.url, isOwnLoad: isOwnLoad
+            ) {
+            case .allowInPlace:
                 decisionHandler(.allow)
-                return
-            }
-            // Everything else — link clicks, meta-refresh redirects, and any
-            // URL that resolved oddly against the nil base — is denied in
-            // place. Only hand a URL to NSWorkspace if it has a real scheme;
-            // an "about" (or schemeless) result never reached a real host, so
-            // there is nothing meaningful to open externally.
-            if let url = navigationAction.request.url,
-               let scheme = url.scheme, scheme != "about" {
+            case .openExternally(let url):
                 NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+            case .cancel:
+                decisionHandler(.cancel)
             }
-            decisionHandler(.cancel)
         }
     }
 }
