@@ -109,9 +109,11 @@ enum ClaudeProjectDirectory {
     }
 
     private static func scanForCWD(worktreePath: String, projectsBase: URL) -> URL? {
-        guard let dirs = try? FileManager.default.contentsOfDirectory(
-            at: projectsBase, includingPropertiesForKeys: nil
-        ) else { return nil }
+        // Symlink-following listing: a profile's `projects` root IS a symlink
+        // into the host store, and listing it directly yields zero entries.
+        // Tiers 1 and 2 above need no such treatment — `fileExists` follows a
+        // symlinked parent. See SymlinkedDirectoryListing.
+        guard let dirs = SymlinkedDirectoryListing.entries(of: projectsBase) else { return nil }
 
         for dir in dirs where dir.hasDirectoryPath {
             guard

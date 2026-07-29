@@ -283,7 +283,8 @@ extension WorktreeLifecycle {
         completionAction: PreSessionCompletionAction,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
-        claudeSettingsOverlay: String? = nil
+        claudeSettingsOverlay: String? = nil,
+        carryover: ConversationCarryover? = nil
     ) async {
         let outcome = await waitForPreSessionCompletion(
             preSession: preSession, tmuxServer: worktree.tmuxServer
@@ -352,7 +353,8 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
-                claudeSettingsOverlay: claudeSettingsOverlay
+                claudeSettingsOverlay: claudeSettingsOverlay,
+                carryover: carryover
             )
             for terminal in created {
                 subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(

@@ -19,6 +19,23 @@ public enum WorktreeCreateCompletion: Sendable {
     case preSessionPending(phase3: Task<Void, Never>)
 }
 
+/// Carries an archived conversation onto a freshly created worktree.
+///
+/// Deliberately carries no prompt: a carryover spawn opens idle at the
+/// composer, exactly like an ordinary resume. An earlier revision passed a
+/// "you have been moved" context prompt as the spawn's trailing argument,
+/// which Claude answered immediately — an unwanted turn on every revive.
+/// Provenance lives solely in `notesSeed`, which seeds the Notes tab.
+public struct ConversationCarryover: Sendable {
+    let sourceSessionID: String
+    let notesSeed: String
+
+    init(sourceSessionID: String, notesSeed: String) {
+        self.sourceSessionID = sourceSessionID
+        self.notesSeed = notesSeed
+    }
+}
+
 extension WorktreeLifecycle {
     // MARK: - Create
 
@@ -202,8 +219,10 @@ extension WorktreeLifecycle {
     ///
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
+    /// Set `retryGeneratedNameOnCollision` to false when callers have already
+    /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -298,7 +317,8 @@ extension WorktreeLifecycle {
                     repo: repo, name: worktree.name, branch: worktree.branch,
                     worktreePath: worktree.path,
                     userSpecifiedFolder: userSpecifiedFolder,
-                    userSpecifiedBranch: userSpecifiedBranch
+                    userSpecifiedBranch: userSpecifiedBranch,
+                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision
                 )
 
                 // 4. If the name changed due to collision, update the DB record
@@ -359,14 +379,18 @@ extension WorktreeLifecycle {
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
                         modelOverride: modelOverride,
-                        claudeSettingsOverlay: claudeSettingsOverlay
+                        claudeSettingsOverlay: claudeSettingsOverlay,
+                        carryover: carryover
                     )
                     // Fresh creates get an initial note tab, appended after the
                     // primary spawn set the tab order. Create path only — a
                     // revive's surviving note rows re-materialize via the app's
                     // reconcile instead. Best-effort: if the worktree row
                     // vanished mid-wait, the note insert FK-fails and is logged.
-                    await createInitialNoteTab(worktreeID: worktree.id)
+                    await createInitialNoteTab(
+                        worktreeID: worktree.id,
+                        seed: carryover?.notesSeed
+                    )
                 }
                 return .preSessionPending(phase3: phase3)
             }
@@ -383,14 +407,18 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
-                claudeSettingsOverlay: claudeSettingsOverlay
+                claudeSettingsOverlay: claudeSettingsOverlay,
+                carryover: carryover
             )
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
             // 3c. Fresh repo-backed creates get an initial note tab (appended
             // last; the primary terminal keeps focus).
-            await createInitialNoteTab(worktreeID: worktreeID)
+            await createInitialNoteTab(
+                worktreeID: worktreeID,
+                seed: carryover?.notesSeed
+            )
 
             // 4. Update status to active
             let markActiveStart = clock.now
@@ -410,15 +438,23 @@ extension WorktreeLifecycle {
     }
 
     /// Creates the initial "Notes" tab for a freshly created repo-backed
-    /// worktree: one empty note row appended to the tab order (last; the
-    /// primary terminal keeps focus). The app materializes the tab from the
-    /// note row via its `reconcileNoteTabs` poll — note tabs use the note
-    /// row's UUID as the tab ID. Best-effort: a failure (e.g. the worktree
-    /// row vanished mid-create, FK-failing the insert) must never fail the
-    /// create, whose checkout and terminals are already valid.
-    func createInitialNoteTab(worktreeID: UUID) async {
+    /// worktree and appends it to the tab order (last; the primary terminal
+    /// keeps focus). Ordinary creates leave the note empty; callers may provide
+    /// a seed for flows whose initial Notes should carry context. The app
+    /// materializes the tab from the note row via its `reconcileNoteTabs` poll
+    /// — note tabs use the note row's UUID as the tab ID. Best-effort: a failure
+    /// (e.g. the worktree row vanished mid-create, FK-failing the insert) must
+    /// never fail the create, whose checkout and terminals are already valid.
+    func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
+            if let seed {
+                _ = try await db.notes.update(
+                    id: note.id,
+                    title: note.title,
+                    content: seed
+                )
+            }
             var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
             order.append(note.id)
             try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
@@ -433,7 +469,8 @@ extension WorktreeLifecycle {
         repo: Repo, name: String, branch: String,
         worktreePath: String,
         userSpecifiedFolder: Bool,
-        userSpecifiedBranch: Bool
+        userSpecifiedBranch: Bool,
+        retryGeneratedNameOnCollision: Bool
     ) async throws -> (name: String, branch: String, path: String) {
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
@@ -459,8 +496,9 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Fail immediately if user specified the folder — can't silently change it
-        if userSpecifiedFolder {
+        // Explicit folders and identity-sensitive callers cannot silently
+        // switch to a different generated folder and branch.
+        if userSpecifiedFolder || !retryGeneratedNameOnCollision {
             let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
                 "git worktree add failed — the folder or branch may already exist\(errorDetail)"
@@ -561,18 +599,21 @@ extension WorktreeLifecycle {
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
-        claudeSettingsOverlay: String? = nil
+        claudeSettingsOverlay: String? = nil,
+        carryover: ConversationCarryover? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
-        let primaryTerminalKind = resolvePrimaryTerminalKind(
-            skipClaude: skipClaude,
-            archivedClaudeSessions: archivedClaudeSessions,
-            configuredPreference: config.primaryAgentPreference
-        )
+        let primaryTerminalKind: TerminalKind = carryover == nil
+            ? resolvePrimaryTerminalKind(
+                skipClaude: skipClaude,
+                archivedClaudeSessions: archivedClaudeSessions,
+                configuredPreference: config.primaryAgentPreference
+            )
+            : .claude
         let archivedSessions = archivedClaudeSessions ?? []
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
@@ -654,10 +695,10 @@ extension WorktreeLifecycle {
             primaryProfileID = nil
             primaryLabel = TerminalLabel.codex
         case .claude:
-            let archivedSession = archivedSessions.first
-            let sessionUUID = archivedSession ?? UUID().uuidString
+            let archivedSession = carryover == nil ? archivedSessions.first : nil
+            let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
-            let isResume = archivedSession != nil
+            let isResume = archivedSession != nil || carryover != nil
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
             // UUID (used on fresh create). Reviving with `--session-id` on an
@@ -699,8 +740,14 @@ extension WorktreeLifecycle {
             }
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
+                forkSession: carryover != nil,
                 freshSessionID: isResume ? nil : sessionUUID,
                 appendSystemPrompt: appendPrompt,
+                // A carryover spawn sends NO initial prompt — it must open idle
+                // at the composer like any other resume. `isResume` is true
+                // whenever a carryover is present, so this expression also
+                // preserves the pre-existing behavior for plain resumes (never
+                // a prompt) and fresh creates (the caller's prompt).
                 initialPrompt: isResume ? nil : initialPrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
@@ -759,6 +806,13 @@ extension WorktreeLifecycle {
             profileID: primaryProfileID,
             kind: primaryTerminalKind
         )
+        if carryover != nil {
+            SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+                terminalID: plannedTerminalID1,
+                paneID: window1.paneID,
+                server: tmuxServer
+            )
+        }
         var createdTerminals: [(id: UUID, label: String)] = [
             (id: plannedTerminalID1, label: primaryLabel)
         ]
@@ -859,7 +913,9 @@ extension WorktreeLifecycle {
         let additionalArchivedClaudeSessions: [String]
         switch primaryTerminalKind {
         case .claude:
-            additionalArchivedClaudeSessions = Array(archivedSessions.dropFirst())
+            additionalArchivedClaudeSessions = carryover == nil
+                ? Array(archivedSessions.dropFirst())
+                : archivedSessions
         case .codex:
             additionalArchivedClaudeSessions = archivedSessions
         case .shell:

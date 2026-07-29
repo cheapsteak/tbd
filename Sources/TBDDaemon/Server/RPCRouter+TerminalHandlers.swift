@@ -1614,16 +1614,11 @@ extension RPCRouter {
     /// against `terminalID`. (On the `.inPlace` path there is no `--fork-session`,
     /// so the id is unchanged and the recapture is a harmless no-op.)
     private func scheduleSessionRecapture(terminalID: UUID, paneID: String, server: String) {
-        let tmuxRef = self.tmux
-        let dbRef = self.db
-        Task {
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: .seconds(5))
-            let detector = ClaudeStateDetector(tmux: tmuxRef)
-            if let recaptured = await detector.captureSessionID(server: server, paneID: paneID) {
-                try? await dbRef.terminals.updateSessionID(id: terminalID, sessionID: recaptured)
-            }
-        }
+        SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+            terminalID: terminalID,
+            paneID: paneID,
+            server: server
+        )
     }
 
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
