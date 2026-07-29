@@ -135,4 +135,104 @@ struct MarkdownWebViewConfigurationTests {
         #expect(MarkdownWebViewConfiguration.policy(
             for: nil, isOwnLoad: false, isLinkActivation: true) == .cancel)
     }
+
+    @Test("plain http is on the allowlist")
+    func plainHTTPOpensExternally() {
+        let url = URL(string: "http://example.com/x")!
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: url, isOwnLoad: false, isLinkActivation: true) == .openExternally(url))
+    }
+
+    @Test("uppercase schemes are handled case-insensitively")
+    func uppercaseSchemes() {
+        let https = URL(string: "HTTPS://example.com/x")!
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: https, isOwnLoad: false, isLinkActivation: true) == .openExternally(https))
+        let file = URL(string: "FILE:///tmp/x")!
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: file, isOwnLoad: false, isLinkActivation: true) == .revealInFinder(file))
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: URL(string: "SMB://evil.com/s"), isOwnLoad: false, isLinkActivation: true)
+            == .cancel)
+    }
+
+    @Test("data: and javascript: hrefs are cancelled")
+    func dangerousSchemesCancelled() {
+        // comrak safe mode empties these today, so this is a tripwire against
+        // a future renderer change rather than a live vector.
+        for raw in ["data:text/html;base64,PGh0bWw+", "javascript:alert(1)"] {
+            #expect(MarkdownWebViewConfiguration.policy(
+                for: URL(string: raw), isOwnLoad: false, isLinkActivation: true) == .cancel)
+        }
+    }
+
+    @Test("anchors are allowed without a click, deliberately bypassing the gesture gate")
+    func anchorBypassesGestureGate() {
+        // Documents the one intentional exception: same-document scrolling is
+        // harmless and can be triggered without a link activation.
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: URL(string: "about:blank#x"), isOwnLoad: false, isLinkActivation: false)
+            == .allowInPlace)
+    }
+
+    @Test("isOwnLoad short-circuits the allowlist entirely")
+    func ownLoadShortCircuitsAllowlist() {
+        // Contract documentation: policy trusts isOwnLoad completely, which is
+        // exactly why the coordinator's shape conjunction is safety-critical.
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: URL(string: "file:///etc/passwd"), isOwnLoad: true, isLinkActivation: false)
+            == .allowInPlace)
+    }
+
+    // MARK: - Who is trusted. The counter + shape conjunction, hoisted out of
+    // the delegate so it is testable without a WKWebView.
+
+    @Test("own-load shapes are recognised, foreign ones are not")
+    func ownLoadShapeRecognition() {
+        #expect(MarkdownWebViewConfiguration.isOwnLoadShaped(nil))
+        #expect(MarkdownWebViewConfiguration.isOwnLoadShaped(URL(string: "about:blank")))
+        #expect(MarkdownWebViewConfiguration.isOwnLoadShaped(URL(string: "About:blank")))
+        #expect(!MarkdownWebViewConfiguration.isOwnLoadShaped(URL(string: "about:blank#x")))
+        #expect(!MarkdownWebViewConfiguration.isOwnLoadShaped(URL(string: "about://evil.com/x")))
+        #expect(!MarkdownWebViewConfiguration.isOwnLoadShaped(URL(string: "https://example.com")))
+    }
+
+    @Test("a single load claims exactly one slot")
+    func singleLoadBalances() {
+        let c = MarkdownWebView.Coordinator()
+        c.noteOwnLoadForTesting()
+        #expect(c.consumeOwnLoad(for: URL(string: "about:blank")))
+        #expect(!c.consumeOwnLoad(for: URL(string: "about:blank")))
+    }
+
+    @Test("two rapid loads each claim a slot")
+    func doubleLoadBothClaim() {
+        // The bug the counter replaced: a Bool collapsed these into one, so
+        // the newer load was cancelled and the pane stuck on stale content.
+        let c = MarkdownWebView.Coordinator()
+        c.noteOwnLoadForTesting()
+        c.noteOwnLoadForTesting()
+        #expect(c.consumeOwnLoad(for: URL(string: "about:blank")))
+        #expect(c.consumeOwnLoad(for: URL(string: "about:blank")))
+        #expect(!c.consumeOwnLoad(for: URL(string: "about:blank")))
+    }
+
+    @Test("a link click mid-load does not steal the slot")
+    func interleavedClickLeavesSlotReserved() {
+        let c = MarkdownWebView.Coordinator()
+        c.noteOwnLoadForTesting()
+        // Foreign callback arrives first — must NOT consume.
+        #expect(!c.consumeOwnLoad(for: URL(string: "https://example.com")))
+        // The real load's callback still finds its slot.
+        #expect(c.consumeOwnLoad(for: URL(string: "about:blank")))
+    }
+
+    @Test("the counter never goes negative")
+    func counterNeverNegative() {
+        let c = MarkdownWebView.Coordinator()
+        #expect(!c.consumeOwnLoad(for: URL(string: "about:blank")))
+        #expect(!c.consumeOwnLoad(for: nil))
+        c.noteOwnLoadForTesting()
+        #expect(c.consumeOwnLoad(for: URL(string: "about:blank")))
+    }
 }

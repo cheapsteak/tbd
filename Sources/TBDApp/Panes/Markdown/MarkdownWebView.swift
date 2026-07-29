@@ -28,6 +28,20 @@ enum MarkdownWebViewConfiguration {
         return config
     }
 
+    /// Does this URL have the shape of a document we loaded ourselves?
+    ///
+    /// Conjoined with the outstanding-load counter, this is what decides WHO
+    /// is trusted — the more security-relevant half of the decision. Hoisted
+    /// out of the delegate so it is unit-testable: the delegate method is
+    /// `@MainActor` and its callback never fires under bare `swift test`
+    /// (no app bundle / WindowServer).
+    static func isOwnLoadShaped(_ url: URL?) -> Bool {
+        guard let url else { return true }
+        return url.scheme?.lowercased() == "about"
+            && url.host == nil
+            && url.fragment == nil
+    }
+
     /// Pure navigation decision, extracted so the awkward URL shapes are
     /// unit-testable instead of live-only.
     ///
@@ -121,8 +135,34 @@ struct MarkdownWebView: NSViewRepresentable {
 
         func load(_ html: String, into webView: WKWebView) {
             loadedHTML = html
-            pendingOwnLoads += 1
+            noteOwnLoadForTesting()
             webView.loadHTMLString(html, baseURL: nil)
+        }
+
+        /// Claims a slot for a `loadHTMLString` call that's about to happen.
+        /// Named for tests: it's the one seam that lets a test construct a
+        /// `Coordinator` and exercise `consumeOwnLoad` without a real
+        /// `WKWebView`, whose navigation callbacks don't fire under bare
+        /// `swift test` anyway.
+        func noteOwnLoadForTesting() {
+            pendingOwnLoads += 1
+        }
+
+        /// Claim an outstanding own-load slot, if this navigation looks like
+        /// one. Belt and braces: either check alone is insufficient — the
+        /// counter can drift, and URL shape alone cannot identify us — but
+        /// conjoined, a stolen slot can only ever be spent rendering
+        /// `about:blank` in place, never on an external open.
+        ///
+        /// Deliberately NOT decremented for a foreign callback: the counter
+        /// means "N own loads outstanding", not "the next N callbacks are
+        /// mine", so a user's link click arriving mid-load must leave the
+        /// slot reserved for the load that claimed it.
+        func consumeOwnLoad(for url: URL?) -> Bool {
+            guard pendingOwnLoads > 0,
+                  MarkdownWebViewConfiguration.isOwnLoadShaped(url) else { return false }
+            pendingOwnLoads -= 1
+            return true
         }
 
         func webView(
@@ -131,17 +171,7 @@ struct MarkdownWebView: NSViewRepresentable {
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
             let url = navigationAction.request.url
-
-            // Belt and braces: only honour the counter when the URL also has
-            // our own load's shape. Either check alone is insufficient — the
-            // counter could drift, and scheme alone cannot identify us — but
-            // conjoined, a stolen slot can only ever be spent on about:blank.
-            let ownShaped = url == nil
-                || (url?.scheme?.lowercased() == "about"
-                    && url?.host == nil
-                    && url?.fragment == nil)
-            let isOwnLoad = pendingOwnLoads > 0 && ownShaped
-            if isOwnLoad { pendingOwnLoads -= 1 }
+            let isOwnLoad = consumeOwnLoad(for: url)
 
             switch MarkdownWebViewConfiguration.policy(
                 for: url,
