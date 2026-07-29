@@ -1,63 +1,184 @@
 /* Default markdown viewer stylesheet.
    Users override by selecting a file from ~/tbd/markdown-themes/.
    Light and dark are handled here via prefers-color-scheme — TBD injects no
-   theme attribute and defines no CSS variable contract. */
+   theme attribute and defines no CSS variable contract.
+
+   Structure and type scale follow Claude's artifact markdown stylesheet
+   (flex-gap spacing, restrained headings, tile tables, Apple system fonts);
+   the palette is a warm neutral rather than pure grey.
+
+   --md-bg is deliberately OPAQUE. It was `transparent`, which relied on the
+   WKWebView being see-through: it is not — WebKit paints white underneath, so
+   the dark-mode foreground rendered near-white on white. */
 :root {
-  --md-fg: #0a0a0a;
-  --md-bg: transparent;
-  --md-muted: #6b6d7a;
-  --md-link: #2c65cf;
-  --md-border: #e4e4e8;
-  --md-code-bg: #f7f7f9;
-  --md-font: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --md-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  --md-size: 13px;
+  --md-bg: #f9f9f7;
+  --md-fill: #efeee8;
+  --md-fill-strong: #e6e5dd;
+  --md-fg: #0b0b0b;
+  --md-fg-2: #52514e;
+  --md-muted: #898781;
+  --md-rule: #e1e0d9;
+  --md-rule-strong: #cfcec5;
+  --md-link: #2a78d6;
+  --md-note: #2a78d6;
+  --md-tip: #157f5c;
+  --md-important: #8250df;
+  --md-warning: #9a6700;
+  --md-caution: #d03b3b;
+  --md-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --md-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --md-size: 14px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --md-fg: #fbfbfc;
-    --md-muted: #9295a0;
-    --md-link: #4c8ef8;
-    --md-border: rgba(255, 255, 255, 0.15);
-    --md-code-bg: rgba(255, 255, 255, 0.06);
+    --md-bg: #0d0d0d;
+    --md-fill: #1a1a19;
+    --md-fill-strong: #232321;
+    --md-fg: #edece6;
+    --md-fg-2: #c3c2b7;
+    --md-muted: #898781;
+    --md-rule: #2c2c2a;
+    --md-rule-strong: #3a3a37;
+    --md-link: #77b3f2;
+    --md-note: #77b3f2;
+    --md-tip: #45c39a;
+    --md-important: #a892f0;
+    --md-warning: #d9a441;
+    --md-caution: #e06c6c;
   }
 }
+
+/* Sibling spacing is one `gap` on the flex column rather than per-element
+   margins, so nothing collapses or doubles. */
 body {
-  margin: 0;
-  padding: 16px;
+  margin: 0 auto;
+  max-width: 720px;
+  padding: 24px 20px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   color: var(--md-fg);
   background: var(--md-bg);
   font-family: var(--md-font);
   font-size: var(--md-size);
-  line-height: 1.6;
+  line-height: 1.55;
+  overflow-wrap: break-word;
   -webkit-text-size-adjust: 100%;
 }
-h1, h2 { border-bottom: 1px solid var(--md-border); padding-bottom: 0.3em; }
-h1 { font-size: 2em; }
-h2 { font-size: 1.5em; }
-a { color: var(--md-link); }
-code { font-family: var(--md-mono); font-size: 0.85em;
-       background: var(--md-code-bg); padding: 0.2em 0.4em; border-radius: 4px; }
-pre { background: var(--md-code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
-pre code { background: none; padding: 0; }
-blockquote { margin-left: 0; padding-left: 12px;
-             border-left: 3px solid var(--md-border); color: var(--md-muted); }
+body > :first-child { margin-top: 0; }
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 10px 0 0;
+  line-height: 1.25;
+  font-weight: 600;
+  text-wrap: balance;
+}
+h1 { font-size: 1.5em; }
+h2 { font-size: 1.2em; padding-bottom: 0.25em; border-bottom: 1px solid var(--md-rule); }
+h3 { font-size: 1.05em; }
+h4, h5, h6 { font-size: 1em; color: var(--md-fg-2); }
+
+p, ul, ol, blockquote, table, pre, hr { margin: 0; }
+strong { font-weight: 600; }
+a { color: var(--md-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a:focus-visible { outline: 2px solid var(--md-link); outline-offset: 2px; border-radius: 2px; }
+
+ul, ol { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; }
+ul { list-style: disc; }
+ol { list-style: decimal; }
+li::marker { color: var(--md-muted); }
+:is(li, td, th) > * + :is(p, ul, ol, blockquote) { margin-top: 6px; }
+input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-link); }
+
+blockquote {
+  display: flex; flex-direction: column; gap: 10px;
+  border-left: 2px solid var(--md-rule-strong);
+  padding-left: 12px;
+  color: var(--md-fg-2);
+}
+
+:not(pre) > code {
+  background: var(--md-fill);
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-family: var(--md-mono);
+  font-size: 0.92em;
+}
+a > code { background: none; color: inherit; }
+pre {
+  background: var(--md-fill);
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: var(--md-mono);
+  font-size: 0.86em;
+  line-height: 1.5;
+  margin-block: 4px;
+}
+pre code { background: none; padding: 0; font: inherit; }
+
 /* display:block + width:max-content is the standard wide-table hack. Without
    max-content the block box fills its container, so columns squish instead of
-   producing the scrollbar overflow-x is asking for. */
+   producing the scrollbar overflow-x is asking for.
+   Cells are separated by a 1px border in the PAGE color rather than by
+   border-spacing: display:block detaches the table box, so border-spacing
+   would silently stop applying while the tiles still need their gutters. */
 table {
   border-collapse: collapse;
   display: block;
   width: max-content;
   max-width: 100%;
   overflow-x: auto;
+  font: inherit;
 }
-th, td { border: 1px solid var(--md-border); padding: 6px 12px; }
-img { max-width: 100%; }
+th, td {
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  border: 1px solid var(--md-bg);
+}
+th { background: var(--md-fill-strong); font-weight: 600; }
+td { background: var(--md-fill); }
+:is(th, td) :not(pre) > code { background: transparent; padding: 0; }
+
+hr { border: 0; border-top: 1px solid var(--md-rule-strong); margin-block: 10px; }
+img { max-width: 100%; height: auto; border-radius: 4px; }
+
 .tbd-oversized-image {
-  display: inline-block; padding: 4px 8px; border: 1px dashed var(--md-border);
-  border-radius: 4px; color: var(--md-muted); font-family: var(--md-mono);
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1px dashed var(--md-rule-strong);
+  border-radius: 4px;
+  color: var(--md-muted);
+  font-family: var(--md-mono);
   font-size: 0.85em;
 }
-.markdown-alert { border-left: 3px solid var(--md-border); padding: 0 12px; margin: 16px 0; }
+
+/* Alert accents are semantic (severity), not decorative — they carry the same
+   meaning as the keyword GitHub renders them from. */
+.markdown-alert {
+  display: flex; flex-direction: column; gap: 6px;
+  border-left: 3px solid var(--md-rule-strong);
+  background: var(--md-fill);
+  padding: 10px 14px;
+  border-radius: 0 6px 6px 0;
+}
 .markdown-alert-title { font-weight: 600; }
+.markdown-alert-note { border-left-color: var(--md-note); }
+.markdown-alert-note .markdown-alert-title { color: var(--md-note); }
+.markdown-alert-tip { border-left-color: var(--md-tip); }
+.markdown-alert-tip .markdown-alert-title { color: var(--md-tip); }
+.markdown-alert-important { border-left-color: var(--md-important); }
+.markdown-alert-important .markdown-alert-title { color: var(--md-important); }
+.markdown-alert-warning { border-left-color: var(--md-warning); }
+.markdown-alert-warning .markdown-alert-title { color: var(--md-warning); }
+.markdown-alert-caution { border-left-color: var(--md-caution); }
+.markdown-alert-caution .markdown-alert-title { color: var(--md-caution); }
+
+.footnotes {
+  border-top: 1px solid var(--md-rule);
+  padding-top: 10px;
+  color: var(--md-fg-2);
+  font-size: 0.92em;
+}
