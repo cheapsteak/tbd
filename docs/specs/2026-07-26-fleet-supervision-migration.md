@@ -81,9 +81,10 @@ by trusting this list.
   then delete.
 - **`PluginDirWriter.writeNightwatch()` + the on-disk skill dir** — Delete after
   harvest; the boot-time overwrite disappears with it.
-- **`nightwatch.setMode` / `nightwatch.report` RPC,
-  `RPCRouter+NightwatchHandlers.swift`** — Superseded by `supervision.*` RPC
-  surface. Delete at §6 (stale-CLI hazard: §6).
+- **`nightwatch.setMode` RPC, `RPCRouter+NightwatchHandlers.swift` (16 lines)** —
+  Superseded by the `supervision.*` RPC surface. Delete at §6 (stale-CLI hazard:
+  §6). Note `nightwatch.report` is already gone, removed with the audit store by
+  #509, so only `setMode` remains to delete.
 - **`TBDCLI/Commands/NightwatchCommand.swift`** — Superseded by `tbd supervise
   ...`. Delete at §6.
 - **`NightwatchMode` in `Models.swift`, `nightwatch_mode` in `ConfigStore`** —
@@ -262,11 +263,20 @@ only — no slice needs a later one:
     the same `resolution` kind differing only in `result`, so build one RPC with
     flag validation that teaches ("that's a proposal — `--approve` or `--reject`
     it") rather than three near-identical commands. `--scope` attaches to
-    `resolve` itself. A scoped resolution writes a `decision` line, and
-    **work-order composition must carry in-scope decisions** (design §8) — that
-    delivery, not any gate, is what satisfies P1-5. `resolve` is operator-only
-    and must not be reachable from a desk, which keeps resolutions off the
-    self-report path (design §10).
+    `resolve` itself, and its values are **temporal only** —
+    `this-once|this-shift|always`, with no per-project or per-repo variant
+    (design §10). A scoped resolution writes a `decision` line, and
+    **work-order composition must carry active decisions** (design §8) — that
+    delivery, not any gate, is what satisfies P1-5. **`--scope always` must also
+    append to `~/tbd/supervision/decisions.jsonl`** (design §7, §8): the shift
+    ledger cannot carry a decision past its own shift, so without that file P1-5
+    fails at the second shift and the parity gate cannot be evidenced. Work-order
+    composition merges the current shift's `this-shift` decisions with every
+    unretracted line in that file. Retraction is an append
+    (`tbd supervise decisions revoke <id>`), never an edit, and
+    `tbd supervise decisions list` shows what is in force. `resolve` is
+    operator-only and must not be reachable from a desk, which keeps resolutions
+    off the self-report path (design §10).
 - **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake
   decision from facts, work-order composition **grouped by project**, desks as
   first-class sessions **one per project, spawned lazily on that project's first

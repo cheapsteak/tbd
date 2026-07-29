@@ -2,7 +2,7 @@
 
 Status of this document: descriptive, written against the tree as of 2026-07-25; **citations and content claims re-verified against the tree on 2026-07-27.** Every claim below is cited to `file:line` in this worktree. If the code and this doc disagree, the code wins — then fix the doc.
 
-> **Citation refresh, 2026-07-27.** `NightwatchSkillContent.swift` grew from 981 to 1528 lines after this document was first written (a `handoffPy` member, a "there is no babysitter daemon" correction in `skillMd`, and other edits), which invalidated every line citation into it by roughly 450–550 lines. All of them have been re-derived, along with the `NightwatchDeskPrompts.swift` citations (that file grew 144 → 200 lines). Three content claims went stale with the same growth and are corrected inline where they appear, each marked: `scripts/handoff.py` is no longer an unowned survivor (§5.2, §6.7, §9), the Settings help text no longer claims the feature is evaluate-only (§6.4), and the hibernation pending-input precedent was mis-described as flag-gated (§4.5, §8 item 4). Citations into System A files deleted by PR #509 (`MergeGate.swift`, `Models_Nightwatch.swift`) are deliberately left as-is — the banner below marks that whole half as a historical record.
+> **Citation refresh, 2026-07-27; scope corrected and general-tree citations re-derived 2026-07-28.** What was verified *exactly* on 2026-07-27 was the embedded-content files — `NightwatchSkillContent.swift` and `NightwatchDeskPrompts.swift` — whose line counts and member boundaries were re-derived member by member and remain exact. Citations into **general TBD files** (`Daemon.swift`, `Models.swift`, `Database.swift`, `ConfigStore.swift`, `AppState.swift`, `DaemonClient.swift`, `SidebarView.swift`, `RPCRouter*`) were *not* covered by that pass and had drifted by tens to hundreds of lines; they were re-derived against the tree on 2026-07-28. Three app files cited here were deleted by PRs #507/#517 on 2026-07-26 and are marked at each citation; the `tbd nightwatch report` subcommand and the `nightwatch.report` RPC no longer exist and the claims about them are corrected in place. `NightwatchSkillContent.swift` grew from 981 to 1528 lines after this document was first written (a `handoffPy` member, a "there is no babysitter daemon" correction in `skillMd`, and other edits), which invalidated every line citation into it by roughly 450–550 lines. All of them have been re-derived, along with the `NightwatchDeskPrompts.swift` citations (that file grew 144 → 200 lines). Three content claims went stale with the same growth and are corrected inline where they appear, each marked: `scripts/handoff.py` is no longer an unowned survivor (§5.2, §6.7, §9), the Settings help text no longer claims the feature is evaluate-only (§6.4), and the hibernation pending-input precedent was mis-described as flag-gated (§4.5, §8 item 4). Citations into System A files deleted by PR #509 (`MergeGate.swift`, `Models_Nightwatch.swift`) are deliberately left as-is — the banner below marks that whole half as a historical record.
 
 Nightwatch is TBD's autonomous "fleet babysitter" feature: while the user is away (or merely distracted), something should keep the ~40 agent worktrees unblocked, triage stuck sessions, and shepherd PRs toward merge. This document explains what actually shipped under that name — which is substantially less, and structurally different, than either the feature's design spec or its own Settings copy suggests.
 
@@ -25,7 +25,7 @@ Nightwatch is TBD's autonomous "fleet babysitter" feature: while the user is awa
 There are **two independent systems** in this codebase that both answer to the name Nightwatch. They share the `nightwatch_mode` config column and a Swift module prefix, and **nothing else**. Neither invokes, reads, or constrains the other.
 
 **System A — the Swift merge gate ("Phase 1", evaluate-only).**
-`MergeGate.swift`, the `clearance` and `audit_log` tables (migrations `v41_clearance_ledger` / `v42_audit_log`, `Database.swift:713-743`), and the shared models in `Models_Nightwatch.swift`. It is wired into `PRStatusManager` at `Daemon.swift:402-454`: every time a PR status is computed while mode ≠ off, the gate evaluates the PR and appends a row to `audit_log`. That is the entire extent of its effect. **It merges nothing, holds nothing, and blocks nothing.** Its only reader is the `tbd nightwatch report` CLI (`NightwatchCommand.swift:68-137`). The `clearance` table has a fully built store (`ClearanceStore.swift`) and **zero production writers or readers** — the only references to `db.clearance` outside its own definition are in `Tests/TBDDaemonTests/ClearanceStoreTests.swift`.
+`MergeGate.swift`, the `clearance` and `audit_log` tables (migrations `v41_clearance_ledger` / `v42_audit_log`, `Database.swift:713-743`), and the shared models in `Models_Nightwatch.swift`. It is wired into `PRStatusManager` at `Daemon.swift:402-454`: every time a PR status is computed while mode ≠ off, the gate evaluates the PR and appends a row to `audit_log`. That is the entire extent of its effect. **It merges nothing, holds nothing, and blocks nothing.** Its only reader was the `tbd nightwatch report` CLI — *removed since: `NightwatchCommand.swift` is now 64 lines carrying only `set` and `status`, and the `nightwatch.report` RPC is gone with the audit store (#509). The audit log now has no reader at all.* The `clearance` table has a fully built store (`ClearanceStore.swift`) and **zero production writers or readers** — the only references to `db.clearance` outside its own definition are in `Tests/TBDDaemonTests/ClearanceStoreTests.swift`.
 
 **System B — the Watch Desk ("Phase A", the thing that actually acts).**
 `DaywatchRunner` (a 15-minute daemon loop, `DaywatchRunner.swift:95-294`) runs `scripts/tick.py` as a subprocess; when the tick exits 10 ("judgment queued"), `DeskSessionManager.nudgeDeskSession` pastes a prompt into a real Claude Code session running in a tmux pane inside a scratch worktree named "◐ Watch Desk". That agent then acts on the live fleet with `gh`, `tbd terminal send`, `tbd worktree archive`, and tmux — governed by nothing but the prompt text it was handed.
@@ -41,7 +41,7 @@ flowchart TB
     subgraph sysA["System A — merge gate (dead end)"]
         prm["PRStatusManager<br/>onPRStatusComputed"] --> gate["MergeGate.evaluate()<br/>inputs mostly hardcoded placeholders"]
         gate --> audit[("audit_log table")]
-        audit --> report["tbd nightwatch report<br/>(the only reader)"]
+        audit --> report["tbd nightwatch report<br/>(reader; removed with #509)"]
         clr[("clearance table<br/>NO production writer,<br/>NO production reader")]
     end
 
@@ -65,9 +65,9 @@ flowchart TB
 
 From the outside in:
 
-- **UI / CLI** — `NightwatchModeToggle` (sidebar footer), `NightwatchStatusItem` (menu bar), `NightwatchDeskStatusBanner`, Settings toggle; `tbd nightwatch set/status/report`
+- **UI / CLI** — `NightwatchModeToggle` (sidebar footer), `NightwatchStatusItem` (menu bar), `NightwatchDeskStatusBanner` *(deleted by #507/#517; described as of its last state)*, Settings toggle; `tbd nightwatch set/status` (`report` has since been removed)
   - *Does:* Set/display the mode; read the audit log. App surfaces are gated on the `nightwatchExperimentalEnabled` UserDefaults key (default false).
-- **RPC** — `nightwatch.setMode`, `nightwatch.report` (`RPCProtocol.swift:207-208`, params at `:344-359`); `nightwatchMode` rides the `Config` payload (`RPCProtocol.swift:570`)
+- **RPC** — `nightwatch.setMode` (`RPCProtocol.swift:213`); `nightwatch.report` has since been removed with the audit store; `nightwatchMode` rides the `Config` payload (`RPCProtocol.swift:576`)
   - *Does:* Persist the mode, apply it to the runner, broadcast a config-changed delta; serve audit rows.
 - **Daemon control plane** — `DaywatchRunner` (loop + mode transitions), `DeskSessionManager` (desk lifecycle + tmux injection), `ProcessDaywatchExecutor` (tick subprocess), the `MergeGate` hook on `PRStatusManager`
   - *Does:* Owns *when* things happen. Owns almost nothing about *what* happens.
@@ -84,8 +84,8 @@ Note what is *not* a layer: there is no daemon-side enforcement between the desk
 
 ### 3.1 Boot
 
-1. `Daemon.start()` calls `RuntimeIntegrationRefresher.production().refresh()` (`Daemon.swift:273`), which calls `PluginDirWriter().writePlugin()` (`Daemon.swift:17`), which calls `writeNightwatch()` (`PluginDirWriter.swift:80`, body at `:87-107`). This **unconditionally overwrites** `SKILL.md`, the three config files, and every script in `NightwatchSkillContent.scripts` — `tick.py`, `wake.py`, `judge.py`, `handoff.py`, `tick-cron.sh`, `scheduler.sh` — under `~/Library/Application Support/TBD/plugin/skills/nightwatch/` on **every daemon boot**. There is no existence check, no merge, no hash comparison. The writer iterates the `scripts` array (`NightwatchSkillContent.swift:21-28`) rather than carrying its own list, so a script named in a desk prompt but absent from the array is a drift `NightwatchDeskPromptsTests` now catches.
-2. Later in `start()`, the runner is constructed with `skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"` (`Daemon.swift:744`) and boot-reconciled: `await runner.apply(mode: config.nightwatchMode)` (`Daemon.swift:766`). If the persisted mode is `daywatch` or `nightwatch`, the loop starts immediately.
+1. `Daemon.start()` calls `RuntimeIntegrationRefresher.production().refresh()` (`Daemon.swift:286`), which calls `PluginDirWriter().writePlugin()` (`Daemon.swift:17`, invoked at `:31`), which calls `writeNightwatch()` (`PluginDirWriter.swift:80`, body at `:87-107`). This **unconditionally overwrites** `SKILL.md`, the three config files, and every script in `NightwatchSkillContent.scripts` — `tick.py`, `wake.py`, `judge.py`, `handoff.py`, `tick-cron.sh`, `scheduler.sh` — under `~/Library/Application Support/TBD/plugin/skills/nightwatch/` on **every daemon boot**. There is no existence check, no merge, no hash comparison. The writer iterates the `scripts` array (`NightwatchSkillContent.swift:21-28`) rather than carrying its own list, so a script named in a desk prompt but absent from the array is a drift `NightwatchDeskPromptsTests` now catches.
+2. Later in `start()`, the runner is constructed with `skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"` (`Daemon.swift:741`) and boot-reconciled: `await runner.apply(mode: config.nightwatchMode)` (`Daemon.swift:763`). If the persisted mode is `daywatch` or `nightwatch`, the loop starts immediately.
 
 ### 3.2 Mode toggle → desk spawn → tick loop → nudge
 
@@ -163,7 +163,7 @@ stateDiagram-v2
     end note
 ```
 
-The restart path is real, not hypothetical: `Daemon.stop()` calls `runner.apply(mode: .off)` (`Daemon.swift:846-848`), which posts the wrap-up (`DaywatchRunner.swift:187-197` → `DeskSessionManager.postShiftWrapUp`, `:202-243`); boot then calls `apply(mode: config.nightwatchMode)` (`Daemon.swift:766`). The persisted mode is untouched by shutdown — only the runner's in-memory mode goes to `.off` — so every `scripts/restart.sh` while a watch is active produces the wrap-up/re-nudge whiplash and resets the overlap guard (`lastNudgeTime` is actor state initialized to nil, `DeskSessionManager.swift:66`, never persisted).
+The restart path is real, not hypothetical: `Daemon.stop()` calls `runner.apply(mode: .off)` (`Daemon.swift:892-894`), which posts the wrap-up (`DaywatchRunner.swift:187-197` → `DeskSessionManager.postShiftWrapUp`, `:202-243`); boot then calls `apply(mode: config.nightwatchMode)` (`Daemon.swift:763`). The persisted mode is untouched by shutdown — only the runner's in-memory mode goes to `.off` — so every `scripts/restart.sh` while a watch is active produces the wrap-up/re-nudge whiplash and resets the overlap guard (`lastNudgeTime` is actor state initialized to nil, `DeskSessionManager.swift:66`, never persisted).
 
 ### 3.4 Turning it off
 
@@ -198,7 +198,7 @@ A related vocabulary bug: `judgePrompt` instructs the agent to "act ONLY if clea
 
 ### 4.3 The desk's identity is a display name
 
-`ensureDeskSession` recovers an existing desk by scanning active worktrees for `displayName == "◐ Watch Desk" && isScratch` (`DeskSessionManager.swift:116-117`, constant at `NightwatchDeskPrompts.swift:8`). The app's status banner resolves the desk the same way (`NightwatchDeskStatusBanner.swift:35`). Rename the worktree and both the daemon's recovery path and the app's click-through silently stop finding it. The cached UUID is validated on the fast path (`DeskSessionManager.swift:96-108`), but any restart falls back to name matching.
+`ensureDeskSession` recovers an existing desk by scanning active worktrees for `displayName == "◐ Watch Desk" && isScratch` (`DeskSessionManager.swift:116-117`, constant at `NightwatchDeskPrompts.swift:8`). The app's status banner resolved the desk the same way (`NightwatchDeskStatusBanner.swift:35`, *deleted by #507/#517; described as of its last state*). Rename the worktree and both the daemon's recovery path and the app's click-through silently stop finding it. The cached UUID is validated on the fast path (`DeskSessionManager.swift:96-108`), but any restart falls back to name matching.
 
 ### 4.4 The hand-rolled FIFO gates (a genuinely good part)
 
@@ -217,11 +217,11 @@ Either way the point for the nudge path stands and is in fact stronger: a shippe
 
 ### 4.6 The experimental flag gates pixels, not behavior
 
-`nightwatchExperimentalEnabled` (UserDefaults, default false; `AppState.swift:2152-2164`) hides the sidebar segmented control (`SidebarView.swift:58-59`), the menu-bar menu (`NightwatchStatusItem.swift:16, 27`), the desk banner (`ContentView.swift:59-60`), and the window tint (`NightwatchModeTintModifier.swift:13-15` via `ContentView.swift:364`). It does **not** gate the daemon: `tbd nightwatch set daywatch` works regardless of the app flag, the loop runs, the desk spawns, audit rows accrue. The flag is an app-side visibility toggle, not a feature flag in the CLAUDE.md sense — the daemon-side behavior has no flag at all beyond the mode itself.
+`nightwatchExperimentalEnabled` (UserDefaults, default false; key at `AppState.swift:2613`, fail-closed reader at `:2619-2621`) hides the sidebar segmented control (`SidebarView.swift:97-98`) and the menu-bar menu (`NightwatchStatusItem.swift:16, 27`). It also hid the desk banner and the window tint, whose files (`NightwatchDeskStatusBanner.swift`, `NightwatchModeTintModifier.swift`, `NightwatchModeTheme.swift`) were *deleted by #507/#517* — the mode tint now lives in the status bar. It does **not** gate the daemon: `tbd nightwatch set daywatch` works regardless of the app flag, the loop runs, the desk spawns, audit rows accrue. The flag is an app-side visibility toggle, not a feature flag in the CLAUDE.md sense — the daemon-side behavior has no flag at all beyond the mode itself.
 
 ### 4.7 `wakeJudge` is a documented no-op
 
-`ProcessDaywatchExecutor.wakeJudge(act:)` logs and returns (`DaywatchRunner.swift:83-90`); the comment records the intent — the interim headless judge spawner was removed in favor of the visible desk, and the fallback is reached only when no desk manager is wired (`DaywatchRunner.swift:258-261`). In production a desk manager is always wired (`Daemon.swift:748-760`), so this path is effectively test-only scaffolding.
+`ProcessDaywatchExecutor.wakeJudge(act:)` logs and returns (`DaywatchRunner.swift:83-90`); the comment records the intent — the interim headless judge spawner was removed in favor of the visible desk, and the fallback is reached only when no desk manager is wired (`DaywatchRunner.swift:258-261`). In production a desk manager is always wired (`Daemon.swift:745-759`), so this path is effectively test-only scaffolding.
 
 ---
 
@@ -229,7 +229,7 @@ Either way the point for the nudge path stands and is in fact stronger: a shippe
 
 This is the central maintenance problem, and it deserves its own section because it inverts the design's stated architecture.
 
-`Sources/TBDShared/NightwatchSkillContent.swift` is **1528 lines of Swift raw string literals** containing the entire operational playbook: `scripts` (the install manifest, `:21-28`), `skillMd` (`:30-193`), `wakePy` (`:195-558`), `tickPy` (`:560-974`), `handoffPy` (`:983-1291`), `judgePy` (`:1293-1429`), `tickCronSh` (`:1431-1446`), `schedulerSh` (`:1448-1501`), `prioritiesTxt` (`:1503-1508`), `safeWedgesTxt` (`:1510-1520`), `dontTouchTxt` (`:1522-1527`). `PluginDirWriter.writeNightwatch()` (`PluginDirWriter.swift:87-107`) writes all of it to `~/Library/Application Support/TBD/plugin/skills/nightwatch/` on every daemon boot, unconditionally, via `RuntimeIntegrationRefresher` (`Daemon.swift:273`).
+`Sources/TBDShared/NightwatchSkillContent.swift` is **1528 lines of Swift raw string literals** containing the entire operational playbook: `scripts` (the install manifest, `:21-28`), `skillMd` (`:30-193`), `wakePy` (`:195-558`), `tickPy` (`:560-974`), `handoffPy` (`:983-1291`), `judgePy` (`:1293-1429`), `tickCronSh` (`:1431-1446`), `schedulerSh` (`:1448-1501`), `prioritiesTxt` (`:1503-1508`), `safeWedgesTxt` (`:1510-1520`), `dontTouchTxt` (`:1522-1527`). `PluginDirWriter.writeNightwatch()` (`PluginDirWriter.swift:87-107`) writes all of it to `~/Library/Application Support/TBD/plugin/skills/nightwatch/` on every daemon boot, unconditionally, via `RuntimeIntegrationRefresher` (`Daemon.swift:286`).
 
 ```mermaid
 flowchart LR
@@ -257,7 +257,7 @@ flowchart LR
     pol -->|"impactMapGlobs, sizeCeiling,<br/>testHoldList"| gateA["MergeGate (System A)"]
     pol -->|"gate.ready_when, advance_skill,<br/>priorities, dont_touch"| deskA
     gateA --> auditT[("audit_log")]
-    auditT -->|"only reader"| cli["tbd nightwatch report"]
+    auditT -->|"only reader (since removed)"| cli["tbd nightwatch report"]
     deskA -->|"acts, unaudited by System A"| fleet2["fleet"]
 ```
 
@@ -331,16 +331,16 @@ The hazard itself is unchanged: everything the agent learns that lands in a file
 
 **`NightwatchSkillContent.swift` (1528 lines)** — see §5. Member-by-member: `scripts` (`:21-28`) — the install manifest the writer iterates, which is also what `NightwatchDeskPromptsTests` asserts against so a prompt cannot name an uninstalled script; `skillMd` — the playbook (tier policy, wake rules, "the gate", incident-derived operating rules, config file semantics, opt-in scheduler, and a "there is no babysitter daemon (retired 2026-07-25)" section at `:160-173` recording that a previously-documented `~/.fleet/` daemon never existed); `wakePy` — pre-wake verifier that re-derives live git/gh truth for hibernated terminals and fails closed to a neutral wake (includes an offline `--selftest` exercised by `PluginDirWriterTests`); `tickPy` — the Tier-0 sweep (capture-pane classification, burn-risk detection, capacity backoff, per-repo `.nightwatch/policy.json` hooks, judgment queue, `/tmp/nightwatch-tick.lock`), whose `daemon_health()` is now an explicit stub returning `no-daemon (retired 2026-07-25)` (`:724-734`); `handoffPy` — the context-ceiling successor relay, agent-authored and later absorbed into the binary (§5.2); `judgePy` — dry-run-by-default queue router with the hardcoded third-party repo/logins; `tickCronSh` — cron wrapper with the dangling `~/.claude` path (§5.5); `schedulerSh` — launchd enable/disable/status; `prioritiesTxt` / `safeWedgesTxt` / `dontTouchTxt` — the three config seeds, containing machine-specific snapshot data.
 
-**`RPCProtocol.swift`** — method names `nightwatch.setMode` / `nightwatch.report` (`:207-208`); `NightwatchSetModeParams` / `NightwatchReportParams` (`:346-359`); `nightwatchMode` on the config payload with decode-default `.off` (`:570`, `:615-616`).
+**`RPCProtocol.swift`** — method name `nightwatch.setMode` (`:213`); `NightwatchSetModeParams`; `nightwatchMode` on the config payload with decode-default `.off` (`:576`, `:621-622`). `nightwatch.report` and `NightwatchReportParams` are gone, removed with the audit store (#509).
 
-**`Models.swift`** — `NightwatchMode` (`:106-110`); `Config.nightwatchMode` with default/decode-default `.off` (`:750`, `:822`, `:879`).
+**`Models.swift`** — `NightwatchMode` (`:106-110`); `Config.nightwatchMode` with default/decode-default `.off` (`:774`, `:850`, `:908-909`).
 
 ### 6.3 Daemon wiring
 
-- **`Server/RPCRouter+NightwatchHandlers.swift` (23 lines)** — `handleSetNightwatchMode` (`:5-15`): persist → `runner.apply(mode:)` → broadcast `.modelProfilesChanged` (the config-reload channel is reused; the app picks the mode up from the next config fetch, `AppState+ModelProfiles.swift:41-42`). `handleNightwatchReport` (`:17-21`): `db.audit.list(since:action:)`. Dispatch at `RPCRouter.swift:365-368`.
-- **`Lifecycle/PluginDirWriter.swift`** — `writePlugin()` (`:48-83`) writes the `tbd` skill and calls `writeNightwatch(pluginDir:)` (`:87-107`), which writes SKILL.md + three config files + every script in `NightwatchSkillContent.scripts` — six of them (scripts get `0o755`). Called on every boot via `RuntimeIntegrationRefresher` (`Daemon.swift:17`, `:32`, invoked at `:273`).
-- **`Database/Database.swift`** — `v38_nightwatch_mode` (`:693-695`, `config.nightwatch_mode TEXT DEFAULT 'off'`); `v41_clearance_ledger` (`:713-728`); `v42_audit_log` (`:730-743`). Store handles exposed as `db.clearance` / `db.audit` (`:25-26`, `:65-66`, `:105-106`).
-- **`Database/ConfigStore.swift`** — `nightwatch_mode` column mapping (`:25-26`, `:52`) and `setNightwatchMode` (`:225-232`).
+- **`Server/RPCRouter+NightwatchHandlers.swift` (16 lines)** — `handleSetNightwatchMode` (`:5-15`): persist → `runner.apply(mode:)` → broadcast `.modelProfilesChanged` (the config-reload channel is reused; the app picks the mode up from the next config fetch). `handleNightwatchReport` is gone with the audit store (#509), which is why the file is 16 lines and not 23. Dispatch at `RPCRouter.swift:377`.
+- **`Lifecycle/PluginDirWriter.swift`** — `writePlugin()` (`:48-83`) writes the `tbd` skill and calls `writeNightwatch(pluginDir:)` (`:87-107`), which writes SKILL.md + three config files + every script in `NightwatchSkillContent.scripts` — six of them (scripts get `0o755`). Called on every boot via `RuntimeIntegrationRefresher` (`Daemon.swift:17`, `:31`, invoked at `:286`).
+- **`Database/Database.swift`** — `v38_nightwatch_mode` (`:690-692`, `config.nightwatch_mode TEXT DEFAULT 'off'`); `v41_clearance_ledger` (`:710-725`) and `v42_audit_log` (`:727-740`), both of whose tables were dropped by `v60` (#509) while the migrations themselves remain, as migrations must. Store handles exposed as `db.clearance` / `db.audit` (`:25-26`, `:65-66`, `:105-106`).
+- **`Database/ConfigStore.swift`** — `nightwatch_mode` column mapping (`:26`, `:53`) and `setNightwatchMode` (`:227-234`).
 - **`Database/AuditStore.swift`** — `AuditLogRecord` (`:7-42`), `logAction` (insert + mirrored `os.Logger` debug line, `:54-68`), `list` / `get` / `countByAction` (`:71-114`). No pruning.
 - **`Database/ClearanceStore.swift`** — `ClearanceRecord` (`:6-44`); `insert` / `voidByID` / `voidBySHA` / `listByPR` / `auditTrail` / `get` (`:55-116`). Fully built, entirely unused outside tests.
 - **`PR/PRStatusManager.swift`** — the seam System A hangs off: `setOnPRStatusComputed` (`:66-68`), fired from the two status-computation paths (`:254`, `:380`).
@@ -348,16 +348,16 @@ The hazard itself is unchanged: everything the agent learns that lands in a file
 
 ### 6.4 App — all pixels gated on `nightwatchExperimentalEnabled`
 
-- **`AppState.swift`** — `@Published var nightwatchMode` (`:471`); the key + fail-closed reader (`:2152-2164`). **`AppState+ModelProfiles.swift`** — mode picked up from config reload (`:41-42`); `setNightwatchMode(_:)` calls the RPC then optimistically sets local state, with an alert on failure (`:551-558`). **`DaemonClient.swift`** — the RPC call (`:1408-1413`).
-- **`Sidebar/NightwatchModeToggle.swift`** — `NightwatchModePresentation` (view-free label/glyph/help/isActive logic, unit-tested) + the three-segment `Off | ◐ Day | 🌙 Night` control. Rendered only when the flag is on (`SidebarView.swift:58-59`).
-- **`Sidebar/NightwatchDeskStatusBanner.swift`** — "desk session active" banner; resolves the desk by display name (`:35`); click selects the desk worktree (`:89-93`). Gated at `ContentView.swift:59-60`.
+- **`AppState.swift`** — `@Published var nightwatchMode` (`:613`); the key (`:2613`) and fail-closed reader (`:2619-2621`). **`DaemonClient.swift`** — the RPC call (`:1522-1527`).
+- **`Sidebar/NightwatchModeToggle.swift`** — `NightwatchModePresentation` (view-free label/glyph/help/isActive logic, unit-tested) + the three-segment `Off | ◐ Day | 🌙 Night` control. Rendered only when the flag is on (`SidebarView.swift:97-98`).
+- **`Sidebar/NightwatchDeskStatusBanner.swift`** *(deleted by #507/#517; described as of its last state)* — "desk session active" banner; resolved the desk by display name (`:35`); click selected the desk worktree (`:89-93`).
 - **`MenuBar/NightwatchStatusItem.swift`** — `Commands`-based menu ("I'm back" / "Step out" / "Go away for the night"); title carries the active glyph; gated by `@AppStorage` (`:16`, `:27`). Installed at `TBDApp.swift:487`.
-- **`Theme/NightwatchModeTheme.swift`** — `tintColor(for:)`: warm amber for daywatch, deep indigo for nightwatch, nil for off. **`Theme/NightwatchModeTintModifier.swift`** — 0.05-opacity window wash; `resolvedTint` returns nil when the flag is off (`:13-15`); applied at `ContentView.swift:364`.
+- **`Theme/NightwatchModeTheme.swift`** and **`Theme/NightwatchModeTintModifier.swift`** *(both deleted by #507/#517; described as of their last state)* — `tintColor(for:)` gave warm amber for daywatch, deep indigo for nightwatch, nil for off, applied as a 0.05-opacity window wash. PR #507 replaced the window-wide wash with a status-bar tint.
 - **`Settings/SettingsView.swift`** — the "Fleet Automation" section toggle (`:221-238`). *Corrected 2026-07-27:* an earlier revision of this document reported the help text as claiming the feature is "Evaluate-only for now — it records what it would do without acting", and called that sentence false for System B. The copy has since been fixed and the claim is gone; the current text says plainly that it "acts on your live fleet — nudging stuck sessions and dispatching work" and that its "behavior and safety rules are still changing" (`:229-231`). That is accurate. What the copy still does not convey is that the toggle governs *visibility only* — the daemon-side loop and desk actions are reachable from the CLI whether or not it is on (§4.6).
 
 ### 6.5 CLI
 
-**`Commands/NightwatchCommand.swift`** — `tbd nightwatch set <off|daywatch|nightwatch>` (`:15-37`), `tbd nightwatch status [--json]` (rides `config.get`, `:41-64`), `tbd nightwatch report [--since ISO8601] [--action …] [--json]` (`:68-137`). Registered in `TBD.swift:27`. Not gated by the app's experimental flag (§4.6).
+**`Commands/NightwatchCommand.swift` (64 lines)** — `tbd nightwatch set <off|daywatch|nightwatch>` (`:15-37`) and `tbd nightwatch status [--json]` (rides `config.get`, `:41-64`); the subcommand list at `:9` names only those two. `tbd nightwatch report` has been removed along with the audit store it read (#509). Registered in `TBD.swift`. Not gated by the app's experimental flag (§4.6).
 
 ### 6.6 Tests
 
@@ -405,7 +405,7 @@ flowchart TB
     PRS["PR status refresh"]
     A2["System A<br/>MergeGate"]
     AUD[("audit_log")]
-    RPT["tbd nightwatch report"]
+    RPT["tbd nightwatch report<br/>(since removed)"]
     CL2[("clearance ledger<br/>no writer, no reader")]
     GH2[("GitHub")]
     B2 -->|"shells out to gh directly"| GH2
@@ -436,7 +436,7 @@ The floor is not missing. `checkSafetyFloor` is correct code enforcing approved-
 - **Spec says:** §17 must-address gate: "auto-merge must not ship until items 1–8 are built"
   - **Code does:** Honored in the narrow sense (System A merges nothing) — but the desk path routes *around* the gate rather than through it, which the spec did not contemplate.
 
-The desk itself ("Phase A visible worker", referenced in comments at `DaywatchRunner.swift:83-87`, `Daemon.swift:747`) comes from a later plan that is not in `docs/specs/`; the shipped code is the only authority on its behavior.
+The desk itself ("Phase A visible worker", referenced in comments at `DaywatchRunner.swift:83-87`, `Daemon.swift:744`) comes from a later plan that is not in `docs/specs/`; the shipped code is the only authority on its behavior.
 
 ---
 
@@ -468,7 +468,7 @@ Plainly, in rough priority order. Items 1–3 are structural; the rest are serio
 
 - Turn on/off: sidebar segments or menu bar (after enabling Settings → Fleet Automation → "Nightwatch / Daywatch"), or `tbd nightwatch set daywatch|nightwatch|off` (works regardless of the app toggle).
 - Current mode: `tbd nightwatch status`; persisted in `config.nightwatch_mode`.
-- Audit rows (System A only): `tbd nightwatch report --since <ISO8601> [--action escalate]`.
+- Audit rows: there is no longer any way to read them — `tbd nightwatch report` and the `nightwatch.report` RPC were removed with the audit store (#509), and the `audit_log` table was dropped by `v60`.
 - The desk: scratch worktree "◐ Watch Desk" under `TBDConstants.scratchDir`; not archived on off; safe to archive by hand.
 - Skill dir: `~/Library/Application Support/TBD/plugin/skills/nightwatch/` — **any edits to SKILL.md/scripts/config are lost on the next daemon restart**; only `queue/*` survives (`scripts/handoff.py` used to, until it was absorbed into the binary — §5.2).
 - Tick loop: 15 min, first tick immediately on mode-on; exit 10 ⇒ nudge (throttled to one per 10 min, in-memory).

@@ -764,9 +764,9 @@ degenerate case is the previous design exactly. Any behavior that differs
 between "no projects declared" and the pre-grouping design is a bug, not a
 feature.
 
-**The gate binds each desk to its project.** A verb arriving from a desk whose
-target worktree lies outside that desk's project is refused in compiled code,
-as a routing error (§3). This deserves stating
+**Each desk is addressed to its own project.** The daemon refuses a desk's verbs
+when the target lies outside that project — addressing correctness, not
+authority (§3). This deserves stating
 as a security property rather than as tidiness: the blast radius of a confused,
 mis-briefed, or prompt-injected supervisor shrinks from the whole fleet to one
 project. A desk that reads a hostile instruction in some agent's transcript can,
@@ -1047,14 +1047,21 @@ account, not a wrong action. The third category is **human-authored process**.
   between multiple writers and therefore the need for a table. Shift-scoped
   decisions are ledger events viewed in the same way. They end with the shift,
   and the shift directory contains everything needed for debugging or sharing.
-- **Durable files**: `~/tbd/supervision/supervision.json` — the project
-  definitions (§5), automation membership and its default stance, and the
-  per-project mode selections (§8). The operator owns the file. It is atomically
-  rewritten after each operator action and can be edited by hand; the daemon
-  reloads it after a change and holds it in memory for lookups. Every change
-  appends a ledger line, so the current selections and the history of how they
-  came about live in the appropriate places. The playbook tiers (§5) are also
-  durable files.
+- **Durable files**, two of them, both operator-owned and hand-editable:
+  - `~/tbd/supervision/supervision.json` — the project definitions (§5),
+    automation membership and its default stance, and the per-project mode
+    selections (§8). Atomically rewritten after each operator action; the daemon
+    reloads it after a change and holds it in memory for lookups. Every change
+    appends a ledger line, so the current selections and the history of how they
+    came about live in the appropriate places.
+  - `~/tbd/supervision/decisions.jsonl` — **append-only**, holding the
+    `always`-scoped decisions that must outlive a shift (§8), plus retraction
+    lines. This is the only supervision state that is durable *and* accumulates:
+    it exists because P1-5 promises an answer is never re-asked, and a shift
+    ledger cannot keep that promise past its own shift. Read at work-order
+    composition, never consulted as a permission.
+
+  The playbook tiers (§5) are also durable files.
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the sweep's temporary tracking. A daemon restart during a shift loses
   them. The result is a one-cycle delay, not a broken promise.
@@ -1064,8 +1071,10 @@ account, not a wrong action. The third category is **human-authored process**.
   wanted." This applies the rule that uncertainty must lead to inaction to the
   supervision machinery itself.
 
-Net property: **supervision adds one column to TBD's database.** Everything
-else it knows is in files a human can open.
+Net property: **supervision adds one column to TBD's database** — the on/off
+switch. Everything else it knows is in files a human can open: two under
+`~/tbd/supervision/`, one directory per shift, and the playbooks in the repos
+themselves.
 
 ## 8. Remembered things: advice, selection, decisions
 
@@ -1094,15 +1103,44 @@ place. What the operator wanted was for the desk to *know the answer*.
 
 So `resolve --scope` survives with a smaller and clearer meaning. Answering a
 proposal or an escalation with `--scope this-shift` or `--scope always` writes a
-`decision` ledger line, and decisions are **carried in every subsequent work
-order within their scope**. The desk reads "the operator has already said:
-archive merged scratch worktrees without asking" and does not ask. It is not
-*stopped* from asking. It is informed, which is what actually prevents the
-repeat.
+`decision`, and decisions are **carried in every subsequent work order while
+they are active**. The desk reads "the operator has already said: archive merged
+scratch worktrees without asking" and does not ask. It is not *stopped* from
+asking. It is informed, which is what actually prevents the repeat.
 
-This is a real reduction, not a relabeling. The old shape needed the same answer
-in two places — a rule the gate consulted and a fact the desk knew — and the two
-could drift. Now there is one: the record, projected into the work order.
+**Where a decision lives depends on how long it is meant to last**, and this
+matters because shift ledgers end with their shift while P1-5 is a promise that
+outlives one night:
+
+- **`this-shift`** — the `decision` line in that shift's `ledger.jsonl`, and
+  nothing else. It is projected into work orders for the rest of the shift and
+  is gone when the shift closes, which is exactly what was asked for.
+- **`always`** — the `resolve` handler writes the `resolution` event to the
+  shift ledger *as it does for every resolution*, and additionally appends the
+  decision to **`~/tbd/supervision/decisions.jsonl`**, an append-only durable
+  instruction log beside `supervision.json`. That file is what carries an answer
+  from shift 1 to shift 50. Without it there is no mechanism at all for a
+  durable decision, since the ledger is per shift and `supervision.json` holds
+  only topology and selection.
+
+At work-order composition the daemon merges two sources — the active
+`this-shift` decisions from the current ledger and every unretracted line in
+`decisions.jsonl` — and includes them as instructions. That merge *is* the
+delivery mechanism for P1-5; nothing consults them as permissions, because
+nothing needs permission.
+
+**Retraction is an append, not an edit.** An operator who no longer wants a
+standing answer appends a retraction line naming the decision's id —
+`tbd supervise decisions revoke <id>`, or by hand, since the file is
+operator-owned exactly like `supervision.json` (§7). Append-only keeps the
+history of what was decided and undecided intact, and it keeps the file's
+writer story identical to the ledger's: one writer, no rewriting of the past.
+`tbd supervise decisions list` shows what is currently in force.
+
+This is still a real reduction, not a relabeling. The old shape needed the same
+answer in two places — a rule the gate consulted and a fact the desk knew — and
+the two could drift. Now there is one fact in one shape, written once and
+delivered.
 
 ### How a shift's experience reaches the playbook (P2-1)
 
@@ -1218,11 +1256,13 @@ supervision" is the honest report.
 Before the redesign, the system represented these concepts in four ways. It had a
 hardcoded `STANDING_RULE` prompt string, which compiled one team's closeout
 command and review-bot name into the app — the exact warning example from the
-brief. The old merge gate had a `clearance` table of per-PR, SHA-pinned operator
-approvals that code enforced. A prompt asked the desk agent to consult
-`approved-prs.jsonl`, so it was binding only until the model forgot. And the
-desk's notes file served as both memory and action log, creating the "self-report"
-problem in P1-7.
+brief. The old merge gate shipped a `clearance` table of per-PR, SHA-pinned
+operator approvals — **designed as enforcement and never wired**: the store was
+fully built, `MergeGate.evaluate()` never consulted it, and it had zero
+production writers or readers (`docs/nightwatch.md` §1, §3.5). A prompt asked the
+desk agent to consult `approved-prs.jsonl`, so it was binding only until the
+model forgot. And the desk's notes file served as both memory and action log,
+creating the "self-report" problem in P1-7.
 
 PR #509, merged on 2026-07-26, deleted the merge gate and its clearance and audit
 stores, because GitHub branch protection now decides whether a PR may merge. Two
@@ -1233,9 +1273,14 @@ every action line itself (§6) — the one piece of this design that genuinely
 constrains a desk, and it constrains what a desk can *claim*, never what it can
 *do*.
 
-The clearance table is history, not a model. Its shape was scoped, enforced,
-revocable, and auditable — and this design keeps only the last of those, which is
-the one that survives contact with the trust bet (§3, §16).
+The clearance table is history, not a model — and the manner of its failure is
+the sharper lesson. It was *designed* scoped, revocable, and auditable, and it
+enforced nothing, because the code that would have consulted it was never
+written. Even the old system's binding tier turned out to be aspirational: what
+actually survived was the record of what someone intended, not a mechanism. This
+design keeps the auditable part deliberately and drops the pretence of
+enforcement openly, which is the same trade the old system made by accident
+(§3, §16).
 
 ## 9. Shift lifecycle (P2-2)
 
@@ -1350,11 +1395,15 @@ Principle: **you take action where you already read the relevant information.**
   you" section of the live `account.md` *is* the queue, and proposals and
   escalations from every desk land in it together, each labeled with its project
   (§6). Each proposal shows the target, exact message, supervisor reasoning, and
-  age of its state. Approve and reject controls appear beside it. Approval also
-  offers scope choices: this once / this shift / always for this project /
-  always for this repo. This is the only user interface (UI) that creates
-  standing verb rules; project definitions and automation membership are managed
-  in the Fleet Supervision settings tab below. A rejection can include an
+  age of its state. Approve and reject controls appear beside it. Resolving also
+  offers a **scope, which is purely temporal**: this once / this shift / always.
+  There is no "always for this project" or "always for this repo" — a decision is
+  an instruction about *the question that was asked*, and that question already
+  carries its own subject, so a spatial dimension would only restate it. (The
+  per-project and per-repo variants were vocabulary inherited from the
+  rules-generalization flow, which died with the verb gate; §3.) Project
+  definitions and automation membership are managed in the Fleet Supervision
+  settings tab below. A rejection can include an
   optional one-line explanation, which reaches that project's supervisor in its
   next work order. Each escalation shows the exact item, exact command,
   recommendation, and an answer box. Every one of these is also a CLI command —
@@ -1528,6 +1577,14 @@ tbd supervise project move   <repo> --to <project|singleton>
 tbd supervise automation default in|out
 tbd supervise automation set <project> in|out|follow-default
 tbd supervise automation list
+```
+
+**Operator — durable decisions** (§8). Only `always`-scoped decisions appear
+here; `this-shift` ones live and die in their shift's ledger.
+
+```
+tbd supervise decisions list
+tbd supervise decisions revoke <decision-id>
 ```
 
 **Deliberately absent**, each with its argument elsewhere in this document:
