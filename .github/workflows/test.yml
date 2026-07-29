@@ -193,7 +193,16 @@ jobs:
       # tests are conditionally skipped at runtime. The floors are set against
       # the executed counts (the summary line these steps grep), which is the
       # only number the check can see; don't "correct" them to the listed
-      # totals. Observed in CI on this PR: 2194 / 2342 / 57.
+      # totals.
+      #
+      # And the executed count is NOT stable run to run: two CI runs on this PR,
+      # on commits differing only in doc comments (zero tests added,
+      # `--list-tests` unchanged), executed 2194 and 2204 for step 1. The cause
+      # is not established — it is not conditional skips (the only
+      # `.enabled(if:)` here is gated on an env var CI does not set) and not
+      # parameterization (all `arguments:` are static literals). Left unexplained
+      # rather than guessed at. The practical consequence is the point: pin a
+      # floor near the exact count and it WILL fire spuriously. Keep the margin.
       # The floors sit well below each step's total
       # so ordinary test additions/removals never trip them. Their job is NOT
       # to catch an unlisted new target (the complement shape already does
