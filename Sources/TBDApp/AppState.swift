@@ -1797,29 +1797,37 @@ final class AppState: ObservableObject {
     /// client). Tombstone it and drop the row so it cannot be resurrected by a
     /// poll snapshot that predates the archive.
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
-        // Check if this was a .creating worktree that failed to complete.
-        // Look it up before it gets removed so we can detect the failure.
+        // Look the row up before it gets removed so we can name it in the alert.
         let worktree = findWorktree(id: delta.worktreeID)
-        let failureMessage = Self.creationFailureMessageIfCreating(worktree)
+        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
 
-        // If it was still creating when it disappeared, its creation failed.
-        // Show an error alert instead of silently redirecting the user.
-        // Note: when THIS client archives a still-.creating worktree, the row
-        // is already removed by removeArchivedWorktreeFromState, so the lookup
-        // will fail and no false alert fires.
+        // The daemon tells us whether creation actually failed; we never infer
+        // it from `.creating` status. A deliberate archive of a still-creating
+        // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
+        // pre-session hook — arrives with creationFailed == false and must stay
+        // silent, even though the row is `.creating` at this moment.
         if let message = failureMessage {
             showAlert(message, isError: true)
         }
     }
 
-    /// Returns a failure alert message if the worktree was in `.creating` status
-    /// when it disappeared, or nil if it was in any other status or unknown.
-    /// Pure static helper for testability — both branches are unit-testable
+    /// Returns a failure alert message when the daemon reported that this
+    /// worktree's *creation* failed, or nil otherwise (deliberate archive, or
+    /// an unknown row we can't name).
+    ///
+    /// `creationFailed` comes from the daemon via `WorktreeIDDelta`; status is
+    /// deliberately NOT consulted, because a `.creating` row can also be
+    /// archived on purpose from the CLI and the two are indistinguishable by
+    /// status alone.
+    ///
+    /// Pure static helper for testability — every branch is unit-testable
     /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
-    nonisolated static func creationFailureMessageIfCreating(_ worktree: Worktree?) -> String? {
-        guard let worktree, worktree.status == .creating else {
+    nonisolated static func creationFailureMessage(
+        _ worktree: Worktree?, creationFailed: Bool
+    ) -> String? {
+        guard creationFailed, let worktree else {
             return nil
         }
         return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
