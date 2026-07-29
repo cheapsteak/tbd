@@ -209,6 +209,30 @@ private func isRenderableFile(_ path: String) -> Bool {
     return ["md", "markdown"].contains(ext)
 }
 
+/// Decides whether a rendered markdown document owns the whole code-viewer
+/// pane instead of being stacked inside the pane's `ScrollView`.
+///
+/// `WKWebView` reports `noIntrinsicMetric` for height. Inside a `ScrollView`
+/// the vertical proposal is unbounded, so the webview resolves to its ideal
+/// height — zero — and the pane paints nothing but its background. A rendered
+/// document therefore replaces the `ScrollView` outright and scrolls
+/// internally.
+///
+/// Only a *single* selected markdown file qualifies. A multi-file selection
+/// with the flag on would hit the same zero-height collapse, and stacking N
+/// internally-scrolling webviews needs a layout design of its own, so it falls
+/// back to the MarkdownUI rendering — a known limitation for the soak.
+enum MarkdownPaneLayout {
+    static func usesFullPaneWebView(
+        showSourceCode: Bool,
+        selectedFiles: [String],
+        useWebView: Bool
+    ) -> Bool {
+        guard useWebView, !showSourceCode, selectedFiles.count == 1 else { return false }
+        return isRenderableFile(selectedFiles[0])
+    }
+}
+
 struct CodeViewerPaneView: View {
     let path: String
     let worktreePath: String
@@ -216,6 +240,17 @@ struct CodeViewerPaneView: View {
 
     @State private var selectedFiles: [String] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
+
+    /// Computed rather than stored: a `private` stored property would drag the
+    /// synthesized memberwise initializer down to `private` too, breaking the
+    /// pane's call sites.
+    private var usesFullPaneWebView: Bool {
+        MarkdownPaneLayout.usesFullPaneWebView(
+            showSourceCode: showSourceCode,
+            selectedFiles: selectedFiles,
+            useWebView: MarkdownViewerPreferences.useWebView()
+        )
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -236,6 +271,17 @@ struct CodeViewerPaneView: View {
             Group {
                 if selectedFiles.isEmpty {
                     emptyState
+                } else if usesFullPaneWebView {
+                    // The webview scrolls itself; wrapping it in the pane's
+                    // ScrollView collapses it to zero height. See
+                    // `MarkdownPaneLayout`.
+                    FilePreviewView(
+                        filePath: selectedFiles[0],
+                        worktreePath: worktreePath,
+                        showSourceCode: showSourceCode,
+                        useWebViewMarkdown: true
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -243,10 +289,16 @@ struct CodeViewerPaneView: View {
                                 if selectedFiles.count > 1 {
                                     fileHeader(filePath)
                                 }
+                                // Always the MarkdownUI renderer here: a
+                                // webview nested in this ScrollView has no
+                                // height. With the flag on, this is reached
+                                // only by a multi-file selection — the known
+                                // limitation named in `MarkdownPaneLayout`.
                                 FilePreviewView(
                                     filePath: filePath,
                                     worktreePath: worktreePath,
-                                    showSourceCode: showSourceCode
+                                    showSourceCode: showSourceCode,
+                                    useWebViewMarkdown: false
                                 )
                             }
                         }
@@ -330,6 +382,9 @@ private struct FilePreviewView: View {
     /// Trust boundary for local image inlining in the rendered markdown path.
     let worktreePath: String
     let showSourceCode: Bool
+    /// Decided by the pane, not read from `UserDefaults` here: only the pane
+    /// knows whether this preview owns the full height the webview needs.
+    let useWebViewMarkdown: Bool
 
     @State private var revision: Int = 0
     private let watcher = FileWatcher()
@@ -338,7 +393,10 @@ private struct FilePreviewView: View {
         Group {
             if !showSourceCode && isRenderableFile(filePath) {
                 RenderedContentView(
-                    filePath: filePath, worktreePath: worktreePath, revision: revision
+                    filePath: filePath,
+                    worktreePath: worktreePath,
+                    revision: revision,
+                    useWebView: useWebViewMarkdown
                 )
             } else if isImageFile(filePath) {
                 ImagePreviewView(filePath: filePath, revision: revision)
@@ -369,6 +427,7 @@ private struct RenderedContentView: View {
     let filePath: String
     let worktreePath: String
     let revision: Int
+    let useWebView: Bool
     @State private var content: String?
     @State private var loadError: String?
     @State private var renderedHTML: String?
@@ -376,7 +435,6 @@ private struct RenderedContentView: View {
     /// change because this view is not `.id(filePath)`-keyed, so without this
     /// a file switch would briefly paint the previous file's HTML.
     @State private var renderedPath: String?
-    private let useWebView = MarkdownViewerPreferences.useWebView()
 
     var body: some View {
         Group {

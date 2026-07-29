@@ -113,6 +113,12 @@ struct MarkdownWebView: NSViewRepresentable {
         // private KVC; if the key ever disappears it raises an ObjC exception
         // that Swift cannot catch, crashing on the render path.
         webView.underPageBackgroundColor = .clear
+        // The code viewer pane is unconditionally dark (`.colorScheme(.dark)`
+        // over the atom-one-dark background), but a SwiftUI color scheme does
+        // not reach the webview: WebKit resolves `prefers-color-scheme` from
+        // the view's `effectiveAppearance`. Without this, a Mac in Light mode
+        // renders near-black body text on the dark pane.
+        webView.appearance = NSAppearance(named: .darkAqua)
         context.coordinator.load(html, into: webView)
         return webView
     }
@@ -120,6 +126,19 @@ struct MarkdownWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         guard context.coordinator.loadedHTML != html else { return }
         context.coordinator.load(html, into: webView)
+    }
+
+    /// Take whatever the container offers instead of being sized by content.
+    ///
+    /// `WKWebView` reports `NSView.noIntrinsicMetric` on both axes and has no
+    /// internal constraints, so the default representable sizing — which falls
+    /// back to `intrinsicContentSize`/`fittingSize` — resolves it to zero and
+    /// the pane renders empty. The document scrolls inside the webview, so
+    /// "fill the offer" is also the correct behavior, not just the non-zero one.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize, nsView: WKWebView, context: Context
+    ) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
     }
 
     @MainActor
