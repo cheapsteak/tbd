@@ -42,7 +42,16 @@ pre { background: var(--md-code-bg); padding: 12px; border-radius: 6px; overflow
 pre code { background: none; padding: 0; }
 blockquote { margin-left: 0; padding-left: 12px;
              border-left: 3px solid var(--md-border); color: var(--md-muted); }
-table { border-collapse: collapse; display: block; overflow-x: auto; }
+/* display:block + width:max-content is the standard wide-table hack. Without
+   max-content the block box fills its container, so columns squish instead of
+   producing the scrollbar overflow-x is asking for. */
+table {
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
 th, td { border: 1px solid var(--md-border); padding: 6px 12px; }
 img { max-width: 100%; }
 .tbd-oversized-image {
