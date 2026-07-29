@@ -6,8 +6,11 @@ Status: **normative sub-document of the fleet-supervision design.** Extracted
 to keep that document readable; it carries the same authority as the section it
 came from, and `design §N` below refers to that document's sections. It records
 the 2026-07-29 amendment that removed the compiled wake gate, motivated by
-PR #522's field review. The requirements doc carries the matching dated
-amendments on P1-2 and P1-4
+PR #522's field review — and the same-day follow-up that removed the compiled
+actuation rails the first draft had kept: TBD's obligation to the wake program
+is sufficient public surfaces, never guardrails. The requirements doc carries
+the matching dated amendments (P0-2, P0-8, P1-1, P1-2, P1-3, P1-4, P3-1) and
+the **Built/Enabled** classification the follow-up introduced
 ([`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md)).
 
 ## The reversal, and why
@@ -56,24 +59,51 @@ and the desk — entirely.**
   Routine waking therefore never reaches a desk. The `wake` verb survives for
   judgment — a desk may still conclude from a case that a session should be
   up — but no case is ever raised *for the purpose of* waking.
-- **The daemon keeps the choke point, not the decision.** Every wake — from
-  the program, a desk, or a human — passes through the same compiled rails at
-  actuation: never-touch flags (P1-3), individually rate-limited targets and
-  fleet-wide capacity holds (P1-1, design §11), an intervention already in
-  flight, and the ledger line the daemon writes at that moment, attributed to
-  its caller (P1-7). Freshness belongs here too: the actuation surface
-  re-verifies a wake text's external claims exactly as `drive --text` does
-  (P0-8) — the check is universal, so it lives at the surface every caller
-  shares.
-- **The program schedules itself.** Cadence is a requirement; daemon ownership
-  of it is not. The reference script runs its own loop — under launchd, or
-  invoked at shift open — and a scheduler outside the daemon survives the
-  daemon being down, which is P3-1's shape obtained for free. What TBD owes is
-  legibility, not supervision of the scheduler: the program's actuation calls
-  are already ledger lines, so the account renders when the wake program was
-  last heard from, and a shift with parked sessions and a silent wake program
-  says so loudly — a dead scheduler must never look like a calm night
-  (design §16).
+- **TBD guards nothing here — its obligation is sufficiency, not guardrails.**
+  A first draft of this amendment kept a compiled choke point at actuation —
+  never-touch flags, capacity holds, in-flight dedup, send-time freshness, a
+  daemon-written ledger line — through which every wake would pass. It was
+  removed the same day, deliberately: it made TBD the guarantor of a program
+  TBD does not run, does not schedule, and — seeded once, never clobbered —
+  cannot repair. A wake program's correctness is its author's, like any cron
+  job's. What TBD owes instead is that everything the program needs is a
+  public, documented, stable surface: parked state and `hibernateReason` in
+  the listings; the never-touch flag visible there too (P1-3); the supervision
+  switch readable (`tbd supervise status --json` or equivalent); per-profile
+  usage facts readable (P1-1 — the one surface that does not exist yet); and
+  `tbd terminal wake --prompt` with its existing race-safety — an
+  already-awake session reports `woken:false` and receives nothing, the one
+  property that must hold no matter who calls, and it already does. The
+  reference script honors every rail the choke point would have enforced —
+  switch off means exit quietly, never-touch means skip, rate-limited or
+  capacity-exhausted means hold — as authored conduct with a worked example,
+  not as law. Send-time freshness (P0-8) is likewise the program's
+  discipline: derive facts live, immediately before composing, as the old
+  wake.py always did. Wakes are recorded as the ordinary terminal operations
+  they already are; nothing here depends on a shift being open, and nothing
+  here writes supervision ledger lines.
+- **The program schedules itself, and watches itself.** Cadence is a
+  requirement; daemon ownership of it is not. The reference script runs its
+  own loop — under launchd, or invoked at shift open — and a scheduler outside
+  the daemon survives the daemon being down, which is P3-1's shape obtained
+  for free (detection survives; actuation still needs the daemon up, which is
+  all P3-1 ever asked). Liveness is the author's, like the rest of the
+  program's correctness: TBD does not track when the program last ran. The
+  reference script ships the self-monitoring pattern instead. A heartbeat
+  file it rewrites on every run, carrying a summary and a next-run-by
+  promise. launchd `KeepAlive` for the crash half, so the common death mode
+  self-heals. On startup, a comparison of now against its own last heartbeat,
+  so every crash-and-recovery reports its own gap ("dark 02:00–05:10, 3 runs
+  missed") in the program's own log. And for the one death mode nothing can
+  self-report — a job unloaded, or never installed — a paired external
+  watchdog: a trivial second cron alerting on a stale heartbeat file, or a
+  dead-man's URL pinged each run. The accepted residue is named in design
+  §16: in the account, a dead wake program over parked sessions looks exactly
+  like the legitimate no-program default. If field use shows that ambiguity
+  biting, the pre-planned escape hatch is one file read — the account
+  renderer surfacing the heartbeat file's age against its own next-run-by
+  promise at a conventional path — added then, as a dated amendment, not
+  built now.
 - **The default is silence, and merge means silence.** A project with no wake
   program gets no automated wakes: parked worktrees appear in the account with
   their work facts — a merged PR renders as done-and-archivable, commits with
@@ -87,14 +117,33 @@ and the desk — entirely.**
   a post-merge closeout ritual) edits its own program; the tool ships no
   opinion it cannot be argued out of.
 
+## The guarantee TBD does make: sufficient, stable surfaces
+
+The requirements doc's **Built/Enabled** classification (added 2026-07-29)
+names the obligation precisely: P1-2 is Enabled — TBD guarantees that a
+program written against its public surfaces *can* implement the story, not
+that TBD implements it. Two consequences with teeth:
+
+- **The reference script is the conformance test.** It may use only
+  documented public surfaces. A fact it cannot obtain that way is a failed
+  conformance check and a concrete, scoped API request — today the list has
+  one entry, per-profile usage facts (P1-1) — and that is the mechanism by
+  which TBD's surface grows: pulled by a real consumer, one argued piece at a
+  time, never pushed by speculation.
+- **Those surfaces become a contract.** Listing output shapes,
+  `hibernateReason` values, wake semantics and exit codes stop being
+  incidental CLI output the moment an external program is the sanctioned
+  implementation of a P1 story. Migration and future changes must treat them
+  as versioned interfaces. This is the one genuinely new cost of the
+  outside-first posture, accepted here rather than discovered later.
+
 ## What the sweep keeps
 
 What the sweep loses is exactly the part that was never universal. Its live
 half — idle and stuck detection, prompt cases, runaway counters — is
 unchanged, model-free, and still the daemon's. Work facts (design §2) are
-still derived on the daemon's clock; they feed the account, the actuation
-rails, and the report lines above. They are no longer a wake gate anywhere in
-compiled TBD.
+still derived on the daemon's clock; they feed the account and the report
+lines above. They are no longer a wake gate anywhere in compiled TBD.
 
 One scope line, so nothing re-inflates here: worktree-local artifacts a wake
 program reads are per-checkout, and **team-wide work-status syncing is out of

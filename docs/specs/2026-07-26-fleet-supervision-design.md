@@ -6,7 +6,11 @@ editing pass. Amended 2026-07-29 after PR #522's field review: the compiled
 wake gate for parked sessions is removed in favor of a project-authored wake
 program, specified in the sub-document
 [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md);
-the requirements doc carries matching dated amendments on P1-2 and P1-4. Companion to
+a same-day follow-up removed the compiled actuation rails the first amendment
+had kept — TBD's obligation to external programs is sufficient public
+surfaces, never guardrails — and the requirements doc carries the matching
+dated amendments plus the **Built/Enabled** classification and outside-first
+migration rule that follow-up introduced. Companion to
 [`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md),
 which carries the stories (P0-1 … P3-1) this doc cites. This is the ideal-state
 design; migration from the current implementation is deliberately out of scope
@@ -59,8 +63,10 @@ a quick audit:
 - **The wake decision for parked sessions** — authored, since the 2026-07-29
   amendment: a project-owned wake program outside the daemon (the
   [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
-  Compiled TBD keeps only the actuation choke point — rails, freshness, the
-  ledger line — that every caller shares. The sweep supervises live agents
+  Compiled TBD keeps nothing of it — a same-day follow-up removed even the
+  actuation rails the first draft kept: TBD's obligation is sufficient public
+  surfaces (the requirements doc's Built/Enabled classification), never
+  guardrails on a program it does not run. The sweep supervises live agents
   only.
 
 **This placement means the daemon, not the supervisor, drives the loop.** A
@@ -68,7 +74,7 @@ compiled sweep follows the same pattern as the existing hibernation sweep: a
 cheap polling tick and a pure decision function. It calculates state, applies
 the mechanical reasons not to act, and wakes a supervisor only when it has a
 work order for that supervisor's project (§5). Waking a supervisor is the result
-of a check, never the way the check is performed (P0-6, P1-2). A supervisor
+of a check, never the way the check is performed (P0-6). A supervisor
 never polls or sweeps, and it never writes state or history directly. The
 sweep itself stays single and fleet-wide however many projects exist. The
 daemon never makes a judgment.
@@ -532,6 +538,15 @@ substance: one gesture, one shift, one ledger, one account, one queue.
 **`off` is not a mode.** It is the absence of supervision — no sweep, no desks,
 nothing observing — and it stays compiled. It is the only behavioral fork the
 switch has.
+
+**The switch's writ runs exactly as far as TBD's own processes.** It stops the
+sweep and the desks; it does not reach programs the operator schedules outside
+TBD. The [wake program's](2026-07-26-fleet-supervision-wake-program.md) off
+gesture is its scheduler's (`launchctl unload`), owned by whoever installed
+it — you stop the things you start. The reference wake program reads the
+switch from the public status surface and exits quietly when supervision is
+off, as authored courtesy rather than as a guarantee TBD enforces (P0-2
+amendment, requirements doc).
 
 ### Modes are project-defined conduct profiles
 
@@ -1633,9 +1648,12 @@ tbd supervise decisions revoke <decision-id>
   rate limiting is already session state.
 - **P1 — fleet-wide hold**: several agents capped at once → hold interventions
   until the limit window resets. The daemon already has usage snapshots for
-  each profile. Holds act at the actuation choke point, so they bind every
-  caller — desk verbs and the
-  [wake program](2026-07-26-fleet-supervision-wake-program.md) alike.
+  each profile. Holds bind the desk verbs — the callers TBD runs. The
+  [wake program](2026-07-26-fleet-supervision-wake-program.md) holds on its
+  own: the same per-profile usage facts must be readable on a public surface
+  (the API gap the requirements doc's P1-1 amendment names), and the
+  reference script honors them. TBD does not enforce holds against programs
+  it does not run.
 - **P2 or never — cross-account rebalancing**: not compiled, ever. It presumes
   a particular arrangement of multiple accounts and requires workflow
   judgment. If it exists, it must be a playbook instruction for a supervisor
@@ -1860,10 +1878,20 @@ to inaction at the largest scale.
   [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md).
 - **Daemon-owned wake scheduling** — the wake program schedules itself, and a
   scheduler outside the daemon survives the daemon being down (P3-1's shape).
-  TBD renders the program's last-heard-from age in the account instead of
-  supervising it. See the
+  TBD neither supervises the scheduler nor tracks its liveness: the program
+  self-monitors (heartbeat file, launchd `KeepAlive`, a resurrection
+  self-report, an external watchdog), and the account renders parked-session
+  facts only. See the
   [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)
-  and §16.
+  and §16 for the ambiguity this accepts.
+- **Actuation rails for the wake program** — a first draft of the 2026-07-29
+  amendment kept a compiled choke point (never-touch, capacity holds,
+  in-flight dedup, send-time freshness, a daemon-written ledger line) that
+  every wake would pass through. Removed the same day: TBD does not guarantee
+  or guardrail a program it does not run and cannot repair. The program's
+  inputs and actuation are public surfaces (Built/Enabled split, requirements
+  doc); the rails are the program's to honor, and the reference script honors
+  all of them.
 - **A machine-appended learnings file** (and the `learn` verb and `learning`
   ledger kind that fed it) — a per-project `learnings.md` the desk could append
   to, carried in every future work order, taking effect with no review. Removed
@@ -2016,8 +2044,13 @@ Two secondary honest costs:
   look like an empty, calm night. Distinguishing "nothing happened" from
   "nothing was seen" requires reading the anomaly section. The account renderer
   should make nights with many unknown states visually unmistakable. The
-  [wake program](2026-07-26-fleet-supervision-wake-program.md) extends this
-  obligation past the process boundary: it is the one scheduled component TBD
-  does not run, so whenever parked sessions exist the account must render how
-  long ago the program was last heard from — a dead scheduler and a calm night
-  must never look alike.
+  [wake program](2026-07-26-fleet-supervision-wake-program.md) sits past the
+  process boundary, and by the outside-first follow-up TBD does not track its
+  liveness: the program self-monitors, and a dead or never-installed wake
+  program renders in the account exactly like the legitimate no-program
+  default — parked facts, no wakes. That ambiguity is accepted deliberately,
+  eyes open: it is this failure mode's sharpest instance, the sub-document
+  names the author-side watchdog pattern that answers it, and the escape
+  hatch if field use proves it insufficient is one file read (the account
+  surfacing the program's own heartbeat age), added then as a dated
+  amendment.

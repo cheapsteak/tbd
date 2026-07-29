@@ -73,6 +73,35 @@ autonomous, **[both]**. Stories marked *(implied, not yet implemented)* are clea
 by the current system's intent but absent or broken in it; treat them as requirements all
 the same.
 
+### Two ways a story can bind TBD
+
+*Added 2026-07-29, with the wake-program descope (P1-2).* A story binds TBD in one of two
+ways, and dated amendments below tag several stories with the distinction:
+
+- **Built** — TBD implements the behavior itself. The guarantee is the behavior. Untagged
+  stories are Built; it is the default.
+- **Enabled** — TBD guarantees that a program authored outside it, written against TBD's
+  public surfaces, *can* implement the behavior: the facts it needs are readable — cheaply,
+  with provenance, able to express not-knowing — the actuations it needs are invokable with
+  their safety semantics stated, and those surfaces are documented and stable. What the
+  program then does with them is authored and owned outside TBD, which neither supervises
+  nor guardrails it. Its correctness is its author's, like any cron job's.
+
+The split carries a migration direction, stated once so no later descope has to re-argue
+it: **capability starts outside TBD and migrates in only when field use proves a need** —
+one piece at a time, each argued on its own evidence as a dated amendment. This is the
+brief's own standing bias ("prefer the extension point") given a ratchet: the outside
+position is the default, and every move inward is deliberate.
+
+An Enabled guarantee also has a proof artifact. **The shipped reference implementation —
+today, the wake program's reference script — may use only documented public surfaces.**
+A fact it cannot obtain that way is a failed conformance check and a concrete, scoped API
+request; that is the mechanism by which TBD's surface grows, pulled by a real consumer
+rather than pushed by speculation. The corollary is a cost accepted here rather than
+discovered later: the surfaces an Enabled story depends on — listing output shapes,
+`hibernateReason` values, wake semantics, exit codes — stop being incidental CLI output
+and become a contract that migration and future change must respect.
+
 ### P0 — without these the subsystem has no point
 
 - **P0-1 [both]** As an operator, I want one supervising agent watching the whole fleet and
@@ -91,6 +120,14 @@ the same.
   behavioral fork on posture left to make: a mode is authored conduct, so it belongs with the
   project whose conduct it describes, while the switch that starts and stops supervision
   stays global.*
+
+  *Amended 2026-07-29, one scope sentence after the wake program (P1-2) moved waking outside
+  TBD: the switch governs what TBD itself runs — the sweep and the desks — and does not reach
+  across the process boundary to programs the operator schedules. The wake program's off
+  gesture is its scheduler's (`launchctl unload`), owned by whoever installed it: you stop
+  the things you start. The reference wake program reads the switch from the public status
+  surface and exits quietly when supervision is off — authored courtesy, not a guarantee TBD
+  makes on the program's behalf.*
 - **P0-3 [both]** As an operator, I want the two modes to differ *mechanically*, not merely
   in prompt wording, so that the label's promise ("a human stays in the loop") is enforced
   by the system rather than requested of the supervisor. *(implied, not yet implemented —
@@ -139,6 +176,13 @@ the same.
   ("your PR merged", "checks are failing") verified against live sources at send time, so
   that agents are never handed stale premises. (Hard-won: hand-composed wakes and gate
   notices have repeatedly described PRs that had merged days earlier.)
+
+  *Amended 2026-07-29: splits along the Built/Enabled line above. **Built** where TBD is the
+  sender — the daemon re-verifies a desk's `drive --text` claims at send time (design §3).
+  **Enabled** for wake programs: a program derives its facts live, immediately before
+  composing, which is the discipline the old wake.py already practiced ("re-derives truth AT
+  WAKE TIME") with no daemon help, and the reference script demonstrates it. TBD does not
+  re-verify a wake program's text for it.*
 - **P0-9 [both]** As an operator, I want a **live** account of the shift — open beside my work,
   updating as things happen, showing what has been done, what is still open, and what needs me
   — so that supervision is legible while it is running, not only after it has stopped. The
@@ -163,6 +207,12 @@ the same.
   stalling a whole fleet overnight. Treat that as conditional: it presumes an operator with
   several accounts configured, which may be one person's topology rather than a general need.
   Design the holding behaviour; argue for or against rebalancing.)*
+
+  *Amended 2026-07-29: splits. Holding is **Built** for the desks TBD runs (design §11). For
+  the wake program it is **Enabled** — the per-profile usage and rate-limit facts the daemon
+  already holds must be exposed on a public, machine-readable surface so a program can hold
+  on its own. That surface does not exist today; it is the first concrete API request the
+  Enabled conformance test has produced.*
 - **P1-2 [A]** As an operator, I want *whether* to wake a parked session decided from cheap
   facts derived entirely outside it — branch, commits not yet on main, whether a pull request
   exists and its state, whether checks fail — so that the supervisor never has to hold the arc
@@ -188,9 +238,15 @@ the same.
   reference and never clobbered, that reads what is parked and why from TBD's public
   surfaces, derives live git and forge facts itself, decides in its own vocabulary,
   composes the wake text, schedules its own cadence, and actuates through
-  `tbd terminal wake`. What stays compiled is the choke point every caller passes through:
-  never-touch flags, capacity holds, in-flight dedup, send-time freshness, and the ledger
-  line written by the daemon at actuation. A project with no wake program gets no automated
+  `tbd terminal wake`. The story is thereby reclassified **Enabled** (see the classification
+  note above): TBD's obligation is that the program's inputs and actuation are public,
+  documented, and stable — never to guarantee or guardrail the program's correctness. A
+  first draft of this amendment kept a compiled choke point at actuation (never-touch,
+  capacity holds, dedup, send-time freshness, a daemon-written ledger line); a same-day
+  follow-up removed it, because it made TBD the guarantor of a program TBD does not run,
+  does not schedule, and — seeded once, never clobbered — cannot repair. The rails are the
+  program's to honor, readable from the same public surfaces, and the reference script
+  honors all of them. A project with no wake program gets no automated
   wakes — parked worktrees appear in the account with their facts, and a merged pull
   request means silence, never a wake. The story's clauses are all preserved: the facts are
   still cheap and derived outside the session, waking is still the conclusion of a check,
@@ -200,6 +256,11 @@ the same.
 - **P1-3 [both]** As an operator, I want to designate sessions the supervisor must never
   touch and worktrees whose progress matters most, so that my own live session is never
   poked and the important work is looked at first.
+
+  *Amended 2026-07-29: the flag itself stays **Built** — a DB flag the sweep honors
+  mechanically (design §5). Its visibility to external programs is **Enabled**: the flag
+  must appear on the public listing surfaces so a wake program can honor it too, and the
+  reference script skips flagged sessions.*
 - **P1-4 [both]** As a repo maintainer, I want my repo's supervision policy — what counts as
   stuck, what interventions are appropriate, house rules the supervisor must follow —
   authored as an artifact in or beside my repo and resolved through TBD's existing
@@ -232,9 +293,9 @@ the same.
   the entire check. The
   [wake program](2026-07-26-fleet-supervision-wake-program.md) of the P1-2 amendment owns
   fact-gathering, verdict, and warrant alike, in the project's own vocabulary, including
-  project-local state (markers, claim conventions) the app could never know. The fact-versus-warrant line is unchanged for
-  everything the daemon still derives: session state and work facts, which feed the account
-  and the actuation rails.*
+  project-local state (markers, claim conventions) the app could never know. The
+  fact-versus-warrant line is unchanged for everything the daemon still derives: session
+  state and work facts, which feed the account.*
 - **P1-5 [both]** As an operator, I want decisions I have already made remembered durably
   for the rest of the shift, so that I am never re-asked a question I answered an hour ago.
 - **P1-6 [A]** As an operator, I want the supervisor to re-check an agent shortly after
@@ -290,6 +351,13 @@ the same.
 
 - **P3-1 [A]** As an operator, I want an optional heartbeat that survives the daemon being
   down entirely, so the safety net doesn't share fate with the process it watches.
+
+  *Amended 2026-07-29: the waking half of the safety net now has this property by
+  construction — the wake program (P1-2) schedules itself outside the daemon, so its
+  detection loop survives the daemon being down (actuation still needs the daemon up, which
+  is all this story ever asked). Live-session supervision — the sweep and the desks — still
+  shares the daemon's fate; whether that half needs an external heartbeat remains open, and
+  the outside-first rule above says any answer starts as an external program too.*
 
 ### Behaviours of the current system that are accidents, not requirements
 
