@@ -14,7 +14,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         displayName: String? = nil
     ) -> Worktree {
         let shortID = id.uuidString.prefix(8)
-        Worktree(
+        return Worktree(
             id: id,
             repoID: repoID ?? self.testRepoID,
             name: "test-\(shortID)",
