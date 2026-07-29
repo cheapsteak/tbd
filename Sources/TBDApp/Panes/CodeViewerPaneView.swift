@@ -363,6 +363,10 @@ private struct RenderedContentView: View {
     @State private var content: String?
     @State private var loadError: String?
     @State private var renderedHTML: String?
+    /// The path `renderedHTML` belongs to. `@State` survives a `filePath`
+    /// change because this view is not `.id(filePath)`-keyed, so without this
+    /// a file switch would briefly paint the previous file's HTML.
+    @State private var renderedPath: String?
     private let useWebView = MarkdownViewerPreferences.useWebView()
 
     var body: some View {
@@ -396,7 +400,7 @@ private struct RenderedContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: "\(filePath)#\(revision)") {
+        .task(id: "\(filePath)#\(revision)#\(useWebView)") {
             await loadContent()
         }
     }
@@ -404,13 +408,20 @@ private struct RenderedContentView: View {
     private func loadContent() async {
         content = nil
         loadError = nil
-        renderedHTML = nil
         let fm = FileManager.default
         if let attrs = try? fm.attributesOfItem(atPath: filePath),
            let size = attrs[.size] as? UInt64, size > 1_048_576 {
             loadError = "File too large to preview (\(size / 1024)KB)"
             return
         }
+        // Clear ONLY on a file switch. Clearing unconditionally on every
+        // `revision` bump would remove `MarkdownWebView` from the hierarchy,
+        // tearing down the WKWebView and its coordinator — defeating the
+        // in-place swap in `updateNSView` and costing a blank flash plus a
+        // scroll reset on every save.
+        if renderedPath != filePath { renderedHTML = nil }
+        renderedPath = filePath
+
         if useWebView {
             let html = await MarkdownRenderService.shared.render(
                 path: filePath, css: MarkdownDocumentBuilder.defaultCSS
