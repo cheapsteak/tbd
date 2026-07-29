@@ -1,0 +1,54 @@
+/* Default markdown viewer stylesheet.
+   Users override by selecting a file from ~/tbd/markdown-themes/.
+   Light and dark are handled here via prefers-color-scheme — TBD injects no
+   theme attribute and defines no CSS variable contract. */
+:root {
+  --md-fg: #0a0a0a;
+  --md-bg: transparent;
+  --md-muted: #6b6d7a;
+  --md-link: #2c65cf;
+  --md-border: #e4e4e8;
+  --md-code-bg: #f7f7f9;
+  --md-font: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --md-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --md-size: 13px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --md-fg: #fbfbfc;
+    --md-muted: #9295a0;
+    --md-link: #4c8ef8;
+    --md-border: rgba(255, 255, 255, 0.15);
+    --md-code-bg: rgba(255, 255, 255, 0.06);
+  }
+}
+body {
+  margin: 0;
+  padding: 16px;
+  color: var(--md-fg);
+  background: var(--md-bg);
+  font-family: var(--md-font);
+  font-size: var(--md-size);
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+h1, h2 { border-bottom: 1px solid var(--md-border); padding-bottom: 0.3em; }
+h1 { font-size: 2em; }
+h2 { font-size: 1.5em; }
+a { color: var(--md-link); }
+code { font-family: var(--md-mono); font-size: 0.85em;
+       background: var(--md-code-bg); padding: 0.2em 0.4em; border-radius: 4px; }
+pre { background: var(--md-code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+blockquote { margin-left: 0; padding-left: 12px;
+             border-left: 3px solid var(--md-border); color: var(--md-muted); }
+table { border-collapse: collapse; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--md-border); padding: 6px 12px; }
+img { max-width: 100%; }
+.tbd-oversized-image {
+  display: inline-block; padding: 4px 8px; border: 1px dashed var(--md-border);
+  border-radius: 4px; color: var(--md-muted); font-family: var(--md-mono);
+  font-size: 0.85em;
+}
+.markdown-alert { border-left: 3px solid var(--md-border); padding: 0 12px; margin: 16px 0; }
+.markdown-alert-title { font-weight: 600; }

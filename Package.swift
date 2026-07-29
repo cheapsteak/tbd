@@ -111,7 +111,7 @@ let package = Package(
                 .product(name: "Markdown", package: "swift-markdown"),
             ],
             path: "Sources/TBDApp",
-            resources: [.copy("Resources/Icons")],
+            resources: [.copy("Resources/Icons"), .copy("Resources/markdown-default.css")],
             // Swift 6.2 WMO-debug OOM workaround — see noWMODebugWorkaround
             // above. TBDApp is the larger of the two memory-heavy modules
             // (SwiftUI view bodies + MarkdownUI + SwiftTerm).
