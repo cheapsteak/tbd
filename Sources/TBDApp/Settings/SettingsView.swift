@@ -212,6 +212,8 @@ struct GeneralSettingsTab: View {
                 remoteProvidersRegistryRow
             }
 
+            MarkdownSettingsSection()
+
             Section {
                 EnvOverridesEditor(
                     initial: appState.globalEnvOverrides,

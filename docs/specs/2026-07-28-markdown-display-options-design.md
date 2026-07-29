@@ -223,7 +223,7 @@ keychain failure PR #196 removed.
 
 ### Feature flag
 
-`useWebViewMarkdownViewer`, a `UserDefaults` key defaulting to **false**. App-only behavior, so
+`markdown.viewer.usewebview`, a `UserDefaults` key defaulting to **false**. App-only behavior, so
 `UserDefaults` is correct per CLAUDE.md; precedent is `enableTranscript` and
 `useTableViewTranscript`.
 

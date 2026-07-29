@@ -11,7 +11,7 @@ which lists mermaid as explicitly out of scope. This document works out how it c
 These are settled and constrain every option below.
 
 - Markdown renders as markdown → HTML → hardened `WKWebView`, behind the default-off
-  `useWebViewMarkdownViewer` flag.
+  `markdown.viewer.usewebview` flag.
 - HTML comes from **comrak in safe mode**, which clobbers all raw HTML. Mermaid diagrams arrive
   as ` ```mermaid ` fenced blocks and survive as `<pre><code class="language-mermaid">`.
 - The display webview runs **no JavaScript**, installs no script message handlers, uses a
