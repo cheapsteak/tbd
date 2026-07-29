@@ -171,6 +171,32 @@ the same.
   performed. *(implied, partially broken today — the live check exists and works, but every
   parked session is woken regardless of its verdict, including the ones just found complete.
   On the night that motivated the check, all 24 were complete.)*
+
+  *Amended 2026-07-29: the story's intent survives; its assigned owner does not. The design's
+  first answer was a compiled wake gate in the daemon's sweep — a global "outstanding work"
+  fact list whose any-true verdict woke a parked session. Field evidence from PR #522's
+  review (zionts, 2026-07-29) showed that gate structurally wrong, not mistuned: its
+  "commits not on the default branch" fact reads true forever for a squash-merged branch,
+  so 33 of 70 active worktrees on a live fleet — and 24 of 24 on this story's own motivating
+  night — were finished work the sweep would have woken every cycle, one into a resume worth
+  750k tokens re-entering work merged five days earlier. Completion is a fact about intent
+  and forge state; git commit identity cannot express it, and no compiled fact list can.
+  Rather than repairing the inference, **the wake decision is descoped from the daemon
+  entirely — and from the desk, which never needed to be involved** (the old system's
+  wake.py composed verified wakes with no model). Waking parked sessions becomes a
+  **project-authored wake program**: an external script, seeded once from a shipped
+  reference and never clobbered, that reads what is parked and why from TBD's public
+  surfaces, derives live git and forge facts itself, decides in its own vocabulary,
+  composes the wake text, schedules its own cadence, and actuates through
+  `tbd terminal wake`. What stays compiled is the choke point every caller passes through:
+  never-touch flags, capacity holds, in-flight dedup, send-time freshness, and the ledger
+  line written by the daemon at actuation. A project with no wake program gets no automated
+  wakes — parked worktrees appear in the account with their facts, and a merged pull
+  request means silence, never a wake. The story's clauses are all preserved: the facts are
+  still cheap and derived outside the session, waking is still the conclusion of a check,
+  and sessions with nothing outstanding are not woken by construction — nothing wakes at
+  all unless a program a human authored concludes it should. Full design:
+  [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).*
 - **P1-3 [both]** As an operator, I want to designate sessions the supervisor must never
   touch and worktrees whose progress matters most, so that my own live session is never
   poked and the important work is looked at first.
@@ -200,6 +226,15 @@ the same.
   Mode belongs on the same axis (see P0-3): one verdict can warrant escalate-to-human when
   supervised and act-directly when autonomous, authored per repo rather than requested of the
   agent in prose.
+
+  *Amended 2026-07-29: for parked sessions the worked example now resolves more strongly than
+  "the check yields a verdict; the repo decides what the verdict warrants" — the repo authors
+  the entire check. The
+  [wake program](2026-07-26-fleet-supervision-wake-program.md) of the P1-2 amendment owns
+  fact-gathering, verdict, and warrant alike, in the project's own vocabulary, including
+  project-local state (markers, claim conventions) the app could never know. The fact-versus-warrant line is unchanged for
+  everything the daemon still derives: session state and work facts, which feed the account
+  and the actuation rails.*
 - **P1-5 [both]** As an operator, I want decisions I have already made remembered durably
   for the rest of the shift, so that I am never re-asked a question I answered an hour ago.
 - **P1-6 [A]** As an operator, I want the supervisor to re-check an agent shortly after

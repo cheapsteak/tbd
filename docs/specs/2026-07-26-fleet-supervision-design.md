@@ -2,7 +2,11 @@
 
 Status: **complete draft, pending operator review.** Captures the decisions
 settled in the design conversation of 2026-07-26, after a plain-language
-editing pass. Companion to
+editing pass. Amended 2026-07-29 after PR #522's field review: the compiled
+wake gate for parked sessions is removed in favor of a project-authored wake
+program, specified in the sub-document
+[`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md);
+the requirements doc carries matching dated amendments on P1-2 and P1-4. Companion to
 [`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md),
 which carries the stories (P0-1 … P3-1) this doc cites. This is the ideal-state
 design; migration from the current implementation is deliberately out of scope
@@ -52,6 +56,12 @@ a quick audit:
   operator's selection of which mode is active.
 - **The shift/morning account** — compiled: a ledger written by the verb
   handlers; views are queries; the supervisor adds attributed notes only (§6).
+- **The wake decision for parked sessions** — authored, since the 2026-07-29
+  amendment: a project-owned wake program outside the daemon (the
+  [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
+  Compiled TBD keeps only the actuation choke point — rails, freshness, the
+  ledger line — that every caller shares. The sweep supervises live agents
+  only.
 
 **This placement means the daemon, not the supervisor, drives the loop.** A
 compiled sweep follows the same pattern as the existing hibernation sweep: a
@@ -588,7 +598,10 @@ the daemon does around each one is accounting and freshness, never permission.
   - `--keys` sends named keys the desk chose after reading the screen. Keys
     assert nothing, so there is nothing to re-verify; the ledger line carries the
     screen capture the desk read instead (§2, §6).
-- **`wake`** — unpark and resume a parked session.
+- **`wake`** — unpark and resume a parked session. A judgment act: routine
+  waking belongs to the project's
+  [wake program](2026-07-26-fleet-supervision-wake-program.md), not to any
+  desk.
 - **`pause`** — halt a runaway session (§13).
 - **`escalate`** — put an exact item, proposed command, and recommendation in
   front of the operator. This is how a desk asks; `resolve` is how the operator
@@ -631,8 +644,11 @@ command (`resolve`, §10), never a verb the supervisor holds.
 Example flow in autonomous mode at 2:00 a.m. with forty agents:
 
 1. **Tick.** The daemon sweeps the fleet table in its own process. It uses no
-   model and starts no subprocesses. It silently skips agents that are working,
-   or parked with no outstanding work. It writes no log and wakes nobody.
+   model and starts no subprocesses. It silently skips agents that are working.
+   Parked sessions are skipped as such: the sweep records their work facts for
+   the account, but waking them is never its call — that is the
+   [wake program's](2026-07-26-fleet-supervision-wake-program.md). It writes
+   no log and wakes nobody.
 2. **Hit.** An agent has been idle for 40 minutes and has uncommitted work.
    Before doing anything, the daemon checks the mechanical reasons to stop: a
    never-touch flag, a rate limit, insufficient quota, an intervention already
@@ -687,22 +703,13 @@ one-desk-per-policy invariant (§5), and it buys something no amount of careful
 prompt wording can: a desk cannot mistake one project's policy for another's,
 because it never holds another's.
 
-**"Outstanding work" is a compiled, global fact list.** Step 1's parked-session
-skip turns on one question: does any of these hold? Commits on the branch that
-are not on the default branch; uncommitted changes in the worktree; an open PR
-that is not merged; failing or missing required checks on an open PR; or an
-undetermined result from any of those probes — which is its own loud case, and
-is never silently treated as "nothing outstanding." That list is fixed and
-identical in every repo.
-
-The trade is deliberate and worth stating plainly: a repo cannot alter *whether*
-a wake happens, only what the wake *warrants* — through its playbook, after the
-supervisor is already awake. The requirements brief's P1-4 worked example ("the
-check yields a verdict; the repo decides what the verdict warrants") is honored
-at the warrant step, not at the wake step. Letting repos hook the wake step
-would put authored code inside the model-free sweep that runs for forty agents
-every cycle. The cost of getting it wrong the other way is small: a false wake
-spends a few supervisor tokens and ends in a note.
+**Parked sessions are absent from this loop, by the 2026-07-29 amendment.** An
+earlier version of this section compiled an "outstanding work" fact list here —
+a global any-true verdict that made a parked session a wake case, with the
+trade argued as "a false wake spends a few supervisor tokens and ends in a
+note." Field measurement falsified both the mechanism and the price; the full
+record, and what replaces it, is the
+[wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md).
 
 **One case arrives by event rather than by tick: a pending `AskUserQuestion`.**
 The `PreToolUse` hook already reports every one of them to the daemon
@@ -1383,8 +1390,8 @@ been in the record," never "a human should have approved the recycle."
 **Fleet agents are explicitly excluded from this.** Auto-compaction is fine
 for them; no handoff templates, recycle flags, or compaction counters exist
 for fleet sessions. The per-agent context fact is available for free (§2), and
-its only fleet-facing use is informational: a wake case may mention a parked
-session's context load, as input to judgment.
+its only fleet-facing use is informational: a report line or a work order may
+mention a parked session's context load, as input to judgment.
 
 *Note on the brief:* the requirements brief deferred supervisor self-handoff
 ("assume the supervisor persists for the shift"). This section overrides that
@@ -1535,8 +1542,10 @@ the adapter clears it first, but **only a dialog the daemon machine-knows** — 
 unidentified one makes the delivery refuse and write an anomaly (§2).
 `drive --keys` sends named keys the desk chose after reading the screen: nothing
 to re-verify, so the ledger line records the capture it read instead, and sends
-are paced (§2, §6). `wake` unparks a session with outstanding work. `pause`
-halts a runaway (§13). Exactly one payload flag per call.
+are paced (§2, §6). `wake` unparks a parked session — a judgment act; routine
+waking is the
+[wake program's](2026-07-26-fleet-supervision-wake-program.md). `pause` halts
+a runaway (§13). Exactly one payload flag per call.
 
 **Desk verbs — recording** (ledger line only).
 
@@ -1624,7 +1633,9 @@ tbd supervise decisions revoke <decision-id>
   rate limiting is already session state.
 - **P1 — fleet-wide hold**: several agents capped at once → hold interventions
   until the limit window resets. The daemon already has usage snapshots for
-  each profile.
+  each profile. Holds act at the actuation choke point, so they bind every
+  caller — desk verbs and the
+  [wake program](2026-07-26-fleet-supervision-wake-program.md) alike.
 - **P2 or never — cross-account rebalancing**: not compiled, ever. It presumes
   a particular arrangement of multiple accounts and requires workflow
   judgment. If it exists, it must be a playbook instruction for a supervisor
@@ -1842,6 +1853,17 @@ to inaction at the largest scale.
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
+- **A compiled wake gate for parked sessions** — removed 2026-07-29 after field
+  measurement falsified its cost argument. The "outstanding work" fact list
+  survives as report content only; the decision to wake is a project-authored
+  wake program, and a project without one gets reports, not wakes. See the
+  [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md).
+- **Daemon-owned wake scheduling** — the wake program schedules itself, and a
+  scheduler outside the daemon survives the daemon being down (P3-1's shape).
+  TBD renders the program's last-heard-from age in the account instead of
+  supervising it. See the
+  [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)
+  and §16.
 - **A machine-appended learnings file** (and the `learn` verb and `learning`
   ledger kind that fed it) — a per-project `learnings.md` the desk could append
   to, carried in every future work order, taking effect with no review. Removed
@@ -1993,4 +2015,9 @@ Two secondary honest costs:
   Anomaly lines call this out in the account. Even so, a broken sensor layer can
   look like an empty, calm night. Distinguishing "nothing happened" from
   "nothing was seen" requires reading the anomaly section. The account renderer
-  should make nights with many unknown states visually unmistakable.
+  should make nights with many unknown states visually unmistakable. The
+  [wake program](2026-07-26-fleet-supervision-wake-program.md) extends this
+  obligation past the process boundary: it is the one scheduled component TBD
+  does not run, so whenever parked sessions exist the account must render how
+  long ago the program was last heard from — a dead scheduler and a calm night
+  must never look alike.
