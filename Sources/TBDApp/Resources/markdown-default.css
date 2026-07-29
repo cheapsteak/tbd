@@ -54,16 +54,16 @@
    margins, so nothing collapses or doubles. */
 body {
   margin: 0 auto;
-  max-width: 76ch;
+  max-width: 68ch;
   padding: 24px 22px 64px;
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 12px;
   color: var(--md-fg);
   background: var(--md-bg);
   font-family: var(--md-font);
   font-size: var(--md-size);
-  line-height: 1.62;
+  line-height: 1.5;
   overflow-wrap: break-word;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -72,7 +72,10 @@ body {
 body > :first-child { margin-top: 0; }
 
 h1, h2, h3, h4, h5, h6 {
-  margin: 12px 0 0;
+  /* Space above a heading, not below it: the doc this palette comes from
+     sets 40px/12px. A uniform gap makes every block equidistant, which
+     reads as drifting rather than grouped. */
+  margin: 26px 0 0;
   line-height: 1.25;
   font-weight: 600;
   text-wrap: balance;
@@ -104,10 +107,12 @@ blockquote {
 
 :not(pre) > code {
   background: var(--md-fill);
-  padding: 1px 4px;
-  border-radius: 4px;
+  border: 1px solid var(--md-rule);
+  padding: 0.08em 0.34em;
+  border-radius: 3px;
   font-family: var(--md-mono);
-  font-size: 0.9em;
+  font-size: 0.86em;
+  font-variant-numeric: tabular-nums;
 }
 a > code { background: none; color: inherit; }
 pre {
