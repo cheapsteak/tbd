@@ -113,12 +113,16 @@ struct MarkdownWebView: NSViewRepresentable {
         // private KVC; if the key ever disappears it raises an ObjC exception
         // that Swift cannot catch, crashing on the render path.
         webView.underPageBackgroundColor = .clear
-        // The code viewer pane is unconditionally dark (`.colorScheme(.dark)`
-        // over the atom-one-dark background), but a SwiftUI color scheme does
-        // not reach the webview: WebKit resolves `prefers-color-scheme` from
-        // the view's `effectiveAppearance`. Without this, a Mac in Light mode
-        // renders near-black body text on the dark pane.
-        webView.appearance = NSAppearance(named: .darkAqua)
+        // No `appearance` override here: leave it nil so WebKit resolves
+        // `prefers-color-scheme` from the system's `effectiveAppearance`,
+        // not a pinned one. The surrounding SwiftUI pane applies
+        // `.colorScheme(.dark)`, but that does not propagate into WebKit —
+        // a SwiftUI color scheme is invisible to it. This used to be pinned
+        // to `.darkAqua` to match, back when the stylesheet had a
+        // transparent `--md-bg` and relied on the (unconditionally dark)
+        // pane showing through. The stylesheet now paints its own opaque
+        // ground in both schemes, so the document should follow the user's
+        // system appearance instead.
         context.coordinator.load(html, into: webView)
         return webView
     }

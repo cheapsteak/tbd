@@ -3,48 +3,50 @@
    Light and dark are handled here via prefers-color-scheme — TBD injects no
    theme attribute and defines no CSS variable contract.
 
-   Structure and type scale follow Claude's artifact markdown stylesheet
-   (flex-gap spacing, restrained headings, tile tables, Apple system fonts);
-   the palette is a warm neutral rather than pure grey.
+   Palette is the warm paper ground from the Nightwatch architecture reference.
+   Type follows Claude's artifact markdown sheet: flex-gap spacing, restrained
+   headings, tile tables, Apple system fonts.
 
    --md-bg is deliberately OPAQUE. It was `transparent`, which relied on the
    WKWebView being see-through: it is not — WebKit paints white underneath, so
    the dark-mode foreground rendered near-white on white. */
 :root {
-  --md-bg: #f9f9f7;
-  --md-fill: #efeee8;
-  --md-fill-strong: #e6e5dd;
-  --md-fg: #0b0b0b;
-  --md-fg-2: #52514e;
-  --md-muted: #898781;
-  --md-rule: #e1e0d9;
-  --md-rule-strong: #cfcec5;
-  --md-link: #2a78d6;
-  --md-note: #2a78d6;
-  --md-tip: #157f5c;
-  --md-important: #8250df;
-  --md-warning: #9a6700;
-  --md-caution: #d03b3b;
-  --md-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  --md-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
-  --md-size: 14px;
+  --md-bg: #f5f4f1;
+  --md-fill: #edebe6;
+  --md-fill-strong: #e3e0d8;
+  --md-fg: #1c1e26;
+  --md-fg-2: #4a4d59;
+  --md-muted: #74776f;
+  --md-rule: #dcd9d2;
+  --md-rule-strong: #c9c5bc;
+  --md-link: #b8722c;
+  --md-accent: #b8722c;
+  --md-accent-bg: #f6eadb;
+  --md-critical: #9e3b36;
+  --md-critical-bg: #f7e7e5;
+  --md-clear: #4a7c59;
+  --md-clear-bg: #e7f0e9;
+  --md-font: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  --md-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --md-size: 15px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --md-bg: #0d0d0d;
-    --md-fill: #1a1a19;
-    --md-fill-strong: #232321;
-    --md-fg: #edece6;
-    --md-fg-2: #c3c2b7;
-    --md-muted: #898781;
-    --md-rule: #2c2c2a;
-    --md-rule-strong: #3a3a37;
-    --md-link: #77b3f2;
-    --md-note: #77b3f2;
-    --md-tip: #45c39a;
-    --md-important: #a892f0;
-    --md-warning: #d9a441;
-    --md-caution: #e06c6c;
+    --md-bg: #16181d;
+    --md-fill: #121419;
+    --md-fill-strong: #1d2027;
+    --md-fg: #e6e6e4;
+    --md-fg-2: #b9bbc2;
+    --md-muted: #8b8e96;
+    --md-rule: #2e323b;
+    --md-rule-strong: #3d424d;
+    --md-link: #d9995a;
+    --md-accent: #d9995a;
+    --md-accent-bg: #2c2318;
+    --md-critical: #e08078;
+    --md-critical-bg: #2e1d1c;
+    --md-clear: #85b593;
+    --md-clear-bg: #1b2620;
   }
 }
 
@@ -52,23 +54,25 @@
    margins, so nothing collapses or doubles. */
 body {
   margin: 0 auto;
-  max-width: 720px;
-  padding: 24px 20px 64px;
+  max-width: 76ch;
+  padding: 24px 22px 64px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 11px;
   color: var(--md-fg);
   background: var(--md-bg);
   font-family: var(--md-font);
   font-size: var(--md-size);
-  line-height: 1.55;
+  line-height: 1.62;
   overflow-wrap: break-word;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
 }
 body > :first-child { margin-top: 0; }
 
 h1, h2, h3, h4, h5, h6 {
-  margin: 10px 0 0;
+  margin: 12px 0 0;
   line-height: 1.25;
   font-weight: 600;
   text-wrap: balance;
@@ -80,16 +84,16 @@ h4, h5, h6 { font-size: 1em; color: var(--md-fg-2); }
 
 p, ul, ol, blockquote, table, pre, hr { margin: 0; }
 strong { font-weight: 600; }
-a { color: var(--md-link); text-decoration: none; }
+a { color: var(--md-link); text-decoration: none; text-underline-offset: 2px; }
 a:hover { text-decoration: underline; }
-a:focus-visible { outline: 2px solid var(--md-link); outline-offset: 2px; border-radius: 2px; }
+a:focus-visible { outline: 2px solid var(--md-accent); outline-offset: 3px; border-radius: 2px; }
 
 ul, ol { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; }
 ul { list-style: disc; }
 ol { list-style: decimal; }
 li::marker { color: var(--md-muted); }
 :is(li, td, th) > * + :is(p, ul, ol, blockquote) { margin-top: 6px; }
-input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-link); }
+input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-accent); }
 
 blockquote {
   display: flex; flex-direction: column; gap: 10px;
@@ -103,7 +107,7 @@ blockquote {
   padding: 1px 4px;
   border-radius: 4px;
   font-family: var(--md-mono);
-  font-size: 0.92em;
+  font-size: 0.9em;
 }
 a > code { background: none; color: inherit; }
 pre {
@@ -112,7 +116,7 @@ pre {
   border-radius: 6px;
   overflow-x: auto;
   font-family: var(--md-mono);
-  font-size: 0.86em;
+  font-size: 0.84em;
   line-height: 1.5;
   margin-block: 4px;
 }
@@ -142,7 +146,7 @@ th { background: var(--md-fill-strong); font-weight: 600; }
 td { background: var(--md-fill); }
 :is(th, td) :not(pre) > code { background: transparent; padding: 0; }
 
-hr { border: 0; border-top: 1px solid var(--md-rule-strong); margin-block: 10px; }
+hr { border: 0; border-top: 1px solid var(--md-rule-strong); margin-block: 12px; }
 img { max-width: 100%; height: auto; border-radius: 4px; }
 
 .tbd-oversized-image {
@@ -156,7 +160,8 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
 }
 
 /* Alert accents are semantic (severity), not decorative — they carry the same
-   meaning as the keyword GitHub renders them from. */
+   meaning as the keyword GitHub renders them from. The source palette has
+   three semantic hues, so informational and advisory keywords pair up. */
 .markdown-alert {
   display: flex; flex-direction: column; gap: 6px;
   border-left: 3px solid var(--md-rule-strong);
@@ -164,17 +169,32 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
   padding: 10px 14px;
   border-radius: 0 6px 6px 0;
 }
-.markdown-alert-title { font-weight: 600; }
-.markdown-alert-note { border-left-color: var(--md-note); }
-.markdown-alert-note .markdown-alert-title { color: var(--md-note); }
-.markdown-alert-tip { border-left-color: var(--md-tip); }
-.markdown-alert-tip .markdown-alert-title { color: var(--md-tip); }
-.markdown-alert-important { border-left-color: var(--md-important); }
-.markdown-alert-important .markdown-alert-title { color: var(--md-important); }
-.markdown-alert-warning { border-left-color: var(--md-warning); }
-.markdown-alert-warning .markdown-alert-title { color: var(--md-warning); }
-.markdown-alert-caution { border-left-color: var(--md-caution); }
-.markdown-alert-caution .markdown-alert-title { color: var(--md-caution); }
+.markdown-alert-title {
+  font-weight: 600;
+  font-family: var(--md-mono);
+  font-size: 0.78em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.markdown-alert-note,
+.markdown-alert-important {
+  border-left-color: var(--md-accent);
+  background: var(--md-accent-bg);
+}
+.markdown-alert-note .markdown-alert-title,
+.markdown-alert-important .markdown-alert-title { color: var(--md-accent); }
+.markdown-alert-tip {
+  border-left-color: var(--md-clear);
+  background: var(--md-clear-bg);
+}
+.markdown-alert-tip .markdown-alert-title { color: var(--md-clear); }
+.markdown-alert-warning,
+.markdown-alert-caution {
+  border-left-color: var(--md-critical);
+  background: var(--md-critical-bg);
+}
+.markdown-alert-warning .markdown-alert-title,
+.markdown-alert-caution .markdown-alert-title { color: var(--md-critical); }
 
 .footnotes {
   border-top: 1px solid var(--md-rule);
