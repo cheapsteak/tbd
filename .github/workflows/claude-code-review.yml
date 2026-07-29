@@ -37,18 +37,65 @@ jobs:
     steps:
       - name: Determine author trust
         id: trust
-        # Trusted = branch pushed to this repo, OR the author is a
-        # collaborator/member/owner. Only the string `true`/`false` reaches the
-        # shell — no PR-controlled text is interpolated — so this is safe under
-        # pull_request_target. Untrusted-fork code is never checked out or run
-        # (every step below that touches PR content is gated on trusted == true).
+        # Trusted = the branch lives in this repo, OR the author has PUSH access to it.
+        #
+        # This deliberately checks effective permission rather than the PR's
+        # `author_association`. `COLLABORATOR` is granted to anyone invited to
+        # collaborate at ANY level — including read-only and triage — and `MEMBER`
+        # would cover every org member if this repo ever moves under an org. Since a
+        # trusted author gets their fork's code executed in this job (see the
+        # allow-unsafe-pr-checkout comment below and docs/pr-review-gate.md), the gate
+        # must admit only people who could already push a branch here and run this
+        # workflow anyway. Otherwise a triage-level collaborator gains code execution
+        # alongside CLAUDE_CODE_OAUTH_TOKEN and the reviewer App token.
+        #
+        # NOTE: on a PUBLIC repo this endpoint returns "read" for a complete stranger
+        # rather than 404, so `read` and `none` must both be treated as untrusted —
+        # only admin/maintain/write may pass. Verified in Actions: the default
+        # GITHUB_TOKEN reads this endpoint fine with just `contents: read`
+        # (zionts -> write, octocat -> read), so no App token is needed here and the
+        # reviewer App is still minted only after the gate passes.
+        #
+        # Injection safety: no PR-controlled text is interpolated into the script.
+        # The author login arrives via env (and GitHub logins are [A-Za-z0-9-] only),
+        # and only the literal strings true/false are written to $GITHUB_OUTPUT.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          echo "trusted=${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}" >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+
+          # Probe unconditionally — even for same-repo PRs, where the result does not
+          # affect the verdict — so that every run logs whether the App token can read
+          # collaborator permissions at all. A same-repo PR therefore proves the probe
+          # works before any fork PR has to depend on it.
+          if probe_out="$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" --jq '.permission' 2>&1)"; then
+            perm="$probe_out"
+          else
+            perm="probe-failed"
+            echo "::warning::Could not read collaborator permission for $PR_AUTHOR: $probe_out"
+            echo "::warning::Until this resolves, fork PRs are all treated as untrusted (fail closed). Same-repo branches are unaffected."
+          fi
+          echo "Permission probe for '$PR_AUTHOR' on '$REPO': $perm (same-repo branch: $SAME_REPO)"
+
+          if [ "$SAME_REPO" = "true" ]; then
+            trusted=true
+          else
+            case "$perm" in
+              admin|maintain|write) trusted=true ;;
+              *)                    trusted=false ;;
+            esac
+          fi
+
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
+          echo "Trusted: $trusted"
 
       - name: Block untrusted fork
         if: steps.trust.outputs.trusted != 'true'
         run: |
-          echo "::error::Claude review is required, but this PR is from an untrusted fork and cannot be auto-reviewed (the review needs repository secrets that are withheld from fork runs). Push the branch to this repository to have it reviewed. No untrusted code is executed here."
+          echo "::error::Claude review is required, but this PR is from a fork whose author does not have push access to this repository, so it cannot be auto-reviewed (the review executes the checked-out branch's tooling alongside repository secrets). A maintainer can push the branch to this repository to have it reviewed. No untrusted code is executed here."
           exit 1
 
       - name: Checkout PR head
@@ -61,6 +108,16 @@ jobs:
           # that impossible — PR #434 diagnostics), and git log/blame for
           # premise-audit checks. The repo packs to ~10 MB; the cost is seconds.
           fetch-depth: 0
+          # actions/checkout v7.0.0 (backported to the floating v4 tag in v4.4.0,
+          # 2026-07-20) refuses to check out a fork PR head under
+          # pull_request_target unless this opt-in is set. Its check is purely
+          # event_name + head.repo != base.repo — it cannot see the author-trust
+          # step above, so without this EVERY fork PR fails the required
+          # claude-review check even from a COLLABORATOR (PR #545). This step is
+          # already gated on trusted == true, so the opt-in restores exactly the
+          # pre-v4.4.0 behavior and adds no exposure. Untrusted forks are still
+          # blocked before reaching here. See docs/pr-review-gate.md.
+          allow-unsafe-pr-checkout: true
 
       - name: Reset any pre-committed verdict file
         if: steps.trust.outputs.trusted == 'true'
