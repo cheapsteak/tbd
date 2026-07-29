@@ -115,13 +115,21 @@ enum MarkdownStylesheet {
         }
     }
 
+    /// Where the bundled stylesheet resource lives on disk, or `nil` if the
+    /// resource is missing from the bundle. Not cached — resolving a bundle URL
+    /// is cheap, and callers that only need the URL (a Reveal-in-Finder button)
+    /// shouldn't pay for reading and holding the file contents too.
+    static var bundledURL: URL? {
+        Bundle.module.url(forResource: "markdown-default", withExtension: "css")
+    }
+
     /// The bundled stylesheet. Falls back to an empty string if the resource is
     /// missing, which renders unstyled rather than failing the document.
     ///
     /// Cached for the process lifetime, which is correct here and only here: a
     /// bundle resource cannot change without a rebuild.
     static let bundledCSS: String = {
-        guard let url = Bundle.module.url(forResource: "markdown-default", withExtension: "css"),
+        guard let url = bundledURL,
               let css = try? String(contentsOf: url, encoding: .utf8) else {
             logger.error("bundled markdown-default.css missing; rendering unstyled")
             return ""
