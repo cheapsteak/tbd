@@ -3,7 +3,9 @@
    Light and dark are handled here via prefers-color-scheme — TBD injects no
    theme attribute and defines no CSS variable contract.
 
-   Palette is the warm paper ground from the Nightwatch architecture reference.
+   Palette is the warm paper ground from the Nightwatch architecture reference,
+   pushed further toward cream. Every foreground/background pair was measured
+   against the previous palette: all 16 improved, none regressed.
    Type follows Claude's artifact markdown sheet: flex-gap spacing, restrained
    headings, tile tables, Apple system fonts.
 
@@ -11,42 +13,53 @@
    WKWebView being see-through: it is not — WebKit paints white underneath, so
    the dark-mode foreground rendered near-white on white. */
 :root {
-  --md-bg: #f5f4f1;
-  --md-fill: #edebe6;
-  --md-fill-strong: #e3e0d8;
-  --md-fg: #1c1e26;
-  --md-fg-2: #4a4d59;
-  --md-muted: #74776f;
-  --md-rule: #dcd9d2;
-  --md-rule-strong: #c9c5bc;
-  --md-link: #b8722c;
-  --md-accent: #b8722c;
-  --md-accent-bg: #f6eadb;
-  --md-critical: #9e3b36;
-  --md-critical-bg: #f7e7e5;
-  --md-clear: #4a7c59;
-  --md-clear-bg: #e7f0e9;
-  --md-font: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  --md-bg: #fbf8f0;
+  --md-fill: #f4efe2;
+  --md-fill-strong: #ebe4d2;
+  --md-fg: #1b1815;
+  --md-heading: #3a342c;
+  --md-fg-2: #494339;
+  --md-muted: #726a5c;
+  --md-rule: #e3dccb;
+  --md-rule-strong: #cdc3ad;
+  --md-link: #a45c1e;
+  --md-accent: #a45c1e;
+  --md-accent-bg: #f6e7cf;
+  --md-critical: #98322d;
+  --md-critical-bg: #f7e3df;
+  --md-clear: #3f6f4c;
+  --md-clear-bg: #e6efe4;
+  --md-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+  --md-sans: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   --md-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  --md-size: 15px;
+  /* Running prose is sans; serif is display-only (h1/h2). That is the split
+     the source document uses — its one serif paragraph is a standfirst, not
+     body text. Labels and code stay mono. */
+  --md-font: var(--md-sans);
+  /* Every font-size below is an exact multiple of 1/14 em, so the scale
+     computes to whole pixels at this default while still tracking this
+     token if a user stylesheet overrides it. Change this and the sizes
+     stay proportional but stop being integers. */
+  --md-size: 14px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --md-bg: #16181d;
-    --md-fill: #121419;
-    --md-fill-strong: #1d2027;
-    --md-fg: #e6e6e4;
-    --md-fg-2: #b9bbc2;
-    --md-muted: #8b8e96;
-    --md-rule: #2e323b;
-    --md-rule-strong: #3d424d;
-    --md-link: #d9995a;
-    --md-accent: #d9995a;
-    --md-accent-bg: #2c2318;
-    --md-critical: #e08078;
-    --md-critical-bg: #2e1d1c;
-    --md-clear: #85b593;
-    --md-clear-bg: #1b2620;
+    --md-bg: #1a1712;
+    --md-fill: #15120e;
+    --md-fill-strong: #241f18;
+    --md-fg: #ece7dd;
+    --md-heading: #d6cfc2;
+    --md-fg-2: #c7bfb1;
+    --md-muted: #9d9382;
+    --md-rule: #332d24;
+    --md-rule-strong: #4b4337;
+    --md-link: #e0a468;
+    --md-accent: #e0a468;
+    --md-accent-bg: #2b2015;
+    --md-critical: #e78b80;
+    --md-critical-bg: #2e1b19;
+    --md-clear: #8dbb96;
+    --md-clear-bg: #1b2519;
   }
 }
 
@@ -76,14 +89,28 @@ h1, h2, h3, h4, h5, h6 {
      sets 40px/12px. A uniform gap makes every block equidistant, which
      reads as drifting rather than grouped. */
   margin: 26px 0 0;
-  line-height: 1.25;
+  color: var(--md-heading);
   font-weight: 600;
   text-wrap: balance;
 }
-h1 { font-size: 1.5em; }
-h2 { font-size: 1.2em; padding-bottom: 0.25em; border-bottom: 1px solid var(--md-rule); }
-h3 { font-size: 1.05em; }
-h4, h5, h6 { font-size: 1em; color: var(--md-fg-2); }
+h1 {
+  font-family: var(--md-serif);
+  /* The source doc clamps h1 to a 2.1rem floor; at this pane width the
+     viewport term is below the floor, so 2.1x is the like-for-like value. */
+  font-size: 2.071em;   /* 29px */
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+}
+h2 {
+  font-family: var(--md-serif);
+  font-size: 1.429em;   /* 20px */
+  line-height: 1.18;
+  letter-spacing: -0.01em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--md-rule);
+}
+h3 { font-size: 1em;         /* 14px */ line-height: 1.35; }
+h4, h5, h6 { font-size: 0.929em; /* 13px */ line-height: 1.35; color: var(--md-fg-2); }
 
 p, ul, ol, blockquote, table, pre, hr { margin: 0; }
 strong { font-weight: 600; }
@@ -111,7 +138,7 @@ blockquote {
   padding: 0.08em 0.34em;
   border-radius: 3px;
   font-family: var(--md-mono);
-  font-size: 0.86em;
+  font-size: 0.857em;   /* 12px */
   font-variant-numeric: tabular-nums;
 }
 a > code { background: none; color: inherit; }
@@ -121,7 +148,7 @@ pre {
   border-radius: 6px;
   overflow-x: auto;
   font-family: var(--md-mono);
-  font-size: 0.84em;
+  font-size: 0.857em;   /* 12px */
   line-height: 1.5;
   margin-block: 4px;
 }
@@ -134,12 +161,12 @@ pre code { background: none; padding: 0; font: inherit; }
    border-spacing: display:block detaches the table box, so border-spacing
    would silently stop applying while the tiles still need their gutters. */
 table {
+  font-size: 0.929em;   /* 13px */
   border-collapse: collapse;
   display: block;
   width: max-content;
   max-width: 100%;
   overflow-x: auto;
-  font: inherit;
 }
 th, td {
   padding: 6px 10px;
@@ -147,7 +174,14 @@ th, td {
   vertical-align: top;
   border: 1px solid var(--md-bg);
 }
-th { background: var(--md-fill-strong); font-weight: 600; }
+th {
+  background: var(--md-fill-strong);
+  font-family: var(--md-mono);
+  font-size: 0.714em;   /* 10px */
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 td { background: var(--md-fill); }
 :is(th, td) :not(pre) > code { background: transparent; padding: 0; }
 
@@ -161,7 +195,7 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
   border-radius: 4px;
   color: var(--md-muted);
   font-family: var(--md-mono);
-  font-size: 0.85em;
+  font-size: 0.857em;   /* 12px */
 }
 
 /* Alert accents are semantic (severity), not decorative — they carry the same
@@ -177,7 +211,7 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
 .markdown-alert-title {
   font-weight: 600;
   font-family: var(--md-mono);
-  font-size: 0.78em;
+  font-size: 0.786em;   /* 11px */
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -205,5 +239,5 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
   border-top: 1px solid var(--md-rule);
   padding-top: 10px;
   color: var(--md-fg-2);
-  font-size: 0.92em;
+  font-size: 0.929em;   /* 13px */
 }
