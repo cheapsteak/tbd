@@ -626,7 +626,10 @@ the daemon does around each one is accounting and freshness, never permission.
 
 Around every one of them the daemon does the same three things, none of which is
 a permission check. It **writes the action line itself**, so a desk cannot
-misreport what it did — it is not the reporter (P1-7). It **arms the one-minute
+misreport what it did — it is not the reporter (P1-7). The line is honest in
+both directions: it asserts *dispatch*, never delivery — whether the message
+landed is a separate machine observation (§12) — so the daemon does not
+overclaim on its own behalf either. It **arms the one-minute
 re-check** (§12). And it **records the active mode and the state snapshot that
 justified the act** (§6).
 
@@ -695,10 +698,14 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    send time; an old premise stops the send and returns the conflicting facts
    (P0-8). (A `--keys` payload asserts nothing, so there is nothing to
    re-verify — its integrity requirement is the screen capture recorded on the
-   ledger line instead, §2.) Second, it **checks
-   **delivers** the payload through the adapter. Third, it **writes the ledger
+   ledger line instead, §2.) Second, it
+   **delivers** the payload through the adapter — a dispatch that cannot
+   succeed fails here, synchronously, as an ordinary error (§12). Third, it
+   **writes the ledger
    line itself**, recording the active mode and the state snapshot that
-   justified the act. There is no posture check and no proposal conversion in
+   justified the act; the line asserts dispatch, and whether the message
+   landed is the re-check's later observation (§12). There is no posture check
+   and no proposal conversion in
    this path: a desk that calls `drive` has driven (§3).
 8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
    memory). The result is recorded as an outcome line referencing the action
@@ -985,7 +992,11 @@ attention — it never changes what any verb is allowed to do.
   outcome, or the account.
 - Its structure prevents several false claims: an action nobody performed
   because only verb handlers write action lines; an outcome nobody observed
-  because outcomes come from the re-check; and certainty the system did not
+  because outcomes come from the re-check; a delivery nobody received because
+  an action line asserts dispatch only — "landed" is an outcome line's claim,
+  made on a machine observation, and an action with no confirming outcome by
+  its deadline renders as unconfirmed, never as done (§12); and certainty the
+  system did not
   have because unknowns are anomalies, not values.
 - Quiet ticks write nothing. Sweep liveness is one status field, not forty
   lines an hour.
@@ -1025,8 +1036,9 @@ What each kind's payload carries:
   (a pending question is a fact, and facts are not ledgered), and no separate
   verb marks the answer — reading the snapshot is what distinguishes a reply
   from an unprompted nudge (§2).
-- **`outcome`** — a reference to the action, one of the three §12 results, and
-  the observed-at of that observation.
+- **`outcome`** — a reference to the action, one of the four §12 results, and
+  the observed-at of that observation. Only this line may claim a message
+  landed; the action line it references claims dispatch alone (§12).
 - **`proposal`** — everything an `action` carries, plus the supervisor's
   reasoning and the age of the state it reasoned from.
 - **`resolution`** — a reference to the proposal or escalation, the result
@@ -1092,7 +1104,13 @@ account, not a wrong action. The third category is **human-authored process**.
   The playbook tiers (§5) are also durable files.
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the sweep's temporary tracking. A daemon restart during a shift loses
-  them. The result is a one-cycle delay, not a broken promise.
+  them. For the sweep that is a one-cycle delay, not a broken promise. For a
+  re-check armed by a send, the lost timer means the acknowledgement
+  observation never runs — handled honestly with no recovery sweep, because
+  delivery status is computed at query time: the outcome line never appears,
+  so the action renders as unconfirmed by construction (§12). Whether anyone
+  resolves it later — the envelope is durable in the transcript, so a late
+  read usually can — is playbook judgment, not compiled repair.
 - **Crash rule** (replay finds an approved proposal with no action line):
   never automatically execute an old approval. Report it as an anomaly:
   "approved at 7:58, daemon restarted before acting; approve again if still
@@ -1663,25 +1681,95 @@ tbd supervise decisions revoke <decision-id>
 
 ## 12. Delivery acknowledgement
 
-The send call cannot confirm delivery. One adapter sends without an
-acknowledgement, and the other can fail if a turn changes at the wrong time.
-The design already has a later observation that can confirm delivery:
-**the one-minute re-check also checks acknowledgement.** Every sent message
-includes its ledger ID as a marker. During the re-check, the daemon reads two
-machine facts: whether the session transcript contains the marker, and whether
-the session state changed to `working`. It records one of three results as an
-outcome line referencing the action:
+*Amended 2026-07-30, addressing PR #522's review (its second ask: an action
+line recording a send nobody received is a false claim no desk authored — the
+machinery built to prevent misreporting becomes the source of one). The
+changes: action lines assert dispatch rather than delivery; the transport
+returns honest errors; acknowledgement is a passive sentinel observation with
+a fourth, undetermined result that is never retried; and an action with no
+confirming outcome renders as unconfirmed at query time, which is also the
+entire restart story.*
 
-- *Landed and acting* — done.
-- *Landed but still blocked* — a fresh case within a minute (P1-6).
-- *Not landed* — retry delivery once. If the second re-check still finds
-  nothing, stop, write an anomaly line, and escalate. Two silent failures
-  indicate a structural problem with the session. A third send without
-  evidence would risk duplicate-message bugs.
+**An action line asserts dispatch, never delivery.** The daemon writing the
+line itself guarantees exactly one thing: this payload was handed to the
+adapter at this moment. Delivery is a separate observation, recorded later as
+an outcome line referencing the action. The send call cannot confirm
+delivery — one adapter pushes without an acknowledgement, and the other can
+fail if a turn changes at the wrong time — and the ledger must never claim
+more than the daemon observed (§6). The field failure this guards against is
+real: on 2026-07-29 `terminal.send` reported success into a dead pane for
+hours while a desk nudged it, and each of those nudges would have stood in the
+ledger as delivered work.
 
-This requires no new machinery. The timer already exists for P1-6, the
-transcript path is recorded for each terminal, and the marker is the ledger ID
-the daemon already writes.
+**First, the transport stops lying.** A dispatch that cannot succeed must fail
+synchronously, at the send call, as an ordinary error the caller sees. That
+fix belongs to `terminal.send` itself — a generic primitive that humans,
+scripts, hooks, and desks all share — not to supervision machinery; the
+migration doc's slice 4 carries it as a dependency. Its two failure classes
+differ in kind. A dead pane is detectable from tmux metadata, but only by
+deliberate consultation: `send-keys` into a `remain-on-exit` pane *succeeds*
+silently, so an honest error means checking `#{pane_dead}` and window
+existence, not trusting tmux's exit status. A *wrong* pane produces no error
+by any mechanical measure — pane IDs are reused, and keys sent to a stale
+coordinate land in a different live session (issue #384) — so target identity
+is verified by deliberate comparison before typing. Neither check is a
+guardrail; both are the send path telling the truth about its own result.
+
+**Receipt is a passive machine observation; the agent cooperates in nothing.**
+Every dispatched payload opens with a one-line envelope carrying the action
+line's ledger ID — `<tbd-dispatch id="a3f1" from="supervision-desk"/>` — which
+doubles as honest attribution: the receiving agent sees who is addressing it.
+No second ID namespace exists; the ledger ID is the identifier, so dispatch,
+transcript receipt, and outcome join on one string. When a submitted message
+enters the conversation, the agent's own harness writes its verbatim content
+into the transcript JSONL, so a tail read finding the envelope is a machine
+fact requiring nothing from the agent — no echo, no acknowledgement behavior,
+no awareness. It is also the *right* fact, stronger than "keys reached the
+pty": a payload swallowed by a modal, discarded mid-generation, or stranded
+unsubmitted in the composer never appears in the transcript — exactly the
+differential that made the old failures silent. The envelope is the Claude
+adapter's implementation of the observation; the Codex adapter gets the same
+answer from the app-server protocol's in-protocol acknowledgement; a future
+adapter supplies whatever its machine interface offers. The contract is the
+result vocabulary below, never the tag.
+
+**The one-minute re-check performs the observation.** The timer already exists
+for P1-6 and the transcript path is recorded for each terminal, so this adds
+no machinery. During the re-check the daemon reads two machine facts: whether
+the transcript contains the envelope, and the session's current state. It
+records one of four results as an outcome line referencing the action:
+
+- *Landed and acting* — delivery confirmed, session working. Done.
+- *Landed but still blocked* — delivery confirmed, session blocked again: a
+  fresh case within a minute (P1-6).
+- *Not landed* — positive evidence of non-delivery: the transcript is
+  readable, the envelope is absent, and the session is verifiably not
+  mid-turn. Retry delivery once. If the second re-check still finds nothing,
+  stop, write an anomaly line, and escalate — two silent failures indicate a
+  structural problem with the session, and a third send without evidence
+  would risk duplicate-message bugs.
+- *Undetermined* — the observation could not be made: transcript unreadable,
+  session state unknown, adapter result ambiguous. **Never retried.** Written
+  as an outcome and an anomaly, then escalated. Retry proceeds only from
+  *not landed*, because retrying into uncertainty risks double-instructing an
+  agent that did receive the first copy — and a message to an agent running
+  with permissions bypassed is arbitrary instruction injection (§3), so
+  delivering it twice is not a neutral event.
+
+**No confirming outcome means not-delivered, at query time.** The account
+computes delivery status as the join of action and outcome: an action past its
+acknowledgement deadline with no confirming outcome renders as unconfirmed,
+as loudly as an anomaly. This is the fail-closed rule applied to delivery —
+never default to "landed," the way the wake verifier never defaulted to
+DONE — and it makes the ledger honest in both directions: the account may
+claim "dispatched" on the daemon's word, and may claim "landed" only on a
+machine observation. Because the rule lives in the query rather than in an
+appended repair, a mid-shift daemon restart needs no recovery sweep: the
+restart kills the re-check timer, the outcome line never appears, and the
+action renders as unconfirmed by construction (§7). The envelope is durable in
+the transcript, so a late read usually still resolves the question — but
+whether anyone performs one, re-drives, or shrugs is playbook judgment at next
+contact, never compiled repair.
 
 ### Delivery adapters: parity for the fleet, a channel for the desks
 

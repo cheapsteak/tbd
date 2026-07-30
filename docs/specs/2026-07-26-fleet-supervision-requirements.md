@@ -306,6 +306,18 @@ and become a contract that migration and future change must respect.
   so that the morning account is verifiable and not merely the supervisor's self-report.
   *(implied, not yet implemented — today's action log is the agent's own notes file.)*
 
+  *Amended 2026-07-30: the ledger's honesty must run in both directions. Daemon authorship
+  protects against a desk overclaiming what it did; PR #522's review showed the mirror-image
+  failure — a transport that reports success into a dead pane lets the daemon write "drove
+  agent X" for a message nobody received, a false line no desk authored. The resolution
+  (design §12): an action line asserts **dispatch**, never delivery; delivery is a later
+  passive machine observation (a sentinel envelope carrying the action's ledger ID, found in
+  the target's own transcript — no cooperation from the receiving agent) recorded as an
+  outcome line; `terminal.send` itself returns honest errors for dead or misidentified
+  panes; and an action with no confirming outcome by its deadline renders as unconfirmed at
+  query time — so a mid-shift daemon restart needs no recovery machinery, and what to do
+  about a stale unconfirmed action is playbook judgment, not compiled repair.*
+
 ### P2 — maturity
 
 - **P2-1 [both]** As the supervisor, I want standing rules I learn during operation ("this

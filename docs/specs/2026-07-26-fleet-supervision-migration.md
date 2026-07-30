@@ -367,7 +367,18 @@ only — no slice needs a later one:
     pane identity before acting (design §2, "verify before acting") is what
     stops a stale pane coordinate from sending a supervisor's message to the
     wrong session — pane IDs are reused, so the check is identity, not just
-    liveness.
+    liveness. Note the two classes differ: a dead pane can surface as an error
+    from inside the send path (checking `#{pane_dead}` deliberately —
+    `send-keys` into a `remain-on-exit` pane succeeds silently), while a wrong
+    live pane produces no error by any mechanical measure, so identity must be
+    a deliberate comparison before typing.
+
+  Design §12 (amended 2026-07-30) now pins the semantics this slice builds on:
+  action lines assert dispatch, never delivery; receipt is a passive sentinel
+  observation (`<tbd-dispatch id="…"/>` in the target's transcript) recorded
+  as one of four outcome results, with retry permitted only from positive
+  non-delivery; and an action with no confirming outcome renders as
+  unconfirmed at query time, which is also the whole restart story.
 - **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
   tab — the **projects section** (declare a multi-repo project, pick members,
   designate the policy source, and list ungrouped repos as the singletons they
