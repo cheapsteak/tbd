@@ -329,6 +329,29 @@ only — no slice needs a later one:
   (`isSubagentTranscript`), so they never become cases. Whether that stays is a
   policy decision at implementation time — default: keep dropping them, since
   the parent session surfaces its own questions.
+
+  **Dependency: this slice presumes an honest transport, and today it does not
+  have one.** `terminal.send` reports success into a dead pane — the send path
+  runs `tmux send-keys` and returns (`TmuxManager.sendKeys`/`sendKey`), and
+  `handleTerminalSend` guards only that the terminal and worktree rows exist,
+  never that the pane is alive. That masked the Watch Desk nudging a dead pane
+  for hours on 2026-07-29; #549 patched it for one consumer, and the general
+  fix is what this slice needs:
+  - **Fix it at the transport layer, before or with this slice.** Detect dead
+    panes from tmux metadata — `#{pane_dead}`, window existence (`windowExists`
+    already exists) — and **fail loudly**; surface `pane_current_command` in
+    `terminal list`/`output`. This is a machine interface, not screen text, so
+    it is the sanctioned kind of knowing (design §2). It belongs in the
+    transport because `terminal.send` is a *generic* primitive — humans,
+    scripts, and hooks all call it — and supervision must not be the only
+    consumer that gets honest delivery. Everything in design §12 (the
+    ledger-marker acknowledgement, retry-once, anomaly-and-escalate) is built
+    on the assumption that a failed send is *reported* as one.
+  - **The same fact-corroboration step already covers issue #384.** Verifying
+    pane identity before acting (design §2, "verify before acting") is what
+    stops a stale pane coordinate from sending a supervisor's message to the
+    wrong session — pane IDs are reused, so the check is identity, not just
+    liveness.
 - **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
   tab — the **projects section** (declare a multi-repo project, pick members,
   designate the policy source, and list ungrouped repos as the singletons they
