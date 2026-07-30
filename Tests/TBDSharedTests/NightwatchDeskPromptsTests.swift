@@ -352,23 +352,51 @@ struct NightwatchDeskPromptsTests {
     @Test("The per-tick nudge carries the variables and points at the rest", arguments: liveModes)
     func judgeNudgeIsAPointer(mode: NightwatchMode) {
         let path = "/desk/\(NightwatchDeskPrompts.judgeInstructionsFileName)"
-        let nudge = NightwatchDeskPrompts.judgeNudge(mode: mode, instructionsPath: path)
+        for changed in [true, false] {
+            let nudge = NightwatchDeskPrompts.judgeNudge(
+                mode: mode, instructionsPath: path, instructionsChanged: changed)
 
-        #expect(nudge.contains(path), "nudge does not name the instructions file it points at")
-        #expect(nudge.contains("mode: \(mode.rawValue)"), "nudge does not carry the mode")
-        #expect(nudge.contains("act=\(mode == .nightwatch)"), "nudge does not carry the act flag")
+            #expect(nudge.contains(path), "nudge does not name the instructions file it points at")
+            #expect(nudge.contains("mode: \(mode.rawValue)"), "nudge does not carry the mode")
+            #expect(nudge.contains("act=\(mode == .nightwatch)"), "nudge does not carry the act flag")
 
-        // The whole reason for the split. `judgePrompt` is ~5 KB; if the nudge
-        // ever drifts back toward inlining it, this is what notices. The bound is
-        // deliberately loose — it catches a wall, not a reworded sentence.
-        #expect(nudge.utf8.count < 400,
-                "nudge is \(nudge.utf8.count) bytes; it is meant to be one line, not the instructions")
+            // The whole reason for the split. `judgePrompt` is ~5 KB; if the nudge
+            // ever drifts back toward inlining it, this is what notices. The bound is
+            // deliberately loose — it catches a wall, not a reworded sentence.
+            #expect(nudge.utf8.count < 500,
+                    "nudge is \(nudge.utf8.count) bytes; it is meant to be one line, not the instructions")
+        }
+    }
 
-        // Moving the body to a file only saves context if the file is read once
-        // per session rather than once per tick. Without this instruction the
-        // paste cost simply becomes a Read cost.
-        #expect(nudge.contains("Don't re-read"),
-                "nudge does not tell the judge to skip re-reading; the saving evaporates into per-tick Reads")
+    /// Both branches of the re-read instruction, which is a mode-switch gate and
+    /// therefore owes a test per branch (`CLAUDE.md`, Workflow).
+    ///
+    /// The steady-state branch is the optimization: without "don't re-read", the
+    /// paste cost merely becomes a `Read` cost and the change saves nothing.
+    /// The changed branch is the correction: the desk is reused across daywatch ↔
+    /// nightwatch without respawning, and the two instruction bodies differ on
+    /// whether an unattended `gh pr merge` is authorized — so a judge that obeyed
+    /// "never re-read" would carry the previous shift's merge rule across the flip.
+    /// Both are load-bearing and they contradict each other, which is exactly why
+    /// the caller has to choose rather than the prompt hardcoding one.
+    @Test("The nudge demands a re-read when the instructions changed, and only then",
+          arguments: liveModes)
+    func judgeNudgeSignalsInstructionChange(mode: NightwatchMode) {
+        let path = "/desk/\(NightwatchDeskPrompts.judgeInstructionsFileName)"
+
+        let changed = NightwatchDeskPrompts.judgeNudge(
+            mode: mode, instructionsPath: path, instructionsChanged: true)
+        #expect(changed.contains("RE-READ"),
+                "\(mode) changed-nudge does not tell the judge to re-read; a stale merge rule survives the flip")
+        #expect(!changed.contains("Don't re-read"),
+                "\(mode) changed-nudge both demands and forbids a re-read")
+
+        let steady = NightwatchDeskPrompts.judgeNudge(
+            mode: mode, instructionsPath: path, instructionsChanged: false)
+        #expect(steady.contains("Don't re-read"),
+                "\(mode) steady-nudge lost the skip-the-read instruction; the context saving evaporates")
+        #expect(!steady.contains("RE-READ"),
+                "\(mode) steady-nudge asks for a re-read every tick, which is the cost this removes")
     }
 
     /// The pointer and the file have to be described the same way in both places,

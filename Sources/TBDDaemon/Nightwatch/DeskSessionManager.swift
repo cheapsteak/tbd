@@ -26,6 +26,11 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// immediately (matching RPCRouter+ScratchHandlers) instead of waiting for a poll.
     private let subscriptions: StateSubscriptionManager?
     private let skillDir: String
+    /// Date seam for the nudge-overlap guard — a compared timestamp, so per
+    /// `Tests/CLAUDE.md` this is the `now:` shape, not an injected `Clock`.
+    /// Without it the 10-minute window is unreachable in a test, which is why the
+    /// guard went so long with no observable beyond "doesn't throw".
+    private let now: @Sendable () -> Date
 
     // MARK: - State
 
@@ -65,6 +70,20 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// M2: nudge-overlap guard. Phase B upgrade: claim-file (queue/claims) single-driver enforcement.
     private var lastNudgeTime: Date?
 
+    /// Mode carried by the last nudge that actually reached the session.
+    ///
+    /// The judge is told to read `JUDGE-INSTRUCTIONS.md` once rather than every
+    /// tick, so *someone* has to notice when the body it memorized stops matching
+    /// the body on disk. The desk is deliberately reused across daywatch ↔
+    /// nightwatch without respawning (see `ensureDeskSession`), and the two bodies
+    /// differ on exactly the thing that matters — whether an unattended
+    /// `gh pr merge` is authorized. `nil` means nothing has been nudged yet, which
+    /// is treated the same as changed: a judge with no reads is a judge that must read.
+    ///
+    /// Internal rather than private so tests can assert the transition; it is state
+    /// the manager needs regardless.
+    private(set) var lastNudgedMode: NightwatchMode?
+
     // MARK: - Init
 
     public init(
@@ -72,13 +91,15 @@ public actor DeskSessionManager: DeskSessionManaging {
         lifecycle: WorktreeLifecycle,
         tmux: TmuxManager,
         skillDir: String,
-        subscriptions: StateSubscriptionManager? = nil
+        subscriptions: StateSubscriptionManager? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.db = db
         self.lifecycle = lifecycle
         self.tmux = tmux
         self.subscriptions = subscriptions
         self.skillDir = skillDir
+        self.now = now
         self.deskWorktreeID = nil
     }
 
@@ -101,8 +122,11 @@ public actor DeskSessionManager: DeskSessionManaging {
             if terminals.first(where: { $0.label == TerminalLabel.claudeCode }) != nil {
                 // Fast path: cached desk is alive and valid.
                 // Mode switches (daywatch ↔ nightwatch) intentionally REUSE the existing desk and terminal.
-                // The desk is NOT respawned on mode switch because the per-tick judgePrompt (via nudgeDeskSession)
-                // carries the current mode/act flag each cycle. Initial frame is one-time; steady-state mode is driven per-tick.
+                // The desk is NOT respawned on mode switch because every tick re-derives the mode and
+                // rewrites JUDGE-INSTRUCTIONS.md to match. Since the judge is told to read that file once
+                // rather than per tick, reuse-without-respawn is exactly the case where a memorized copy
+                // can go stale — `nudgeDeskSession` compares against `lastNudgedMode` and flags the flip.
+                // Initial frame is one-time; steady-state mode is driven per-tick.
                 return existing
             }
         }
@@ -257,7 +281,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         defer { gateRelease() }
         // M2: Skip nudge if previous nudge was < 10 min ago (prevent overlapping judge runs)
         if let last = lastNudgeTime {
-            let elapsed = Date().timeIntervalSince(last)
+            let elapsed = now().timeIntervalSince(last)
             if elapsed < 10 * 60 {
                 logger.debug("Skipping nudge: last nudge was \(Int(elapsed))s ago (< 10 min)")
                 return
@@ -290,7 +314,16 @@ public actor DeskSessionManager: DeskSessionManaging {
             // nothing is a silent one.
             let prompt: String
             if let instructionsPath = writeJudgeInstructions(deskPath: worktree.path, mode: mode) {
-                prompt = NightwatchDeskPrompts.judgeNudge(mode: mode, instructionsPath: instructionsPath)
+                // A mode flip rewrites the file under a judge that was told to read
+                // it once. Nothing on the judge's side can see that happen, so the
+                // daemon — the only party that knows both the old and new mode —
+                // has to say so. First nudge (nil) counts as changed: a judge that
+                // has read nothing must read.
+                prompt = NightwatchDeskPrompts.judgeNudge(
+                    mode: mode,
+                    instructionsPath: instructionsPath,
+                    instructionsChanged: lastNudgedMode != mode
+                )
             } else {
                 logger.warning("Could not write judge instructions to \(worktree.path, privacy: .public); falling back to the inline prompt")
                 prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
@@ -310,8 +343,12 @@ public actor DeskSessionManager: DeskSessionManaging {
                 key: "Enter"
             )
 
-            // Record nudge time for overlap guard
-            lastNudgeTime = Date()
+            // Record nudge time for overlap guard. `lastNudgedMode` is set only
+            // here, after the paste actually went out — a nudge that failed to
+            // reach the session must not count as "the judge has seen this mode",
+            // or the next tick would tell it nothing changed when everything did.
+            lastNudgeTime = now()
+            lastNudgedMode = mode
 
             logger.debug("Nudged Watch Desk session: act=\(act, privacy: .public)")
         } catch {

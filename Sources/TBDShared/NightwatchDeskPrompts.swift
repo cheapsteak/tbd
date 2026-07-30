@@ -29,10 +29,15 @@ public enum NightwatchDeskPrompts {
 
         **How the per-tick nudge works:** every ~15 min you get a one-line tick message carrying
         the mode and act flag, pointing at `\(judgeInstructionsFileName)` by absolute path. Read
-        that file ONCE, on your first tick. Later ticks change only the mode/act line, so
-        re-reading it every tick just spends your own context on your own heartbeat — which is
-        what makes a desk hit its handoff ceiling early. If a tick arrives and you have not read
-        the file yet (fresh session, or you took over from a predecessor), read it then.
+        that file ONCE, on your first tick; re-reading it every tick just spends your own context
+        on your own heartbeat, which is what makes a desk hit its handoff ceiling early.
+
+        **The exception, and it matters:** that file is MODE-SPECIFIC — the merge rule is not the
+        same under daywatch and nightwatch, and this desk is reused across a mode switch without
+        being respawned. So the tick line tells you which case you are in. When it says the
+        instructions CHANGED, re-read the file before acting; a memorized copy from the previous
+        shift may grant or withhold a merge that the current shift does not. Never infer this
+        yourself from the mode — act on what the tick line says.
 
         **Your job (\(modeLabel)):**
         \(jobDescription(mode: mode))
@@ -111,13 +116,21 @@ public enum NightwatchDeskPrompts {
     /// mechanism whose entire job is to keep the desk alive. The body now lives in
     /// a file; this carries only what changes.
     ///
-    /// Two details are load-bearing rather than cosmetic:
+    /// Three details are load-bearing rather than cosmetic:
     ///
     /// - **The mode and act flag are inline**, not in the file, so a judge that
     ///   already read the instructions needs nothing from disk to act on this tick.
-    /// - **It tells the judge not to re-read.** Without that, the paste cost simply
-    ///   becomes a `Read` cost and nothing is saved. The saving is real only if the
-    ///   file is read once per session, not once per tick.
+    /// - **A steady-state tick tells the judge not to re-read.** Without that, the
+    ///   paste cost simply becomes a `Read` cost and nothing is saved. The saving is
+    ///   real only if the file is read once per session, not once per tick.
+    /// - **`instructionsChanged` overrides that and demands a re-read.** The first
+    ///   version of this said "later ticks change only the mode/act line", which is
+    ///   false: the desk session is deliberately reused across daywatch ↔ nightwatch
+    ///   switches without respawning, and `mergeRule(mode:)` differs between them —
+    ///   nightwatch grants an unattended `gh pr merge` that daywatch withholds. A
+    ///   judge told never to re-read would carry a memorized authorization from the
+    ///   previous shift across the flip. Caught in review of PR #551, which is itself
+    ///   about stale facts baked into these prompts.
     ///
     /// Short pastes are also more likely to *arrive*: a large paste can land as
     /// `[Pasted text #N]` and sit in the composer unsubmitted, which for an
@@ -126,12 +139,23 @@ public enum NightwatchDeskPrompts {
     /// - Parameters:
     ///   - mode: current shift; also determines the act flag the judge applies
     ///   - instructionsPath: absolute path to the written `JUDGE-INSTRUCTIONS.md`
-    public static func judgeNudge(mode: NightwatchMode, instructionsPath: String) -> String {
+    ///   - instructionsChanged: true when this tick's body differs from the last one
+    ///     the judge was nudged with — a mode flip, or the first tick of a session,
+    ///     where "what I already read" is either wrong or absent. The caller decides;
+    ///     the safe default at any call site that cannot tell is `true`.
+    public static func judgeNudge(
+        mode: NightwatchMode,
+        instructionsPath: String,
+        instructionsChanged: Bool
+    ) -> String {
         let icon = mode == .daywatch ? "◐" : "🌙"
         let act = mode == .nightwatch
+        let readInstruction = instructionsChanged
+            ? "The instructions CHANGED since your last tick (or this is your first) — RE-READ \(instructionsPath) before you act. The merge rule differs by mode; do not act on a memorized copy."
+            : "Already read \(instructionsPath) this session? Don't re-read it — nothing in it changed since your last tick."
         return """
         \(icon) Judge tick — mode: \(mode.rawValue), act=\(act). Run the cycle per \(instructionsPath). \
-        Already read that file this session? Don't re-read it — this line carries the only thing that changes between ticks.
+        \(readInstruction)
         """
     }
 
