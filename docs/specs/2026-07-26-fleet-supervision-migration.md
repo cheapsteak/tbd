@@ -155,8 +155,15 @@ citations are to the baseline doc's §5–§6):
 - **`skillMd` (playbook)** — Split: escalation etiquette and operating rules →
   doctrine (2); tier tables, sign-off conventions, project slash-commands → repo
   advisory (3); config-file semantics and the opt-in scheduler → superseded (1).
-- **`wakePy` (pre-wake verifier)** — Superseded (1) by compiled dispatch-time
-  re-verification (design §4, P0-8).
+- **`wakePy` (pre-wake verifier)** — **Doctrine (2), not superseded.** An earlier
+  version of this line sent it to bucket 1, against compiled dispatch-time
+  re-verification; that machinery melted on 2026-07-30 and P0-8 is authored
+  discipline in both halves now. What the script knew — derive the facts live
+  immediately before composing, trust a stale MERGED and never a stale OPEN,
+  fail closed to "verify first" — seeds the shipped playbook's freshness
+  universal (design §5) and the shipped reference wake program
+  ([wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
+  Its per-repo residue is repo advisory (3).
 - **`tickPy` (capture-pane sweep)** — Superseded (1) by the hook-fed state model
   and daemon sweep (design §2). This is the scraper retirement.
 - **`judgePy` (PR gating for one hardcoded repo)** — Repo advisory (3) for the
@@ -248,11 +255,15 @@ only — no slice needs a later one:
     `--text` or `--keys` (design §3); there is no `answer` verb, no separate
     key-sending verb, and no `learn` verb. The dialog dismissal that makes
     `--text` work is delivery-adapter behavior landing with the adapter in
-    slice 4 (design §2). Around each verb the daemon does three things and no
-    more: send-time re-verification for `--text`, the daemon-written action line
-    carrying the active mode and state snapshot, and the one-minute re-check.
-    **Do not build a posture check, a rule lookup, or a proposal conversion** —
-    there are none (design §3), and the ledger has **nine** kinds.
+    slice 4 (design §2). Around each verb the daemon does two things and no
+    more: the daemon-written action line carrying the payload verbatim, the
+    active mode, and the state snapshot, and the one-minute re-check. An earlier
+    version of this slice carried a third — send-time re-verification of a
+    `--text` payload's claims — which melted on 2026-07-30: freshness is the
+    desk's discipline and the daemon reads no message content (design §3, P0-8
+    amendment). **Do not build a posture check, a rule lookup, a proposal
+    conversion, or a content check** — there are none (design §3), and the
+    ledger has **nine** kinds.
   - **The `supervision.json` loader**: project topology (declared multi-repo
     projects and their designated policy source; reject a file where any repo
     appears in two projects; resolve every other repo to its implicit
@@ -334,9 +345,8 @@ only — no slice needs a later one:
   §2), so build no auto-escalate path for it. The **`drive --keys` payload**
   lands here as well: named-key, paced sends, and the action ledger line must
   carry the screen capture the desk read when choosing the keys — that record is
-  the variant's integrity requirement, standing in for the send-time
-  re-verification that only `--text` can have, so a `--keys` action written
-  without it is a bug, not a thin log line. Two non-blocking notes for
+  the variant's integrity requirement — the evidence every screen-informed act
+  owes — so a `--keys` action written without it is a bug, not a thin log line. Two non-blocking notes for
   whoever picks this up: pending questions
   have no CLI read surface today (`terminal.transcript` is RPC-only, and the
   work-order carriage is what makes a read surface unnecessary — a

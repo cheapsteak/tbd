@@ -10,7 +10,11 @@ a same-day follow-up removed the compiled actuation rails the first amendment
 had kept — TBD's obligation to external programs is sufficient public
 surfaces, never guardrails — and the requirements doc carries the matching
 dated amendments plus the **Built/Enabled** classification and outside-first
-migration rule that follow-up introduced. Companion to
+migration rule that follow-up introduced. Amended again 2026-07-30, twice: §12
+pins dispatch-versus-delivery semantics, and the compiled send-time verifier for
+desk messages is removed — freshness is authored discipline in both halves, and
+the daemon never inspects message content (§15, and the P0-8 amendment in the
+requirements doc). Companion to
 [`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md),
 which carries the stories (P0-1 … P3-1) this doc cites. This is the ideal-state
 design; migration from the current implementation is deliberately out of scope
@@ -23,10 +27,9 @@ places. Each place has its own test:
 
 - **Compiled (daemon)** — facts and safeguards that must hold no matter what a
   model says. These include deriving state, gathering facts, enforcing the
-  which mode is active, keeping the ledger, verifying facts before sending, and
-  scheduling. Ask two questions: *If this were wrong, would the rest of the
-  system be built on a lie?* And: *Must it run for forty agents every cycle
-  without calling a model?*
+  which mode is active, keeping the ledger, and scheduling. Ask two questions:
+  *If this were wrong, would the rest of the system be built on a lie?* And:
+  *Must it run for forty agents every cycle without calling a model?*
 - **Authored artifacts (files, resolved through three tiers)** — choices on
   which two reasonable repositories or operators could differ. Examples
   include what counts as stuck, local rules, and what response a situation
@@ -134,11 +137,19 @@ for context goes away.
 calculates almost all work state. It gets pull request (PR) status for each
 worktree through batched GraphQL requests. It persists `PRStatus`, including
 state and a summary of checks. It also sweeps for branch conflicts and detects
-merge transitions. Two implementation gaps remain. First, PR fetching runs
+merge transitions. Three implementation gaps remain. First, PR fetching runs
 only when the app polls, so it stops overnight; move it to the daemon's clock.
 Second, a failed fetch looks the same as "no PR"; record
-`undetermined (cause)` as a separate result. This needs no new terms or state
-calculation.
+`undetermined (cause)` as a separate result. Third, **the persisted `PRStatus`
+is display-tier and must be labeled as such**: wherever it appears on a public
+surface it carries its observed-at, and no view — the account least of all —
+renders it as current truth. That cache was measured lying, showing "Ready to
+merge" for pull requests merged days earlier (PR #522's review), so anything
+that must be *right* about forge state derives it live rather than reading the
+cache. This is the design's own source-and-observed-at rule applied to TBD's
+own store, and it is what compiled TBD owes P0-8 now that the send-time
+verifier is gone (P0-8 amendment 2026-07-30). None of the three needs new terms
+or state calculation.
 
 **P2 — add nothing unless experience proves it is needed.** Do not add verdict
 enumerations or a schema for the stages of work. A "work arc" differs by
@@ -324,10 +335,12 @@ and does not forbid it; the test governs what the daemon does unattended, and
 this is
 judgment acting, which is the distinction drawn at the top of this section.
 
-Because keys make no claims about the world, there is nothing in them to
-re-verify at send time — the `--text` variant's send-time integrity check has
-nothing to check. **Evidence takes its place**: the action's ledger line records
-the screen capture the desk was looking at when it chose those keys (§6). If a
+Because keys make no claims about the world, a `--keys` payload has no premise
+that could go stale — the freshness discipline a `--text` message answers to
+(P0-8, and conduct rather than machinery since the 2026-07-30 amendment) has
+nothing to bite on here. **Evidence is the requirement instead**: the action's
+ledger line records the screen capture the desk was looking at when it chose
+those keys (§6). If a
 sequence turns out to have been wrong, the record shows exactly what was on the
 screen and exactly what was sent, which is the same accountability the
 three-condition test buys for the automatic path, obtained a different way.
@@ -503,9 +516,10 @@ Everything in this design sorts into three layers, and knowing which layer you
 are in answers most questions about where a behavior belongs:
 
 - **Compiled TBD does facts, delivery, and the record.** It derives state,
-  gathers work facts, sweeps, composes work orders, delivers messages,
-  re-verifies stale claims at send time, and writes the ledger. All of it is
-  model-free, and none of it is a judgment.
+  gathers work facts, sweeps, composes work orders, delivers messages, and
+  writes the ledger. All of it is model-free, and none of it is a judgment. It
+  never inspects what a message says: content is the desk's, and so is its
+  freshness (P0-8 amendment 2026-07-30).
 - **Conduct is authored.** Modes and playbooks — prose, versioned, and
   project-definable — tell a desk what to act on, what to propose, what to
   escalate, and how bold to be.
@@ -600,19 +614,19 @@ amendment saying exactly that.
 
 This list is the single normative inventory of what a desk can do. Every other
 mention of a verb in this document defers to it. **None of them is gated.** What
-the daemon does around each one is accounting and freshness, never permission.
+the daemon does around each one is accounting, never permission.
 
 - **`drive`** — act on a fleet agent's session (the send path of §4 step 7), in
   one of two payload variants.
-  - `--text` delivers a message. The daemon **re-verifies every external claim in
-    it against live sources at send time**; an old premise stops the send and
-    returns the conflicting facts (P0-8). That is freshness, not permission — it
-    protects an agent from being told something no longer true, and it would earn
-    its place in a system with no rules whatsoever. It is also how an agent's
-    `AskUserQuestion` is answered, the adapter clearing a machine-known dialog
-    first (§2).
+  - `--text` delivers a message. The daemon does not read it: **freshness here is
+    conduct, not machinery** — the shipped playbook's universal says to derive the
+    facts live, in the same breath as the send (§5), and the ledger records the
+    message verbatim, so a stale premise is *visible* in the account the moment it
+    ships rather than prevented at the door (P0-8, amended 2026-07-30). It is also
+    how an agent's `AskUserQuestion` is answered, the adapter clearing a
+    machine-known dialog first (§2).
   - `--keys` sends named keys the desk chose after reading the screen. Keys
-    assert nothing, so there is nothing to re-verify; the ledger line carries the
+    assert nothing, so no premise can be stale; the ledger line carries the
     screen capture the desk read instead (§2, §6).
 - **`wake`** — unpark and resume a parked session. A judgment act: routine
   waking belongs to the project's
@@ -693,19 +707,18 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    step. It never sends only "continue" (P0-7). This is the loop's only model
    reasoning.
 7. **Act through the daemon, never around it.** `tbd supervise drive …`.
-   The daemon performs three steps. First, for a `--text` payload it
-   **re-verifies** every external claim in the message against live sources at
-   send time; an old premise stops the send and returns the conflicting facts
-   (P0-8). (A `--keys` payload asserts nothing, so there is nothing to
-   re-verify — its integrity requirement is the screen capture recorded on the
-   ledger line instead, §2.) Second, it
+   The daemon performs two steps, and inspects the payload in neither. First, it
    **delivers** the payload through the adapter — a dispatch that cannot
-   succeed fails here, synchronously, as an ordinary error (§12). Third, it
+   succeed fails here, synchronously, as an ordinary error (§12). Second, it
    **writes the ledger
-   line itself**, recording the active mode and the state snapshot that
-   justified the act; the line asserts dispatch, and whether the message
-   landed is the re-check's later observation (§12). There is no posture check
-   and no proposal conversion in
+   line itself**, recording the payload verbatim, the active mode, and the state
+   snapshot that justified the act (for `--keys`, that snapshot includes the
+   screen capture the desk read, §2); the line asserts dispatch, and whether the
+   message landed is the re-check's later observation (§12). Nothing here
+   verifies what the message claims — that a `--text` message rests on facts
+   derived live is the desk's discipline, and the verbatim line is what makes a
+   stale premise findable afterward (P0-8, amended 2026-07-30). There is no
+   posture check and no proposal conversion in
    this path: a desk that calls `drive` has driven (§3).
 8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
    memory). The result is recorded as an outcome line referencing the action
@@ -907,7 +920,14 @@ policies — that is the invariant the project exists to create.
   absent from the record. A third covers permission prompts, since answering one
   is an ad hoc judgment with no approval layer behind it (§2): **escalate when
   unsure, and treat prompts guarding merges, credentials, or anything
-  irreversible as deserving a human.** The default contains no commands, bot
+  irreversible as deserving a human.** A fourth is send-time freshness, which
+  since the 2026-07-30 amendment lives here and nowhere else: **before
+  dispatching any message that asserts external state — a merge, a review, a
+  check result — re-derive that state live, in the same breath as the send, and
+  from the source that tells the truth rather than the one that answers
+  fastest** (P0-8; the daemon verifies nothing, §3). The old system carried this
+  same sentence and it was the thing that worked; a desk is a full agent session
+  and can run `gh` and `git` itself. The default contains no commands, bot
   names, or organization-specific content.
 - **The shipped default also defines the two baseline modes** (§3), so every
   project has `attended` and `autonomous` available without authoring anything.
@@ -983,8 +1003,8 @@ attention — it never changes what any verb is allowed to do.
   **resolution** record proposed actions and their results. **escalation** and
   **resolution** record questions and their answers. **decision** records a
   durable answer the operator gave (P1-5, §8). **anomaly** records an unknown state,
-  an old premise found during send-time verification, a failed fetch, or a dark
-  supervisor. Deliberate inaction is recorded as seriously as action. **note**
+  a failed fetch, or a dark supervisor. Deliberate inaction is recorded as
+  seriously as action. **note**
   is the one kind whose content is supervisor-authored prose — attributed prose
   added with `tbd supervise note`, written by the daemon's verb handler like
   every other line, and unable to change any other line. The supervisor may
@@ -1030,8 +1050,9 @@ What each kind's payload carries:
   (message text for `drive --text`, the named keys for `drive --keys`), and the
   state snapshot — with its source and observed-at — that justified it. For
   `drive --keys`, that snapshot includes **the screen capture the desk read when
-  choosing those keys**, the evidence that stands in for send-time
-  re-verification (§2). When a drive answers a pending question, the snapshot
+  choosing those keys** — the evidence requirement every screen-informed act
+  carries, without which the line is a bug rather than a thin record (§2). When
+  a drive answers a pending question, the snapshot
   **is** the question payload, verbatim: no separate line records the question
   (a pending question is a fact, and facts are not ledgered), and no separate
   verb marks the answer — reading the snapshot is what distinguishes a reply
@@ -1572,11 +1593,12 @@ tbd supervise wake  --worktree <id>
 tbd supervise pause --terminal <id> [--reason "…"]
 ```
 
-`drive --text` delivers a re-verified message; when the target sits on a dialog
-the adapter clears it first, but **only a dialog the daemon machine-knows** — an
-unidentified one makes the delivery refuse and write an anomaly (§2).
-`drive --keys` sends named keys the desk chose after reading the screen: nothing
-to re-verify, so the ledger line records the capture it read instead, and sends
+`drive --text` delivers a message, unread by the daemon and recorded verbatim
+(deriving its facts live is the desk's discipline, §3); when the target sits on
+a dialog the adapter clears it first, but **only a dialog the daemon
+machine-knows** — an unidentified one makes the delivery refuse and write an
+anomaly (§2). `drive --keys` sends named keys the desk chose after reading the
+screen: the ledger line records the capture it read, and sends
 are paced (§2, §6). `wake` unparks a parked session — a judgment act; routine
 waking is the
 [wake program's](2026-07-26-fleet-supervision-wake-program.md). `pause` halts
@@ -1929,10 +1951,34 @@ to inaction at the largest scale.
   full as over-engineering: it was machinery for a failure mode these models are
   not expected to exhibit, and TBD declines to build a second anti-injection
   layer on top of models already resistant to injection. What survives —
-  send-time re-verification, daemon-written ledger lines, the one-minute
-  re-check — survives because it is freshness and accounting, and would earn its
-  place in a system with no rules at all. The bet this rests on is named in §3
-  and revisited in §16.
+  daemon-written ledger lines, the one-minute re-check — survives because it is
+  accounting, and would earn its place in a system with no rules at all. This
+  bullet named send-time re-verification as a third survivor; it outlasted the
+  gate by one revision and then melted too, for the reasons in the next bullet.
+  The bet this rests on is named in §3 and revisited in §16.
+- **Compiled send-time re-verification for desk messages** — removed 2026-07-30.
+  A `drive --text` was to have every external claim in it checked against live
+  sources by the daemon, with a stale premise stopping the send. Three reasons it
+  went. **Its owner was invented rather than extracted**: the running system
+  never compiled this check — it lived in authored content the desk executed
+  itself (the old `wake.py` re-deriving truth at wake time, the playbook's
+  "re-read live state in the same breath as the send"), and that discipline is
+  what actually fixed the failures P0-8 cites. **It was never implementable as
+  stated**: compiled code cannot find "every external claim" in free prose
+  without a model, so either the desk declares its claims on the call — covering
+  only what it chose to declare, which is no stronger than conduct — or the
+  daemon parses prose, which is judgment at the wrong layer. **And it was the
+  same knife as the verb gate and the wake rails**: the last compiled
+  interposition between a desk's judgment and its act, machinery for the careless
+  desk §3's trust bet declines to build for. What replaces it is conduct (§5's
+  freshness universal) plus visibility (the verbatim ledger line, §6), and one
+  small compiled obligation — display-tier honesty for the persisted `PRStatus`
+  (§2). The full argument, the field evidence that a faithful re-verification can
+  still be lied to by its source, and the failure signature that would justify
+  rebuilding it are in the P0-8 amendment (requirements doc); the transient
+  per-source reliability findings live as a dated note in the reference wake
+  script, where they can rot without touching this document
+  ([wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
 - **Per-mode playbook files** — a project's modes are named sections of its one
   playbook (§3, §5), so a reader sees every posture a project can take in one
   place. Splitting them across files would also invite the reader to imagine the

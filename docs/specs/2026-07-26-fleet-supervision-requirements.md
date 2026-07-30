@@ -183,6 +183,47 @@ and become a contract that migration and future change must respect.
   composing, which is the discipline the old wake.py already practiced ("re-derives truth AT
   WAKE TIME") with no daemon help, and the reference script demonstrates it. TBD does not
   re-verify a wake program's text for it.*
+
+  *Amended 2026-07-30, superseding that split: **the Built half is withdrawn.** The daemon
+  does not re-verify a desk's `drive --text` claims, and does not inspect message content
+  at all, for anyone. Both halves are now **authored discipline** — for a desk, the shipped
+  playbook's universal (derive the facts live, in the same breath as the send); for a wake
+  program, the discipline it already practiced, unchanged. Three findings, in the order
+  they arrived. **The owner was invented, not extracted.** The running system never
+  compiled this check: it lived entirely in authored content the desk executed itself —
+  `wake.py` "re-derives truth AT WAKE TIME", and the playbook already says "before
+  dispatching any message that asserts PR state, re-read live state in the same breath as
+  the send." The hand-composed wakes this story cites as hard-won predate that rule; the
+  authored discipline *was* the fix, and it worked. The redesign quietly promoted the
+  owner from desk conduct to daemon machinery. **The compiled guarantee was never
+  implementable as stated.** No compiled code finds "every external claim" in free prose
+  without a model. Either the desk declares its claims structurally on the call — in which
+  case verification covers only what the desk chose to declare, which is no stronger than
+  conduct — or the daemon parses prose, which is judgment work at the wrong layer. The
+  sentence read like a guarantee; implemented honestly it could never have been one. **And
+  the field evidence says the failure was source choice, in the authored tier all along.**
+  PR #522's review (zionts, 2026-07-29) measured desks re-verifying faithfully and being
+  lied to anyway: `gh pr view` (GraphQL) served 17.5-hour-stale, internally self-consistent
+  state where REST was correct every time, and `git ls-remote` beat the API by ~20s on a
+  force-pushed head. A compiled verifier would have consulted those same lying oracles, and
+  a re-verification that consults a lying oracle is worse than none, because it returns
+  confidence. Which API tells the truth this week is data, not design — it lands as a dated
+  source note in the reference wake script, where it can rot without touching a spec.*
+
+  *What stays **Built** is narrow, and is stated here exactly. Fresh work facts carrying
+  source and observed-at in every work order (design §2). Public surfaces a desk or a
+  program can re-derive from — a desk is a full agent session and can run `gh` and `git`
+  itself. The ledger recording every dispatched message verbatim (design §6), so a stale
+  premise is visible in the account the moment it ships: visibility, not prevention. And
+  one new, small obligation — **display-tier honesty**: TBD's persisted `PRStatus` is
+  display-tier, so wherever it appears on a public surface it carries its observed-at, and
+  the account never renders it as current truth (that cache was observed reporting "Ready
+  to merge" for PRs merged days earlier). That is TBD's own honesty rule applied to TBD's
+  own cache, not a workaround for anyone's API. The failure signature that would justify
+  rebuilding compiled freshness machinery, pre-committed here so nobody has to argue it
+  from scratch: the account recurrently showing fleet agents acting on stale premises
+  carried by desk messages. That pattern, in the record, is the argument — and the rebuild
+  would arrive as a dated amendment, never as a quiet restoration.*
 - **P0-9 [both]** As an operator, I want a **live** account of the shift — open beside my work,
   updating as things happen, showing what has been done, what is still open, and what needs me
   — so that supervision is legible while it is running, not only after it has stopped. The

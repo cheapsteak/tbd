@@ -8,7 +8,12 @@ came from, and `design §N` below refers to that document's sections. It records
 the 2026-07-29 amendment that removed the compiled wake gate, motivated by
 PR #522's field review — and the same-day follow-up that removed the compiled
 actuation rails the first draft had kept: TBD's obligation to the wake program
-is sufficient public surfaces, never guardrails. The requirements doc carries
+is sufficient public surfaces, never guardrails. This document also holds the
+dated source note (2026-07-29 field observations) that the 2026-07-30 P0-8
+amendment sent here rather than into the design: with the compiled send-time
+verifier melted, freshness is authored on both sides of the process boundary,
+and which source tells the truth is data that belongs beside the script that
+consults it. The requirements doc carries
 the matching dated amendments (P0-2, P0-8, P1-1, P1-2, P1-3, P1-4, P3-1) and
 the **Built/Enabled** classification the follow-up introduced
 ([`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md)).
@@ -79,7 +84,10 @@ and the desk — entirely.**
   capacity-exhausted means hold — as authored conduct with a worked example,
   not as law. Send-time freshness (P0-8) is likewise the program's
   discipline: derive facts live, immediately before composing, as the old
-  wake.py always did. Wakes are recorded as the ordinary terminal operations
+  wake.py always did — and since the P0-8 amendment of 2026-07-30 that is the
+  discipline for desk sends too, the compiled verifier having melted. The
+  daemon verifies nothing for anyone; freshness is authored on both sides of
+  the process boundary. Wakes are recorded as the ordinary terminal operations
   they already are; nothing here depends on a shift being open, and nothing
   here writes supervision ledger lines.
 - **The program schedules itself, and watches itself.** Cadence is a
@@ -116,6 +124,36 @@ and the desk — entirely.**
   an archive question for the human. A project whose convention differs (say,
   a post-merge closeout ritual) edits its own program; the tool ships no
   opinion it cannot be argued out of.
+
+## A dated source note in the reference script (2026-07-29)
+
+These are **observations from one week of one fleet, recorded as a dated
+comment block in the shipped reference script — not spec law.** They live there
+precisely so they can be edited, disagreed with, or rot without anyone touching
+a design document: which API tells the truth this week is transient forge
+weather, the same bucket as a repo slug or a machine's fleet snapshot. They are
+written down at all because the 2026-07-30 P0-8 amendment made freshness
+entirely an authored concern (requirements doc), and an authored discipline is
+only as good as the source it consults — a re-derivation that consults a lying
+oracle is worse than none, because it returns confidence.
+
+Measured during PR #522's review (zionts, 2026-07-29):
+
+- **Prefer the forge's REST reads over `gh`'s GraphQL for pull-request state.**
+  GraphQL was observed serving 17.5-hour-stale state that was internally
+  self-consistent — nothing in the response looked wrong. The REST read was
+  correct every time it was compared.
+- **Use `git ls-remote` when a head SHA must be certain.** After a force-push
+  it reported the new head about 20 seconds before the API did.
+- **Treat TBD's own listed PR status as display-tier.** It carries an
+  observed-at for a reason (design §2); derive forge facts yourself rather
+  than composing a wake from a cache that was seen reporting "Ready to merge"
+  for pull requests merged days earlier.
+- **Trust a stale MERGED; never trust a stale OPEN.** This one is not weather —
+  it is the forge-independent semantics already recorded above: merged is an
+  absorbing state, so an old MERGED is still true, while an old OPEN says
+  nothing about now. It is playbook-tier and belongs in any program's verdict
+  logic, whatever the sources of the week turn out to be.
 
 ## The guarantee TBD does make: sufficient, stable surfaces
 
