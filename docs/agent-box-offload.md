@@ -1,9 +1,9 @@
 # Offloading TBD sessions to the agent box
 
 **Date:** 2026-07-30
-**Status:** Plan + measured baseline. The box itself is proven working; nothing
-is offloaded yet, because remote sessions are still invisible in TBD (see
-"Trial status").
+**Status:** Live. Remote backends are enabled and polling, and the box's
+sessions are visible in TBD. Nothing is offloaded *yet* — the trial set still
+needs `gh` on the box (see "Trial status").
 **Companion:** [`docs/remote-provider-contract.md`](remote-provider-contract.md)
 — the contract this rides on. The provider itself (`agentbox`) lives in the
 longeye monorepo and is not referenced by TBD's code.
@@ -133,18 +133,46 @@ TUI, with `agent_state` arriving from the lifecycle hooks
 (`"working"` / `agent_state_reason: "user_prompt"`) rather than any screen
 scraping. The mechanism is proven end to end.
 
-Two things still gate the *offload itself*, as opposed to the box:
+**TBD now sees the box.** With Adam's approval the daemon was rebuilt and
+restarted from this worktree, running migrations `v61`–`v67`; remote backends
+are enabled and `remoteBackendsLive` is true. `remote.providers` reports the
+`agentbox` provider at health `ok`, and `remote.sessions` carries all four box
+sessions with real state flowing through — two `running`/`working`, two
+`exited`/`exited`. Process liveness and agent attention both arrive from the
+provider, not from screen scraping.
 
-1. **Remote sessions are still invisible in TBD.** The running daemon binary
-   predates the feature entirely — no `config.setRemoteBackends`, no
-   `remote.providers`, no `RemoteProviderManager` — so the Settings toggle
-   cannot even be set. Needs a rebuild + restart, which suspends ~52 live
-   sessions at one instant and moves the machine-wide `tbd://` handler.
-   **Held for Adam.** Until then the box is drivable only from the CLI, which
-   means offloaded work is not yet *visible* work — and visibility is most of
-   the point.
-2. **`gh` is not installed on the box**, which is the prerequisite for the two
-   best-shaped candidates (#1 and #2 above).
+**The predicted grouping failure is confirmed.** All four sessions come back
+`(ungrouped)`: the box reports `meta.repo` as `longeye-ai/longeye-app` and this
+laptop's origin is `longeye-ai/monorepo`, and `RemoteRepoMatching` is an exact
+case-insensitive `org/name` comparison with deliberately no alias handling. It
+is cosmetic, but it is the first thing anyone will notice.
+
+One thing still gates the *offload itself*, as opposed to the box:
+
+- **`gh` is not installed on the box**, which is the prerequisite for the two
+  best-shaped candidates (#1 and #2 above). That is now the single blocking
+  item for moving real work.
+
+### Turning it on again (or elsewhere)
+
+Two things about the enable path cost time and are not obvious:
+
+- **`restart.sh` refuses on a WIP branch.** A branch ahead of `main` is not
+  "install-ready", so the script silently *skips the daemon restart* and
+  launches the app from `.build` only — leaving a new app against an old
+  daemon, which is the "Unknown method" failure mode. `--wip` is the sanctioned
+  override. It also does not stop an already-installed `/Applications` app, so
+  clear both first: `pkill -f TBDApp; pkill -f TBDDaemon`.
+- **Build before you stop anything.** A stale `.build` compiled by a different
+  Swift toolchain (6.3.2 modules against a 6.2.1 compiler here) fails to build;
+  discovering that *after* killing the daemon would leave the fleet without
+  one. `rm -rf .build` fixes it. Note `swift build` still fails on the test
+  targets locally (`no such module 'Testing'`) — build the products explicitly
+  to get a clean signal.
+- **The flag is boot-only.** `config.setRemoteBackends` persists immediately but
+  the daemon constructs its provider manager only at boot, so enabling it costs
+  a second daemon restart. `daemon.capabilities` distinguishes the two:
+  `remoteBackendsEnabled` vs `remoteBackendsLive`.
 
 Also worth knowing before trusting a moved session: **`agentbox new --prompt`
 does not currently deliver the prompt** (monorepo #18202) — the session comes up
