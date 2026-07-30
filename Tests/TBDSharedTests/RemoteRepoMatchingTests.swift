@@ -156,4 +156,55 @@ struct RemoteRepoMatchingTests {
         let repos = [repo(remoteURL: "https://github.com/other-org/api")]
         #expect(RemoteRepoMatching.resolveRepoID(metaRepo: "acme/api", repos: repos) == nil)
     }
+
+    // MARK: - resolveRepoID — renamed-repo fallback
+    //
+    // A provider keeps reporting the name it clones by, and the host serves
+    // that old name via a redirect long after a rename. The local clone's
+    // DIRECTORY is not renamed by that, so it still carries the old name.
+
+    private func repo(id: UUID = UUID(), remoteURL: String?, path: String) -> Repo {
+        Repo(id: id, path: path, remoteURL: remoteURL, displayName: "r", defaultBranch: "main")
+    }
+
+    @Test func resolveRepoID_matchesRenamedRepoViaDirectoryName() {
+        // Host renamed acme/old-name -> acme/api; the clone directory did not follow.
+        let target = repo(remoteURL: "https://github.com/acme/api", path: "/repos/old-name")
+        let resolved = RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name", repos: [target])
+        #expect(resolved == target.id)
+    }
+
+    @Test func resolveRepoID_exactRemoteMatchBeatsRenameFallback() {
+        // Ordered so the fallback candidate comes FIRST: a single-pass loop
+        // would return it and lose the real match.
+        let decoy = repo(remoteURL: "https://github.com/acme/api", path: "/repos/old-name")
+        let exact = repo(remoteURL: "https://github.com/acme/old-name", path: "/repos/whatever")
+        let resolved = RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name",
+                                                        repos: [decoy, exact])
+        #expect(resolved == exact.id)
+    }
+
+    @Test func resolveRepoID_renameFallbackRequiresSameOrg() {
+        // Directory name agrees but the owner does not — must NOT match, or the
+        // fallback would invent cross-org matches pass 1 forbids.
+        let repos = [repo(remoteURL: "https://github.com/other-org/api", path: "/repos/old-name")]
+        #expect(RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name", repos: repos) == nil)
+    }
+
+    @Test func resolveRepoID_renameFallbackIgnoresPathPrefix() {
+        // Only the directory's own name counts; a parent segment must not match.
+        let repos = [repo(remoteURL: "https://github.com/acme/api", path: "/old-name/checkout")]
+        #expect(RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name", repos: repos) == nil)
+    }
+
+    @Test func resolveRepoID_renameFallbackTakesFirstWhenRepoRegisteredTwice() {
+        // The real shape: one repo cloned twice (primary + worktree root), both
+        // directories keeping the old name. Pass 1 resolves duplicates by taking
+        // the first, so this must too rather than refusing to choose.
+        let first = repo(remoteURL: "https://github.com/acme/api", path: "/primary/old-name")
+        let second = repo(remoteURL: "git@github.com:acme/api.git", path: "/worktrees/old-name")
+        let resolved = RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name",
+                                                        repos: [first, second])
+        #expect(resolved == first.id)
+    }
 }

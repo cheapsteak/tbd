@@ -81,13 +81,71 @@ public enum RemoteRepoMatching {
     /// Resolves `metaRepo` (a provider's `meta["repo"]` value) against
     /// `repos` by comparing normalized keys. Returns the first matching
     /// repo's id in `repos` order, or nil when `metaRepo` is nil/blank,
-    /// unparseable, or no repo's `remoteURL` normalizes to the same key.
+    /// unparseable, or no repo matches.
+    ///
+    /// Two passes, in this order — an exact `remoteURL` match must never lose
+    /// to the rename fallback, which is why this cannot be a single loop:
+    ///
+    /// 1. Exact: the provider's `org/name` equals the repo's `remoteURL`
+    ///    `org/name`. This is the normal case and the only one before renames
+    ///    were considered.
+    /// 2. Renamed-repo fallback: the **org** still agrees, and the provider's
+    ///    `name` equals the repo's local directory name. See
+    ///    `renamedRepoFallbackID` for why that is a real signal rather than a
+    ///    guess.
     public static func resolveRepoID(metaRepo: String?, repos: [Repo]) -> UUID? {
-        guard let metaRepo, let targetKey = normalizedKey(metaRepo) else { return nil }
+        guard let metaRepo, let target = segments(metaRepo) else { return nil }
+        let targetKey = "\(target.org.lowercased())/\(target.name.lowercased())"
+
         for repo in repos {
             guard let remoteURL = repo.remoteURL, let key = normalizedKey(remoteURL) else { continue }
             if key == targetKey { return repo.id }
         }
-        return nil
+        return renamedRepoFallbackID(target: target, repos: repos)
+    }
+
+    /// Second pass of `resolveRepoID`: tolerate a repo that has been **renamed
+    /// on the host** since the provider learned its name.
+    ///
+    /// A provider reports whatever name it clones by, and a host like GitHub
+    /// keeps serving the old name via a redirect indefinitely — so a provider
+    /// can go on reporting `acme/old-name` long after the repo became
+    /// `acme/new-name`, and pass 1 will never match it. Resolving the redirect
+    /// would mean a network call from a pure matching function, so instead we
+    /// use a signal already on disk: **a rename on the host does not rename
+    /// anyone's local clone directory**, so the directory usually still
+    /// carries the old name — the same name the provider is reporting.
+    ///
+    /// Deliberately kept narrow, because this is the one heuristic in an
+    /// otherwise deterministic matcher:
+    ///
+    /// - The org must still match the repo's `remoteURL`, so this can only
+    ///   ever pair repos already known to live under the same owner. It cannot
+    ///   introduce a cross-org match.
+    /// - Only the directory's own name is compared, never a path prefix.
+    /// - It runs only after pass 1 found nothing, so it can never override a
+    ///   real `remoteURL` match.
+    ///
+    /// Like pass 1, this returns the **first** match in `repos` order rather
+    /// than treating several as ambiguous. The same repo registered at two
+    /// paths is ordinary (a primary clone plus a worktree root), and it is
+    /// exactly the shape this fallback sees — both clones keep the old
+    /// directory name, so both match. Pass 1 already resolves that case by
+    /// taking the first; refusing to choose here would only mean the sessions
+    /// stay ungrouped for the users most likely to hit a rename.
+    private static func renamedRepoFallbackID(
+        target: (org: String, name: String), repos: [Repo]
+    ) -> UUID? {
+        let wantOrg = target.org.lowercased()
+        let wantName = target.name.lowercased()
+
+        return repos.first { repo in
+            guard let remoteURL = repo.remoteURL,
+                  let local = segments(remoteURL),
+                  local.org.lowercased() == wantOrg else { return false }
+            // Compare against the clone's directory name, not its remote name.
+            let directory = (repo.path as NSString).lastPathComponent.lowercased()
+            return directory == wantName
+        }?.id
     }
 }
