@@ -339,7 +339,7 @@ The hazard itself is unchanged: everything the agent learns that lands in a file
 
 - **`Server/RPCRouter+NightwatchHandlers.swift` (16 lines)** — `handleSetNightwatchMode` (`:5-15`): persist → `runner.apply(mode:)` → broadcast `.modelProfilesChanged` (the config-reload channel is reused; the app picks the mode up from the next config fetch). `handleNightwatchReport` is gone with the audit store (#509), which is why the file is 16 lines and not 23. Dispatch at `RPCRouter.swift:377`.
 - **`Lifecycle/PluginDirWriter.swift`** — `writePlugin()` (`:48-83`) writes the `tbd` skill and calls `writeNightwatch(pluginDir:)` (`:87-107`), which writes SKILL.md + three config files + every script in `NightwatchSkillContent.scripts` — six of them (scripts get `0o755`). Called on every boot via `RuntimeIntegrationRefresher` (`Daemon.swift:17`, `:31`, invoked at `:286`).
-- **`Database/Database.swift`** — `v38_nightwatch_mode` (`:690-692`, `config.nightwatch_mode TEXT DEFAULT 'off'`); `v41_clearance_ledger` (`:710-725`) and `v42_audit_log` (`:727-740`), both of whose tables were dropped by `v60` (#509) while the migrations themselves remain, as migrations must. Store handles exposed as `db.clearance` / `db.audit` (`:25-26`, `:65-66`, `:105-106`).
+- **`Database/Database.swift`** — `v38_nightwatch_mode` (`:690-692`, `config.nightwatch_mode TEXT DEFAULT 'off'`); `v41_clearance_ledger` (`:710-725`) and `v42_audit_log` (`:727-740`), both of whose tables were dropped by `v60` (#509) while the migrations themselves remain, as migrations must. The `db.clearance` / `db.audit` store handles were *removed by #509* along with `ClearanceStore.swift` and `AuditStore.swift`; only the migration bodies and `v60`'s `DROP TABLE` statements mention those tables today.
 - **`Database/ConfigStore.swift`** — `nightwatch_mode` column mapping (`:26`, `:53`) and `setNightwatchMode` (`:227-234`).
 - **`Database/AuditStore.swift`** — `AuditLogRecord` (`:7-42`), `logAction` (insert + mirrored `os.Logger` debug line, `:54-68`), `list` / `get` / `countByAction` (`:71-114`). No pruning.
 - **`Database/ClearanceStore.swift`** — `ClearanceRecord` (`:6-44`); `insert` / `voidByID` / `voidBySHA` / `listByPR` / `auditTrail` / `get` (`:55-116`). Fully built, entirely unused outside tests.
@@ -363,11 +363,9 @@ The hazard itself is unchanged: everything the agent learns that lands in a file
 
 - `Tests/TBDDaemonTests/DaywatchRunnerTests.swift` (494 lines) — loop/mode transitions against a mock executor + mock desk manager and the injected test clock.
 - `Tests/TBDDaemonTests/DeskSessionManagerTests.swift` (460) — ensure/recover/wrap-up/nudge/close against a real temp DB (under `TBDHomeSerialized`, `:6`) with dry-run tmux.
-- `Tests/TBDDaemonTests/MergeGateTests.swift` (471) — the only place `.wouldMerge`/`.hold` are reachable; floor, holds, globs, policy clamp.
-- `Tests/TBDDaemonTests/MigrationTests_Nightwatch.swift` (106) — v38/v41/v42 schema.
-- `Tests/TBDDaemonTests/AuditStoreTests.swift`, `ClearanceStoreTests.swift` — store CRUD.
 - `Tests/TBDSharedTests/NightwatchModeTests.swift` (54) — enum round-trip/decode defaults.
-- `Tests/TBDAppTests/Nightwatch{ModeToggle,ModeTheme,DeskStatusBanner,ExperimentalGate}Tests.swift` — presentation logic and flag fail-closed behavior.
+- `Tests/TBDAppTests/Nightwatch{ModeToggle,ExperimentalGate}Tests.swift` — presentation logic and flag fail-closed behavior.
+- *Deleted with their subjects:* `MergeGateTests.swift`, `MigrationTests_Nightwatch.swift`, `AuditStoreTests.swift`, and `ClearanceStoreTests.swift` went with System A (#509); `NightwatchModeThemeTests` and `NightwatchDeskStatusBannerTests` went with the theme and banner files (#507/#517). None of the six exists in the tree.
 - `PluginDirWriterTests` additionally runs `wake.py --selftest` offline.
 
 ### 6.7 Runtime artifacts (generated, not source)

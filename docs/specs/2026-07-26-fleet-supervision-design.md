@@ -318,9 +318,10 @@ can only return one of its own options. The composer can return judgment.
 `AskUserQuestion`, and the ones that are not cannot be answered with composer
 text — a permission prompt wants a keypress. That path exists. It is
 deliberately *not* automatic: it is a desk that has read the screen with
-`tbd terminal output <id>`, chosen keys, and sent them through the same gate as
-everything else. The three-condition test does not license it and does not
-forbid it; the test governs what the daemon does unattended, and this is
+`tbd terminal output <id>`, chosen keys, and sent them down the same audited
+delivery path as everything else. The three-condition test does not license it
+and does not forbid it; the test governs what the daemon does unattended, and
+this is
 judgment acting, which is the distinction drawn at the top of this section.
 
 Because keys make no claims about the world, there is nothing in them to
@@ -736,8 +737,8 @@ question becomes a case and **hastens an immediate mini-tick for that
 terminal**, running the same pure decision function the clock would have run
 minutes later. The work order carries the question payload verbatim from the
 daemon's store, so the supervisor fetches nothing and needs no new read
-surface. From there it is an ordinary case: judgment, then `drive` through
-the same gate as every other verb. Full mechanics, including the
+surface. From there it is an ordinary case: judgment, then `drive` down the
+same audited delivery path as every other verb. Full mechanics, including the
 dismiss-and-reply actuation and what a mid-shift restart costs, are in §2's
 prompt-stalls subsection.
 
@@ -1393,9 +1394,10 @@ The sequence, all daemon-driven:
    future turn. A ledger line links the old session ID to the new one.
 
 **This runs automatically, in both modes, with no proposal.** Everything else
-consequential in this design needs a gesture or a gate; this deliberately does
-not. Recycling a desk touches no fleet agent and destroys no work state,
-because desks were built disposable — it is self-maintenance of the
+consequential in this design either takes an operator gesture or leaves an
+action line someone will read; this deliberately does neither. Recycling a desk
+touches no fleet agent and destroys no work state, because desks were built
+disposable — it is self-maintenance of the
 supervision machinery, not an act on the fleet. It appears in the account
 ("3:12 a.m. — acme-web desk recycled at 261k context, 4 notes flushed"), not
 in the queue. If a recycle ever loses something that mattered, that

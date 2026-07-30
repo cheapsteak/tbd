@@ -136,11 +136,17 @@ the target repos' `.nightwatch/policy.json` — into exactly one bucket:
    seeds the new TBD-shipped supervisor prompt and playbook template.
 3. **Repo-specific advisory** — prose that belongs to one repo; lands as a PR
    to *that repo's* `.agents/supervision.md`, authored outside TBD's tree.
-4. **Operator-binding** — rules the daemon must enforce with no model in the
-   loop. **This bucket is now empty by construction**: the new design has no
-   rules of any kind (design §3), so a never-entry becomes either conduct prose
-   in a project's mode, or an automation-membership mark, or a never-touch flag
-   — sort it into bucket 2 or 3 and record which.
+4. **Operator-binding** — **retired.** This bucket held rules the daemon would
+   enforce with no model in the loop, and the new design has **no rules of any
+   kind** (design §3), so nothing can land here. Its former content splits two
+   ways, and the disposition log records which way each unit went:
+   - Anything that reads as *advice* becomes conduct — bucket 2 or 3.
+   - Anything **selection-shaped** — a never-touch flag (P1-3), an
+     automation-membership mark — is not authored content at all. It is an
+     operator gesture, applied **by hand** at setup and recorded in the log as
+     applied rather than migrated. Selections have no file to carry across.
+   The distinction that matters: content moves between files, selections are
+   made. Nothing in this bucket becomes something the daemon enforces.
 5. **Stale snapshot / person-specific** — discard, with a line in the log.
 
 Expected dispositions per source (verify against content during execution;
@@ -171,8 +177,12 @@ citations are to the baseline doc's §5–§6):
   shipped list, which carried a bare `git` prefix, is too broad to have ever
   been ratified. Nothing from it seeds anything in the new design — there are no
   rules for it to seed (design §3).
-- **`dontTouchTxt`** — Never-list entries → operator-binding (4); the frozen
-  pane-ID comment → discard (5).
+- **`dontTouchTxt`** — Never-list entries are **selection-shaped**: the operator
+  applies each surviving one by hand as a **never-touch flag** on that terminal
+  or worktree (P1-3 per-object DB flags — an operator gesture, not authored
+  policy), and the log records which were applied and which were dropped as
+  stale. Nothing here migrates as content. The frozen pane-ID comment →
+  discard (5).
 - **`NightwatchDeskPrompts`** — Claim-before-apply, escalation batching, the
   200k respawn rule → doctrine (2), where the design has not already compiled
   them (§9 recycles context mechanically); person-specific wording → discard
@@ -185,19 +195,25 @@ citations are to the baseline doc's §5–§6):
   boot-overwritten (see `handoffPy` above) — but snapshot-first still applies to
   the whole dir, because which files the writer owns has changed once already
   and the snapshot is what makes that harmless.
-- **Target repos' `.nightwatch/policy.json`** — `priorities`, `dont_touch`, gate
-  conditions → that repo's advisory playbook (3), except entries the operator
-  promotes to binding (4).
+- **Target repos' `.nightwatch/policy.json`** — `priorities`, `dont_touch`, and
+  the old gate conditions → that repo's advisory playbook (3). There is nothing
+  left to "promote to binding," bucket 4 being retired, so an entry that reads
+  as a standing decision rather than advice takes one of the two paths above:
+  written as conduct prose in the project's mode, or applied by hand as a
+  selection (never-touch flag, automation mark).
 
 **Step 3 — seed the destinations.** Open the `.agents/supervision.md` PR in
 the target repo; record the operator's selections in `supervision.json`
 (automation-membership marks and default stance, project topology, mode
-choices). There is no learnings file to
-append to — durable prose goes in the advisory PR.
+choices); and apply the by-hand selections bucket 4 produced — never-touch
+flags on the terminals or worktrees that earned them. There is no learnings
+file to append to — durable prose goes in the advisory PR.
 
-**Exit gate**: the disposition log accounts for every file in the inventory;
-the advisory PR exists; the rules file parses and the operator has confirmed
-every binding entry.
+**Exit gate**: the disposition log accounts for every file in the inventory and
+records, for each selection-shaped unit, whether the operator applied it or
+dropped it; the advisory PR exists; and `supervision.json` parses. There is no
+rules file to validate and no binding entries to confirm — bucket 4 is retired
+(above).
 
 ## 4. Build slices
 
