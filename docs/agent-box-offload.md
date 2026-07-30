@@ -1,8 +1,9 @@
 # Offloading TBD sessions to the agent box
 
 **Date:** 2026-07-30
-**Status:** Plan + measured baseline. Nothing is offloaded yet — the box cannot
-clone (see "What still blocks a live trial").
+**Status:** Plan + measured baseline. The box itself is proven working; nothing
+is offloaded yet, because remote sessions are still invisible in TBD (see
+"Trial status").
 **Companion:** [`docs/remote-provider-contract.md`](remote-provider-contract.md)
 — the contract this rides on. The provider itself (`agentbox`) lives in the
 longeye monorepo and is not referenced by TBD's code.
@@ -76,8 +77,8 @@ trial runs, so they can be scored honestly afterward.
 
 | # | Candidate (live worktree) | Needs from the laptop | Verdict |
 |---|---|---|---|
-| 1 | **PR babysitting** — `🍼 Babysit Open PRs` | GitHub API + git only. No DB, no browser, no local toolchain. | **Move.** Best shape in the fleet: all API latency, long idle gaps, no local dependency. |
-| 2 | **PR backlog triage** — `📋 PR Cleanup Plan` | GitHub API only. | **Move.** Same shape as #1; bursty reads, long think time. |
+| 1 | **PR babysitting** — `🍼 Babysit Open PRs` | GitHub API + git only. No DB, no browser, no local toolchain. | **Move — after installing `gh`.** Best shape in the fleet, but the box has no `gh` (verified: `command -v gh` → absent; the TUI itself prompts "install gh for PR status"). Until then the best-shaped candidate is the one the box is least equipped to run. |
+| 2 | **PR backlog triage** — `📋 PR Cleanup Plan` | GitHub API only. | **Move — same `gh` prerequisite as #1.** |
 | 3 | **Docs / ADR review** — `🔐 Staff Access ADR Review`, `🧵 Chat Summarization Design` | Repo checkout for reading and writing. | **Move, with care.** Cheap to move. Verify the specific doc carries no CJI before moving. |
 | 4 | **Repo research sweeps** | The embedding store at `~/Desktop/proj/longeye-embeddings` is **local**. | **Keep local for now.** Looks like an ideal candidate — pure API latency — but the corpus is a local artifact. Moving the workload without the store just makes it slower. Reconsider if the store is ever hosted. |
 | 5 | **Monitor / chat UI work** — `monitor-ui-polish`, `panel-width-floor`, `search-unlock`, `🖼️ Details image drop-ins` | `just dev`, Storybook, a browser. | **Keep local.** Disqualified by the local toolchain. |
@@ -112,7 +113,8 @@ invisibly is a bad candidate however patient it is.
 
 | Failure | Detectable? | Recoverable without a human? |
 |---|---|---|
-| **Token revoked / invalid** | Poorly. `claude-auth-health` pages on 401, but it currently returns 403 for a healthy setup token and DMs the owner every 30 min (#18126) — so a real alert arrives inside a stream of false ones. | No. Needs `agentbox set-token` (a browser step). |
+| **Token revoked / invalid** | **Effectively no.** `claude-auth-health` returns 403 and DMs every 30 min (#18126), so real alerts arrive inside a stream of noise — and the check proves the token with headless `claude -p`, which skips the first-run onboarding that interactive sessions must pass. It therefore exercises a *different code path* from the thing it certifies and structurally cannot see the failure it exists to catch. The timer is currently **disabled** on this box. | No. Needs `agentbox set-token` (a browser step). |
+| **Laptop's AWS SSO lapses** | Yes, loudly — every provider verb exits 4 with `auth_expired` and a remediation command, so TBD shows a dead provider rather than wrong data. | Usually yes, without a browser: boto3 cannot refresh an expired SSO token, but the `aws` CLI can. `eval "$(aws configure export-credentials --profile longeye-agentbox --format env)"` re-arms it. Observed live — a `create` failed `auth_expired`, and the next call succeeded after one `aws` invocation. |
 | **Clone / auth breakage** | Yes — `create` returns a `failed` record carrying the error text. This is exactly how the current minter gap was found. | No. The current instance needs an IAM change. |
 | **Session invisible to TBD** | Yes, once the daemon is running: provider health surfaces in Settings, and absence from two consecutive snapshots reads as gone. | Partly — TBD re-describes on its poll. |
 | **Permission prompt on a remote session** | Yes. `agent_state: waiting_input` comes from Claude Code lifecycle hooks, not screen scraping. | Yes — the `send` capability answers it without attaching. This is the failure mode that most threatened the whole idea, and it is genuinely covered. |
@@ -122,30 +124,39 @@ invisibly is a bad candidate however patient it is.
 No `events` capability is implemented, so **60s polling is the floor** for every
 state change above. Nothing here is real-time.
 
-## What still blocks a live trial
+## Trial status
 
-Two blockers, both outside this document's reach, plus findings from dry-running
-everything that is not blocked.
+**The box works.** The IAM grant landed (monorepo #18135 + an Atlantis apply),
+and `invoke-agent-box-github-minter` is now on `agent-box-zionts-role`.
+Sessions since then have cloned the 4.7 GB monorepo and run a live Claude Code
+TUI, with `agent_state` arriving from the lifecycle hooks
+(`"working"` / `agent_state_reason: "user_prompt"`) rather than any screen
+scraping. The mechanism is proven end to end.
 
-1. **No session can be created.** `agent-box-zionts-role` is missing the
-   `invoke-agent-box-github-minter` policy that the working box's role has, so
-   `git clone` fails and every `create` lands as `failed`. The fix is a
-   monorepo terragrunt change already authored on another branch; after it
-   merges someone must comment
-   `atlantis apply -p management-agent-box-github-minter` — merging alone
-   changes nothing. **This is a management-account IAM change and is Adam's
-   call.**
-2. **Remote sessions are invisible in TBD.** The running daemon binary predates
-   the feature entirely — no `config.setRemoteBackends`, no `remote.providers`,
-   no `RemoteProviderManager` — so the Settings toggle cannot even be set. Needs
-   a rebuild + restart, which suspends ~52 live sessions at one instant and
-   moves the machine-wide `tbd://` handler. **Held for Adam.**
+Two things still gate the *offload itself*, as opposed to the box:
 
-### Findings from the parts that could be dry-run
+1. **Remote sessions are still invisible in TBD.** The running daemon binary
+   predates the feature entirely — no `config.setRemoteBackends`, no
+   `remote.providers`, no `RemoteProviderManager` — so the Settings toggle
+   cannot even be set. Needs a rebuild + restart, which suspends ~52 live
+   sessions at one instant and moves the machine-wide `tbd://` handler.
+   **Held for Adam.** Until then the box is drivable only from the CLI, which
+   means offloaded work is not yet *visible* work — and visibility is most of
+   the point.
+2. **`gh` is not installed on the box**, which is the prerequisite for the two
+   best-shaped candidates (#1 and #2 above).
 
-The provider was exercised end to end against the rebuilt box under a stripped
-environment (`env -i`), which is the case that matters because TBD's daemon is
-GUI-launched and inherits almost nothing:
+Also worth knowing before trusting a moved session: **`agentbox new --prompt`
+does not currently deliver the prompt** (monorepo #18202) — the session comes up
+ready and empty. Send the prompt with `agentbox send <slug> "..."` after create.
+A workload moved with `--prompt` would sit idle looking healthy, which is
+exactly the invisible-wedge shape this document argues against.
+
+### Findings from exercising the provider
+
+The provider was exercised against the rebuilt box under a stripped environment
+(`env -i`), which is the case that matters because TBD's daemon is GUI-launched
+and inherits almost nothing:
 
 - `describe`, `list`, and `create` all behave per contract. `create` returns in
   seconds with `state: "starting"`, as required.
