@@ -197,6 +197,14 @@ struct RemoteRepoMatchingTests {
         #expect(RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name", repos: repos) == nil)
     }
 
+    @Test func resolveRepoID_renameFallbackIsCaseInsensitive() {
+        // Both sides are lowercased before comparing; nothing else pins that,
+        // and directory casing is whatever the person who cloned it typed.
+        let target = repo(remoteURL: "https://github.com/Acme/api", path: "/repos/Old-Name")
+        let resolved = RemoteRepoMatching.resolveRepoID(metaRepo: "acme/old-name", repos: [target])
+        #expect(resolved == target.id)
+    }
+
     @Test func resolveRepoID_renameFallbackTakesFirstWhenRepoRegisteredTwice() {
         // The real shape: one repo cloned twice (primary + worktree root), both
         // directories keeping the old name. Pass 1 resolves duplicates by taking
