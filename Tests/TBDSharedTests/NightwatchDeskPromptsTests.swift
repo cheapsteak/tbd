@@ -9,10 +9,15 @@ import TBDShared
 /// agent behavior fleet-wide. Nothing asserted on their content until
 /// 2026-07-25, and by then the judge prompt had spent five days telling sessions
 /// to run `tbd terminal close --all` — a command that has never existed — as its
-/// context-ceiling remedy, and to merge PRs that the nightwatch gate reserves
-/// for the human.
+/// context-ceiling remedy.
 ///
 /// Each expectation below therefore pins a *policy invariant*, not phrasing.
+/// Which means: when the policy itself changes, these change with it. They did on
+/// 2026-07-29, when Adam authorized the nightwatch judge to merge his own
+/// loop-perfect PRs. The invariant did not disappear — it narrowed, from "never
+/// merge" to "merge only `zionts`-authored, only loop-perfect, never `--admin`,
+/// and only on the nightwatch shift". A test that had merely banned the substring
+/// `gh pr merge` would have had nothing left to say about that.
 @Suite("Nightwatch desk prompt policy invariants")
 struct NightwatchDeskPromptsTests {
     /// Modes that actually reach a desk session. `.off` is a programmer-error
@@ -47,23 +52,45 @@ struct NightwatchDeskPromptsTests {
     @Test("The only context-ceiling remedy offered is the handoff relay", arguments: liveModes)
     func ceilingRemedyIsTheRelay(mode: NightwatchMode) {
         for (label, text) in prompts(mode: mode, skillDir: "/skill") {
-            let mentionsCeiling = text.contains("200k") || text.lowercased().contains("context ceiling")
+            let mentionsCeiling = text.contains("600k") || text.lowercased().contains("context ceiling")
             #expect(mentionsCeiling, "\(mode) \(label) never states the context ceiling")
 
             #expect(
                 text.contains("handoff.py"),
                 "\(mode) \(label) raises the context ceiling without naming the handoff relay"
             )
-            // No prompt may point at a recycler that does not exist. Asserted on
-            // concrete artifacts rather than on phrasing: a blacklist of wordings
-            // like "will restart you" is defeated from BOTH sides — a reworded
-            // reintroduction slips through, and the sentence that *forbids* the
-            // promise trips it, because a prohibition quotes what it prohibits.
-            // These names have no innocent reading in a prompt; none of them exist.
+            // No prompt may point the session at machine-local infrastructure as
+            // its remedy. Asserted on concrete artifacts rather than on phrasing:
+            // a blacklist of wordings like "will restart you" is defeated from
+            // BOTH sides — a reworded reintroduction slips through, and the
+            // sentence that *forbids* the promise trips it, because a prohibition
+            // quotes what it prohibits.
+            //
+            // These names were listed in 2026-07-25 as things that "were never
+            // built". That was wrong — `~/.fleet/babysitter_daemon.py` and its
+            // watchdog are real, launchd-loaded, and predate the claim by a month
+            // (see SKILL.md, "The babysitter daemon is machine-local"). The list
+            // survives on a *different* rationale, which is the durable one: this
+            // skill ships to any machine, and none of these paths is installed by
+            // it, so naming one in a shipped prompt points most readers at
+            // nothing. The relay is the remedy; a daemon is never the answer to a
+            // context ceiling either way.
             for phantom in ["daemon.py", "watchdog.sh", "~/.fleet", "babysitter_daemon"] {
                 #expect(
                     !text.contains(phantom),
-                    "\(mode) \(label) points at \(phantom), which was never built"
+                    "\(mode) \(label) points at \(phantom), which this skill does not install"
+                )
+            }
+            // The 2026-07-25 error that this file's own comment propagated: the
+            // prompts told the judge "nothing will restart you", which reads as
+            // "your handoff is pointless" — the exact inference that makes a
+            // session push through its ceiling. No prompt may deny that a
+            // successor is reachable.
+            for despair in ["Nothing will restart you", "nothing will restart you",
+                            "no respawner", "there is no babysitter daemon"] {
+                #expect(
+                    !text.contains(despair),
+                    "\(mode) \(label) tells the judge nothing can succeed it (\"\(despair)\"), which makes the handoff relay look pointless"
                 )
             }
         }
@@ -102,16 +129,50 @@ struct NightwatchDeskPromptsTests {
         #expect(text.contains("NEVER closes itself"))
     }
 
-    @Test("No prompt authorizes a merge — the human merges", arguments: liveModes)
-    func noMergeAuthorization(mode: NightwatchMode) {
+    /// Merging is authorized as of 2026-07-29, but narrowly. The dangerous
+    /// failure is no longer "the prompt permits a merge" — it is a prompt that
+    /// permits one while dropping any of the three limits, because a judge acting
+    /// on a partial rule merges someone else's PR, or merges toward green, and
+    /// both are irreversible on a repo behind a merge queue.
+    ///
+    /// So each limit is pinned separately: an author scope, a completeness bar,
+    /// and the `--admin` prohibition. Dropping any single clause reds this test.
+    @Test("Every prompt states all three limits on the merge authorization", arguments: liveModes)
+    func mergeAuthorizationIsBounded(mode: NightwatchMode) {
         for (label, text) in prompts(mode: mode, skillDir: "/skill") {
             #expect(
-                text.contains("NEVER run `gh pr merge`") || text.contains("never run `gh pr merge`"),
-                "\(mode) \(label) does not forbid `gh pr merge`; the SKILL.md gate reserves merging for the human"
+                text.contains("`zionts`"),
+                "\(mode) \(label) authorizes merging without naming whose PRs qualify"
+            )
+            #expect(
+                text.contains("loop-perfect"),
+                "\(mode) \(label) authorizes merging without the completeness bar"
+            )
+            #expect(
+                text.contains("Never `--admin`") || text.contains("never `--admin`"),
+                "\(mode) \(label) does not forbid `--admin`, which bypasses the gate entirely"
             )
             #expect(
                 !text.contains("Merge PRs cleared"),
-                "\(mode) \(label) authorizes merging cleared PRs, contradicting the gate"
+                "\(mode) \(label) authorizes merging cleared PRs in general, ignoring the author scope"
+            )
+        }
+    }
+
+    /// `gh pr merge` on a merge-queue repo *enqueues*, and prints
+    /// `! The merge strategy for main is set by the merge queue` while succeeding.
+    /// A judge that reads that `!` as a failure retries the merge, or reports a
+    /// merged PR as blocked — so the prompt has to say which it is.
+    @Test("Every prompt disambiguates the merge-queue warning", arguments: liveModes)
+    func mergeQueueWarningExplained(mode: NightwatchMode) {
+        for (label, text) in prompts(mode: mode, skillDir: "/skill") {
+            #expect(
+                text.contains("merge queue"),
+                "\(mode) \(label) tells the judge to merge without mentioning the merge queue"
+            )
+            #expect(
+                text.contains("warning, not a failure"),
+                "\(mode) \(label) does not tell the judge the merge-queue notice is not an error"
             )
         }
     }
@@ -148,15 +209,31 @@ struct NightwatchDeskPromptsTests {
     /// It must not contradict the prompt.
     @Suite("Shipped nightwatch skill content")
     struct SkillContentTests {
-        @Test("SKILL.md does not claim a babysitter daemon exists")
-        func noBabysitterDaemonClaim() {
+        /// Two errors, in opposite directions, both of which SKILL.md has made.
+        ///
+        /// Before 2026-07-25 it advertised a "durable spine already on launchd"
+        /// that this skill has never installed, and ticks escalated restarts for
+        /// software with no install to restore. The 2026-07-25 correction then
+        /// overshot into "none of it ever existed" — also false, since the
+        /// operator's `com.fleet-babysitter` LaunchAgents predate that claim by a
+        /// month — and that overshoot propagated into the desk prompts as
+        /// "nothing will restart you".
+        ///
+        /// The true statement sits between them and is the one pinned here: *this
+        /// skill ships no daemon*, which is a fact about the package rather than
+        /// about any machine, and is therefore still true wherever it installs.
+        @Test("SKILL.md claims neither a shipped daemon nor a universally absent one")
+        func babysitterDaemonClaimIsScoped() {
             let md = NightwatchSkillContent.skillMd
             for claim in ["durable spine (already on launchd",
                           "These keep the critical safety net running",
                           "`scripts/daemon.py` (babysitter) — auto-approves"] {
-                #expect(!md.contains(claim), "SKILL.md still asserts a babysitter daemon: \(claim)")
+                #expect(!md.contains(claim), "SKILL.md still asserts a shipped babysitter daemon: \(claim)")
             }
-            #expect(md.contains("There is no babysitter daemon"))
+            #expect(!md.contains("None of it ever existed"),
+                    "SKILL.md again claims no babysitter daemon exists anywhere; the operator's runs under launchd")
+            #expect(md.contains("this skill does not ship one"),
+                    "SKILL.md lost the scoped claim — that the absence is the package's, not the machine's")
         }
 
         @Test("SKILL.md carries the standing rules the prompts echo")
@@ -192,6 +269,37 @@ struct NightwatchDeskPromptsTests {
             }
             #expect(py.contains("refusing to close myself"),
                     "handoff.py lost the self-close guard the relay depends on")
+        }
+
+        /// The ceiling is the one number in this skill that both prompts quote in
+        /// prose, so a change to `DEFAULT_THRESHOLD` that misses the prose leaves
+        /// the judge acting on a figure the script disagrees with.
+        ///
+        /// The literal fixture is also pinned. `handoff.py --selftest` asserted
+        /// "over ceiling exits 10" against a hardcoded 250_000, which the raise to
+        /// 600k turned into an *under*-ceiling case — the selftest would have kept
+        /// passing while testing the opposite of its label, so the fixture is now
+        /// derived from `DEFAULT_THRESHOLD` and that derivation is what's checked.
+        @Test("The context ceiling is 600k in the script and in every prompt")
+        func ceilingIsConsistent() {
+            #expect(NightwatchSkillContent.handoffPy.contains("DEFAULT_THRESHOLD = 600_000"),
+                    "handoff.py's ceiling moved off 600k")
+            #expect(NightwatchSkillContent.handoffPy.contains("over_total = DEFAULT_THRESHOLD + 50_000"),
+                    "the selftest's over-ceiling fixture is a literal again; it will rot on the next raise")
+            #expect(NightwatchSkillContent.skillMd.contains("~600k tokens"),
+                    "SKILL.md quotes a ceiling other than the script's")
+
+            for mode in NightwatchDeskPromptsTests.liveModes {
+                for (label, text) in [
+                    ("initialPrompt", NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: "/skill")),
+                    ("judgePrompt", NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: "/skill"))
+                ] {
+                    #expect(!text.contains("200k"),
+                            "\(mode) \(label) still quotes the retired 200k ceiling as current")
+                    #expect(text.contains("600k"),
+                            "\(mode) \(label) does not state the 600k ceiling")
+                }
+            }
         }
 
         /// The never-/closeout standing rule has to hold for the whole shipped
@@ -230,14 +338,27 @@ struct NightwatchDeskPromptsTests {
         }
     }
 
-    @Test("Daywatch stays triage-only and nightwatch does not widen to merging")
+    /// Merging is the one action the two shifts differ on (Adam, 2026-07-29:
+    /// nightwatch only). Daywatch runs while a human is around, so a loop-perfect
+    /// PR is something it *reports*; the unattended shift is the one that acts.
+    ///
+    /// Both prompts still carry the full qualifying rule — see `mergeRule`'s doc
+    /// comment for why — so "daywatch does not merge" cannot be pinned by the
+    /// absence of merge vocabulary. It is pinned on the authorization sentence,
+    /// which is the only part that differs.
+    @Test("Only nightwatch is authorized to act on the merge rule")
     func modeSpecificScope() {
         let day = NightwatchDeskPrompts.judgePrompt(mode: .daywatch, skillDir: "/skill")
         let night = NightwatchDeskPrompts.judgePrompt(mode: .nightwatch, skillDir: "/skill")
 
         #expect(day.contains("triage only"))
-        // Nightwatch is the wider role, but "wider" must stop before merging.
-        #expect(night.contains("the human merges"))
+        #expect(day.contains("Merging is a NIGHTWATCH action"),
+                "daywatch judge prompt does not withhold the merge authorization")
+        #expect(!day.contains("you MAY run `gh pr merge"),
+                "daywatch judge prompt authorizes an unattended merge")
+
+        #expect(night.contains("you MAY run `gh pr merge"),
+                "nightwatch judge prompt withholds the authorization Adam granted 2026-07-29")
         #expect(!night.contains("act on everything the gate allows"))
         #expect(!night.contains("act on everything the gate approves"))
     }
