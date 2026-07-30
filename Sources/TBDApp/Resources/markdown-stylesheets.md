@@ -7,14 +7,14 @@ property.
 
 ## Where stylesheets live
 
-Stylesheets are the `*.css` files in `~/tbd/markdown-themes/`. Pick one in
-**Settings → General → Markdown**; the selection is stored per user, not per
-repository.
+Stylesheets are the `*.css` files in `~/tbd/markdown-themes/`. Pick one from the
+**Stylesheet** menu in **Settings → General → Markdown**; the selection is stored
+per user, not per repository.
 
-The fastest way to start is **New from Default**, which copies TBD's bundled
-stylesheet into that folder, selects it, and reveals it in Finder. Note that the
-copy is a snapshot: later improvements to the bundled stylesheet will not reach
-it.
+The fastest way to start is **New from Default**, the last entry in that menu,
+below the separator. It copies TBD's bundled stylesheet into the folder, selects
+it, and reveals it in Finder. Note that the copy is a snapshot: later
+improvements to the bundled stylesheet will not reach it.
 
 Edits apply as soon as you save. Any open markdown file re-renders — no restart,
 no rebuild.
@@ -82,5 +82,5 @@ over the network and may not appear at all.
 
 The bundled stylesheet is the most complete reference available: it styles every
 element and class listed above, and its comments explain the decisions behind the
-type scale, the wide-table technique, and the palette. Use **New from Default**
-to get an editable copy.
+type scale, the wide-table technique, and the palette. Choose **New from
+Default** in the **Stylesheet** menu to get an editable copy.

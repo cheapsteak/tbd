@@ -132,8 +132,23 @@ enum MarkdownStylesheet {
     /// Where the bundled "writing a stylesheet" documentation lives, or `nil`
     /// if the resource is missing from the bundle. Not cached, mirroring the
     /// former `bundledURL`: resolving a bundle URL is cheap, and this is only
-    /// read once — when the Settings doc button is clicked (or disabled).
+    /// read when the Markdown settings section appears.
     static var stylesheetDocsURL: URL? {
         Bundle.module.url(forResource: "markdown-stylesheets", withExtension: "md")
+    }
+
+    /// The text of that guide, or `nil` when the resource is missing or
+    /// unreadable.
+    ///
+    /// This resource is the single source of truth for the guide; the
+    /// `README.md` that `MarkdownThemeCatalog.syncManagedReadme` maintains in
+    /// the themes directory is a mirror of it, never the other way round.
+    static var bundledStylesheetDoc: String? {
+        guard let url = stylesheetDocsURL,
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            logger.error("bundled markdown-stylesheets.md missing; skipping themes-folder README")
+            return nil
+        }
+        return text
     }
 }

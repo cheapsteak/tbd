@@ -276,4 +276,219 @@ struct MarkdownThemeCatalogTests {
         #expect(written.contains(MarkdownStylesheet.bundledCSS))
         #expect(written.contains("prefers-color-scheme"))
     }
+
+    // MARK: - Picker action sentinel
+
+    @Test("the action tag routes to the action and never to storage")
+    func actionTagRoutesToAction() {
+        #expect(
+            MarkdownThemeCatalog.pickerSelection(forTag: MarkdownThemeCatalog.newFromDefaultTag)
+                == .newFromDefault
+        )
+        #expect(MarkdownThemeCatalog.pickerSelection(forTag: "") == .bundledDefault)
+        #expect(MarkdownThemeCatalog.pickerSelection(forTag: "   ") == .bundledDefault)
+        #expect(MarkdownThemeCatalog.pickerSelection(forTag: "amber") == .theme("amber"))
+    }
+
+    /// The sentinel's guard is that it contains a path separator, which is the
+    /// one byte a POSIX filename cannot hold. Without it, a stylesheet named
+    /// after the sentinel would silently become an un-selectable entry that
+    /// re-fires the create action.
+    @Test("no stylesheet filename can produce the action tag")
+    func actionTagIsUnreachableFromFilenames() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sentinel = MarkdownThemeCatalog.newFromDefaultTag
+        #expect(sentinel.contains("/"))
+
+        // Everything a user could plausibly get onto disk while aiming at it.
+        // The literal name is impossible — `write` would treat the slashes as
+        // directories — so these are the near misses that actually can exist.
+        let nearMisses = [
+            "\(sentinel.replacingOccurrences(of: "/", with: "-")).css",
+            "\(sentinel.replacingOccurrences(of: "/", with: ":")).css",
+            "\(sentinel.replacingOccurrences(of: "/", with: "%2F")).css",
+            "new-from-default.css",
+            "action.css",
+        ]
+        for name in nearMisses {
+            try write("a{}", named: name, in: dir)
+        }
+
+        let installed = MarkdownThemeCatalog.installedThemeIDs(in: dir)
+        #expect(installed.count == nearMisses.count)
+        #expect(!installed.contains(sentinel))
+        // Mutation check: the guard is the separator, so a would-be tag that
+        // differs only by it must still be classified as a plain theme.
+        for id in installed {
+            #expect(MarkdownThemeCatalog.pickerSelection(forTag: id) == .theme(id))
+        }
+
+        // And if the sentinel somehow reached the stored default by hand, the
+        // path-component guard upstream refuses to treat it as a selection.
+        try withDefaults { defaults in
+            defaults.set(sentinel, forKey: MarkdownStylesheet.themeKey)
+            #expect(MarkdownStylesheet.themeID(defaults) == nil)
+            let catalog = MarkdownThemeCatalog.load(themesDirectory: dir, defaults: defaults)
+            #expect(catalog.selected == nil)
+            #expect(catalog.missingSelection == nil)
+        }
+    }
+
+    // MARK: - Reveal target
+
+    @Test("a selected stylesheet that exists is the reveal target")
+    func revealTargetIsTheSelectedStylesheet() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("a{}", named: "amber.css", in: dir)
+
+        try withDefaults { defaults in
+            defaults.set("amber", forKey: MarkdownStylesheet.themeKey)
+            let target = MarkdownThemeCatalog.revealTarget(themesDirectory: dir, defaults: defaults)
+            #expect(target == .stylesheet(dir.appendingPathComponent("amber.css")))
+            #expect(!target.isFolder)
+            // The path shown is the path revealed — one value drives both.
+            #expect(target.url.lastPathComponent == "amber.css")
+        }
+    }
+
+    /// The bundled sheet lives inside the `.app`, so there is no user file to
+    /// point at and a path in there would be useless.
+    @Test("the bundled default reveals the folder, never a path inside the app bundle")
+    func revealTargetForBundledDefaultIsTheFolder() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("a{}", named: "amber.css", in: dir)
+
+        try withDefaults { defaults in
+            let target = MarkdownThemeCatalog.revealTarget(themesDirectory: dir, defaults: defaults)
+            #expect(target == .folder(dir))
+            #expect(target.isFolder)
+            #expect(!target.url.path.contains(".app/"))
+        }
+    }
+
+    /// `activateFileViewerSelecting` on a nonexistent path silently does
+    /// nothing, which reads as a broken button — so a dead selection falls back
+    /// to the folder.
+    @Test("a selection whose file is gone reveals the folder, not the dead path")
+    func revealTargetForMissingSelectionIsTheFolder() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("a{}", named: "amber.css", in: dir)
+
+        try withDefaults { defaults in
+            defaults.set("deleted", forKey: MarkdownStylesheet.themeKey)
+            let target = MarkdownThemeCatalog.revealTarget(themesDirectory: dir, defaults: defaults)
+            #expect(target == .folder(dir))
+            #expect(!FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("deleted.css").path
+            ))
+        }
+    }
+
+    @Test("a missing themes directory still resolves to the folder")
+    func revealTargetWithNoDirectory() throws {
+        let dir = try tempDir()
+        try FileManager.default.removeItem(at: dir)
+
+        try withDefaults { defaults in
+            defaults.set("amber", forKey: MarkdownStylesheet.themeKey)
+            #expect(MarkdownThemeCatalog.revealTarget(themesDirectory: dir, defaults: defaults)
+                == .folder(dir))
+        }
+    }
+
+    // MARK: - Managed README
+
+    private func readmeURL(in dir: URL) -> URL {
+        dir.appendingPathComponent(MarkdownThemeCatalog.managedReadmeName)
+    }
+
+    @Test("the README is created, with the overwrite warning ahead of the guide")
+    func readmeCreated() throws {
+        let parent = try tempDir()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let dir = parent.appendingPathComponent("markdown-themes", isDirectory: true)
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir, doc: "# Guide\n") == .created)
+
+        let written = try String(contentsOf: readmeURL(in: dir), encoding: .utf8)
+        #expect(written.hasSuffix("# Guide\n"))
+        #expect(written.hasPrefix("<!--"))
+        #expect(written.lowercased().contains("generated by tbd"))
+        #expect(written.lowercased().contains("overwritten"))
+        // It is a mirror, not a stylesheet — the picker must not list it.
+        #expect(MarkdownThemeCatalog.installedThemeIDs(in: dir).isEmpty)
+    }
+
+    @Test("a stale README is rewritten from the bundled guide")
+    func readmeRefreshedWhenStale() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("# Old guide\n", named: MarkdownThemeCatalog.managedReadmeName, in: dir)
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir, doc: "# New guide\n") == .refreshed)
+
+        let written = try String(contentsOf: readmeURL(in: dir), encoding: .utf8)
+        #expect(written.contains("# New guide"))
+        #expect(!written.contains("# Old guide"))
+    }
+
+    /// Not just "reports `.unchanged`": the modification date is stamped into
+    /// the past first, so a rewrite would move it. That is what proves opening
+    /// Settings repeatedly does not churn the file.
+    @Test("a README that already matches is not rewritten")
+    func readmeUntouchedWhenCurrent() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir, doc: "# Guide\n") == .created)
+
+        let url = readmeURL(in: dir)
+        let stamp = Date(timeIntervalSince1970: 1_000_000)
+        try FileManager.default.setAttributes([.modificationDate: stamp], ofItemAtPath: url.path)
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir, doc: "# Guide\n") == .unchanged)
+
+        let after = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        #expect(after == stamp)
+    }
+
+    @Test("no bundled guide means no README rather than an empty one")
+    func readmeSkippedWhenGuideUnavailable() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir, doc: nil) == .unavailable)
+        #expect(!FileManager.default.fileExists(atPath: readmeURL(in: dir).path))
+    }
+
+    @Test("a regular file where the themes directory should be reports failure")
+    func readmeFailsOnFileInPlaceOfDirectory() throws {
+        let parent = try tempDir()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let dir = parent.appendingPathComponent("markdown-themes")
+        try "not a directory".write(to: dir, atomically: true, encoding: .utf8)
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir, doc: "# Guide\n") == .failed)
+    }
+
+    /// The bundled resource is the single source of truth; the folder copy is
+    /// a mirror of it, so the default argument must actually carry it.
+    @Test("the default argument mirrors the real bundled guide")
+    func readmeMirrorsTheRealBundledGuide() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir) == .created)
+        let written = try String(contentsOf: readmeURL(in: dir), encoding: .utf8)
+        let doc = try #require(MarkdownStylesheet.bundledStylesheetDoc)
+        #expect(written.contains(doc))
+        #expect(doc.contains("# Writing a markdown stylesheet"))
+        // Second pass over an untouched folder is a no-op.
+        #expect(MarkdownThemeCatalog.syncManagedReadme(in: dir) == .unchanged)
+    }
 }
