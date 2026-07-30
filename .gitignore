@@ -21,3 +21,5 @@ docs/plans/
 
 # Mock harness screenshot artifacts
 artifacts/
+
+rust/comrak-ffi/target/

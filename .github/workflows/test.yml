@@ -20,6 +20,43 @@ jobs:
       - name: Install swiftlint
         run: brew install swiftlint
 
+      # Two independent halves. The sources hash catches "sources changed, .a
+      # not rebuilt"; the archive hash catches stamp/archive desync (stamp
+      # staged without the .a, or a binary merge conflict resolved to the wrong
+      # side) which the sources hash alone cannot see. The file list must stay
+      # in lockstep with scripts/build-rust.sh — see the comment there.
+      - name: Verify committed Rust archive is not stale
+        run: |
+          set -euo pipefail
+          STAMP=rust/comrak-ffi/lib/.build-stamp
+          EXPECTED_SRC=$(shasum -a 256 rust/comrak-ffi/src/lib.rs rust/comrak-ffi/Cargo.toml rust/comrak-ffi/Cargo.lock \
+            | awk '{print $1}' | shasum -a 256 | awk '{print $1}')
+          EXPECTED_LIB=$(shasum -a 256 rust/comrak-ffi/lib/libcomrak_ffi.a | awk '{print $1}')
+          ACTUAL_SRC=$(sed -n 1p "$STAMP")
+          ACTUAL_LIB=$(sed -n 2p "$STAMP")
+          if [ -z "$ACTUAL_LIB" ]; then
+            echo "::error::$STAMP is missing its archive-hash line (line 2)."
+            echo "Regenerate it with scripts/build-rust.sh and commit the result."
+            exit 1
+          fi
+          if [ "$EXPECTED_SRC" != "$ACTUAL_SRC" ]; then
+            echo "::error::rust/comrak-ffi/lib/libcomrak_ffi.a is stale."
+            echo "Rust sources changed without regenerating the archive."
+            echo "Run scripts/build-rust.sh and commit the result."
+            echo "expected $EXPECTED_SRC"
+            echo "committed $ACTUAL_SRC"
+            exit 1
+          fi
+          if [ "$EXPECTED_LIB" != "$ACTUAL_LIB" ]; then
+            echo "::error::rust/comrak-ffi/lib/libcomrak_ffi.a does not match its stamp."
+            echo "The archive and .build-stamp are out of sync (partial commit or bad merge resolution)."
+            echo "Run scripts/build-rust.sh and commit both files together."
+            echo "expected $EXPECTED_LIB"
+            echo "committed $ACTUAL_LIB"
+            exit 1
+          fi
+          echo "archive stamp matches sources and archive"
+
       - name: SwiftLint (strict)
         run: swiftlint --strict
 

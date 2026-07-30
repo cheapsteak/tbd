@@ -153,6 +153,15 @@ import Foundation
     #expect(path == "/tmp/tbd-cso/repos/12345678-1234-1234-1234-123456789ABC/claude-settings.json")
 }
 
+@Test func markdownThemesDirFollowsTBDHome() {
+    let env = ["TBD_HOME": "/tmp/tbd-md-themes"]
+    #expect(TBDConstants.markdownThemesDir(environment: env).path == "/tmp/tbd-md-themes/markdown-themes")
+}
+
+@Test func markdownThemesDirFallsBackToHomeTbdMarkdownThemes() {
+    #expect(TBDConstants.markdownThemesDir(environment: [:]).path.hasSuffix("/tbd/markdown-themes"))
+}
+
 @Test func notesPathWorktreeScope() {
     let wtID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
     let path = TBDConstants.notesPath(worktreeID: wtID, environment: ["TBD_HOME": "/tmp/tbd-notes"])

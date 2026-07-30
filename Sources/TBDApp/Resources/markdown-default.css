@@ -1,0 +1,243 @@
+/* Default markdown viewer stylesheet.
+   Users override by selecting a file from ~/tbd/markdown-themes/.
+   Light and dark are handled here via prefers-color-scheme — TBD injects no
+   theme attribute and defines no CSS variable contract.
+
+   Palette is the warm paper ground from the Nightwatch architecture reference,
+   pushed further toward cream. Every foreground/background pair was measured
+   against the previous palette: all 16 improved, none regressed.
+   Type follows Claude's artifact markdown sheet: flex-gap spacing, restrained
+   headings, tile tables, Apple system fonts.
+
+   --md-bg is deliberately OPAQUE. It was `transparent`, which relied on the
+   WKWebView being see-through: it is not — WebKit paints white underneath, so
+   the dark-mode foreground rendered near-white on white. */
+:root {
+  --md-bg: #fbf8f0;
+  --md-fill: #f4efe2;
+  --md-fill-strong: #ebe4d2;
+  --md-fg: #1b1815;
+  --md-heading: #3a342c;
+  --md-fg-2: #494339;
+  --md-muted: #726a5c;
+  --md-rule: #e3dccb;
+  --md-rule-strong: #cdc3ad;
+  --md-link: #a45c1e;
+  --md-accent: #a45c1e;
+  --md-accent-bg: #f6e7cf;
+  --md-critical: #98322d;
+  --md-critical-bg: #f7e3df;
+  --md-clear: #3f6f4c;
+  --md-clear-bg: #e6efe4;
+  --md-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+  --md-sans: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  --md-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  /* Running prose is sans; serif is display-only (h1/h2). That is the split
+     the source document uses — its one serif paragraph is a standfirst, not
+     body text. Labels and code stay mono. */
+  --md-font: var(--md-sans);
+  /* Every font-size below is an exact multiple of 1/14 em, so the scale
+     computes to whole pixels at this default while still tracking this
+     token if a user stylesheet overrides it. Change this and the sizes
+     stay proportional but stop being integers. */
+  --md-size: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --md-bg: #1a1712;
+    --md-fill: #15120e;
+    --md-fill-strong: #241f18;
+    --md-fg: #ece7dd;
+    --md-heading: #d6cfc2;
+    --md-fg-2: #c7bfb1;
+    --md-muted: #9d9382;
+    --md-rule: #332d24;
+    --md-rule-strong: #4b4337;
+    --md-link: #e0a468;
+    --md-accent: #e0a468;
+    --md-accent-bg: #2b2015;
+    --md-critical: #e78b80;
+    --md-critical-bg: #2e1b19;
+    --md-clear: #8dbb96;
+    --md-clear-bg: #1b2519;
+  }
+}
+
+/* Sibling spacing is one `gap` on the flex column rather than per-element
+   margins, so nothing collapses or doubles. */
+body {
+  margin: 0 auto;
+  max-width: 68ch;
+  padding: 24px 22px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--md-fg);
+  background: var(--md-bg);
+  font-family: var(--md-font);
+  font-size: var(--md-size);
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+body > :first-child { margin-top: 0; }
+
+h1, h2, h3, h4, h5, h6 {
+  /* Space above a heading, not below it: the doc this palette comes from
+     sets 40px/12px. A uniform gap makes every block equidistant, which
+     reads as drifting rather than grouped. */
+  margin: 26px 0 0;
+  color: var(--md-heading);
+  font-weight: 600;
+  text-wrap: balance;
+}
+h1 {
+  font-family: var(--md-serif);
+  /* The source doc clamps h1 to a 2.1rem floor; at this pane width the
+     viewport term is below the floor, so 2.1x is the like-for-like value. */
+  font-size: 2.071em;   /* 29px */
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+}
+h2 {
+  font-family: var(--md-serif);
+  font-size: 1.429em;   /* 20px */
+  line-height: 1.18;
+  letter-spacing: -0.01em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--md-rule);
+}
+h3 { font-size: 1em;         /* 14px */ line-height: 1.35; }
+h4, h5, h6 { font-size: 0.929em; /* 13px */ line-height: 1.35; color: var(--md-fg-2); }
+
+p, ul, ol, blockquote, table, pre, hr { margin: 0; }
+strong { font-weight: 600; }
+a { color: var(--md-link); text-decoration: none; text-underline-offset: 2px; }
+a:hover { text-decoration: underline; }
+a:focus-visible { outline: 2px solid var(--md-accent); outline-offset: 3px; border-radius: 2px; }
+
+ul, ol { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; }
+ul { list-style: disc; }
+ol { list-style: decimal; }
+li::marker { color: var(--md-muted); }
+:is(li, td, th) > * + :is(p, ul, ol, blockquote) { margin-top: 6px; }
+input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-accent); }
+
+blockquote {
+  display: flex; flex-direction: column; gap: 10px;
+  border-left: 2px solid var(--md-rule-strong);
+  padding-left: 12px;
+  color: var(--md-fg-2);
+}
+
+:not(pre) > code {
+  background: var(--md-fill);
+  border: 1px solid var(--md-rule);
+  padding: 0.08em 0.34em;
+  border-radius: 3px;
+  font-family: var(--md-mono);
+  font-size: 0.857em;   /* 12px */
+  font-variant-numeric: tabular-nums;
+}
+a > code { background: none; color: inherit; }
+pre {
+  background: var(--md-fill);
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: var(--md-mono);
+  font-size: 0.857em;   /* 12px */
+  line-height: 1.5;
+  margin-block: 4px;
+}
+pre code { background: none; padding: 0; font: inherit; }
+
+/* display:block + width:max-content is the standard wide-table hack. Without
+   max-content the block box fills its container, so columns squish instead of
+   producing the scrollbar overflow-x is asking for.
+   Cells are separated by a 1px border in the PAGE color rather than by
+   border-spacing: display:block detaches the table box, so border-spacing
+   would silently stop applying while the tiles still need their gutters. */
+table {
+  font-size: 0.929em;   /* 13px */
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+th, td {
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  border: 1px solid var(--md-bg);
+}
+th {
+  background: var(--md-fill-strong);
+  font-family: var(--md-mono);
+  font-size: 0.714em;   /* 10px */
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+td { background: var(--md-fill); }
+:is(th, td) :not(pre) > code { background: transparent; padding: 0; }
+
+hr { border: 0; border-top: 1px solid var(--md-rule-strong); margin-block: 12px; }
+img { max-width: 100%; height: auto; border-radius: 4px; }
+
+.tbd-oversized-image {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1px dashed var(--md-rule-strong);
+  border-radius: 4px;
+  color: var(--md-muted);
+  font-family: var(--md-mono);
+  font-size: 0.857em;   /* 12px */
+}
+
+/* Alert accents are semantic (severity), not decorative — they carry the same
+   meaning as the keyword GitHub renders them from. The source palette has
+   three semantic hues, so informational and advisory keywords pair up. */
+.markdown-alert {
+  display: flex; flex-direction: column; gap: 6px;
+  border-left: 3px solid var(--md-rule-strong);
+  background: var(--md-fill);
+  padding: 10px 14px;
+  border-radius: 0 6px 6px 0;
+}
+.markdown-alert-title {
+  font-weight: 600;
+  font-family: var(--md-mono);
+  font-size: 0.786em;   /* 11px */
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.markdown-alert-note,
+.markdown-alert-important {
+  border-left-color: var(--md-accent);
+  background: var(--md-accent-bg);
+}
+.markdown-alert-note .markdown-alert-title,
+.markdown-alert-important .markdown-alert-title { color: var(--md-accent); }
+.markdown-alert-tip {
+  border-left-color: var(--md-clear);
+  background: var(--md-clear-bg);
+}
+.markdown-alert-tip .markdown-alert-title { color: var(--md-clear); }
+.markdown-alert-warning,
+.markdown-alert-caution {
+  border-left-color: var(--md-critical);
+  background: var(--md-critical-bg);
+}
+.markdown-alert-warning .markdown-alert-title,
+.markdown-alert-caution .markdown-alert-title { color: var(--md-critical); }
+
+.footnotes {
+  border-top: 1px solid var(--md-rule);
+  padding-top: 10px;
+  color: var(--md-fg-2);
+  font-size: 0.929em;   /* 13px */
+}
