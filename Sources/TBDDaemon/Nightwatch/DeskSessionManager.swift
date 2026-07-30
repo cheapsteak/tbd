@@ -265,7 +265,6 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
 
         let mode: NightwatchMode = act ? .nightwatch : .daywatch
-        let prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
 
         do {
             let terminals = try await db.terminals.list(worktreeID: worktreeID)
@@ -277,6 +276,24 @@ public actor DeskSessionManager: DeskSessionManaging {
             guard let worktree = try await db.worktrees.get(id: worktreeID) else {
                 logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
                 return
+            }
+
+            // The ~5 KB instructions go to a file; only the one-line pointer goes
+            // into the session. Rewritten every tick rather than once at spawn
+            // because it is mode-specific and a local write costs nothing — that
+            // also makes the file self-healing across daemon restarts, mode
+            // switches, and a desk whose directory was cleaned out under it.
+            //
+            // Fallback, deliberately: if the write fails there is no file to point
+            // at, so we paste the full prompt exactly as before. A judge holding
+            // stale instructions is a bad night; a judge holding a pointer to
+            // nothing is a silent one.
+            let prompt: String
+            if let instructionsPath = writeJudgeInstructions(deskPath: worktree.path, mode: mode) {
+                prompt = NightwatchDeskPrompts.judgeNudge(mode: mode, instructionsPath: instructionsPath)
+            } else {
+                logger.warning("Could not write judge instructions to \(worktree.path, privacy: .public); falling back to the inline prompt")
+                prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
             }
 
             // Paste the prompt text (matches handleTerminalSend pattern for reliability)
@@ -346,6 +363,25 @@ public actor DeskSessionManager: DeskSessionManaging {
 
     // MARK: - Private Helpers
 
+    /// Write the mode-specific judge instructions into the desk worktree.
+    ///
+    /// Returns the absolute path on success, `nil` on any failure — callers treat
+    /// `nil` as "fall back to the inline prompt" rather than proceeding with a
+    /// pointer to a file that may not exist. Deliberately non-throwing: a desk
+    /// that cannot write a file must still get nudged.
+    private func writeJudgeInstructions(deskPath: String, mode: NightwatchMode) -> String? {
+        let url = URL(fileURLWithPath: deskPath)
+            .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
+        let body = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
+        do {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        } catch {
+            logger.warning("Failed to write judge instructions: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
     /// Spawn a Claude terminal in the desk worktree using lifecycle.spawnPrimaryTerminals.
     /// This reuses the production spawn path which handles trust seeding, overlay injection, etc.
     /// Note: Model selection (daywatch=Sonnet, nightwatch=Opus) requires per-profile configuration.
@@ -354,6 +390,14 @@ public actor DeskSessionManager: DeskSessionManaging {
     private func spawnDeskTerminal(worktree: Worktree, mode: NightwatchMode) async throws {
         // Get initial prompt for mode (includes absolute skillDir paths and field learnings)
         let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: skillDir)
+
+        // Lay the instructions down before the session exists, so a judge that
+        // reads them on its own initiative — before its first tick ever fires —
+        // finds them there. Best-effort: the nudge path rewrites this every tick
+        // and falls back to the inline prompt if it can't.
+        writeJudgeInstructions(deskPath: worktree.path, mode: mode).map { path in
+            logger.debug("Wrote judge instructions to \(path, privacy: .public)")
+        }
 
         // Use production spawn path which handles trust, overlay, and all lifecycle concerns
         _ = try await lifecycle.spawnPrimaryTerminals(

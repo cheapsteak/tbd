@@ -338,6 +338,50 @@ struct NightwatchDeskPromptsTests {
         }
     }
 
+    /// The per-tick nudge is a pointer, not a prompt.
+    ///
+    /// It is deliberately NOT in `prompts(mode:skillDir:)` above, so the policy
+    /// invariants — forbid `/closeout`, state the merge limits, name the relay —
+    /// are not asserted on it. That is the point of the split: those rules live in
+    /// the file it points at, and re-stating them every tick is the ~5 KB cost
+    /// this change exists to remove.
+    ///
+    /// What must hold instead is that the pointer is *self-sufficient for one
+    /// tick*: it carries the mode and act flag (the only per-tick variables) and
+    /// an unambiguous absolute path to everything else.
+    @Test("The per-tick nudge carries the variables and points at the rest", arguments: liveModes)
+    func judgeNudgeIsAPointer(mode: NightwatchMode) {
+        let path = "/desk/\(NightwatchDeskPrompts.judgeInstructionsFileName)"
+        let nudge = NightwatchDeskPrompts.judgeNudge(mode: mode, instructionsPath: path)
+
+        #expect(nudge.contains(path), "nudge does not name the instructions file it points at")
+        #expect(nudge.contains("mode: \(mode.rawValue)"), "nudge does not carry the mode")
+        #expect(nudge.contains("act=\(mode == .nightwatch)"), "nudge does not carry the act flag")
+
+        // The whole reason for the split. `judgePrompt` is ~5 KB; if the nudge
+        // ever drifts back toward inlining it, this is what notices. The bound is
+        // deliberately loose — it catches a wall, not a reworded sentence.
+        #expect(nudge.utf8.count < 400,
+                "nudge is \(nudge.utf8.count) bytes; it is meant to be one line, not the instructions")
+
+        // Moving the body to a file only saves context if the file is read once
+        // per session rather than once per tick. Without this instruction the
+        // paste cost simply becomes a Read cost.
+        #expect(nudge.contains("Don't re-read"),
+                "nudge does not tell the judge to skip re-reading; the saving evaporates into per-tick Reads")
+    }
+
+    /// The pointer and the file have to be described the same way in both places,
+    /// or the judge is told to read one file and handed another.
+    @Test("The initial prompt explains the pointer the judge will receive", arguments: liveModes)
+    func initialPromptExplainsTheNudgeProtocol(mode: NightwatchMode) {
+        let initial = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: "/skill")
+        #expect(initial.contains(NightwatchDeskPrompts.judgeInstructionsFileName),
+                "initial prompt never names the file the per-tick nudge will point at")
+        #expect(initial.contains("ONCE"),
+                "initial prompt does not tell the judge to read the instructions once rather than per tick")
+    }
+
     /// Merging is the one action the two shifts differ on (Adam, 2026-07-29:
     /// nightwatch only). Daywatch runs while a human is around, so a loop-perfect
     /// PR is something it *reports*; the unattended shift is the one that acts.

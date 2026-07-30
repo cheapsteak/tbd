@@ -272,6 +272,100 @@ extension TBDHomeSerialized {
             // If this reaches here without exception, the overlap guard worked
         }
 
+        /// The ~5 KB judge instructions must land on disk, not in the session.
+        ///
+        /// Asserted on the file's *content*, not just its existence: the failure
+        /// this guards against is a pointer to a file that is empty, stale, or
+        /// written for the other mode — all of which leave the desk pointed at
+        /// something, which is exactly as bad as pointing at nothing while looking
+        /// healthier.
+        @Test("nudgeDeskSession writes mode-correct judge instructions into the desk")
+        func testNudgeWritesInstructionsFile() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-instr-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .nightwatch)
+            let instructions = URL(fileURLWithPath: desk.path)
+                .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
+
+            // Written at spawn, before any tick fires.
+            #expect(FileManager.default.fileExists(atPath: instructions.path),
+                    "desk spawn did not lay down \(NightwatchDeskPrompts.judgeInstructionsFileName)")
+
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let written = try String(contentsOf: instructions, encoding: .utf8)
+            #expect(written == NightwatchDeskPrompts.judgePrompt(mode: .nightwatch, skillDir: skillDir),
+                    "instructions file does not match the nightwatch judge prompt the pointer promises")
+            #expect(written.contains("you MAY run `gh pr merge"),
+                    "act=true wrote the daywatch body; the judge would be told it may not merge")
+        }
+
+        /// The overlap guard previously had no observable — the old test could only
+        /// assert "doesn't throw", which passes just as well if the guard is gone.
+        /// The instructions write gives it one: a skipped nudge should touch
+        /// nothing, so a deleted file stays deleted.
+        @Test("a nudge skipped by the overlap guard does no work at all")
+        func testSkippedNudgeWritesNothing() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-skip-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let instructions = URL(fileURLWithPath: desk.path)
+                .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
+
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(FileManager.default.fileExists(atPath: instructions.path))
+
+            try FileManager.default.removeItem(at: instructions)
+
+            // Second nudge inside the 10-minute window: guarded, so it must not
+            // reach the write.
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(!FileManager.default.fileExists(atPath: instructions.path),
+                    "the overlap guard let a second nudge through inside its window")
+        }
+
         @Test("concurrent ensureDeskSession calls are serialized — single desk")
         func testConcurrentEnsureSerialized() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())

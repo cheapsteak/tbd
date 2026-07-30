@@ -25,6 +25,14 @@ public enum NightwatchDeskPrompts {
         - Skill docs: \(skillDocPath) (full job description)
         - Approved PRs memory: \(queueDir)/approved-prs.jsonl (PRs human already approved today — auto-answer on re-prompt)
         - Claim registry: \(queueDir)/claims (lock file before atlantis apply/merge; unlock when done)
+        - Judge instructions: `\(judgeInstructionsFileName)` in THIS worktree (your cwd)
+
+        **How the per-tick nudge works:** every ~15 min you get a one-line tick message carrying
+        the mode and act flag, pointing at `\(judgeInstructionsFileName)` by absolute path. Read
+        that file ONCE, on your first tick. Later ticks change only the mode/act line, so
+        re-reading it every tick just spends your own context on your own heartbeat — which is
+        what makes a desk hit its handoff ceiling early. If a tick arrives and you have not read
+        the file yet (fresh session, or you took over from a predecessor), read it then.
 
         **Your job (\(modeLabel)):**
         \(jobDescription(mode: mode))
@@ -90,7 +98,48 @@ public enum NightwatchDeskPrompts {
     When you're ready, start typing your summary.
     """
 
-    /// Prompt sent when the daemon nudges the desk session with a batch of queued judgments.
+    /// Filename of the per-desk judge instructions, written into the desk worktree
+    /// by `DeskSessionManager` and pointed at by `judgeNudge`.
+    public static let judgeInstructionsFileName = "JUDGE-INSTRUCTIONS.md"
+
+    /// The one line the daemon actually pastes into the desk on every tick.
+    ///
+    /// `judgePrompt` is ~5 KB and identical from tick to tick except for the
+    /// mode/act flag. Pasting all of it every ~15 minutes spent the judge's own
+    /// context on its own heartbeat — the session reached its handoff ceiling
+    /// faster the more reliably it was nudged, which is the wrong direction for a
+    /// mechanism whose entire job is to keep the desk alive. The body now lives in
+    /// a file; this carries only what changes.
+    ///
+    /// Two details are load-bearing rather than cosmetic:
+    ///
+    /// - **The mode and act flag are inline**, not in the file, so a judge that
+    ///   already read the instructions needs nothing from disk to act on this tick.
+    /// - **It tells the judge not to re-read.** Without that, the paste cost simply
+    ///   becomes a `Read` cost and nothing is saved. The saving is real only if the
+    ///   file is read once per session, not once per tick.
+    ///
+    /// Short pastes are also more likely to *arrive*: a large paste can land as
+    /// `[Pasted text #N]` and sit in the composer unsubmitted, which for an
+    /// unattended desk is indistinguishable from never having been nudged.
+    ///
+    /// - Parameters:
+    ///   - mode: current shift; also determines the act flag the judge applies
+    ///   - instructionsPath: absolute path to the written `JUDGE-INSTRUCTIONS.md`
+    public static func judgeNudge(mode: NightwatchMode, instructionsPath: String) -> String {
+        let icon = mode == .daywatch ? "◐" : "🌙"
+        let act = mode == .nightwatch
+        return """
+        \(icon) Judge tick — mode: \(mode.rawValue), act=\(act). Run the cycle per \(instructionsPath). \
+        Already read that file this session? Don't re-read it — this line carries the only thing that changes between ticks.
+        """
+    }
+
+    /// The full judge instructions — the *body*, written once per desk to
+    /// `judgeInstructionsFileName` rather than pasted per tick (see `judgeNudge`).
+    ///
+    /// Still regenerated on every nudge because it is mode-specific and a local
+    /// file write is free; what was expensive was putting it in the session.
     /// - Parameter skillDir: Absolute path to the nightwatch skill directory for file references
     public static func judgePrompt(mode: NightwatchMode, skillDir: String) -> String {
         let actionHint: String
