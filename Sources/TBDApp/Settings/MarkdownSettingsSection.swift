@@ -56,15 +56,15 @@ struct MarkdownSettingsSection: View {
 
             themesDirectoryRow
 
-            Text("""
-                A stylesheet is free-form CSS. TBD injects no theme attribute and defines no CSS \
-                variable contract, so the --md-* tokens in the bundled sheet are internal \
-                convention rather than an API. The only classes TBD's own sheet styles are \
-                .markdown-alert (with its -note, -tip, -important, -warning and -caution \
-                variants), .markdown-alert-title, .tbd-oversized-image, and .footnotes.
-                """)
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            HStack {
+                Text("A stylesheet is free-form CSS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Writing a Stylesheet…") { openStylesheetDocs() }
+                    .disabled(MarkdownStylesheet.stylesheetDocsURL == nil)
+            }
+            .controlSize(.small)
         }
         // No watcher: re-enumerate on appear and after anything that could have
         // changed the directory or the selection.
@@ -113,5 +113,13 @@ struct MarkdownSettingsSection: View {
         // general — so the new copy is the thing selected in Finder.
         let newFileURL = themesDirectory.appendingPathComponent("\(id).css")
         NSWorkspace.shared.activateFileViewerSelecting([newFileURL])
+    }
+
+    /// Opens the bundled doc in the user's default markdown application —
+    /// `open`, not `activateFileViewerSelecting`, because the point is to read
+    /// it, not to be shown its location in Finder.
+    private func openStylesheetDocs() {
+        guard let url = MarkdownStylesheet.stylesheetDocsURL else { return }
+        NSWorkspace.shared.open(url)
     }
 }

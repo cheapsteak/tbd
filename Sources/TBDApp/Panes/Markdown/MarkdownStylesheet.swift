@@ -128,4 +128,12 @@ enum MarkdownStylesheet {
         }
         return css
     }()
+
+    /// Where the bundled "writing a stylesheet" documentation lives, or `nil`
+    /// if the resource is missing from the bundle. Not cached, mirroring the
+    /// former `bundledURL`: resolving a bundle URL is cheap, and this is only
+    /// read once — when the Settings doc button is clicked (or disabled).
+    static var stylesheetDocsURL: URL? {
+        Bundle.module.url(forResource: "markdown-stylesheets", withExtension: "md")
+    }
 }

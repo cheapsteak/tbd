@@ -265,6 +265,19 @@ struct MarkdownStylesheetTests {
         #expect(MarkdownStylesheet.bundledCSS.contains("prefers-color-scheme"))
     }
 
+    /// Both `.copy(...)` resources (the CSS and this doc) now sit in the same
+    /// generated `TBDApp_TBDApp.bundle` — this guards that adding the second
+    /// one didn't disturb the first's lookup.
+    @Test("the bundled stylesheet doc resolves and is non-empty")
+    func stylesheetDocsURLResolves() throws {
+        let url = try #require(MarkdownStylesheet.stylesheetDocsURL)
+        #expect(url.pathExtension == "md")
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        #expect(contents.contains("# Writing a markdown stylesheet"))
+        // Same-run cross-check: the sibling CSS resource still resolves too.
+        #expect(!MarkdownStylesheet.bundledCSS.isEmpty)
+    }
+
     // MARK: - Live reload (tier 2)
 
     /// The load-bearing assumption behind watching the themes *directory*: a
