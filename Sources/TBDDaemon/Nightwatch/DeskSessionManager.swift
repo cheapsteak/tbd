@@ -428,6 +428,25 @@ public actor DeskSessionManager: DeskSessionManaging {
         // Get initial prompt for mode (includes absolute skillDir paths and field learnings)
         let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: skillDir)
 
+        // A new session has read nothing, so nothing it could have memorized is
+        // still valid. `lastNudgedMode` is keyed on the MODE, not on which session
+        // is running, so without this reset a crash-respawn with the mode
+        // unchanged computes `lastNudgedMode != mode` == false and tells a
+        // brand-new judge "you already read the instructions — don't re-read".
+        // It hasn't. It doesn't. (Caught in review of PR #551.)
+        //
+        // `lastNudgeTime` goes with it for the same reason: a rate-limit window
+        // opened by a session that no longer exists should not silence the first
+        // tick of its replacement. Both are per-session facts that were living on
+        // the actor, and this is the one chokepoint both spawn paths — fresh
+        // create and crash recovery — pass through.
+        //
+        // Reset unconditionally, before the spawn can throw: over-signalling
+        // costs one extra file Read, under-signalling costs a judge running an
+        // unattended shift on instructions it never opened.
+        lastNudgedMode = nil
+        lastNudgeTime = nil
+
         // Lay the instructions down before the session exists, so a judge that
         // reads them on its own initiative — before its first tick ever fires —
         // finds them there. Best-effort: the nudge path rewrites this every tick

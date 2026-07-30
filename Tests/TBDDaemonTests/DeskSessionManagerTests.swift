@@ -476,6 +476,66 @@ extension TBDHomeSerialized {
                     "a nudge the guard dropped still recorded its mode; the judge would never be told it changed")
         }
 
+        /// A respawned judge has read nothing, so it must be told to read.
+        ///
+        /// `lastNudgedMode` is keyed on the mode, not on which session is running
+        /// — so a crash-respawn that does NOT change mode leaves it matching, and
+        /// the next nudge tells a session that has opened no files "don't
+        /// re-read". The mode-flip guard was necessary but not sufficient: it
+        /// answered "did the instructions change under the reader" and missed
+        /// "did the reader change under the instructions".
+        ///
+        /// The pre-existing respawn test never nudged afterward, which is why
+        /// this was invisible to it.
+        @Test("respawning the desk terminal makes the next nudge demand a re-read")
+        func testRespawnClearsTheReadMemory() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-respawn-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let clock = TestDateSource(Date(timeIntervalSince1970: 3_000_000))
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir,
+                now: clock.provider
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .nightwatch)
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(await manager.lastNudgedMode == .nightwatch)
+
+            // The judge's terminal dies; ensure respawns a fresh session into the
+            // same worktree, with the mode unchanged — the exact case where a
+            // mode-only guard reports "nothing changed".
+            try await db.terminals.deleteForWorktree(worktreeID: desk.id)
+            let recovered = try await manager.ensureDeskSession(mode: .nightwatch)
+            #expect(recovered.id == desk.id, "expected the same desk to be recovered, not a new one")
+
+            #expect(await manager.lastNudgedMode == nil,
+                    "respawned judge would be told 'don't re-read' despite having read nothing")
+
+            // And the dead session's rate-limit window must not silence the new
+            // session's first tick: this nudge lands immediately, without the
+            // clock having moved past the 10-minute guard.
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(await manager.lastNudgedMode == .nightwatch,
+                    "first nudge to the respawned session was suppressed by the dead session's window")
+        }
+
         @Test("concurrent ensureDeskSession calls are serialized — single desk")
         func testConcurrentEnsureSerialized() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
