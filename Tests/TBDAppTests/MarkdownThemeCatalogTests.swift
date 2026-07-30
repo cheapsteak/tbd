@@ -175,7 +175,7 @@ struct MarkdownThemeCatalogTests {
         #expect(MarkdownThemeCatalog.nextAvailableThemeID(in: dir) == "custom-3")
     }
 
-    // MARK: - Duplicate Default
+    // MARK: - New from Default
 
     @Test("duplicating seeds the bundled CSS plus a no-auto-update header")
     func duplicateSeedsBundledPlusHeader() throws {

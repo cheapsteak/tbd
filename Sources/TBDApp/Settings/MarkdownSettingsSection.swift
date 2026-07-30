@@ -9,10 +9,20 @@ import TBDShared
 /// explicit directory so it is testable without touching `~/tbd`. This view only
 /// binds, calls, and re-enumerates.
 ///
+/// ## Row hierarchy
+///
+/// Two things live here, and the rows say so. The webview toggle is the
+/// feature switch; the stylesheet picker is the setting. Everything else —
+/// where the stylesheets live, how to make one, how to write one — is
+/// *subordinate to the picker*, so it collapses into a single `LabeledContent`
+/// row beneath it rather than floating as unlabelled siblings of equal weight.
+/// The trailing cluster (path + copy, create, docs) reads as the picker's
+/// toolbox, which is what it is.
+///
 /// File-backed setting, so it carries the affordance CLAUDE.md requires for one:
-/// the tilde-abbreviated backing path and a copy-path button. "Duplicate
-/// Default…" additionally reveals the file it just wrote in Finder, since
-/// that is the moment a new file exists to point at.
+/// the tilde-abbreviated backing path and a copy-path button. "New from Default"
+/// additionally reveals the file it just wrote in Finder, since that is the
+/// moment a new file exists to point at.
 struct MarkdownSettingsSection: View {
     @AppStorage(MarkdownViewerPreferences.useWebViewKey) private var useWebView: Bool = false
     /// `""` means "no selection" — the bundled default. `MarkdownStylesheet`
@@ -47,24 +57,7 @@ struct MarkdownSettingsSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack {
-                Button("Duplicate Default…") { duplicateDefault() }
-                    .help("Copy TBD's bundled stylesheet into the folder below as a new theme, select it, and reveal the copy in Finder. The copy is a snapshot — it will not pick up later changes to the bundled sheet.")
-                Spacer()
-            }
-            .controlSize(.small)
-
-            themesDirectoryRow
-
-            HStack {
-                Text("A stylesheet is free-form CSS.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Writing a Stylesheet…") { openStylesheetDocs() }
-                    .disabled(MarkdownStylesheet.stylesheetDocsURL == nil)
-            }
-            .controlSize(.small)
+            stylesheetsFolderRow
         }
         // No watcher: re-enumerate on appear and after anything that could have
         // changed the directory or the selection.
@@ -72,37 +65,64 @@ struct MarkdownSettingsSection: View {
         .onChange(of: themeID) { refresh() }
     }
 
-    /// Backing path + copy, modelled on `RepoHooksSettingsView`.
+    /// The picker's subordinate row: where stylesheets live, how to get one,
+    /// and where the guide is — one labelled form row instead of three floating
+    /// ones. The path + copy-path button follow `RepoHooksSettingsView`, which is
+    /// the shape every file-backed settings surface in this app uses.
     @ViewBuilder
-    private var themesDirectoryRow: some View {
-        let path = themesDirectory.path
-        HStack(spacing: 4) {
-            Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+    private var stylesheetsFolderRow: some View {
+        LabeledContent("Stylesheets folder") {
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Text(themesDirectory.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
 
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            } label: {
-                Image(systemName: "doc.on.doc")
-                    .font(.caption)
+                    copyPathButton
+                }
+
+                Button("New from Default") { newStylesheetFromDefault() }
+                    .controlSize(.small)
+                    .help("Copy TBD's bundled \u{201C}Default (bundled)\u{201D} stylesheet into this folder as a new stylesheet, select it, and reveal the copy in Finder. The copy is a snapshot — it will not pick up later changes to the bundled sheet.")
+
+                stylesheetDocsButton
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help("Copy full path")
-
-            Spacer()
         }
+    }
+
+    private var copyPathButton: some View {
+        Button {
+            let path = themesDirectory.path
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(path, forType: .string)
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("Copy full path")
+    }
+
+    private var stylesheetDocsButton: some View {
+        Button {
+            revealStylesheetDocs()
+        } label: {
+            Image(systemName: "info.circle")
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("Read the docs on writing a stylesheet — reveals the guide in Finder.")
+        .disabled(MarkdownStylesheet.stylesheetDocsURL == nil)
     }
 
     private func refresh() {
         catalog = MarkdownThemeCatalog.load(themesDirectory: themesDirectory)
     }
 
-    private func duplicateDefault() {
+    private func newStylesheetFromDefault() {
         guard let id = MarkdownThemeCatalog.duplicateBundledDefault(in: themesDirectory) else {
             refresh()
             return
@@ -115,11 +135,11 @@ struct MarkdownSettingsSection: View {
         NSWorkspace.shared.activateFileViewerSelecting([newFileURL])
     }
 
-    /// Opens the bundled doc in the user's default markdown application —
-    /// `open`, not `activateFileViewerSelecting`, because the point is to read
-    /// it, not to be shown its location in Finder.
-    private func openStylesheetDocs() {
+    /// Reveals the bundled doc in Finder rather than opening it. It lives inside
+    /// the `.app` bundle, so handing the user its location is the deliberate
+    /// behavior here — they decide what to open it with.
+    private func revealStylesheetDocs() {
         guard let url = MarkdownStylesheet.stylesheetDocsURL else { return }
-        NSWorkspace.shared.open(url)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }

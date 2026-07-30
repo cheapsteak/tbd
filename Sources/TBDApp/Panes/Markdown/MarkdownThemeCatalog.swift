@@ -16,7 +16,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 /// `CodeViewerPaneView`), because it has to re-render.
 enum MarkdownThemeCatalog {
 
-    /// Filename stem the "Duplicate Default…" action prefers.
+    /// Filename stem the "New from Default" action prefers.
     static let defaultCopyBase = "custom"
 
     /// How far the `custom`, `custom-2`, `custom-3`… search runs before giving
@@ -122,7 +122,7 @@ enum MarkdownThemeCatalog {
          */
         """
 
-    /// The contents written by "Duplicate Default…": the header, then the
+    /// The contents written by "New from Default": the header, then the
     /// bundled sheet verbatim.
     static func seededStylesheet(bundled: String = MarkdownStylesheet.bundledCSS) -> String {
         "\(snapshotHeader)\n\n\(bundled)"
