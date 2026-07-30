@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -311,6 +312,269 @@ extension TBDHomeSerialized {
             // that it doesn't throw and the method completes (no-op behavior)
             await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
             // If this reaches here without exception, the overlap guard worked
+        }
+
+        /// The ~5 KB judge instructions must land on disk, not in the session.
+        ///
+        /// Asserted on the file's *content*, not just its existence: the failure
+        /// this guards against is a pointer to a file that is empty, stale, or
+        /// written for the other mode — all of which leave the desk pointed at
+        /// something, which is exactly as bad as pointing at nothing while looking
+        /// healthier.
+        @Test("nudgeDeskSession writes mode-correct judge instructions into the desk")
+        func testNudgeWritesInstructionsFile() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-instr-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .nightwatch)
+            let instructions = URL(fileURLWithPath: desk.path)
+                .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
+
+            // Written at spawn, before any tick fires.
+            #expect(FileManager.default.fileExists(atPath: instructions.path),
+                    "desk spawn did not lay down \(NightwatchDeskPrompts.judgeInstructionsFileName)")
+
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let written = try String(contentsOf: instructions, encoding: .utf8)
+            #expect(written == NightwatchDeskPrompts.judgePrompt(mode: .nightwatch, skillDir: skillDir),
+                    "instructions file does not match the nightwatch judge prompt the pointer promises")
+            #expect(written.contains("you MAY run `gh pr merge"),
+                    "act=true wrote the daywatch body; the judge would be told it may not merge")
+        }
+
+        /// The overlap guard previously had no observable — the old test could only
+        /// assert "doesn't throw", which passes just as well if the guard is gone.
+        /// The instructions write gives it one: a skipped nudge should touch
+        /// nothing, so a deleted file stays deleted.
+        @Test("a nudge skipped by the overlap guard does no work at all")
+        func testSkippedNudgeWritesNothing() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-skip-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let instructions = URL(fileURLWithPath: desk.path)
+                .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
+
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(FileManager.default.fileExists(atPath: instructions.path))
+
+            try FileManager.default.removeItem(at: instructions)
+
+            // Second nudge inside the 10-minute window: guarded, so it must not
+            // reach the write.
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(!FileManager.default.fileExists(atPath: instructions.path),
+                    "the overlap guard let a second nudge through inside its window")
+        }
+
+        /// The finding that rejected PR #551's first head: the desk is reused
+        /// across a daywatch ↔ nightwatch flip without respawning, while the judge
+        /// is told to read `JUDGE-INSTRUCTIONS.md` once. Nothing on the judge's
+        /// side can observe the file being rewritten underneath it, so the daemon
+        /// has to track which mode it last nudged with and say when that changes.
+        ///
+        /// Every previous test here nudged exactly once, which is why the gap
+        /// survived: a single-tick test cannot see a transition by construction.
+        /// The injected clock is what makes a second tick reachable past the
+        /// 10-minute overlap guard.
+        @Test("a mode flip between ticks is tracked, and only the flip is a change")
+        func testModeFlipBetweenTicksIsTracked() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-flip-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+
+            // Walk the clock forward past the overlap guard between ticks.
+            let clock = TestDateSource(Date(timeIntervalSince1970: 1_000_000))
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir,
+                now: clock.provider
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let instructions = URL(fileURLWithPath: desk.path)
+                .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
+
+            // Nothing nudged yet: a judge that has read nothing must read.
+            #expect(await manager.lastNudgedMode == nil)
+
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(await manager.lastNudgedMode == .daywatch)
+            var body = try String(contentsOf: instructions, encoding: .utf8)
+            #expect(!body.contains("you MAY run `gh pr merge"),
+                    "daywatch tick wrote an authorization daywatch does not grant")
+
+            // Same mode, a tick later: steady state, nothing changed.
+            clock.advance(by: 11 * 60)
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(await manager.lastNudgedMode == .daywatch)
+
+            // The flip. The body on disk must now grant the merge, and the manager
+            // must know the judge's memorized copy predates it.
+            clock.advance(by: 11 * 60)
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(await manager.lastNudgedMode == .nightwatch,
+                    "manager did not record the flip; the next tick would claim nothing changed")
+            body = try String(contentsOf: instructions, encoding: .utf8)
+            #expect(body.contains("you MAY run `gh pr merge"),
+                    "nightwatch tick left the daywatch body on disk")
+        }
+
+        /// A nudge that never reached the session must not count as "the judge has
+        /// seen this mode" — otherwise the next tick reports no change across a
+        /// flip the judge never learned about. Exercised via the overlap guard,
+        /// which is the reachable way to make a nudge return without pasting.
+        @Test("a skipped nudge does not advance the recorded mode")
+        func testSkippedNudgeDoesNotRecordMode() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-skipmode-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let clock = TestDateSource(Date(timeIntervalSince1970: 2_000_000))
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir,
+                now: clock.provider
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(await manager.lastNudgedMode == .daywatch)
+
+            // Inside the window: guarded, so the flip never reaches the session.
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(await manager.lastNudgedMode == .daywatch,
+                    "a nudge the guard dropped still recorded its mode; the judge would never be told it changed")
+        }
+
+        /// A respawned judge has read nothing, so it must be told to read.
+        ///
+        /// `lastNudgedMode` is keyed on the mode, not on which session is running
+        /// — so a crash-respawn that does NOT change mode leaves it matching, and
+        /// the next nudge tells a session that has opened no files "don't
+        /// re-read". The mode-flip guard was necessary but not sufficient: it
+        /// answered "did the instructions change under the reader" and missed
+        /// "did the reader change under the instructions".
+        ///
+        /// The pre-existing respawn test never nudged afterward, which is why
+        /// this was invisible to it.
+        @Test("respawning the desk terminal makes the next nudge demand a re-read")
+        func testRespawnClearsTheReadMemory() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-respawn-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            setenv("TBD_HOME", tmpHome.path, 1)
+            defer { unsetenv("TBD_HOME") }
+
+            let db = try TBDDatabase(inMemory: true)
+            let lifecycle = WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            )
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let clock = TestDateSource(Date(timeIntervalSince1970: 3_000_000))
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: lifecycle,
+                tmux: TmuxManager(dryRun: true),
+                skillDir: skillDir,
+                now: clock.provider
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .nightwatch)
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(await manager.lastNudgedMode == .nightwatch)
+
+            // The judge's terminal dies; ensure respawns a fresh session into the
+            // same worktree, with the mode unchanged — the exact case where a
+            // mode-only guard reports "nothing changed".
+            try await db.terminals.deleteForWorktree(worktreeID: desk.id)
+            let recovered = try await manager.ensureDeskSession(mode: .nightwatch)
+            #expect(recovered.id == desk.id, "expected the same desk to be recovered, not a new one")
+
+            #expect(await manager.lastNudgedMode == nil,
+                    "respawned judge would be told 'don't re-read' despite having read nothing")
+
+            // And the dead session's rate-limit window must not silence the new
+            // session's first tick: this nudge lands immediately, without the
+            // clock having moved past the 10-minute guard.
+            await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(await manager.lastNudgedMode == .nightwatch,
+                    "first nudge to the respawned session was suppressed by the dead session's window")
         }
 
         @Test("concurrent ensureDeskSession calls are serialized — single desk")
