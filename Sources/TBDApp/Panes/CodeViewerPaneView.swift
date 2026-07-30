@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 @preconcurrency import Highlightr
 import MarkdownUI
+import TBDShared
 
 // MARK: - CodeViewerPaneView
 
@@ -209,6 +210,30 @@ private func isRenderableFile(_ path: String) -> Bool {
     return ["md", "markdown"].contains(ext)
 }
 
+/// Decides whether a rendered markdown document owns the whole code-viewer
+/// pane instead of being stacked inside the pane's `ScrollView`.
+///
+/// `WKWebView` reports `noIntrinsicMetric` for height. Inside a `ScrollView`
+/// the vertical proposal is unbounded, so the webview resolves to its ideal
+/// height — zero — and the pane paints nothing but its background. A rendered
+/// document therefore replaces the `ScrollView` outright and scrolls
+/// internally.
+///
+/// Only a *single* selected markdown file qualifies. A multi-file selection
+/// with the flag on would hit the same zero-height collapse, and stacking N
+/// internally-scrolling webviews needs a layout design of its own, so it falls
+/// back to the MarkdownUI rendering — a known limitation for the soak.
+enum MarkdownPaneLayout {
+    static func usesFullPaneWebView(
+        showSourceCode: Bool,
+        selectedFiles: [String],
+        useWebView: Bool
+    ) -> Bool {
+        guard useWebView, !showSourceCode, selectedFiles.count == 1 else { return false }
+        return isRenderableFile(selectedFiles[0])
+    }
+}
+
 struct CodeViewerPaneView: View {
     let path: String
     let worktreePath: String
@@ -216,6 +241,17 @@ struct CodeViewerPaneView: View {
 
     @State private var selectedFiles: [String] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
+
+    /// Computed rather than stored: a `private` stored property would drag the
+    /// synthesized memberwise initializer down to `private` too, breaking the
+    /// pane's call sites.
+    private var usesFullPaneWebView: Bool {
+        MarkdownPaneLayout.usesFullPaneWebView(
+            showSourceCode: showSourceCode,
+            selectedFiles: selectedFiles,
+            useWebView: MarkdownViewerPreferences.useWebView()
+        )
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -233,24 +269,55 @@ struct CodeViewerPaneView: View {
             }
 
             // Code preview
-            Group {
-                if selectedFiles.isEmpty {
-                    emptyState
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(selectedFiles, id: \.self) { filePath in
-                                if selectedFiles.count > 1 {
-                                    fileHeader(filePath)
+            if usesFullPaneWebView {
+                // Deliberately OUTSIDE the `.colorScheme(.dark)` forcing below:
+                // that modifier propagates into AppKit-hosted views (SwiftUI
+                // sets the hosted NSView's NSAppearance from it), which would
+                // make this WKWebView resolve `prefers-color-scheme: dark`
+                // regardless of the user's actual system setting. Leaving this
+                // branch on the ambient appearance lets the rendered document
+                // track light/dark live, the way `MarkdownWebView` intends.
+                //
+                // The webview scrolls itself; wrapping it in the pane's
+                // ScrollView collapses it to zero height. See
+                // `MarkdownPaneLayout`.
+                FilePreviewView(
+                    filePath: selectedFiles[0],
+                    worktreePath: worktreePath,
+                    showSourceCode: showSourceCode,
+                    useWebViewMarkdown: true
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Group {
+                    if selectedFiles.isEmpty {
+                        emptyState
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(selectedFiles, id: \.self) { filePath in
+                                    if selectedFiles.count > 1 {
+                                        fileHeader(filePath)
+                                    }
+                                    // Always the MarkdownUI renderer here: a
+                                    // webview nested in this ScrollView has no
+                                    // height. With the flag on, this is reached
+                                    // only by a multi-file selection — the known
+                                    // limitation named in `MarkdownPaneLayout`.
+                                    FilePreviewView(
+                                        filePath: filePath,
+                                        worktreePath: worktreePath,
+                                        showSourceCode: showSourceCode,
+                                        useWebViewMarkdown: false
+                                    )
                                 }
-                                FilePreviewView(filePath: filePath, showSourceCode: showSourceCode)
                             }
                         }
                     }
                 }
+                .background(highlightrBackgroundColor)
+                .colorScheme(.dark)
             }
-            .background(highlightrBackgroundColor)
-            .colorScheme(.dark)
         }
         .preference(key: HasRenderableContentKey.self, value: selectedFiles.contains(where: isRenderableFile))
         .onAppear {
@@ -323,7 +390,12 @@ private func isTextFile(_ path: String) -> Bool {
 /// cancel handler. SwiftUI just observes the `revision` Int.
 private struct FilePreviewView: View {
     let filePath: String
+    /// Trust boundary for local image inlining in the rendered markdown path.
+    let worktreePath: String
     let showSourceCode: Bool
+    /// Decided by the pane, not read from `UserDefaults` here: only the pane
+    /// knows whether this preview owns the full height the webview needs.
+    let useWebViewMarkdown: Bool
 
     @State private var revision: Int = 0
     private let watcher = FileWatcher()
@@ -331,7 +403,12 @@ private struct FilePreviewView: View {
     var body: some View {
         Group {
             if !showSourceCode && isRenderableFile(filePath) {
-                RenderedContentView(filePath: filePath, revision: revision)
+                RenderedContentView(
+                    filePath: filePath,
+                    worktreePath: worktreePath,
+                    revision: revision,
+                    useWebView: useWebViewMarkdown
+                )
             } else if isImageFile(filePath) {
                 ImagePreviewView(filePath: filePath, revision: revision)
             } else if isTextFile(filePath) {
@@ -359,9 +436,38 @@ private struct FilePreviewView: View {
 
 private struct RenderedContentView: View {
     let filePath: String
+    let worktreePath: String
     let revision: Int
+    let useWebView: Bool
     @State private var content: String?
     @State private var loadError: String?
+    @State private var renderedHTML: String?
+    /// The path `renderedHTML` belongs to. `@State` survives a `filePath`
+    /// change because this view is not `.id(filePath)`-keyed, so without this
+    /// a file switch would briefly paint the previous file's HTML.
+    @State private var renderedPath: String?
+    /// Bumped when the resolved user stylesheet changes on disk, which
+    /// re-keys `loadContent`'s `.task(id:)` and re-renders the visible document.
+    @State private var cssRevision: Int = 0
+    /// The CSS actually inlined into `renderedHTML`. Compared against a fresh
+    /// resolution so a filesystem event that does not change the effective
+    /// stylesheet — a sibling theme file being written, or the second of the
+    /// two events an atomic rename-replace produces — costs no re-render.
+    @State private var appliedCSS: String?
+
+    /// Two watchers, deliberately: one on the stylesheet file (catches in-place
+    /// writes and, via `FileWatcher`'s own re-open, atomic rename-replace), one
+    /// on the themes directory (catches the file being *created* after the
+    /// viewer opened, which a file watcher cannot see because there is no inode
+    /// to open yet).
+    private let stylesheetWatcher = FileWatcher()
+    private let themesDirWatcher = FileWatcher()
+
+    /// Where the selected theme's stylesheet lives, or nil when no theme is
+    /// selected (the bundled default is in force and nothing can change it).
+    private var stylesheetPath: String? {
+        MarkdownStylesheet.userStylesheetURL()?.path
+    }
 
     var body: some View {
         Group {
@@ -370,6 +476,12 @@ private struct RenderedContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(12)
+            } else if useWebView {
+                if let renderedHTML {
+                    MarkdownWebView(html: renderedHTML)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
             } else if let content {
                 Markdown(content, baseURL: URL(fileURLWithPath: filePath))
                     .markdownTheme(.codeViewer)
@@ -388,9 +500,33 @@ private struct RenderedContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: "\(filePath)#\(revision)") {
+        .task(id: "\(filePath)#\(revision)#\(useWebView)#\(cssRevision)") {
             await loadContent()
         }
+        // Re-armed on every `cssRevision` bump, which is what recovers a watch
+        // whose stream finished because the stylesheet was deleted, and what
+        // picks up a file that did not exist when the viewer opened.
+        .task(id: "md-css-file#\(useWebView)#\(stylesheetPath ?? "")#\(cssRevision)") {
+            guard useWebView, let path = stylesheetPath else { return }
+            for await _ in stylesheetWatcher.changes(for: path) {
+                reloadStylesheetIfChanged()
+            }
+        }
+        .task(id: "md-css-dir#\(useWebView)#\(stylesheetPath ?? "")") {
+            guard useWebView, stylesheetPath != nil else { return }
+            let directory = TBDConstants.markdownThemesDir
+            guard MarkdownStylesheet.ensureThemesDirectoryExists(directory) else { return }
+            for await _ in themesDirWatcher.changes(for: directory.path) {
+                reloadStylesheetIfChanged()
+            }
+        }
+    }
+
+    /// Bump only when the stylesheet the next render would use actually differs
+    /// from the one already on screen.
+    private func reloadStylesheetIfChanged() {
+        guard MarkdownStylesheet.resolve() != appliedCSS else { return }
+        cssRevision &+= 1
     }
 
     private func loadContent() async {
@@ -400,6 +536,29 @@ private struct RenderedContentView: View {
         if let attrs = try? fm.attributesOfItem(atPath: filePath),
            let size = attrs[.size] as? UInt64, size > 1_048_576 {
             loadError = "File too large to preview (\(size / 1024)KB)"
+            return
+        }
+        // Clear ONLY on a file switch. Clearing unconditionally on every
+        // `revision` bump would remove `MarkdownWebView` from the hierarchy,
+        // tearing down the WKWebView and its coordinator — defeating the
+        // in-place swap in `updateNSView` and costing a blank flash plus a
+        // scroll reset on every save.
+        if renderedPath != filePath { renderedHTML = nil }
+        renderedPath = filePath
+
+        if useWebView {
+            // Resolved per render, never cached: that is what lets an edit to
+            // the user stylesheet show up without relaunching the app.
+            let css = MarkdownStylesheet.resolve()
+            appliedCSS = css
+            let html = await MarkdownRenderService.shared.render(
+                path: filePath,
+                worktreeRoot: worktreePath,
+                css: css
+            )
+            guard !Task.isCancelled else { return }
+            renderedHTML = html
+            if html == nil { loadError = "Unable to render this file." }
             return
         }
         do {
