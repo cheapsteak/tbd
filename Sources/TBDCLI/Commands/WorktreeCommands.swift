@@ -170,7 +170,24 @@ struct WorktreeCreate: AsyncParsableCommand {
                     return updated
                 }
             } else {
-                throw CLIError.invalidArgument("Worktree creation failed (see daemon logs)")
+                // The row vanished, so the daemon's background create failed and
+                // rolled it back. The reason exists — the daemon logs it with
+                // git's stderr embedded — but it goes to os_log, not down this
+                // RPC, because `worktreeCreate` returns the pending row and does
+                // the work in a detached lane.
+                //
+                // So the message has to name WHERE. The old "(see daemon logs)"
+                // named nothing, and the two obvious guesses are both wrong:
+                // ~/Library/Logs/TBD/exceptions.log is the app's crash log, and
+                // predicating on TBDApp searches the wrong process entirely.
+                throw CLIError.invalidArgument("""
+                    Worktree creation failed and was rolled back. The daemon logged why:
+
+                      log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
+
+                    (Common cause: the branch already exists and is checked out in \
+                    another worktree — git's error names that directory.)
+                    """)
             }
             let elapsed = Date().timeIntervalSince(start)
             if elapsed >= nextHeartbeat {
