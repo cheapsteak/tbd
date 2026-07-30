@@ -124,14 +124,37 @@ liveness identifies gone agents. This design adds two things:
 One more session-state fact comes free from the same source: **context load** —
 the tokens currently in a session's context window, read from the last
 assistant record's `usage` block at the transcript tail (the same tail read
-that already classifies rate limits). The window size (the denominator) is not
-in the transcript, so the app carries a small compiled model → window-size
-table — a universal fact about models, not about any repo's process. The
-statusline is deliberately **not** used as the source: its stdin JSON carries
-the same numbers, but claiming the `statusLine` settings key would overwrite a
-statusline the operator configured — a display slot the user owns. The data
-was always in the transcript; TBD reads it there, and the current pane-read
-for context goes away.
+that already classifies rate limits). Claude Code's own docs now mark the
+transcript format as internal and version-unstable; the design accepts that as
+a known-fragile dependency, named here rather than hidden, because no better
+machine source for the numerator exists today.
+
+The denominator — the window size — is a different kind of fact than it first
+appears, and an earlier draft got it wrong by compiling a model → window-size
+table. **The effective window is a session fact, not a model fact.** Claude
+Code resolves it per session from the model id, a `[1m]` suffix, a
+long-context beta header, environment overrides, and a remote feature flag —
+the same model id can be a 200k session or a 1M session. Any out-of-band
+source (a compiled table, a public capability dataset, the catalog embedded in
+the Claude Code binary) reports *capability*, not the resolved value, and
+capability errs in the dangerous direction: a table saying 1M for a session
+running at 200k reads one-fifth full at the boundary. The only party that
+knows the resolved window is Claude Code itself, and the one surface where it
+tells a third party is the statusline: its stdin JSON carries
+`context_window.context_window_size` alongside used/remaining percentages.
+
+So the denominator's source is a **statusline tee**. For every session TBD
+spawns, the per-session settings overlay installs a statusline wrapper that
+writes the stdin JSON where the daemon can read it, then execs the statusline
+the operator configured — or exits quietly when there is none. Presence is by
+construction for TBD-spawned sessions, and nothing clobbers a display slot the
+user owns, which was the earlier draft's reason for refusing the statusline.
+Where the tee is absent or has not yet fired — an older Claude Code, a session
+TBD did not spawn — the denominator is **unknown and reported as unknown**:
+raw token counts with no percentage, never a guessed one. Anything that needs
+a number anyway assumes 200k as a labeled assumption, because 200k errs safe —
+thresholds fire early, never late. The current pane-read for context goes
+away.
 
 **P1 — make existing work facts available overnight.** The daemon already
 calculates almost all work state. It gets pull request (PR) status for each
@@ -768,11 +791,17 @@ Boundary cases:
   the morning queue. An answer becomes a durable decision and is never asked
   again (P1-5).
 - **Supervisor stuck or gone** → it is a session like any other; the same
-  machinery watches it. The sweep continues to collect mechanical facts, but
-  makes no judgments. It reports the failure prominently. The daemon never
-  pretends to provide the supervisor's judgment. A dark desk darkens its own
-  project only: other projects' desks are separate sessions and keep working,
-  and the anomaly line names which project lost its judgment layer.
+  machinery watches it — and both failures converge on the same remediation.
+  An earlier draft detected a stuck desk and only *reported* it, an anomaly
+  addressed to an operator who is asleep; now detection is the dead-man's
+  switch (§9) — a work order with no ledger line by the deadline, or a desk
+  `working` past it with nothing ledgered — and firing means replacement
+  through §9's path, bounded by the reroll budget. The sweep continues to
+  collect mechanical facts throughout and makes no judgments; the daemon never
+  pretends to provide the supervisor's judgment. When the budget is spent, a
+  dark desk darkens its own project only: other projects' desks are separate
+  sessions and keep working, and the anomaly line names which project lost its
+  judgment layer.
 
 ## 5. Supervision projects and where policy lives
 
@@ -1399,29 +1428,49 @@ enforcement openly, which is the same trade the old system made by accident
 ### Supervisor context recycling
 
 A desk runs all night and receives work orders full of playbooks and
-transcripts, so its context grows fast — and a session cruising at a huge
-context pays for that context on every turn. Waiting for auto-compaction is the
-expensive path. Instead, the daemon recycles a desk deliberately, using the
-mid-shift replacement path above. This works because of a decision already
-made: a supervisor externalizes everything durable as it goes (ledger,
-notes, account, escalations). **Its handoff document already exists — it is the
-shift record.**
+transcripts, so its context grows fast. Two mechanisms manage that, and their
+relationship is deliberate: **auto-compaction bears survival; deliberate
+recycling is an optimization.** An earlier draft had this inverted — it called
+waiting for auto-compaction "the expensive path" and made the recycle
+machinery the thing standing between a desk and its context ceiling. That
+quietly made recycling load-bearing: if it failed to fire, the desk died at
+the ceiling — which is exactly how the desk reviewing this design's first
+draft came to exist, spawned by hand from a predecessor that hit 200k
+mid-shift. Now auto-compaction stays on for desks and is the guarantee: a desk
+can never hard-die from context alone, and what compaction loses is
+acceptable by this design's own doctrine, because everything durable is
+externalized as it happens (ledger, notes, account, escalations). **A desk's
+handoff document already exists — it is the shift record.** Recycling remains
+preferred whenever it can run — a fresh desk with a clean briefing reasons
+better and costs less per turn than a compacted one — but nothing breaks if
+it never fires.
+
+Thresholds are **fractions of the session's effective window**, never absolute
+token counts. The denominator comes from the statusline tee (§2); absolute
+numbers would be wrong on the next model, and the effective window is a
+session fact TBD receives rather than knows. As context grows the daemon
+sends staged **flush nudges** — bounded requests, same shape as the shift-end
+closing note: "anything in your head not yet in artifacts, write it now as
+notes" — at rising fullness (§13), so that whenever a recycle or a compaction
+lands, the artifacts are already current. When the tee has supplied no
+denominator, the daemon nudges against the labeled 200k assumption (§2) —
+early, never late — rather than guessing a larger window.
 
 Recycling is **per desk**, evaluated independently for each: a busy project's
 desk may recycle twice in a night while three quiet projects' desks never do.
 The sequence, all daemon-driven:
 
 1. **Detect** — a supervisor is a session like any other, so its context
-   load is already a session-state fact. Threshold: a compiled default, around
-   250k tokens (§13).
+   fullness is already a session-state fact (§2). Threshold: a compiled
+   default fraction of the effective window (§13).
 2. **Hold** — the daemon stops delivering work orders to *that* desk. Its new
    cases queue; the sweep keeps running; other projects' desks are unaffected;
    the fleet stays watched. The recycle waits until that supervisor is idle with
    no case in flight.
-3. **Flush** — a bounded request, same shape as the shift-end closing note:
-   "anything in your head not yet in artifacts, write it now as notes." If the
-   supervisor is wedged, the recycle proceeds without it — that is exactly the
-   crash path, which was already designed to be survivable.
+3. **Flush** — the final flush nudge, if the staged ones have not already
+   emptied the desk's head. If the supervisor is wedged, the recycle proceeds
+   without it — that is exactly the crash path, which was already designed to
+   be survivable.
 4. **Recycle** — tear down that desk's session, spawn fresh into the same shift
    and the same project, and deliver the standard replacement briefing (the
    active mode, that project's account so far, its open escalations, its one
@@ -1443,17 +1492,69 @@ in the queue. If a recycle ever loses something that mattered, that
 is an artifact-externalization bug to fix — the answer is "that should have
 been in the record," never "a human should have approved the recycle."
 
-**Fleet agents are explicitly excluded from this.** Auto-compaction is fine
-for them; no handoff templates, recycle flags, or compaction counters exist
-for fleet sessions. The per-agent context fact is available for free (§2), and
-its only fleet-facing use is informational: a report line or a work order may
-mention a parked session's context load, as input to judgment.
+### Desk liveness: the dead-man's switch
+
+Context is not the only way a desk fails, and the first external review of
+this design supplied the receipt: a desk can stall on its own question, wedge
+mid-turn, or sit silent with cases queued — failing exactly like the agents it
+exists to catch, while the draft's only answer was an anomaly line addressed
+to an operator who is asleep. The desk was the one session in the system with
+no liveness contract. Now it has one, and it is compiled.
+
+**The switch triggers on an unanswered work order, never on idleness.** A desk
+is *supposed* to be idle most of the night; it is event-woken, not polling —
+rerolling any desk idle for an hour would churn healthy quiet desks for
+nothing. The meaningful silence is a work order delivered at time T with **no
+ledger line from that desk** by T plus the deadline (§13) — no drive, wake,
+pause, escalate, or note. Every desk act is already a daemon-written ledger
+line, so ledger silence *is* unresponsiveness, and no new observation channel
+is needed. The second arm bounds the working state: a desk `working`
+continuously past the same deadline with nothing ledgered. Whether it is
+wedged or merely lost in thought stops mattering at the deadline — a desk
+holds cases, a case unanswered for an hour is the failure the switch exists to
+catch, and replacement costs a briefing, not work state. Both arms are the
+P1-6 pattern generalized: every message the daemon sends anyone arms a
+deadline; only the clock differs.
+
+**Firing means replacement, not reporting.** Anomaly line, then the
+replacement path above with the flush skipped — the desk is by definition not
+answering — and queued and unanswered cases redeliver to the successor. A
+lifecycle line links the sessions, as with any recycle.
+
+**The reroll budget bounds the loop.** If the work order itself is what wedges
+the desk — a pathological transcript, a poisoned case — the successor stalls
+identically, and an unbounded switch would reroll all night. After two
+consecutive stalled desks on the same project (§13), the daemon stops: the
+project is marked dark, its cases hold, and the anomaly line is the loudest
+thing in the account. This bound is insurance against machinery this section
+introduces, not a scar from a lived incident — the old system never rerolled
+a desk at all — but the shape has precedent one layer up: five nights of
+judge sessions escalating a restart for software that never existed. Repeated
+futile acts happen, and they go unnoticed precisely when nobody is watching.
+
+**No third role is needed, and the regress terminates.** Watching a desk
+requires no judgment — ledger silence and a timer are facts — so the desk's
+watcher is the compiled daemon, the same machinery that watches every other
+session. The daemon's own watcher is the out-of-band heartbeat (§14). Nothing
+above that is required.
+
+**Fleet agents are explicitly excluded from all of this.** Auto-compaction is
+fine for them too; no handoff templates, recycle flags, or compaction counters
+exist for fleet sessions. The per-agent context fact is available for free
+(§2), and its only fleet-facing use is informational: a report line or a work
+order may mention a parked session's context load, as input to judgment. And a
+desk never runs its own succession: the primitives to self-replace exist in
+the CLI, and the design's answer is that desk lifecycle — spawn, brief,
+recycle, dispose — belongs to the daemon, full stop. The desk's whole
+contribution to its own replacement is writing notes when asked.
 
 *Note on the brief:* the requirements brief deferred supervisor self-handoff
 ("assume the supervisor persists for the shift"). This section overrides that
 deferral by operator decision, and the reason is worth recording: the deferral
 assumed handoff was a hard open problem, and the shift-record design had
-already solved it as a side effect.
+already solved it as a side effect. The liveness contract above closes the
+remaining gap that review named — a supervisor that fails like the agents it
+watches, with nothing watching it.
 
 ## 10. Operator surfaces (intent, not screens)
 
@@ -1908,7 +2009,11 @@ to hunt for the value that governs a behavior:
 | Idle-intervention threshold | 40 min | §4 step 2 |
 | Post-intervention re-check | 60 s | §4 step 8, §12 |
 | Delivery retries before anomaly | 2 sends | §12 |
-| Supervisor recycle threshold | ~250k tokens of context, per desk | §9 |
+| Supervisor recycle preference | 50% of the effective window, per desk | §9 |
+| Flush nudges | 50% / 60% / 70% fullness | §9 |
+| Unknown-denominator assumption | 200k, labeled | §2, §9 |
+| Dead-man deadline (work order unanswered) | 60 min | §9 |
+| Reroll budget | 2 consecutive stalled desks per project | §9 |
 | Runaway: turns in window | 30 turns | §13 |
 | Runaway: no-progress window | 90 min with no commits | §13 |
 | Heartbeat staleness | 10 min | §14 |
@@ -2083,10 +2188,24 @@ to inaction at the largest scale.
   sessions. No handoff templates, recycle flags, or compaction counters for
   agents; the context fact is informational only (§2, §9). Deliberate
   recycling exists solely for the supervisor's own session (§9).
-- **The statusline as a data source** — its stdin JSON carries context data,
-  but claiming the `statusLine` settings key would overwrite the operator's
-  own statusline. The same numbers live in the transcript, which TBD already
-  reads (§2).
+- **A compiled model → window-size table** — an earlier draft carried one.
+  Deleted, because the effective window is a session fact, not a model fact:
+  Claude Code resolves it per session from suffix, beta header, environment
+  overrides, and a remote flag, so any out-of-band source — a compiled table,
+  a public capability dataset such as LiteLLM's or OpenRouter's, or the
+  catalog embedded in the Claude Code binary — reports capability, not the
+  resolved value, and errs unsafe (a 1M capability read against a 200k
+  session hides the boundary). The Models API would be authoritative but
+  subscription OAuth tokens are contractually and technically scoped to
+  Claude Code itself. The statusline tee (§2) is the one source that reports
+  the resolved value; wherever it is absent the design says unknown rather
+  than consulting a table.
+- **Pinning the compaction window at spawn** — rejected. Claude Code clamps
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the model's real window silently, so a
+  pin above it leaves TBD believing a denominator that is not in effect and
+  every threshold computed from it quietly inert — a dead sensor that looks
+  like a calm night. TBD may still *lower* compaction via the percentage
+  override as a preference it expresses, but never treats a pin as knowledge.
 
 ## 16. The strongest argument against this design
 
