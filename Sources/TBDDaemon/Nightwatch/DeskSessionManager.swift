@@ -194,6 +194,47 @@ public actor DeskSessionManager: DeskSessionManaging {
         return wt
     }
 
+    /// Resolve the Watch Desk's *live* Claude terminal, newest first.
+    ///
+    /// `TerminalStore.list` orders by `createdAt` ascending, so the previous
+    /// `terminals.first(where: { $0.label == .claudeCode })` deterministically returned
+    /// the OLDEST Claude row — not a race, a guarantee. Desk terminal rows outlive their
+    /// panes: a session that dies, or is killed out-of-band (the nightwatch judge handoff
+    /// `kill-window`s its predecessor directly, so the daemon never removes the row),
+    /// leaves its row behind forever. The oldest row is therefore the one *most* likely
+    /// to be dead, and every handoff inserted another corpse ahead of the live desk.
+    ///
+    /// Observed in production: one desk carried three `Claude Code` rows, the nudge aimed
+    /// at the first, and the judge prompt was discarded every fifteen minutes for hours
+    /// while ticks kept correctly reporting queued judgment.
+    ///
+    /// Two guards make that impossible. Prefer the NEWEST row, and confirm its tmux window
+    /// still exists before sending. The liveness check is not redundant belt-and-braces:
+    /// tmux recycles pane IDs per server — both dead rows in the incident above had been
+    /// assigned `%1` — so a stale row can start resolving to a *live pane owned by an
+    /// unrelated session*, which would then receive a pasted judge prompt plus Enter. That
+    /// is issue #384, and picking the newest row alone would not prevent it.
+    ///
+    /// - Returns: The newest Claude terminal whose tmux window is still alive, or nil.
+    private func liveClaudeTerminal(worktreeID: UUID, server: String) async throws -> Terminal? {
+        let candidates = try await db.terminals.list(worktreeID: worktreeID)
+            .filter { $0.label == TerminalLabel.claudeCode }
+            // Secondary key on id: Swift's sort is not stable, and two rows can share a
+            // createdAt, so without it the winner between same-instant rows is arbitrary.
+            .sorted { ($0.createdAt, $0.id.uuidString) > ($1.createdAt, $1.id.uuidString) }
+
+        for terminal in candidates {
+            if await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) {
+                return terminal
+            }
+            logger.notice("""
+                Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
+                window \(terminal.tmuxWindowID, privacy: .public) no longer exists
+                """)
+        }
+        return nil
+    }
+
     /// Post a shift wrap-up prompt to the desk session and fire a completion notification.
     /// Called when daywatch/nightwatch mode is turned OFF to gracefully end the shift.
     /// Sends the wrap-up prompt via tmux (non-destructive), fires a notification, and leaves
@@ -204,14 +245,16 @@ public actor DeskSessionManager: DeskSessionManaging {
         defer { gateRelease() }
 
         do {
-            let terminals = try await db.terminals.list(worktreeID: worktreeID)
-            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
-                logger.warning("No Claude terminal found in Watch Desk; skipping wrap-up prompt")
+            // Worktree first: resolving a live terminal needs the tmux server to query.
+            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+                logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
                 return
             }
 
-            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
-                logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
+            guard let claudeTerminal = try await liveClaudeTerminal(
+                worktreeID: worktreeID, server: worktree.tmuxServer
+            ) else {
+                logger.warning("No live Claude terminal in Watch Desk; skipping wrap-up prompt")
                 return
             }
 
@@ -268,14 +311,19 @@ public actor DeskSessionManager: DeskSessionManaging {
         let prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
 
         do {
-            let terminals = try await db.terminals.list(worktreeID: worktreeID)
-            guard let claudeTerminal = terminals.first(where: { $0.label == TerminalLabel.claudeCode }) else {
-                logger.warning("No Claude terminal found in Watch Desk; skipping nudge")
+            // Worktree first: resolving a live terminal needs the tmux server to query.
+            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+                logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
                 return
             }
 
-            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
-                logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
+            guard let claudeTerminal = try await liveClaudeTerminal(
+                worktreeID: worktreeID, server: worktree.tmuxServer
+            ) else {
+                // Deliberately does NOT stamp lastNudgeTime: a nudge that never reached a
+                // pane must not start the 10-minute overlap cooldown, or one dead desk
+                // would suppress the retry that recovers it.
+                logger.warning("No live Claude terminal in Watch Desk; skipping nudge")
                 return
             }
 

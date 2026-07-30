@@ -3,6 +3,47 @@ import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// Records the argv TmuxManager *would* have run in dry-run mode, so a test can assert
+/// which pane a nudge actually targeted rather than merely that it didn't throw.
+private final class DeskTmuxRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [[String]] = []
+
+    func record(_ args: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        _calls.append(args)
+    }
+
+    /// Target panes of every `paste-buffer` call, in order. `pasteBufferCommand` renders
+    /// `["-L", server, "paste-buffer", "-d", "-p", "-b", buffer, "-t", paneID]`.
+    var pastedPanes: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _calls.compactMap { args in
+            guard args.contains("paste-buffer"), let t = args.lastIndex(of: "-t"),
+                  args.index(after: t) < args.endIndex else { return nil }
+            return args[args.index(after: t)]
+        }
+    }
+}
+
+/// Mutable set of tmux windows that `windowExists` should report as gone. Mutable rather
+/// than a fixed closure because one test has to *revive* a desk mid-flight to prove a
+/// failed nudge didn't start the overlap cooldown.
+private final class DeadWindows: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dead: Set<String> = []
+
+    func markDead(_ windowID: String) {
+        lock.lock(); defer { lock.unlock() }
+        dead.insert(windowID)
+    }
+
+    func isDead(_ windowID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return dead.contains(windowID)
+    }
+}
+
 extension TBDHomeSerialized {
     @Suite("DeskSessionManager — TBD_HOME isolated")
     struct DeskSessionManagerTests {
@@ -455,6 +496,155 @@ extension TBDHomeSerialized {
             let terminals2 = try await db.terminals.list(worktreeID: desk1ID)
             let claudeTerminal2 = terminals2.first(where: { $0.label == TerminalLabel.claudeCode })
             #expect(claudeTerminal2 != nil, "Terminal should be respawned")
+        }
+
+        // MARK: - Live-terminal resolution (stale desk rows)
+
+        /// Temp TBD_HOME + in-memory DB + a DeskSessionManager whose own tmux records argv
+        /// and consults a mutable dead-window set. The lifecycle gets a separate dry-run
+        /// tmux so desk *creation* never lands in the recorder the assertions read.
+        /// Caller owns cleanup of `home` and TBD_HOME.
+        private func makeDeskFixture(tag: String) throws -> (
+            db: TBDDatabase, manager: DeskSessionManager,
+            recorder: DeskTmuxRecorder, dead: DeadWindows, home: URL
+        ) {
+            let home = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-\(tag)-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            setenv("TBD_HOME", home.path, 1)
+
+            let db = try TBDDatabase(inMemory: true)
+            let recorder = DeskTmuxRecorder()
+            let dead = DeadWindows()
+            let manager = DeskSessionManager(
+                db: db,
+                lifecycle: WorktreeLifecycle(
+                    db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+                ),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: { recorder.record($0) },
+                    dryRunWindowIsDead: { dead.isDead($0) }
+                ),
+                skillDir: home.appendingPathComponent("skills/nightwatch").path
+            )
+            return (db, manager, recorder, dead, home)
+        }
+
+        /// The regression: `TerminalStore.list` orders createdAt ASC, so resolving the desk
+        /// terminal with `first(where:)` always picked the OLDEST row. Judge handoffs kill
+        /// the predecessor's window out-of-band and leave its row behind, so the oldest row
+        /// is the likeliest corpse — in production three rows accumulated and every nudge
+        /// for hours was pasted at a pane that no longer existed.
+        @Test("nudgeDeskSession targets the newest Claude terminal, not the oldest")
+        func testNudgeTargetsNewestClaudeTerminal() async throws {
+            let f = try makeDeskFixture(tag: "nudge-newest")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let oldest = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // A later Claude row on the same desk — the live session after a handoff.
+            let newest = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+                label: TerminalLabel.claudeCode)
+
+            // Asserted, not assumed: if the clock ever ties these two, the recency
+            // assertion below proves nothing, so fail where the cause is legible.
+            #expect(newest.createdAt > oldest.createdAt, "fixture must yield distinct createdAt")
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets == ["%9"], "nudge must reach the newest Claude terminal, got \(targets)")
+        }
+
+        /// Recency alone is not enough. tmux recycles pane IDs per server, so a stale row
+        /// can start resolving to a live pane owned by an unrelated session, which would
+        /// then be handed a judge prompt plus Enter (#384). The window-liveness check is
+        /// what makes that unreachable.
+        @Test("nudgeDeskSession skips a newer terminal whose tmux window is gone")
+        func testNudgeSkipsStaleTerminal() async throws {
+            let f = try makeDeskFixture(tag: "nudge-stale")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let live = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Newer by createdAt, but its window is dead — exactly the orphan a handoff leaves.
+            _ = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@dead", tmuxPaneID: "%dead",
+                label: TerminalLabel.claudeCode)
+            f.dead.markDead("@dead")
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets == [live.tmuxPaneID], "must fall through to the live row, got \(targets)")
+            #expect(!targets.contains("%dead"), "a dead window must never be pasted into")
+        }
+
+        /// A nudge that reached nothing must not start the 10-minute overlap cooldown, or a
+        /// single dead desk would suppress the very retry that recovers it — which is how a
+        /// transient gap becomes a silent all-night outage.
+        @Test("a nudge with no live terminal sends nothing and does not start the cooldown")
+        func testFailedNudgeDoesNotStartCooldown() async throws {
+            let f = try makeDeskFixture(tag: "nudge-cooldown")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let original = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+            f.dead.markDead(original.tmuxWindowID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)).isEmpty,
+                "no live terminal means nothing should be pasted anywhere")
+
+            // Desk comes back; the next nudge must fire immediately.
+            _ = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@revived", tmuxPaneID: "%7",
+                label: TerminalLabel.claudeCode)
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)) == ["%7"],
+                "the failed attempt must not have armed the overlap guard")
+        }
+
+        /// `postShiftWrapUp` resolved its target the same broken way, and failed the same
+        /// way in production ("Failed to post shift wrap-up: TmuxError error 0").
+        @Test("postShiftWrapUp targets the newest live terminal")
+        func testWrapUpTargetsNewestLiveTerminal() async throws {
+            let f = try makeDeskFixture(tag: "wrapup-live")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let original = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+            f.dead.markDead(original.tmuxWindowID)
+
+            _ = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@live", tmuxPaneID: "%5",
+                label: TerminalLabel.claudeCode)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.postShiftWrapUp(worktreeID: desk.id)
+
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)) == ["%5"],
+                "wrap-up must reach the live terminal, not the dead original")
+
+            let notifications = try await f.db.notifications.unread(worktreeID: desk.id)
+            #expect(
+                notifications.contains(where: { $0.type == .taskComplete }),
+                "wrap-up should still fire its completion notification")
         }
     }
 }
