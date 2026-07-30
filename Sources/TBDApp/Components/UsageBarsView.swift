@@ -3,8 +3,8 @@ import TBDShared
 
 /// A compact usage meter for a Claude OAuth profile: the 5-hour session
 /// window, the weekly all-models window, and per-model-family weekly windows,
-/// each drawn as a thin bar with a pace-aware colored fill (green/yellow/
-/// orange/red — projection of end-of-window usage from the current burn rate,
+/// each drawn as a thin bar with a pace-aware colored fill (green/orange/
+/// red — projection of end-of-window usage from the current burn rate,
 /// floored by the API severity so a warning/critical bucket never reads
 /// healthy), a neutral "time marker" tick showing how far through the window
 /// we are, and a trailing percent (and inline reset countdown on the weekly
@@ -17,13 +17,18 @@ import TBDShared
 /// data at all.
 struct UsageBarsView: View {
     let snapshot: ProfileUsageSnapshot?
+    /// The user's reset-time display preference (time-of-reset vs time-until).
+    /// Injected by the hosting view from `@AppStorage(AppState.usageResetTimeStyleKey)`.
+    let resetStyle: ProfileUsagePresentation.ResetTimeStyle
     let now: Date
     let timeZone: TimeZone
 
     init(snapshot: ProfileUsageSnapshot?,
+         resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
          now: Date = Date(),
          timeZone: TimeZone = .current) {
         self.snapshot = snapshot
+        self.resetStyle = resetStyle
         self.now = now
         self.timeZone = timeZone
     }
@@ -31,32 +36,23 @@ struct UsageBarsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                UsageBarRow(bucket: session,
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(session, style: resetStyle, now: now, timeZone: timeZone),
                             label: "5h:",
                             windowLabel: "5-hour window",
-                            windowDuration: ProfileUsagePresentation.sessionWindow,
-                            usesRelativeReset: false,
-                            showsInlineReset: false,
                             now: now,
                             timeZone: timeZone)
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                UsageBarRow(bucket: weekly,
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: resetStyle, now: now, timeZone: timeZone),
                             label: "wk:",
                             windowLabel: "Weekly window",
-                            windowDuration: ProfileUsagePresentation.weeklyWindow,
-                            usesRelativeReset: true,
-                            showsInlineReset: true,
                             now: now,
                             timeZone: timeZone)
             }
             ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()), id: \.offset) { _, scoped in
-                UsageBarRow(bucket: scoped,
+                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: resetStyle, now: now, timeZone: timeZone),
                             label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
                             windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
-                            windowDuration: ProfileUsagePresentation.weeklyWindow,
-                            usesRelativeReset: true,
-                            showsInlineReset: false,
                             now: now,
                             timeZone: timeZone)
             }
@@ -70,20 +66,11 @@ struct UsageBarsView: View {
 /// marker), a fixed-width trailing percent, and a fixed-width trailing hint
 /// column. The four fixed columns keep bars vertically aligned across rows.
 private struct UsageBarRow: View {
-    let bucket: ClaudeUsageLimitBucket
+    let presentation: ProfileUsagePresentation.BucketPresentation
     /// Leading label ("5h:" / "wk:" / "F:").
     let label: String
     /// Spelled-out window name for the `.help` tooltip ("5-hour window" / "Fable weekly").
     let windowLabel: String
-    /// Window length feeding the time marker's elapsed fraction.
-    let windowDuration: TimeInterval
-    /// The 5h window shows an absolute reset clock; the weekly window shows a
-    /// relative countdown ("resets in 2d 5h").
-    let usesRelativeReset: Bool
-    /// Whether to show the inline trailing countdown ("· 2d 5h"). When true,
-    /// requires usesRelativeReset to be true to render the countdown. The trailing
-    /// column is still reserved on all rows for bar alignment.
-    let showsInlineReset: Bool
     let now: Date
     let timeZone: TimeZone
 
@@ -96,7 +83,7 @@ private struct UsageBarRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 22, alignment: .leading)
             bar
-            Text(ProfileUsagePresentation.percentText(bucket.percent))
+            Text(presentation.percentText)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(fillColor)
@@ -106,25 +93,28 @@ private struct UsageBarRow: View {
         .help(helpText)
     }
 
-    // MARK: Trailing reset countdown
+    // MARK: Trailing reset hint
 
-    /// Fourth column: weekly reset countdown (inline hint) on rows where
-    /// showsInlineReset is true, empty but space-reserving on other rows
-    /// to keep bars aligned.
+    /// Fourth column: reset display inline ("at 8pm" / "at Fri 7pm" /
+    /// "in 4d 2h", prefix baked into `resetInline`) on rows where resetDisplay
+    /// shows inline; empty but space-reserving on other rows to keep bars
+    /// aligned. The 74pt fixed width fits the true worst case at FULL size —
+    /// "at Wed 10:30pm" / "at Wed 12:30pm" = 72.6pt at 9pt rounded
+    /// monospacedDigit — with no minimumScaleFactor, so every string renders
+    /// at identical size (a visible scale-down on one row next to a full-size
+    /// neighbor read as a glitch). Leading alignment keeps every reset string
+    /// starting at the same x across rows. The width win over the old 75pt
+    /// column comes from the strings themselves (ceil-rounding + dropped ":00"
+    /// make "at 8pm" the common case); the flexible bar absorbs the difference.
+    /// `.secondary` (not `.tertiary`) keeps the reset legible in the popover
+    /// while still subordinate to the semibold percent column.
     private var trailingResetHint: some View {
-        let countdownText: String = {
-            guard showsInlineReset, usesRelativeReset, let resetsAt = bucket.resetsAt,
-                  let compact = ProfileUsagePresentation.relativeResetText(resetsAt, now: now) else {
-                return ""
-            }
-            return "· \(compact)"
-        }()
-
-        return Text(countdownText)
+        Text(presentation.resetInline ?? "")
             .font(.system(size: 9, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.tertiary)
-            .frame(width: 46, alignment: .leading)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .frame(width: 74, alignment: .leading)
     }
 
     // MARK: Bar geometry
@@ -138,7 +128,7 @@ private struct UsageBarRow: View {
                 // Usage fill.
                 RoundedRectangle(cornerRadius: 2.5)
                     .fill(fillColor)
-                    .frame(width: geo.size.width * min(bucket.percent / 100, 1))
+                    .frame(width: geo.size.width * min(presentation.percent / 100, 1))
             }
             .frame(height: 5)
             // Time marker: a 9pt tick centered on the 5pt bar (overhangs 2pt
@@ -159,46 +149,19 @@ private struct UsageBarRow: View {
     // MARK: Colors
 
     /// Pace-aware fill (shared by the bar and the trailing percent): green
-    /// (adaptive) when on a sustainable pace, yellow (adaptive) when the
-    /// projected end-of-window usage is warming (75–90%), orange when it will
-    /// likely graze the limit (90–100%), red when on pace to exceed. The API
+    /// (adaptive) when on a sustainable pace, orange when the projected
+    /// end-of-window usage is warming (75–90%) or will likely graze the
+    /// limit (90–100%), red when on pace to exceed. The API
     /// severity (or the >=75/>=90 percent fallback) floors the tier, so a
     /// warning/critical bucket never renders healthier than before; without
     /// pace data (no reset date, <15% elapsed) this is exactly the old
     /// severity coloring.
     private var fillColor: Color {
-        switch ProfileUsagePresentation.fillLevel(severity: bucket.severity,
-                                                  percent: bucket.percent,
-                                                  elapsedFraction: elapsedFraction) {
-        case .normal: return Self.adaptiveGreen(colorScheme)
-        case .caution: return Self.adaptiveYellow(colorScheme)
-        case .warning: return .orange
-        case .critical: return .red
-        }
+        presentation.fill.barColor(colorScheme)
     }
 
     private var elapsedFraction: Double? {
-        ProfileUsagePresentation.elapsedFraction(resetsAt: bucket.resetsAt,
-                                                 windowDuration: windowDuration,
-                                                 now: now)
-    }
-
-    /// Green that reads on both appearances: a brighter mint in dark mode, a
-    /// deeper forest in light mode (the light default green washes out on a
-    /// pale bar track).
-    private static func adaptiveGreen(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark
-            ? Color(red: 60 / 255, green: 199 / 255, blue: 95 / 255)
-            : Color(red: 27 / 255, green: 107 / 255, blue: 52 / 255)
-    }
-
-    /// Yellow that reads on both appearances: a bright warm yellow in dark
-    /// mode, a deeper amber in light mode (pure yellow washes out against the
-    /// pale bar track).
-    private static func adaptiveYellow(_ colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark
-            ? Color(red: 235 / 255, green: 194 / 255, blue: 52 / 255)
-            : Color(red: 158 / 255, green: 110 / 255, blue: 6 / 255)
+        presentation.elapsedFraction
     }
 
     // MARK: Tooltip
@@ -206,15 +169,9 @@ private struct UsageBarRow: View {
     /// The spelled-out reset info the compact form omits, kept as a `.help`
     /// tooltip so nothing is lost: "5-hour window: 12% used · resets 23:10".
     private var helpText: String {
-        var text = "\(windowLabel): \(ProfileUsagePresentation.percentText(bucket.percent)) used"
-        if let resets = bucket.resetsAt {
-            if usesRelativeReset {
-                if let relative = ProfileUsagePresentation.relativeResetText(resets, now: now) {
-                    text += " · resets in \(relative)"
-                }
-            } else {
-                text += " · resets \(ProfileUsagePresentation.resetTimeText(resets, timeZone: timeZone))"
-            }
+        var text = "\(windowLabel): \(presentation.percentText) used"
+        if let resetPhrase = presentation.resetPhrase {
+            text += " · \(resetPhrase)"
         }
         return text
     }
@@ -252,7 +209,7 @@ private struct UsageBarRow: View {
 
         // Mid usage — the projection lands in the caution/warning bands even
         // while the marker sits just ahead of the fill. Session projects to
-        // ~85% (yellow "warming"); weekly projects to ~95% (orange) despite
+        // ~85% (caution "warming"); weekly projects to ~95% (warning) despite
         // the API still saying "normal".
         UsageBarsView(snapshot: snap([
             bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),

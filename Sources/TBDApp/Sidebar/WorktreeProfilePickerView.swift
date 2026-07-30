@@ -16,7 +16,9 @@ import TBDShared
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
 ///
-/// Modeled on `BranchPickerView` for consistent popover sizing/styling.
+/// Width matches `BranchPickerView` for consistent popover styling; height is
+/// per-page (see `body`) so the short profiles list isn't padded out to the
+/// branch list's minimum.
 struct WorktreeProfilePickerView: View {
     let repoID: UUID
     /// When set, created worktrees are nested under this parent (the nested `+`
@@ -52,7 +54,14 @@ struct WorktreeProfilePickerView: View {
             }
         }
         .frame(width: 300)
-        .frame(minHeight: 320)
+        // Height is per-page: `.branches` needs a 320pt minimum so the
+        // searchable list stays usable, while `.profiles` hugs its rows.
+        // `FloatingPanel` never re-fits after `showAsMenu`, and doesn't need
+        // to: `NSHostingView`'s default `sizingOptions` constrain the panel to
+        // the SwiftUI content's ideal size, so AppKit autolayout resizes the
+        // borderless panel in place (top edge pinned) when `page` flips — no
+        // explicit `setFrame` hook (cf. `HoverCard.apply`) is required.
+        .frame(minHeight: page == .branches ? 320 : nil, alignment: .top)
         .task {
             // Ensure the list (and usage suffixes) are populated even if the
             // user hasn't opened Settings yet this session.
@@ -101,13 +110,19 @@ struct WorktreeProfilePickerView: View {
                     let isSelectable = ProfileUsagePresentation.isSelectable(entry)
                     let isTheDefault = entry.profile.id == appState.defaultProfileID
                     Group {
-                        if showsUsageBars(for: entry) {
-                            // OAuth profile with a usage snapshot that has
-                            // buckets: render the two-bar meter instead of the
-                            // single-line usage text.
-                            UsageBarsProfileRow(
+                        if entry.profile.kind == .oauth && isSelectable {
+                            // Selectable Claude account: always render the
+                            // model rail — model selection must not depend on
+                            // usage data being available. The subtitle is the
+                            // two-bar meter when a snapshot has buckets, else
+                            // the same text/skeleton line as the plain rows.
+                            ClaudeProfileRow(
                                 entry: entry,
-                                highlighted: isTheDefault && highlightDefaultProfile
+                                highlighted: isTheDefault && highlightDefaultProfile,
+                                subtitle: claudeRowSubtitle(for: entry),
+                                onSelectModel: { model in
+                                    pick(profileID: entry.profile.id, model: model)
+                                }
                             ) {
                                 pick(profileID: entry.profile.id)
                             }
@@ -117,7 +132,6 @@ struct WorktreeProfilePickerView: View {
                             ProfilePickerRow(
                                 title: line.primary,
                                 subtitle: subtitle.text,
-                                systemImage: "person.crop.circle",
                                 highlighted: isTheDefault && highlightDefaultProfile,
                                 // Always reserve subtitle height so the row never
                                 // shifts, whichever state it resolves to.
@@ -166,10 +180,12 @@ struct WorktreeProfilePickerView: View {
         }
     }
 
-    private func pick(profileID: UUID?) {
+    /// `model` is an optional per-spawn Claude model override (the row's model
+    /// rail); nil keeps the profile's default model.
+    private func pick(profileID: UUID?, model: String? = nil) {
         dismiss()
         onClose()
-        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID)
+        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID, model: model)
     }
 
     /// Whether a profile row should render the two-bar usage meter (instead of
@@ -182,12 +198,21 @@ struct WorktreeProfilePickerView: View {
             || ProfileUsagePresentation.weeklyAllBucket(entry.usageSnapshot) != nil
     }
 
-    /// Resolve the fixed-height subtitle for a profile row. Precedence:
+    /// Subtitle for a selectable Claude row: the two-bar meter when the
+    /// snapshot has buckets, otherwise the same text/skeleton precedence as
+    /// `profileSubtitle` (usage note → first-poll skeleton → reserved blank).
+    private func claudeRowSubtitle(for entry: ModelProfileWithUsage) -> ClaudeProfileRow.Subtitle {
+        if showsUsageBars(for: entry) { return .bars }
+        let line = ProfileUsagePresentation.menuLine(for: entry)
+        return .text(line.secondary, showsSkeleton: line.secondary == nil && entry.usageSnapshot == nil)
+    }
+
+    /// Resolve the fixed-height subtitle for a non-Claude-row profile
+    /// (selectable OAuth rows render via `ClaudeProfileRow` instead).
+    /// Precedence:
     ///  1. A real usage / login note from `menuLine` (`usageNote`) — shown as-is.
-    ///  2. Logged-in OAuth awaiting its first usage poll → skeleton (the ONE
-    ///     genuine "loading" state).
-    ///  3. Logged-out OAuth → a plain "not logged in" note (no skeleton).
-    ///  4. API-key / Bedrock → the profile's own static kind descriptor.
+    ///  2. Logged-out OAuth → a plain "not logged in" note (no skeleton).
+    ///  3. API-key / Bedrock → the profile's own static kind descriptor.
     private func profileSubtitle(
         for entry: ModelProfileWithUsage,
         usageNote: String?
@@ -197,10 +222,7 @@ struct WorktreeProfilePickerView: View {
         }
         switch entry.profile.kind {
         case .oauth:
-            if ProfileUsagePresentation.isSelectable(entry) {
-                // Logged in; skeleton only until the first snapshot lands.
-                return (nil, entry.usageSnapshot == nil)
-            }
+            // Selectable OAuth never reaches this path; only logged-out rows.
             return ("Not logged in — run /login", false)
         case .apiKey, .bedrock:
             // Static descriptor from ModelProfile — never a loading state.
@@ -212,51 +234,168 @@ struct WorktreeProfilePickerView: View {
     }
 }
 
-/// A profile row whose subtitle is the two-bar usage meter rather than a text
-/// line. Mirrors `ProfilePickerRow`'s chrome (icon, title, hover highlight,
-/// "default" chip) but hosts `UsageBarsView`, which sizes to its two bars — the
-/// fixed-single-line reservation only applies to the text rows.
-private struct UsageBarsProfileRow: View {
+/// A selectable Claude (OAuth) profile row. Mirrors `ProfilePickerRow`'s
+/// chrome (title, hover highlight); the subtitle is either the two-bar usage
+/// meter (`.bars`) or the same fixed-height text/skeleton line as the plain
+/// rows (`.text`) so the rail never depends on usage data. The leading slot
+/// is a vertical rail of per-spawn model buttons (Fable/Opus/Sonnet):
+/// clicking one picks this profile AND requests that model for the spawn;
+/// clicking anywhere else on the row keeps the profile's default model. The
+/// rail sits OUTSIDE the row's Button so its buttons don't fight the row's
+/// hit-testing.
+private struct ClaudeProfileRow: View {
+    enum Subtitle {
+        /// Two-bar usage meter drawn from the entry's snapshot.
+        case bars
+        /// Single text line; skeleton is reserved for the ONE genuine loading
+        /// case (logged-in OAuth awaiting its first poll). Nil text with no
+        /// skeleton reserves the line's height so the row doesn't shift.
+        case text(String?, showsSkeleton: Bool)
+    }
+
     let entry: ModelProfileWithUsage
     var highlighted: Bool = false
+    let subtitle: Subtitle
+    var onSelectModel: (String) -> Void = { _ in }
     let onSelect: () -> Void
 
     @State private var isHovered = false
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14)
+        HStack(spacing: 6) {
+            ModelRailView(onSelectModel: onSelectModel)
+            Button(action: onSelect) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(ProfileLoginPresentation.menuItemTitle(for: entry))
                         .font(.system(size: 12))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    UsageBarsView(snapshot: entry.usageSnapshot)
+                    subtitleView
                 }
-                Spacer(minLength: 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
-            )
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 10)
+        // Tighter than the plain rows' 10pt: the usage-bars table should run
+        // to within ~8pt of the popover's right edge (the old inner
+        // Spacer + shared 10pt inset left ~20pt of dead space there).
+        .padding(.trailing, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Let the row's natural content height (title + subtitle/bars) drive
+        // its size — the rail stretches to match, never the other way around,
+        // and the popover's minHeight can't balloon the row.
+        .fixedSize(horizontal: false, vertical: true)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .onHover { isHovered = $0 }
+    }
+
+    @ViewBuilder
+    private var subtitleView: some View {
+        switch subtitle {
+        case .bars:
+            UsageBarsView(snapshot: entry.usageSnapshot, resetStyle: usageResetTimeStyle)
+        case .text(let text, let showsSkeleton):
+            if let text, !text.isEmpty {
+                subtitleText(text)
+            } else if showsSkeleton {
+                subtitleText("resets 00:00 · week 00% used")
+                    .redacted(reason: .placeholder)
+            } else {
+                subtitleText(" ")
+                    .hidden()
+            }
+        }
+    }
+
+    /// Matches `ProfilePickerRow.subtitleText` so both Claude subtitle states
+    /// and the plain rows share font/size/line-limit.
+    private func subtitleText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+}
+
+/// The vertical rail of per-spawn model buttons on a Claude row.
+private struct ModelRailView: View {
+    let onSelectModel: (String) -> Void
+
+    /// Per-spawn model buttons: label + Claude Code model *alias*.
+    ///
+    /// Aliases, not pinned ids (`claude-opus-4-8`): the `claude` binary carries
+    /// the alias table (`opus` → latest opus, resolved per provider), so a CLI
+    /// auto-update picks up each new Opus/Sonnet/Fable with no TBD rebuild.
+    /// `ANTHROPIC_MODEL` — how the spawn delivers this (see
+    /// `ClaudeSpawnCommandBuilder`) — runs the same resolution as `--model`.
+    private static let models: [(label: String, id: String, help: String)] = [
+        ("Fable", "fable", "Spawn with the latest Claude Fable"),
+        ("Opus", "opus", "Spawn with the latest Claude Opus"),
+        ("Sonnet", "sonnet", "Spawn with the latest Claude Sonnet"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Self.models, id: \.id) { model in
+                ModelRailButton(title: model.label, help: model.help) {
+                    onSelectModel(model.id)
+                }
+            }
+        }
+        // Natural width (widest capsule), but stretch vertically to the row's
+        // full height so the three buttons divide it into equal-thirds hit
+        // areas.
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+/// One segment of the model rail, styled like a vertical segmented control:
+/// the visible surface fills its full third of the rail (full rail width x
+/// 1/3 of the row height, minus a 1pt inset between segments), with the
+/// label centered. Hover feedback covers the whole segment; the hit area
+/// includes the inset so the thirds stay contiguous.
+private struct ModelRailButton: View {
+    let title: String
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 9))
+                .foregroundStyle(isHovered ? Color.primary : Color.secondary)
+                .padding(.horizontal, 5)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(isHovered ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.06))
+                )
+                .padding(.vertical, 1)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+        .help(help)
     }
 }
 
 private struct ProfilePickerRow: View {
     let title: String
     let subtitle: String?
-    let systemImage: String
+    /// Leading icon; nil renders no icon view (profile rows). The
+    /// "Choose a branch…" navigation row keeps its branch icon.
+    var systemImage: String? = nil
     var highlighted: Bool = false
     /// When true, a subtitle line is always rendered at full height — real text
     /// when available, otherwise an invisible placeholder — so the row height
@@ -279,10 +418,12 @@ private struct ProfilePickerRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14)
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+                }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
                         .font(.system(size: 12))

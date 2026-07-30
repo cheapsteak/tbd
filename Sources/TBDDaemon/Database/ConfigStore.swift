@@ -29,9 +29,18 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
     var hibernate_input_veto_enabled: Bool?
+    var auto_close_setup_enabled: Bool?
+    /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
+    /// repos (TBD-created ones and the repo's own checkout), excluding
+    /// fork-PR-head checkouts. Default ON (see the
+    /// `v66_config_auto_trust_worktrees` migration).
+    var auto_trust_worktrees: Bool?
     var gc_enabled: Bool?
     var gc_grace_seconds: Int?
     var gc_snapshot_retention_days: Int?
+    var daemon_panel_surface_enabled: Bool?
+    var agent_panel_control_enabled: Bool?
+    var remote_backends_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -53,9 +62,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
             hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
+            autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
+            autoTrustWorktrees: auto_trust_worktrees ?? true,
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
-            gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays
+            gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
+            panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
+            agentPanelControlEnabled: agent_panel_control_enabled ?? false,
+            remoteBackendsEnabled: remote_backends_enabled ?? false
         )
     }
 }
@@ -263,11 +277,72 @@ public struct ConfigStore: Sendable {
         }
     }
 
+    /// Persist the auto-close-setup-tab opt-in (default OFF, soaking). Read
+    /// fresh at spawn time, so no daemon restart is required — applies to the
+    /// next worktree creation.
+    public func setAutoCloseSetup(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_close_setup_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the auto-trust opt-out for TBD-created worktrees (default ON).
+    /// Read fresh at every spawn/wake, so no daemon restart is required — the
+    /// next Claude spawn picks it up. Turning it OFF does not un-trust anything
+    /// already seeded; it only stops TBD from seeding new non-scratch paths.
+    /// Scratch spaces are seeded unconditionally and are not governed by this.
+    public func setAutoTrustWorktrees(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_trust_worktrees = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
     /// Persist the orphan-GC master switch (default ON).
     public func setGCEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the daemon panel-surface store master switch (spec C Phase 2
+    /// §8). Default OFF; the store stays inert until this flips on.
+    public func setPanelSurfaceEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET daemon_panel_surface_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the agent-originated panel-control gate. Default OFF and
+    /// independent of `daemon_panel_surface_enabled` — both must be true for
+    /// an agent to mutate panel layout.
+    public func setAgentPanelControlEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET agent_panel_control_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the remote-agent-backends master switch (spec 2026-07-24).
+    /// Default OFF: the feature polls provider executables in the background
+    /// and can stop remote sessions, so it is opt-in until it soaks.
+    public func setRemoteBackendsEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_backends_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

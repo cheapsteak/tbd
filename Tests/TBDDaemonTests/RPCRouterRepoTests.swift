@@ -283,4 +283,64 @@ extension RPCRouterTests {
         #expect(!response.success)
         #expect(response.error?.contains("Unknown method") == true)
     }
+
+    // MARK: - repo.listOpenPRs in-use filter
+
+    private func openPR(_ number: Int, head: String, fork: Bool = false) -> OpenPRInfo {
+        OpenPRInfo(number: number, title: "PR \(number)", headRefName: head,
+                   headOwner: "acme", isCrossRepository: fork, isDraft: false)
+    }
+
+    @Test("filterOpenPRsNotInUse drops a PR whose number is stamped on a worktree even when branch names differ")
+    func filterOpenPRsDropsByStoredNumber() {
+        // The PR head was fetched under a uniquified local branch ("feature-2"),
+        // so its head name ("feature") is NOT in the in-use branch set, but the
+        // worktree row carries PR #42 — the number filter must still drop it.
+        let prs = [openPR(42, head: "feature"), openPR(43, head: "other")]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["feature-2"], inUsePRNumbers: [42])
+        #expect(filtered.map(\.number) == [43])
+    }
+
+    @Test("filterOpenPRsNotInUse still drops a PR by matching head branch name")
+    func filterOpenPRsDropsByBranchName() {
+        let prs = [openPR(42, head: "feature"), openPR(43, head: "other")]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["feature"], inUsePRNumbers: [])
+        #expect(filtered.map(\.number) == [43])
+    }
+
+    @Test("filterOpenPRsNotInUse keeps PRs that are neither checked out nor stamped")
+    func filterOpenPRsKeepsFree() {
+        let prs = [openPR(42, head: "feature"), openPR(43, head: "other")]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["unrelated"], inUsePRNumbers: [99])
+        #expect(filtered.map(\.number) == [42, 43])
+    }
+
+    @Test("filterOpenPRsNotInUse keeps a fork PR whose head name coincidentally matches an in-use branch")
+    func filterOpenPRsKeepsForkWithMatchingBranchName() {
+        // Fork PR head lives in the contributor's namespace, not origin's — a
+        // same-named checked-out branch is a coincidence, not the same ref.
+        let prs = [openPR(42, head: "main", fork: true)]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["main"], inUsePRNumbers: [])
+        #expect(filtered.map(\.number) == [42])
+    }
+
+    @Test("filterOpenPRsNotInUse still drops a fork PR by stored PR number")
+    func filterOpenPRsDropsForkByStoredNumber() {
+        let prs = [openPR(42, head: "main", fork: true)]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["main"], inUsePRNumbers: [42])
+        #expect(filtered.map(\.number) == [])
+    }
+
+    @Test("filterOpenPRsNotInUse still drops a same-repo PR by matching head branch name")
+    func filterOpenPRsDropsSameRepoByBranchName() {
+        let prs = [openPR(42, head: "feature", fork: false)]
+        let filtered = RPCRouter.filterOpenPRsNotInUse(
+            prs, inUseBranches: ["feature"], inUsePRNumbers: [])
+        #expect(filtered.map(\.number) == [])
+    }
 }

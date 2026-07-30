@@ -18,8 +18,9 @@ struct SplitLayoutView: View {
                 tabID: tabID,
                 layout: $layout
             )
-        case .split(let direction, let children, let ratios):
+        case .split(let id, let direction, let children, let ratios):
             SplitContainer(
+                splitID: id,
                 direction: direction,
                 children: children,
                 ratios: ratios,
@@ -36,6 +37,7 @@ struct SplitLayoutView: View {
 /// Divides space according to ratios using GeometryReader.
 /// Renders each child recursively with a 4px draggable divider between them.
 struct SplitContainer: View {
+    let splitID: UUID
     let direction: SplitDirection
     let children: [LayoutNode]
     let ratios: [CGFloat]
@@ -81,7 +83,7 @@ struct SplitContainer: View {
 
         if isHorizontal {
             HStack(spacing: 0) {
-                ForEach(Array(children.enumerated()), id: \.offset) { index, child in
+                ForEach(Array(children.enumerated()), id: \.element.nodeID) { index, child in
                     SplitLayoutView(
                         node: child,
                         worktree: worktree,
@@ -104,7 +106,7 @@ struct SplitContainer: View {
             }
         } else {
             VStack(spacing: 0) {
-                ForEach(Array(children.enumerated()), id: \.offset) { index, child in
+                ForEach(Array(children.enumerated()), id: \.element.nodeID) { index, child in
                     SplitLayoutView(
                         node: child,
                         worktree: worktree,
@@ -128,29 +130,10 @@ struct SplitContainer: View {
         }
     }
 
-    /// Write back current ratios into the layout binding.
+    /// Write back current ratios into the layout binding, targeting this
+    /// split by its stable ID (never by child-array equality).
     private func commitRatios() {
-        layout = updateRatios(in: layout, for: children, newRatios: currentRatios)
-    }
-
-    /// Recursively find the matching split node and update its ratios.
-    private func updateRatios(
-        in node: LayoutNode,
-        for targetChildren: [LayoutNode],
-        newRatios: [CGFloat]
-    ) -> LayoutNode {
-        switch node {
-        case .pane:
-            return node
-        case .split(let dir, let nodeChildren, let nodeRatios):
-            if nodeChildren == targetChildren {
-                return .split(direction: dir, children: nodeChildren, ratios: newRatios)
-            }
-            let updatedChildren = nodeChildren.map { child in
-                updateRatios(in: child, for: targetChildren, newRatios: newRatios)
-            }
-            return .split(direction: dir, children: updatedChildren, ratios: nodeRatios)
-        }
+        layout = layout.updatingRatios(forSplitID: splitID, to: currentRatios)
     }
 }
 

@@ -223,7 +223,7 @@ ZStack {
 
 ### Option C — Replace `ZStack` with `TabView`
 
-If Options A/B both miss subtle event paths (e.g., key event routing), use the OS-blessed mechanism. Wrap `NSTabViewController` directly to fully suppress the tab strip:
+If Options A/B both miss subtle event paths (e.g., key event routing), use the OS-sanctioned mechanism. Wrap `NSTabViewController` directly to fully suppress the tab strip:
 
 ```swift
 struct InvisibleTabContainer<Content: View>: NSViewControllerRepresentable {

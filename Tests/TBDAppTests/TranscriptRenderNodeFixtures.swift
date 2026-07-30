@@ -28,11 +28,13 @@ extension TranscriptRenderNode {
     }
 
     static func makeSystemReminder(
-        id: String, kind: SystemKind, text: String, timestamp: Date? = nil
+        id: String, kind: SystemKind, text: String, timestamp: Date? = nil,
+        source: String? = nil, truncatedTo: Int? = nil
     ) -> TranscriptRenderNode {
         TranscriptRenderNode(
             id: id,
-            kind: .systemReminder(id: id, kind: kind, text: text, timestamp: timestamp),
+            kind: .systemReminder(id: id, kind: kind, text: text, timestamp: timestamp,
+                                  source: source, truncatedTo: truncatedTo),
             badgeUsage: nil
         )
     }

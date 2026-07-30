@@ -109,12 +109,49 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
+    /// so it applies to the next worktree creation immediately — already-open
+    /// setup tabs are unaffected.
+    func handleConfigSetAutoCloseSetup(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoCloseSetupParams.self, from: paramsData)
+        try await db.config.setAutoCloseSetup(enabled: params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the worktree auto-trust switch (default ON). Every Claude spawn
+    /// and wake re-reads it, so this applies to the next one immediately.
+    /// Turning it off never un-trusts a path that was already seeded — it only
+    /// stops TBD from seeding new non-scratch worktrees.
+    func handleConfigSetAutoTrustWorktrees(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoTrustWorktreesParams.self, from: paramsData)
+        try await db.config.setAutoTrustWorktrees(enabled: params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphan-GC master switch. Turning it off does not cancel or
     /// undo any in-progress sweep — `OrphanGC.sweep` re-reads the flag itself
     /// on its next pass — this just flips the persisted gate.
     func handleConfigSetGCEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetGCEnabledParams.self, from: paramsData)
         try await db.config.setGCEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the remote-backends master switch. Takes effect for polling
+    /// on the NEXT daemon start — the manager is constructed at boot only
+    /// when the flag was already on (see `Daemon.swift`), so flipping this
+    /// on alone does not start polling until a restart. `remote.*` RPC
+    /// verbs re-check the flag on every call, so disabling it cuts off
+    /// access immediately even without a restart.
+    func handleConfigSetRemoteBackends(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetRemoteBackendsParams.self, from: paramsData)
+        try await db.config.setRemoteBackendsEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

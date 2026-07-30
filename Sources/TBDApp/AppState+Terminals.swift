@@ -58,13 +58,11 @@ extension AppState {
     }
 
     /// Terminal ID at the root of the active tab's content (nil for
-    /// note/file tabs or when no tabs exist). Mirrors the view layer's
-    /// `?? 0` default for an unset active index.
+    /// note/file tabs or when no tabs exist). Shares the view layer's
+    /// active-tab resolution via `resolvedActiveTab`.
     private func activeTabTerminalID(worktreeID: UUID) -> UUID? {
-        let arr = tabs[worktreeID] ?? []
-        guard !arr.isEmpty else { return nil }
-        let idx = min(activeTabIndices[worktreeID] ?? 0, arr.count - 1)
-        guard case .terminal(let id) = arr[idx].content else { return nil }
+        guard let tab = resolvedActiveTab(worktreeID: worktreeID),
+              case .terminal(let id) = tab.content else { return nil }
         return id
     }
 
@@ -244,23 +242,6 @@ extension AppState {
         } catch {
             logger.error("Failed to create terminal: \(error)")
             handleConnectionError(error)
-        }
-    }
-
-    /// Create a terminal via the daemon without adding a tab.
-    /// Used when splitting an existing tab — the terminal lives inside
-    /// the parent tab's layout tree, not as its own tab.
-    func createTerminalForSplit(worktreeID: UUID) async -> Terminal? {
-        do {
-            let size = mainAreaTerminalSize()
-            let colorFgBg = appearance?.currentColorFgBg
-            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
-            terminals[worktreeID, default: []].append(terminal)
-            return terminal
-        } catch {
-            logger.error("Failed to create terminal for split: \(error)")
-            handleConnectionError(error)
-            return nil
         }
     }
 

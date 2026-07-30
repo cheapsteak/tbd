@@ -64,6 +64,7 @@ public struct ProcessDaywatchExecutor: DaywatchExecuting {
             // Set up a 5-minute deadline. The timeout Task's check-and-set is also protected
             // by the lock, so only one of {termination, timeout} will successfully resume.
             Task {
+                // swiftlint:disable:next no_raw_task_sleep - see issue #529: not migrated because this deadline Task is armed AFTER `process.run()`, the same ordering `BoundedProcessRunner` documents as a measured flake (a real fork/exec sits in front of a TestClock sleeper's registration, so a fast child can finish before the sleeper is registered), and fixing the ordering needs a kill-on-arrival branch that is untested-by-construction — see issue #529 for the analysis plus two further defects at this site, and docs/specs/2026-07-24-test-hardening-design.md
                 try await Task.sleep(for: .seconds(5 * 60))
                 state.lock.withLock { s in
                     if !s.finished {
@@ -103,6 +104,7 @@ public actor DaywatchRunner {
     private let executor: DaywatchExecuting
     private let deskSessionManager: (any DeskSessionManaging)?
     private let interval: TimeInterval
+    private let clock: any Clock<Duration>
 
     // MARK: - State
 
@@ -141,11 +143,13 @@ public actor DaywatchRunner {
     public init(
         executor: DaywatchExecuting,
         deskSessionManager: (any DeskSessionManaging)? = nil,
-        interval: TimeInterval = DaywatchRunner.defaultInterval
+        interval: TimeInterval = DaywatchRunner.defaultInterval,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.executor = executor
         self.deskSessionManager = deskSessionManager
         self.interval = interval
+        self.clock = clock
     }
 
     // MARK: - Public API
@@ -273,12 +277,15 @@ public actor DaywatchRunner {
         // Then sleep and loop
         while !Task.isCancelled {
             do {
-                try await Task.sleep(for: .seconds(interval))
+                try await clock.sleep(for: .seconds(interval))
             } catch {
-                // Cancelled during sleep
+                // Any error from the clock ends the loop; for the clocks in use
+                // (ContinuousClock, TestClock) the only throw is cancellation.
                 return
             }
 
+            // A sleep that resumed *before* cancellation landed must not fall
+            // through to a tick — this re-check is what stops it.
             if Task.isCancelled { return }
 
             await runOnce()

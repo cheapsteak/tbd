@@ -201,6 +201,13 @@ enum TranscriptParser {
     /// tool_use_id→result index) into `[TranscriptItem]`. Both the full `parse`
     /// and the tail `parseTail` call this, guaranteeing the tail's items are
     /// byte-identical to the bottom of the full parse for the same lines.
+    ///
+    /// That guarantee holds only while this stays a pure function of the lines
+    /// it is handed: every item must be derivable from its own row. Do not add
+    /// cross-row state (a "have I already emitted this text?" set, say) — the
+    /// tail path passes only the lines inside its byte window, so any such
+    /// state starts empty there and the tail would emit rows the full parse
+    /// suppresses.
     private static func buildItems(
         rawLines: [[String: Any]],
         stableIDs: [String],
@@ -216,6 +223,25 @@ enum TranscriptParser {
             let lineUUID = stableIDs[i]
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
             let typeStr = json["type"] as? String
+
+            // Hook- and CLAUDE.md-injected context arrives as `type:"attachment"`
+            // rows, which carry no `message` and so match none of the branches
+            // below. Always `continue` — an attachment never falls through.
+            if typeStr == "attachment" {
+                let payloads = attachmentPayloads(from: json)
+                for (index, payload) in payloads.enumerated() {
+                    let (truncated, originalCount) = truncate(payload.text)
+                    items.append(.systemReminder(
+                        id: payloads.count > 1 ? "\(lineUUID)#\(index)" : lineUUID,
+                        kind: payload.kind,
+                        text: truncated,
+                        timestamp: timestamp,
+                        source: payload.source,
+                        truncatedTo: originalCount == truncated.count ? nil : originalCount
+                    ))
+                }
+                continue
+            }
 
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
                 let text = extractUserText(from: json) ?? ""
@@ -326,6 +352,208 @@ enum TranscriptParser {
         )
     }
 
+    // MARK: - attachments
+
+    /// One renderable payload extracted from a `type: "attachment"` JSONL row.
+    struct AttachmentPayload: Equatable {
+        let kind: SystemKind
+        /// Where the context came from: a CLAUDE.md display path, a hook name.
+        let source: String
+        let text: String
+    }
+
+    /// Extracts every injected-context payload from one JSONL row, in emission
+    /// order. Returns `[]` for non-attachment rows and for flavors that carry
+    /// no injected *prose* context: `*_delta`, `command_permissions`,
+    /// `queued_command`, `diagnostics`, and `edited_text_file` have no
+    /// `content` field at all, while `task_reminder`'s `content` is a
+    /// structured array of todo objects, not renderable text.
+    ///
+    /// `attachment.content` has a DIFFERENT native JSON type per flavor —
+    /// object for `nested_memory`, array for `hook_additional_context`, string
+    /// for the rest — so a single `as? String` silently drops the two largest
+    /// sources of injected context.
+    ///
+    /// Shared by `buildItems` and `lookupFullBody` so the collapsed row and the
+    /// click-to-open overlay can never disagree about what a row contains.
+    ///
+    /// Extraction is per-row and stateless — no cross-row dedup — which is what
+    /// keeps `buildItems` a pure function of the lines it is handed and
+    /// preserves `parseTail`'s identical-bottom guarantee.
+    static func attachmentPayloads(from json: [String: Any]) -> [AttachmentPayload] {
+        guard json["type"] as? String == "attachment",
+              let att = json["attachment"] as? [String: Any],
+              let rawType = att["type"] as? String else {
+            return []
+        }
+
+        func hookName() -> String { (att["hookName"] as? String) ?? "hook" }
+
+        switch rawType {
+        case "nested_memory":
+            // `content` is an object `{path, type, content}`; the CLAUDE.md
+            // body is one level deeper.
+            guard let inner = att["content"] as? [String: Any],
+                  let body = inner["content"] as? String, !body.isEmpty else { return [] }
+            let source = injectedPathSource(
+                displayPath: att["displayPath"] as? String,
+                absolutePath: (att["path"] as? String) ?? (inner["path"] as? String),
+                filename: nil
+            ) ?? "CLAUDE.md"
+            return [AttachmentPayload(kind: .nestedMemory, source: source, text: body)]
+
+        case "file":
+            // An @-mentioned file's body, injected verbatim into the context
+            // window. Same shape as `nested_memory` — `content` is an object,
+            // the body one level deeper at `content.file.content` — and the
+            // same *thing*: a file's text pasted into the prompt. Reusing
+            // `.nestedMemory` (not `.hookOutput`, which would badge a file
+            // body as hook stdout) rather than adding a case; the badge is now
+            // "file" for both, and the source segment carries the actual path,
+            // which is what distinguished a CLAUDE.md row anyway.
+            guard let inner = att["content"] as? [String: Any],
+                  let file = inner["file"] as? [String: Any],
+                  let body = file["content"] as? String, !body.isEmpty else { return [] }
+            let source = injectedPathSource(
+                displayPath: att["displayPath"] as? String,
+                absolutePath: file["filePath"] as? String,
+                filename: att["filename"] as? String
+            ) ?? "file"
+            return [AttachmentPayload(kind: .nestedMemory, source: source, text: body)]
+
+        case "hook_additional_context":
+            // `content` is an array of strings — one entry per injected block.
+            let strings = (att["content"] as? [Any])?.compactMap { $0 as? String } ?? []
+            return strings.filter { !$0.isEmpty }.map {
+                AttachmentPayload(kind: .hookOutput, source: hookName(), text: $0)
+            }
+
+        case "hook_success":
+            // ONLY the plain-text `content` branch. `stdout`'s
+            // `hookSpecificOutput.additionalContext` is deliberately NOT read:
+            // measured across 120+ real sessions, every such payload is also
+            // present in a `hook_additional_context` row — either verbatim (130
+            // cases) or as the `<persisted-output>` notice that REPLACED an
+            // oversized payload (all 11 apparent orphans). `hook_additional_context`
+            // is what actually entered the context window; a hook's stdout is
+            // merely what it emitted. Rendering only the former is therefore
+            // both non-redundant and more truthful — and, because the rule is
+            // per-row rather than a cross-row dedup set, it keeps `buildItems`
+            // a pure function of its window (see `parseTail`'s identical-bottom
+            // guarantee). `content` itself is never mirrored in hac (221/221
+            // unique) so it stays.
+            guard let s = att["content"] as? String, !s.isEmpty else { return [] }
+            return [AttachmentPayload(kind: .hookOutput, source: hookName(), text: s)]
+
+        case "skill_listing":
+            guard let s = att["content"] as? String, !s.isEmpty else { return [] }
+            return [AttachmentPayload(kind: .hookOutput, source: "skills", text: s)]
+
+        default:
+            return []
+        }
+    }
+
+    /// The path to show for an injected file body, in preference order:
+    ///
+    /// 1. A `displayPath` that stays inside the repo (`.github/CLAUDE.md`) —
+    ///    already the nicest form, and what the row has always rendered.
+    /// 2. The absolute path with `$HOME` collapsed to `~`, when `displayPath`
+    ///    is missing or *escapes* the repo. Claude Code writes escaping paths
+    ///    relative to the cwd, so a file in `/private/tmp` arrives as
+    ///    `../../../../../../private/tmp/…`, which truncates to nothing useful.
+    /// 3. The `filename`, or the display path's last component.
+    ///
+    /// Never returns a `../` prefix. The daemon runs as the same user as the
+    /// app, so `NSHomeDirectory()` abbreviates identically on either side.
+    ///
+    /// The abbreviation goes through `abbreviatingWithTildeInPath`, which only
+    /// matches on path-component boundaries. A substring replace would turn
+    /// `/Users/changelog-archive/x` into `~elog-archive/x` and
+    /// `/Volumes/T7/Users/me/x` into `/Volumes/T7~/x`.
+    static func injectedPathSource(
+        displayPath: String?, absolutePath: String?, filename: String?
+    ) -> String? {
+        if let displayPath, !displayPath.isEmpty, !displayPath.hasPrefix("../") { return displayPath }
+        if let absolutePath, !absolutePath.isEmpty {
+            return (absolutePath as NSString).abbreviatingWithTildeInPath
+        }
+        if let filename, !filename.isEmpty { return filename }
+        if let displayPath, !displayPath.isEmpty { return (displayPath as NSString).lastPathComponent }
+        return nil
+    }
+
+    /// The injection mechanism behind one attachment row: which hook ran, with
+    /// what command and exit status, or which memory tier / file path was
+    /// loaded — plus the tool call that triggered it, resolved through
+    /// `attachment.toolUseID`.
+    ///
+    /// Deliberately NOT carried on `TranscriptItem`: it is only ever read when
+    /// a row is opened, so it rides the `terminal.transcriptItemFullBody`
+    /// round-trip the overlay already makes instead of costing a switch site
+    /// per associated value.
+    ///
+    /// `toolSummaries` maps `tool_use.id` → its short summary. Attribution is
+    /// resolved strictly through that map: `nil` when the row carries no
+    /// `toolUseID` (every `nested_memory` / `file` row) or when the id names a
+    /// `tool_use` the scan never saw. Position and proximity are never used —
+    /// no field links a CLAUDE.md load to the Read that touched its directory,
+    /// and guessing one would look authoritative while being wrong.
+    static func attachmentMetadata(
+        from json: [String: Any], toolSummaries: [String: String]
+    ) -> TranscriptAttachmentMetadata? {
+        guard json["type"] as? String == "attachment",
+              let att = json["attachment"] as? [String: Any],
+              let rawType = att["type"] as? String else {
+            return nil
+        }
+
+        func text(_ key: String) -> String? {
+            guard let s = att[key] as? String,
+                  !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return s
+        }
+
+        let inner = att["content"] as? [String: Any]
+        let file = inner?["file"] as? [String: Any]
+        let metadata = TranscriptAttachmentMetadata(
+            hookName: text("hookName"),
+            hookEvent: text("hookEvent"),
+            command: text("command"),
+            exitCode: att["exitCode"] as? Int,
+            durationMs: att["durationMs"] as? Int,
+            stderr: text("stderr"),
+            // Only meaningful for a memory row ("Project", "User", …); a
+            // `file` row's inner type is just "text".
+            memoryType: rawType == "nested_memory" ? inner?["type"] as? String : nil,
+            path: (att["path"] as? String) ?? (inner?["path"] as? String) ?? (file?["filePath"] as? String),
+            triggeredBy: (att["toolUseID"] as? String).flatMap { toolSummaries[$0] }
+        )
+        return metadata.isEmpty ? nil : metadata
+    }
+
+    /// `"Read ai-review-gate.yml"` — a tool call named by the scrap of input
+    /// that identifies it. Intentionally a small local summarizer: the richer
+    /// app-side one lives in `ActivityRowFormatter` (module `TBDApp`) and is
+    /// not reachable from the daemon.
+    static func toolInputSummary(name: String, input: [String: Any]) -> String {
+        func short(_ s: String, limit: Int = 40) -> String {
+            let oneLine = s.replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            return oneLine.count > limit ? "\(oneLine.prefix(limit))…" : oneLine
+        }
+        let detail: String? = {
+            if let p = input["file_path"] as? String, !p.isEmpty { return (p as NSString).lastPathComponent }
+            if let d = input["description"] as? String, !d.isEmpty { return short(d) }
+            if let c = input["command"] as? String, !c.isEmpty { return short(c) }
+            if let p = input["pattern"] as? String, !p.isEmpty { return short(p) }
+            if let p = input["path"] as? String, !p.isEmpty { return (p as NSString).lastPathComponent }
+            return nil
+        }()
+        guard let detail, !detail.isEmpty else { return name }
+        return name.isEmpty ? detail : "\(name) \(detail)"
+    }
+
     // MARK: - helpers
 
     static let bodyCharCap = 2000
@@ -409,12 +637,27 @@ enum TranscriptParser {
     /// itemID forms:
     ///  - `tool_use_id` (e.g. "toolu_abc") → returns the matching tool_result content
     ///  - `<tool_use_id>#input` → returns the un-truncated `tool_use.input` JSON
-    ///  - `<lineUUID>#<blockIndex>` → returns the assistant block's text/thinking
-    ///  - bare `lineUUID` → returns the user message content
+    ///  - `<lineUUID>#<blockIndex>` → returns the assistant block's text/thinking,
+    ///    or the Nth injected payload of a multi-payload attachment row
+    ///  - bare `lineUUID` → returns the user message content, or the sole
+    ///    injected payload of an attachment row
     static func lookupFullBody(filePath: String, itemID: String) -> String? {
+        lookupDetail(filePath: filePath, itemID: itemID).text
+    }
+
+    /// What one opened row can recover from the JSONL: its un-truncated body
+    /// plus, for `attachment` rows, how the context got injected.
+    struct ItemDetail {
+        let text: String?
+        let attachment: TranscriptAttachmentMetadata?
+    }
+
+    /// `lookupFullBody` plus the injection metadata. Same single pass, same id
+    /// forms — see `lookupFullBody` for the id grammar.
+    static func lookupDetail(filePath: String, itemID: String) -> ItemDetail {
         guard let data = FileManager.default.contents(atPath: filePath),
               let content = String(data: data, encoding: .utf8) else {
-            return nil
+            return ItemDetail(text: nil, attachment: nil)
         }
 
         // Detect the `#input` suffix variant first — when present, we ONLY scan
@@ -438,6 +681,12 @@ enum TranscriptParser {
             blockIndex = nil
         }
 
+        // `tool_use.id` → short summary, for resolving an attachment row's
+        // `toolUseID`. Accumulated as the scan walks down: a hook fires after
+        // the assistant emitted the tool call, so the triggering `tool_use`
+        // line is always already behind us when its attachment row appears.
+        var toolSummaries: [String: String] = [:]
+
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
@@ -453,7 +702,7 @@ enum TranscriptParser {
                             let input = block["input"] ?? [:]
                             if let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]),
                                let s = String(data: data, encoding: .utf8) {
-                                return s
+                                return ItemDetail(text: s, attachment: nil)
                             }
                         }
                     }
@@ -461,38 +710,73 @@ enum TranscriptParser {
                 continue
             }
 
-            // tool_use_id match — search tool_result blocks within user lines.
             if let message = json["message"] as? [String: Any],
                let array = message["content"] as? [[String: Any]] {
-                for block in array where block["type"] as? String == "tool_result" {
-                    if (block["tool_use_id"] as? String) == itemID {
-                        if let s = block["content"] as? String { return s }
-                        if let inner = block["content"] as? [[String: Any]] {
-                            return inner.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                for block in array {
+                    switch block["type"] as? String {
+                    case "tool_use":
+                        guard let id = block["id"] as? String else { continue }
+                        toolSummaries[id] = toolInputSummary(
+                            name: (block["name"] as? String) ?? "",
+                            input: (block["input"] as? [String: Any]) ?? [:])
+                    case "tool_result":
+                        // tool_use_id match — the un-truncated result content.
+                        guard (block["tool_use_id"] as? String) == itemID else { continue }
+                        if let s = block["content"] as? String {
+                            return ItemDetail(text: s, attachment: nil)
                         }
+                        if let inner = block["content"] as? [[String: Any]] {
+                            return ItemDetail(
+                                text: inner.compactMap { $0["text"] as? String }.joined(separator: "\n"),
+                                attachment: nil)
+                        }
+                    default:
+                        continue
                     }
                 }
             }
 
             // line UUID match.
             if (json["uuid"] as? String) == lineUUID {
+                // Attachment rows carry no `message`, so the branches below
+                // can never recover their (truncated) body. Re-run the same
+                // extraction `buildItems` used and return it whole, alongside
+                // the injection metadata the overlay renders.
+                let payloads = attachmentPayloads(from: json)
+                if !payloads.isEmpty {
+                    let meta = attachmentMetadata(from: json, toolSummaries: toolSummaries)
+                    if payloads.count > 1 {
+                        guard let blockIndex, blockIndex < payloads.count else {
+                            return ItemDetail(text: nil, attachment: meta)
+                        }
+                        return ItemDetail(text: payloads[blockIndex].text, attachment: meta)
+                    }
+                    return ItemDetail(text: payloads[0].text, attachment: meta)
+                }
+
                 if let blockIndex,
                    let message = json["message"] as? [String: Any],
                    let blocks = message["content"] as? [[String: Any]],
                    blockIndex < blocks.count {
                     let block = blocks[blockIndex]
-                    return (block["text"] as? String) ?? (block["thinking"] as? String)
+                    return ItemDetail(
+                        text: (block["text"] as? String) ?? (block["thinking"] as? String),
+                        attachment: nil)
                 }
                 if let message = json["message"] as? [String: Any] {
-                    if let s = message["content"] as? String { return s }
+                    if let s = message["content"] as? String {
+                        return ItemDetail(text: s, attachment: nil)
+                    }
                     if let array = message["content"] as? [[String: Any]] {
-                        return array.first(where: { $0["type"] as? String == "text" })
-                            .flatMap { $0["text"] as? String }
+                        return ItemDetail(
+                            text: array.first(where: { $0["type"] as? String == "text" })
+                                .flatMap { $0["text"] as? String },
+                            attachment: nil)
                     }
                 }
             }
         }
-        return nil
+        return ItemDetail(text: nil, attachment: nil)
     }
 
     /// Parse `<command-name>foo</command-name><command-args>bar</command-args>` envelopes.

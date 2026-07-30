@@ -65,11 +65,14 @@ struct TranscriptRenderNodeEquatableTests {
     private func makeSystemReminderNode(
         id: String = "sys-1",
         kind: SystemKind = .other,
-        text: String = "reminder"
+        text: String = "reminder",
+        source: String? = nil,
+        truncatedTo: Int? = nil
     ) -> TranscriptRenderNode {
         TranscriptRenderNode(
             id: id,
-            kind: .systemReminder(id: id, kind: kind, text: text, timestamp: nil),
+            kind: .systemReminder(id: id, kind: kind, text: text, timestamp: nil,
+                                  source: source, truncatedTo: truncatedTo),
             badgeUsage: nil
         )
     }
@@ -217,6 +220,21 @@ struct TranscriptRenderNodeEquatableTests {
         #expect(a != b)
     }
 
+    // systemReminder: source / truncatedTo feed contentVersion. Two rows can
+    // hold the SAME truncated prefix while coming from different files or
+    // different original sizes — the row must still re-render.
+    @Test func systemReminder_sourceChanges_isNotEqual() {
+        let a = makeSystemReminderNode(id: "s1", kind: .nestedMemory, text: "# rules", source: "CLAUDE.md")
+        let b = makeSystemReminderNode(id: "s1", kind: .nestedMemory, text: "# rules", source: ".github/CLAUDE.md")
+        #expect(a != b)
+    }
+
+    @Test func systemReminder_truncatedToChanges_isNotEqual() {
+        let a = makeSystemReminderNode(id: "s1", text: "# rules", source: "CLAUDE.md", truncatedTo: 5000)
+        let b = makeSystemReminderNode(id: "s1", text: "# rules", source: "CLAUDE.md", truncatedTo: 9000)
+        #expect(a != b)
+    }
+
     // skillBody: text changes
     @Test func skillBody_textChanges_isNotEqual() {
         let a = makeSkillBodyNode(id: "k1", text: "version A")
@@ -281,6 +299,10 @@ struct TranscriptRenderNodeEquatableTests {
         #expect(base != TranscriptRenderNode.Kind.systemReminder(id: "s1", kind: .skillBody, text: "msg", timestamp: ts))
         #expect(base != TranscriptRenderNode.Kind.systemReminder(id: "s1", kind: .other, text: "other", timestamp: ts))
         #expect(base != TranscriptRenderNode.Kind.systemReminder(id: "s1", kind: .other, text: "msg", timestamp: nil))
+        #expect(base != TranscriptRenderNode.Kind.systemReminder(
+            id: "s1", kind: .other, text: "msg", timestamp: ts, source: "CLAUDE.md"))
+        #expect(base != TranscriptRenderNode.Kind.systemReminder(
+            id: "s1", kind: .other, text: "msg", timestamp: ts, truncatedTo: 9000))
     }
 
     // skillBody: all three associated values contribute

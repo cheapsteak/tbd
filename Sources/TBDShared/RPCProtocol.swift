@@ -88,6 +88,10 @@ public enum RPCErrorCode: String, Sendable {
     /// refused. The app offers a default-account fallback retry
     /// (`TerminalWakeParams.fallbackToDefaultProfile`).
     case profileMissing
+    /// A `terminal.delete` with `respectActivityRails` was refused because the
+    /// terminal is mid-turn or holding a permission prompt AND its window is
+    /// still alive. The CLI maps this to exit 2; `--force` drops the rails.
+    case terminalBusy
 }
 
 // MARK: - RPC Method Names
@@ -101,6 +105,7 @@ public enum RPCMethod {
     public static let worktreeArchive = "worktree.archive"
     public static let worktreeRerunPreSession = "worktree.rerunPreSession"
     public static let worktreeRevive = "worktree.revive"
+    public static let worktreeReviveConversationFresh = "worktree.reviveConversationFresh"
     public static let worktreeAdopt = "worktree.adopt"
     public static let worktreeRename = "worktree.rename"
     public static let worktreeReorder = "worktree.reorder"
@@ -139,6 +144,8 @@ public enum RPCMethod {
     public static let noteUpdate = "note.update"
     public static let noteDelete = "note.delete"
     public static let noteList = "note.list"
+    public static let terminalHistoryList = "terminalHistory.list"
+    public static let terminalHistoryRevive = "terminalHistory.revive"
     public static let terminalOutput = "terminal.output"
     public static let terminalConversation = "terminal.conversation"
     public static let terminalTranscript = "terminal.transcript"
@@ -153,6 +160,7 @@ public enum RPCMethod {
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
     public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
+    public static let modelProfileReorder = "modelProfile.reorder"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileUsageRefresh = "modelProfile.usageRefresh"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
@@ -178,11 +186,14 @@ public enum RPCMethod {
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
     public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
     public static let repoListBranches = "repo.listBranches"
+    public static let repoListOpenPRs = "repo.listOpenPRs"
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let worktreeSetAutoHibernate = "worktree.setAutoHibernate"
+    public static let worktreeSetPin = "worktree.setPin"
+    public static let worktreeReorderPins = "worktree.reorderPins"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
     public static let configSetAutoHibernateOnMergeDefault = "config.setAutoHibernateOnMergeDefault"
@@ -201,14 +212,29 @@ public enum RPCMethod {
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
-    public static let nightwatchReport = "nightwatch.report"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
+    public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
+    public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
     public static let gcList = "gc.list"
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
+    public static let remoteProviders = "remote.providers"
+    public static let remoteSessions = "remote.sessions"
+    public static let remoteCreate = "remote.create"
+    public static let remoteStop = "remote.stop"
+    public static let remoteSend = "remote.send"
+    public static let remoteLog = "remote.log"
+    public static let remoteRename = "remote.rename"
+    public static let remoteDismiss = "remote.dismiss"
+    public static let remoteSetPin = "remote.setPin"
+    public static let remoteReportAttachExit = "remote.reportAttachExit"
+    public static let configSetRemoteBackends = "config.setRemoteBackends"
+    public static let panelGet = "panel.get"
+    public static let panelApply = "panel.apply"
+    public static let panelImportLegacy = "panel.importLegacy"
 }
 
 // MARK: - Branch Listing
@@ -236,6 +262,39 @@ public struct RepoListBranchesParams: Codable, Sendable {
 public struct RepoListBranchesResult: Codable, Sendable {
     public let branches: [BranchInfo]
     public init(branches: [BranchInfo]) { self.branches = branches }
+}
+
+// MARK: - Open PR Listing
+
+/// One open PR on a repo, for the `repo.listOpenPRs` RPC (branch picker).
+public struct OpenPRInfo: Codable, Sendable, Equatable, Identifiable {
+    public let number: Int
+    public let title: String
+    public let headRefName: String
+    public let headOwner: String        // headRepositoryOwner.login; "" if absent
+    public let isCrossRepository: Bool
+    public let isDraft: Bool
+    public var id: Int { number }
+
+    public init(number: Int, title: String, headRefName: String, headOwner: String,
+                isCrossRepository: Bool, isDraft: Bool) {
+        self.number = number
+        self.title = title
+        self.headRefName = headRefName
+        self.headOwner = headOwner
+        self.isCrossRepository = isCrossRepository
+        self.isDraft = isDraft
+    }
+}
+
+public struct RepoListOpenPRsParams: Codable, Sendable {
+    public let repoID: UUID
+    public init(repoID: UUID) { self.repoID = repoID }
+}
+
+public struct RepoListOpenPRsResult: Codable, Sendable {
+    public let prs: [OpenPRInfo]
+    public init(prs: [OpenPRInfo]) { self.prs = prs }
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -305,16 +364,6 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
 public struct NightwatchSetModeParams: Codable, Sendable {
     public let mode: NightwatchMode
     public init(mode: NightwatchMode) { self.mode = mode }
-}
-
-public struct NightwatchReportParams: Codable, Sendable {
-    public let since: Date?
-    public let action: AuditAction?
-
-    public init(since: Date? = nil, action: AuditAction? = nil) {
-        self.since = since
-        self.action = action
-    }
 }
 
 // MARK: - Terminal Swap Profile
@@ -586,10 +635,11 @@ public struct ModelProfileFetchUsageResult: Codable, Sendable {
     public init(usage: ModelProfileUsage) { self.usage = usage }
 }
 
-/// Params for `modelProfile.usageRefresh` — force an immediate usage sweep of
-/// the daemon's in-memory OAuth usage poller (the picker dialog calls this on
-/// open). `id == nil` refreshes every logged-in OAuth profile; a non-nil id
-/// refreshes just that profile.
+/// Params for `modelProfile.usageRefresh` — sweep the daemon's OAuth usage
+/// poller for stale, eligible profiles (the picker dialog calls this on
+/// open). Profiles with a fresh snapshot or inside a rate-limit backoff
+/// window are skipped; their cached snapshot is returned instead. `id == nil`
+/// covers every logged-in OAuth profile; a non-nil id just that profile.
 public struct ModelProfileUsageRefreshParams: Codable, Sendable {
     public let id: UUID?
     public init(id: UUID? = nil) { self.id = id }
@@ -822,12 +872,40 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// existing precedence-based resolution. Not persisted — creation-time only.
     /// Optional/defaulted for backward compatibility with older clients.
     public let profileID: UUID?
+    /// Explicit per-creation Claude model override — either a Claude Code alias
+    /// ("opus", what the model rail sends) or an exact id ("claude-opus-5"),
+    /// injected as ANTHROPIC_MODEL for the new worktree's INITIAL Claude spawn
+    /// only — later respawns (hibernation wake, new sessions) fall back to the
+    /// profile default. nil preserves the profile's own model. Optional/
+    /// defaulted for backward compatibility with older clients.
+    public let model: String?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
     /// per-session `--settings` overlay for this spawn's Claude agent. General
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, claudeSettingsOverlay: String? = nil) {
+    /// GitHub PR number this worktree is being created from. Stamped on the row
+    /// (with `useExistingBranch == true`) so `PRStatusManager` tracks it by
+    /// number — set for BOTH decorated same-repo rows and fork rows.
+    /// Optional/defaulted for backward compatibility (old daemons ignore the
+    /// unknown key; old clients omit it).
+    public let prNumber: Int?
+    /// When true, the daemon fetches `refs/pull/<prNumber>/head` into a fresh
+    /// local branch and checks THAT out (fork PRs, whose head has no local
+    /// ref). When false/omitted, `branch` is checked out via the plain
+    /// existing-branch path even if `prNumber` is set — this is the decorated
+    /// same-repo row, which must behave exactly like picking that branch today.
+    /// `prNumber` alone can't disambiguate: a fork head name may coincide with
+    /// an unrelated local branch. Optional/defaulted for backward compatibility.
+    public let checkoutPRHead: Bool?
+    /// When true, the daemon arms this worktree's per-worktree
+    /// auto-archive-on-merge override (sets the `autoArchiveOnMerge` column to
+    /// true), so it self-archives when its PR merges regardless of the global
+    /// default. nil means "follow the global default" (unchanged behavior).
+    /// Optional/defaulted for backward compatibility (old daemons ignore the
+    /// unknown key; old clients omit it).
+    public let autoArchiveOnMerge: Bool?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -836,7 +914,11 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.suppressAutoParent = suppressAutoParent
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
+        self.model = model
         self.claudeSettingsOverlay = claudeSettingsOverlay
+        self.prNumber = prNumber
+        self.checkoutPRHead = checkoutPRHead
+        self.autoArchiveOnMerge = autoArchiveOnMerge
     }
 }
 
@@ -862,6 +944,17 @@ public struct WorktreeListParams: Codable, Sendable {
     /// backward compatibility — old daemons ignore the unknown key and always
     /// enrich; old clients omit it and get the enriched default.
     public let includeSessionCounts: Bool?
+    /// Substring filter over the worktree's folder `name` **and** its
+    /// `displayName`: a row matches when the query appears anywhere in either
+    /// (not just as a prefix). Matching is case-insensitive for ASCII — the
+    /// daemon implements this with SQLite `LIKE`, whose built-in case folding
+    /// does not cover non-ASCII characters.
+    ///
+    /// nil or blank (whitespace-only) means "no filter". The filter is applied
+    /// *before* `limit`/`offset`, so pagination pages over the matching set.
+    /// Optional (nil == no filter) for backward compatibility — old daemons
+    /// ignore the unknown key and return everything; old clients omit it.
+    public let nameQuery: String?
     public init(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
@@ -869,7 +962,8 @@ public struct WorktreeListParams: Codable, Sendable {
         offset: Int? = nil,
         excludeArchived: Bool? = nil,
         scratchOnly: Bool? = nil,
-        includeSessionCounts: Bool? = nil
+        includeSessionCounts: Bool? = nil,
+        nameQuery: String? = nil
     ) {
         self.repoID = repoID
         self.status = status
@@ -878,6 +972,7 @@ public struct WorktreeListParams: Codable, Sendable {
         self.excludeArchived = excludeArchived
         self.scratchOnly = scratchOnly
         self.includeSessionCounts = includeSessionCounts
+        self.nameQuery = nameQuery
     }
 }
 
@@ -913,6 +1008,180 @@ public struct GCSweepNowParams: Codable, Sendable {
     public init(dryRun: Bool = false) {
         self.dryRun = dryRun
     }
+}
+
+/// Result of `remote.providers` — every registered provider's negotiated
+/// contract + current health.
+public struct RemoteProvidersResult: Codable, Sendable {
+    public let providers: [RemoteProviderStatus]
+    public init(providers: [RemoteProviderStatus]) { self.providers = providers }
+}
+
+/// One row of the `remote.sessions` mirror — the provider-scoped payload
+/// plus the drift bookkeeping (`gone`/`dismissed`) the app needs to render
+/// (or hide) a stale session.
+public struct RemoteSessionInfo: Codable, Sendable, Identifiable, Equatable {
+    /// Stable synthetic identity for this mirror row — see
+    /// `RemoteSessionIdentity`. ALWAYS recomputed from `provider`/
+    /// `payload.id` rather than trusted off the wire (see `init(from:)`):
+    /// since it's a pure function of those two fields, an older daemon that
+    /// never sent this key, or any future transport that drops it, still
+    /// produces an IDENTICAL id client-side — there is nothing to default or
+    /// version. It's still included on the wire (for other/non-Swift
+    /// consumers and debugging), just never trusted as the source of truth.
+    public let id: UUID
+    public let provider: String
+    public let payload: RemoteSessionPayload
+    public let gone: Bool
+    public let dismissed: Bool
+    public let lastSeen: Date
+    /// The local repo this session was resolved to, via `meta["repo"]`
+    /// (`docs/remote-provider-contract.md` § Session object) matched against
+    /// registered repos' `remoteURL` (`RemoteRepoMatching`). Pinned at first
+    /// sighting by the daemon (`RemoteSessionStore`) — nil means either "the
+    /// provider reported no repo" or "not resolved yet", and the daemon
+    /// keeps retrying resolution only while this stays nil. Once non-nil, it
+    /// never changes, even if the provider's reported meta later does.
+    public let resolvedRepoID: UUID?
+    /// When the user pinned this session to the sidebar's pinned dock, or nil
+    /// when it isn't pinned. Stamped daemon-side (`remote.setPin`) so pin
+    /// ORDER is server-assigned, exactly like `Worktree.pinnedAt`. Survives
+    /// app and daemon restarts because it lives on the mirror row, whose
+    /// primary key `(provider, sessionID)` is durable by contract.
+    /// `decodeIfPresent` so a payload from an older daemon still decodes.
+    public let pinnedAt: Date?
+
+    public init(provider: String, payload: RemoteSessionPayload,
+                gone: Bool, dismissed: Bool, lastSeen: Date, resolvedRepoID: UUID? = nil,
+                pinnedAt: Date? = nil) {
+        self.id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
+        self.provider = provider; self.payload = payload
+        self.gone = gone; self.dismissed = dismissed; self.lastSeen = lastSeen
+        self.resolvedRepoID = resolvedRepoID
+        self.pinnedAt = pinnedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, provider, payload, gone, dismissed, lastSeen, resolvedRepoID, pinnedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        payload = try c.decode(RemoteSessionPayload.self, forKey: .payload)
+        gone = try c.decode(Bool.self, forKey: .gone)
+        dismissed = try c.decode(Bool.self, forKey: .dismissed)
+        lastSeen = try c.decode(Date.self, forKey: .lastSeen)
+        resolvedRepoID = try c.decodeIfPresent(UUID.self, forKey: .resolvedRepoID)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        // See the `id` doc comment — deliberately recomputed, never decoded.
+        id = RemoteSessionIdentity.uuid(provider: provider, sessionID: payload.id)
+    }
+}
+
+public struct RemoteSessionsResult: Codable, Sendable {
+    public let sessions: [RemoteSessionInfo]
+    public init(sessions: [RemoteSessionInfo]) { self.sessions = sessions }
+}
+
+public struct RemoteCreateParams: Codable, Sendable {
+    public let provider: String
+    /// Raw JSON object of create-form values; passed to the provider verbatim
+    /// inside the contract's create request. Kept as a string so RPC stays
+    /// schema-free about provider-specific fields.
+    public let paramsJSON: String
+    public init(provider: String, paramsJSON: String) {
+        self.provider = provider; self.paramsJSON = paramsJSON
+    }
+}
+
+public struct RemoteStopParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+public struct RemoteSendParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let text: String
+    public init(provider: String, sessionID: String, text: String) {
+        self.provider = provider; self.sessionID = sessionID; self.text = text
+    }
+}
+
+public struct RemoteLogParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let lines: Int?
+    public init(provider: String, sessionID: String, lines: Int? = nil) {
+        self.provider = provider; self.sessionID = sessionID; self.lines = lines
+    }
+}
+
+public struct RemoteLogResult: Codable, Sendable {
+    public let text: String
+    public init(text: String) { self.text = text }
+}
+
+public struct RemoteDismissParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Pin or unpin a remote session for the sidebar dock. Purely local — no
+/// provider verb is involved, so this works for any provider regardless of
+/// declared capabilities, and for a `gone` row too. Mirrors
+/// `WorktreeSetPinParams`: the client only says whether it wants the pin on
+/// or off, and the daemon stamps `pinnedAt` so pin order is server-assigned.
+public struct RemoteSetPinParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let pinned: Bool
+    public init(provider: String, sessionID: String, pinned: Bool) {
+        self.provider = provider; self.sessionID = sessionID; self.pinned = pinned
+    }
+}
+
+/// Params for `remote.reportAttachExit` — the app reporting the exit code of
+/// an `attach` process IT spawned (the provider is exec'd on a terminal's own
+/// TTY, so the daemon never sees that exit itself).
+///
+/// The exit code is the ONLY thing reported: `attach`'s stdout is a PTY byte
+/// stream and MUST NOT be parsed (`docs/remote-provider-contract.md` §
+/// `attach`), so there is no error object to carry. The daemon classifies it
+/// and, for the auth class only, moves provider health.
+public struct RemoteReportAttachExitParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let exitCode: Int32
+    public init(provider: String, sessionID: String, exitCode: Int32) {
+        self.provider = provider; self.sessionID = sessionID; self.exitCode = exitCode
+    }
+}
+
+/// Params for `remote.rename` — pushes a display-name rename to a provider
+/// that declares the optional `rename` capability
+/// (`docs/remote-provider-contract.md` § `rename`). `title` rides as a
+/// single argv value (never shell-escaped — the daemon execs the provider
+/// directly, per contract).
+public struct RemoteRenameParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let title: String
+    public init(provider: String, sessionID: String, title: String) {
+        self.provider = provider; self.sessionID = sessionID; self.title = title
+    }
+}
+
+public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
 }
 
 /// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return
@@ -960,6 +1229,35 @@ public struct WorktreeReviveParams: Codable, Sendable {
     }
 }
 
+public struct WorktreeReviveConversationFreshParams: Codable, Sendable {
+    public let archivedWorktreeID: UUID
+    public let sessionID: String
+    public let cols: Int?
+    public let rows: Int?
+
+    public init(
+        archivedWorktreeID: UUID,
+        sessionID: String,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) {
+        self.archivedWorktreeID = archivedWorktreeID
+        self.sessionID = sessionID
+        self.cols = cols
+        self.rows = rows
+    }
+}
+
+public struct WorktreeReviveConversationFreshResult: Codable, Sendable {
+    public let worktree: Worktree
+    public let warning: String?
+
+    public init(worktree: Worktree, warning: String?) {
+        self.worktree = worktree
+        self.warning = warning
+    }
+}
+
 public struct WorktreeAdoptParams: Codable, Sendable {
     public let repoID: UUID
     public let path: String
@@ -984,6 +1282,15 @@ public struct WorktreeReorderParams: Codable, Sendable {
     public let worktreeIDs: [UUID]
     public init(repoID: UUID, worktreeIDs: [UUID]) {
         self.repoID = repoID; self.worktreeIDs = worktreeIDs
+    }
+}
+
+/// Params for `modelProfile.reorder`. Profiles are global — no repoID scoping
+/// (unlike `WorktreeReorderParams`).
+public struct ModelProfileReorderParams: Codable, Sendable {
+    public let profileIDs: [UUID]
+    public init(profileIDs: [UUID]) {
+        self.profileIDs = profileIDs
     }
 }
 
@@ -1075,7 +1382,61 @@ public struct TerminalSendParams: Codable, Sendable {
 
 public struct TerminalDeleteParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// When true, refuse to close a terminal that is mid-turn or holding a
+    /// permission prompt, returning `RPCErrorCode.terminalBusy`. Optional and
+    /// defaulting to nil (= no rails) so the app's tab-close — a direct human
+    /// gesture on a visible tab — keeps its existing unconditional semantics,
+    /// and so older callers still decode.
+    ///
+    /// The CLI sets it; `--force` drops it. See `handleTerminalDelete` for why
+    /// the check is additionally qualified on the window being alive.
+    public let respectActivityRails: Bool?
+    public init(terminalID: UUID, respectActivityRails: Bool? = nil) {
+        self.terminalID = terminalID
+        self.respectActivityRails = respectActivityRails
+    }
+}
+
+/// Result for `terminal.delete`. Mirrors `TerminalWakeResult`'s shape: the call
+/// is idempotent, and the caller learns which of the two success paths it took.
+public struct TerminalDeleteResult: Codable, Sendable {
+    /// true — this call tore the terminal down; false — it was already gone.
+    public let closed: Bool
+    /// true when there was no such terminal row. Not an error: closing an
+    /// already-closed terminal is a no-op success, matching `terminal wake`.
+    public let alreadyGone: Bool
+    /// Echoed so an autonomous caller keeps a resume pointer after the row is
+    /// gone (the transcript survives on disk). nil for non-Claude terminals and
+    /// for the already-gone path.
+    public let claudeSessionID: String?
+    public init(closed: Bool, alreadyGone: Bool, claudeSessionID: String? = nil) {
+        self.closed = closed
+        self.alreadyGone = alreadyGone
+        self.claudeSessionID = claudeSessionID
+    }
+}
+
+/// Params for `terminalHistory.list` — closed-terminal capture metadata for a
+/// worktree, newest first. Result type: `[TerminalHistoryEntry]`. Content is
+/// NOT sent over RPC; the app reads the file at
+/// `TBDConstants.terminalHistoryPath` directly.
+public struct TerminalHistoryListParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+/// Params for `terminalHistory.revive` — spawn a NEW terminal in `worktreeID`
+/// from the closed-terminal history entry `id`. Claude entries with a session
+/// id resume that session; every other kind opens a fresh shell with the raw
+/// capture (colors intact) printed above the prompt. Result type: `Terminal`.
+public struct TerminalHistoryReviveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let id: UUID
+    public let cols: Int?
+    public let rows: Int?
+    public init(worktreeID: UUID, id: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.worktreeID = worktreeID; self.id = id; self.cols = cols; self.rows = rows
+    }
 }
 
 public struct TerminalSetPinParams: Codable, Sendable {
@@ -1157,6 +1518,26 @@ public struct WorktreeSetAutoHibernateParams: Codable, Sendable {
     public let enabled: Bool
     public init(worktreeID: UUID, enabled: Bool) {
         self.worktreeID = worktreeID; self.enabled = enabled
+    }
+}
+
+/// Pin or unpin a worktree for the sidebar dock. The `pinnedAt` timestamp is
+/// stamped daemon-side, so pin ORDER is server-assigned and consistent across
+/// clients — the client only says whether it wants the pin on or off.
+public struct WorktreeSetPinParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let pinned: Bool
+    public init(worktreeID: UUID, pinned: Bool) {
+        self.worktreeID = worktreeID; self.pinned = pinned
+    }
+}
+
+/// Params for `worktree.reorderPins`. The dock is one flat cross-repo list, so
+/// there is no repoID scoping (unlike `WorktreeReorderParams`).
+public struct WorktreeReorderPinsParams: Codable, Sendable {
+    public let worktreeIDs: [UUID]
+    public init(worktreeIDs: [UUID]) {
+        self.worktreeIDs = worktreeIDs
     }
 }
 
@@ -1282,6 +1663,23 @@ public struct ConfigSetControlModeParams: Codable, Sendable {
 /// sessions with typed-but-unsent input). The change applies on the next
 /// hibernation sweep; no daemon restart required.
 public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setAutoCloseSetup` — the auto-close-setup-tab soak
+/// flag (default OFF). Read fresh at spawn time; applies to the next
+/// worktree creation, no daemon restart required.
+public struct ConfigSetAutoCloseSetupParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setAutoTrustWorktrees` — pre-accept Claude's folder-trust
+/// dialog for TBD-created worktrees (default ON). Read fresh at every Claude
+/// spawn/wake, so the change applies to the next one; no daemon restart needed.
+/// Turning it off never un-trusts an already-seeded path.
+public struct ConfigSetAutoTrustWorktreesParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -1427,15 +1825,57 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// against hibernating sessions with typed-but-unsent input. Re-evaluated
     /// by the daemon on every call.
     public let hibernateInputVetoEnabled: Bool
+    /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
+    /// default OFF). Re-evaluated by the daemon on every call.
+    public let autoCloseSetupEnabled: Bool
+    /// Whether TBD pre-accepts Claude's folder-trust dialog for the worktrees of
+    /// registered repos — the ones TBD created plus the repo's own checkout, but
+    /// never a fork-PR-head checkout (default ON). Re-evaluated by the daemon on
+    /// every call.
+    public let autoTrustWorktrees: Bool
+    /// Whether the daemon owns panel-surface state (`daemon_panel_surface_enabled`,
+    /// spec C Phase 2 §8/§10). Default OFF while the feature soaks — the app
+    /// uses this to decide whether `panel.get`/`panel.apply` are live or the
+    /// legacy client-owned layout path should still be used.
+    public let panelSurfaceEnabled: Bool
+    /// Whether `config.remoteBackendsEnabled` is currently set. Default OFF
+    /// while the feature soaks (Task 7). The app can already read this off
+    /// `Config`, but this lets `remoteBackendsLive` sit next to it in one
+    /// payload — see that field's doc comment for why both are needed.
+    public let remoteBackendsEnabled: Bool
+    /// Whether the daemon actually constructed a `RemoteProviderManager` at
+    /// boot — `false` when the flag is off, AND when the flag is on but was
+    /// flipped on after the daemon last started (it only constructs the
+    /// manager at boot; see `Daemon.swift`). Lets the app distinguish "flag
+    /// on and live" from "flag on but needs a restart" without calling a
+    /// `remote.*` verb and parsing its error string.
+    ///
+    /// True from the moment the manager is *constructed*, not from when it
+    /// has finished describing providers — so during the brief boot window
+    /// before `remoteManager.start()` completes, `remoteBackendsLive` can be
+    /// true while the provider list is still empty. Fine for the
+    /// restart-required distinction this field exists for; just don't read
+    /// it as "at least one provider is up."
+    public let remoteBackendsLive: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
-                hibernateInputVetoEnabled: Bool = false) {
+                hibernateInputVetoEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = false,
+                autoTrustWorktrees: Bool = true,
+                panelSurfaceEnabled: Bool = false,
+                remoteBackendsEnabled: Bool = false,
+                remoteBackendsLive: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
+        self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.autoTrustWorktrees = autoTrustWorktrees
+        self.panelSurfaceEnabled = panelSurfaceEnabled
+        self.remoteBackendsEnabled = remoteBackendsEnabled
+        self.remoteBackendsLive = remoteBackendsLive
     }
 
     public init(from decoder: Decoder) throws {
@@ -1447,6 +1887,16 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
         // New field for pending-input veto; absent from older daemons defaults to false (soaking).
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
+        // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
+        autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // New field for worktree auto-trust; absent from older daemons defaults
+        // to true, matching the column default (it is not a soak flag).
+        autoTrustWorktrees = try c.decodeIfPresent(Bool.self, forKey: .autoTrustWorktrees) ?? true
+        // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
+        panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
+        // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).
+        remoteBackendsEnabled = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsEnabled) ?? false
+        remoteBackendsLive = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsLive) ?? false
     }
 }
 
@@ -1625,16 +2075,97 @@ public struct TerminalTranscriptResult: Codable, Sendable {
 public struct TerminalTranscriptItemFullBodyParams: Codable, Sendable {
     public let terminalID: UUID
     public let itemID: String
-    public init(terminalID: UUID, itemID: String) {
+    /// Whether the response carries the item's body text. `false` asks for the
+    /// injection metadata alone — the transcript opens *every* injected row on
+    /// appear just to read that metadata, and an injected CLAUDE.md body can be
+    /// tens of KB that the caller immediately discards.
+    ///
+    /// Defaults to `true`, and a payload that omits the key decodes as `true`,
+    /// so every existing caller and any older client keeps the body.
+    public let includeBody: Bool
+    public init(terminalID: UUID, itemID: String, includeBody: Bool = true) {
         self.terminalID = terminalID
         self.itemID = itemID
+        self.includeBody = includeBody
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case terminalID, itemID, includeBody
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        terminalID = try c.decode(UUID.self, forKey: .terminalID)
+        itemID = try c.decode(String.self, forKey: .itemID)
+        includeBody = try c.decodeIfPresent(Bool.self, forKey: .includeBody) ?? true
+    }
+}
+
+/// How one injected-context row got into the context window: the hook that ran
+/// (name, event, command, exit status, timing, stderr), the memory tier / path
+/// of a loaded file, and the tool call that triggered it.
+///
+/// Rides the `terminal.transcriptItemFullBody` round-trip rather than living on
+/// `TranscriptItem`: it is only read when a row is opened, and every extra
+/// associated value on `TranscriptItem.systemReminder` costs ~15 switch sites.
+/// Every field is optional — only what a row actually carries is populated, and
+/// the overlay omits the rest rather than rendering placeholders.
+public struct TranscriptAttachmentMetadata: Codable, Sendable, Equatable {
+    public let hookName: String?
+    public let hookEvent: String?
+    public let command: String?
+    public let exitCode: Int?
+    public let durationMs: Int?
+    public let stderr: String?
+    /// `nested_memory`'s inner `content.type` — the memory tier, e.g. "Project".
+    /// Passed through verbatim; the set of values is Claude Code's, not ours.
+    public let memoryType: String?
+    /// Absolute path of the loaded file, for display (tilde-abbreviated) and
+    /// copy (verbatim).
+    public let path: String?
+    /// Short summary of the `tool_use` named by `attachment.toolUseID`, e.g.
+    /// "Read ai-review-gate.yml". Nil when the row carries no `toolUseID` or
+    /// the id resolves to nothing — never guessed from row position.
+    public let triggeredBy: String?
+
+    public var isEmpty: Bool {
+        hookName == nil && hookEvent == nil && command == nil && exitCode == nil
+            && durationMs == nil && stderr == nil && memoryType == nil
+            && path == nil && triggeredBy == nil
+    }
+
+    public init(
+        hookName: String? = nil,
+        hookEvent: String? = nil,
+        command: String? = nil,
+        exitCode: Int? = nil,
+        durationMs: Int? = nil,
+        stderr: String? = nil,
+        memoryType: String? = nil,
+        path: String? = nil,
+        triggeredBy: String? = nil
+    ) {
+        self.hookName = hookName
+        self.hookEvent = hookEvent
+        self.command = command
+        self.exitCode = exitCode
+        self.durationMs = durationMs
+        self.stderr = stderr
+        self.memoryType = memoryType
+        self.path = path
+        self.triggeredBy = triggeredBy
     }
 }
 
 public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
+    /// The un-truncated body, or `""` when the request passed
+    /// `includeBody: false` (metadata-only fetch).
     public let text: String
-    public init(text: String) {
+    /// Present only for `attachment` rows (hook output, CLAUDE.md / file bodies).
+    public let attachment: TranscriptAttachmentMetadata?
+    public init(text: String, attachment: TranscriptAttachmentMetadata? = nil) {
         self.text = text
+        self.attachment = attachment
     }
 }
 

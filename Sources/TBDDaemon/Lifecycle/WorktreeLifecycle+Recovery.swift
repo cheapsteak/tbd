@@ -3,6 +3,7 @@ import os
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
+private let archiveLogger = Logger(subsystem: "com.tbd.daemon", category: "archive")
 
 extension WorktreeLifecycle {
 
@@ -54,6 +55,8 @@ extension WorktreeLifecycle {
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    // Hard delete: closed-terminal history (rows + files) goes too.
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: cleanup of missing-checkout worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -79,6 +82,8 @@ extension WorktreeLifecycle {
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    // Hard delete: closed-terminal history (rows + files) goes too.
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -91,6 +96,8 @@ extension WorktreeLifecycle {
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    // Hard delete: closed-terminal history (rows + files) goes too.
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: cleanup of repo-less worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -130,6 +137,11 @@ extension WorktreeLifecycle {
             // process — spawn with defaults.
             let archivedSessions = worktree.archivedClaudeSessions ?? []
             let isMidRevive = !archivedSessions.isEmpty
+            if !isMidRevive {
+                archiveLogger.warning(
+                    "recovery: resuming ordinary .creating worktree \(worktree.id, privacy: .public); any ephemeral conversation carryover cannot survive a daemon restart. If this create came from a fresh-branch conversation revive, the user can run that action again."
+                )
+            }
             logger.info("recovery: resuming pre-session wait for .creating worktree \(worktree.id, privacy: .public) (\(isMidRevive ? "mid-revive" : "mid-create", privacy: .public))")
             let task = Task.detached { [self] in
                 await runPreSessionPhase3(

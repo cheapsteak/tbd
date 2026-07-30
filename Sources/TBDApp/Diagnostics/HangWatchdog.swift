@@ -26,13 +26,13 @@ enum HangWatchdogAction: Equatable {
 struct HangWatchdogSnapshot: Equatable {
     /// Wall-clock timestamp the snapshot was recorded.
     var capturedAt: Date
-    /// Suffix-4 hex of the focused terminal UUID (matches
-    /// `TranscriptItemsView.shortID`). `nil` when no terminal is focused or
-    /// the snapshot has never been populated by a view.
+    /// Suffix-4 hex of the focused terminal UUID. `nil` when no terminal is
+    /// focused or the snapshot has never been populated by a view.
     var focusedTerminalIDShort: String?
-    /// Set by `LiveTranscriptPaneView` on appear and on `messages.count`
-    /// change; cleared on disappear. `nil` when the live transcript pane is
-    /// not the active view — including before it has ever been visited and
+    /// Set by both transcript viewers — the live `TableTranscriptPaneView`
+    /// (`pane=liveTranscript`) and the session-history one (`pane=history`) —
+    /// on appear and on `messages.count` change; cleared on disappear. `nil`
+    /// when neither is the active view — including before either has ever been visited and
     /// after the user has navigated to a different pane. Other panes
     /// (terminal, file viewer, code viewer, web view) don't yet feed the
     /// snapshot — hangs in those panes log with `itemCount=-1 pane=-`.
@@ -92,9 +92,8 @@ final class HangWatchdog: @unchecked Sendable {
 
     /// Mach timestamp of the most recent successful main-thread heartbeat.
     /// Read from the background timer, written from the main queue. Guarded
-    /// by `OSAllocatedUnfairLock` to match the project pattern in
-    /// `TranscriptItemsView` (and avoid relying on Atomic/UnsafeAtomic
-    /// availability in the current toolchain).
+    /// by `OSAllocatedUnfairLock` to match the project pattern (and avoid
+    /// relying on Atomic/UnsafeAtomic availability in the current toolchain).
     private let lastTickLock = OSAllocatedUnfairLock<UInt64>(initialState: 0)
 
     /// Most recent snapshot captured on the main thread. Read by the timer

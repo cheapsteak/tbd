@@ -282,13 +282,19 @@ extension RPCRouter {
             ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
             : nil
 
-        // Pre-accept Claude Code's folder-trust dialog for scratch spaces so
-        // fresh, TBD-owned scratch dirs don't prompt on every launch. Only the
-        // claude path can trigger the dialog; self-gates on isScratch and is
-        // best-effort (never throws), so seeding on both fresh and resume is safe.
+        // Pre-accept Claude Code's folder-trust dialog: this worktree belongs to
+        // a registered repo, so the trust answer is known by construction, and
+        // the dialog blocks before SessionStart (a stall would be
+        // machine-invisible). The seeder still declines for `foreignHead` rows.
+        // Only the claude path can trigger it; best-effort (never throws), so
+        // seeding on fresh and resume is safe. `createConfig` is a `try?` read —
+        // falling back to `true` keeps the shipped default rather than silently
+        // reinstating the stall.
         if isClaudeType {
-            ClaudeTrustSeeder.ensureTrustedForScratch(
-                worktree: worktree, profileConfigDir: profileConfigDir)
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: createConfig?.autoTrustWorktrees ?? true,
+                profileConfigDir: profileConfigDir)
         }
 
         // Pre-resume freshness: `claude --resume` only looks in the project
@@ -445,8 +451,38 @@ extension RPCRouter {
     func handleTerminalDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalDeleteParams.self, from: paramsData)
 
+        // Closing an already-closed terminal is a no-op SUCCESS, not an error —
+        // same contract as `terminal.wake`. Autonomous callers retry and race
+        // each other; making the second one fail would push every caller into
+        // string-matching this message to tell "already done" from "broken".
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
-            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+            return try RPCResponse(result: TerminalDeleteResult(closed: false, alreadyGone: true))
+        }
+
+        // Optional rails (CLI sets them; --force drops them; the app never
+        // does). Refuse to kill an in-flight turn or a raised permission hand,
+        // matching `isManuallyHibernatable`'s rails.
+        //
+        // Qualified on the window actually being ALIVE. `activityState` is
+        // hook-fed and carries no timestamp, so a session that died mid-turn
+        // (crash, OOM, killed pane) stays `.working` forever. An unqualified
+        // rail would then refuse forever on exactly the wedged terminal a
+        // caller most needs to close — turning the safety rail into a trap for
+        // this command's primary cleanup use case. A dead-window row cannot be
+        // mid-turn, so it stays closeable without --force.
+        if params.respectActivityRails == true,
+           terminal.activityState == .working || terminal.activityState == .waitingForUser,
+           let worktree = try await db.worktrees.get(id: terminal.worktreeID),
+           await tmux.windowExists(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID) {
+            let what = terminal.activityState == .working
+                ? "mid-turn"
+                : "waiting on a permission prompt"
+            return RPCResponse(
+                error: "Terminal \(params.terminalID) is \(what) "
+                    + "(activityState=\(terminal.activityState.rawValue)). "
+                    + "Closing now would kill in-flight work. Pass --force to close anyway.",
+                code: RPCErrorCode.terminalBusy.rawValue
+            )
         }
 
         // Terminal close cancels any pending auto-resume (spec §Cancellation).
@@ -454,8 +490,16 @@ extension RPCRouter {
             await limitResumeScheduler?.wake()
         }
 
-        // Kill the tmux window
+        // Capture the pane's scrollback just before the window dies so the
+        // user can view it read-only later (Session History → Closed
+        // Terminals). Strictly best-effort: any failure logs inside
+        // captureOnClose and the close proceeds unchanged.
         if let worktree = try await db.worktrees.get(id: terminal.worktreeID) {
+            await db.terminalHistory.captureOnClose(terminal: terminal) {
+                try await tmux.capturePaneScrollback(
+                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            }
+            // Kill the tmux window
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
         }
 
@@ -473,8 +517,240 @@ extension RPCRouter {
             terminalID: terminal.id
         )))
 
-        return .ok()
+        return try RPCResponse(result: TerminalDeleteResult(
+            closed: true,
+            alreadyGone: false,
+            claudeSessionID: terminal.claudeSessionID
+        ))
     }
+
+    /// Closed-terminal capture metadata for a worktree, newest first. Content
+    /// is not sent over RPC — the app reads the file at
+    /// `TBDConstants.terminalHistoryPath` directly.
+    func handleTerminalHistoryList(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalHistoryListParams.self, from: paramsData)
+        let entries = try await db.terminalHistory.list(worktreeID: params.worktreeID)
+        return try RPCResponse(result: entries)
+    }
+
+    /// Revive a closed terminal from its history entry into a NEW terminal in
+    /// the same (live) worktree. Claude entries with a session id resume that
+    /// Claude session (no scrollback replay — Claude repaints its transcript);
+    /// every other kind opens a fresh shell with the raw capture (colors
+    /// intact) printed above the prompt. The history row is kept.
+    func handleTerminalHistoryRevive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalHistoryReviveParams.self, from: paramsData)
+
+        guard let worktree = try await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
+        }
+        // A revived terminal must land in a live worktree — an archived row's
+        // tmux state is gone and nothing would ever show the tab.
+        if worktree.status == .archived {
+            return RPCResponse(error: "Worktree is archived: \(worktree.displayName). Revive it before reviving terminals.")
+        }
+        guard FileManager.default.fileExists(atPath: worktree.path) else {
+            return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot revive a terminal there.")
+        }
+        guard let entry = try await db.terminalHistory.list(worktreeID: params.worktreeID)
+            .first(where: { $0.id == params.id }) else {
+            return RPCResponse(error: "Closed-terminal history entry not found: \(params.id)")
+        }
+
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+        let plannedTerminalID = UUID()
+        let defaultShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+
+        _ = try await tmux.ensureServer(
+            server: worktree.tmuxServer, session: "main", cwd: worktree.path,
+            cols: resolvedCols, rows: resolvedRows)
+        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
+
+        // Claude-kind with a live session id → resume it. Mirrors the
+        // archived-session restore spawn in WorktreeLifecycle+Create.
+        if entry.kind == .claude, let sessionID = entry.claudeSessionID {
+            let repo: Repo?
+            if let rid = worktree.repoID {
+                repo = try await db.repos.get(id: rid)
+            } else {
+                repo = nil
+            }
+            let reviveConfig = try? await db.config.get()
+            var resolvedProfile: ResolvedModelProfile? = nil
+            do {
+                resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+            } catch {
+                logger.warning("revive: model profile resolution failed; falling back to keychain login")
+                resolvedProfile = nil
+            }
+            let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            // Reviving a closed terminal respawns claude in the same worktree,
+            // so the same trust argument applies — including the seeder's
+            // `foreignHead` refusal, which is why the flag lives on the row
+            // rather than in the create-time parameter list. `reviveConfig` is a
+            // `try?` read; fall back to the shipped default.
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: reviveConfig?.autoTrustWorktrees ?? true,
+                profileConfigDir: profileConfigDir)
+            await TranscriptProjectDirSync.ensureSessionResumableDetached(
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
+                storedTranscriptPath: nil
+            )
+            let claudeEnvOverrides = reviveConfig?.envSettingOverrides ?? [:]
+            let spawn = ClaudeSpawnCommandBuilder.build(
+                resumeID: sessionID,
+                freshSessionID: nil,
+                appendSystemPrompt: nil,
+                initialPrompt: nil,
+                profileSecret: resolvedProfile?.secret,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                profileModel: resolvedProfile?.model,
+                profileAwsRegion: resolvedProfile?.awsRegion,
+                profileAwsProfile: resolvedProfile?.awsProfile,
+                profileConfigDir: profileConfigDir,
+                cmd: nil,
+                shellFallback: defaultShell,
+                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolvedProfile?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString,
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                ),
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides
+            )
+            let env: [String: String] = [
+                "TBD_WORKTREE_ID": worktree.id.uuidString,
+                "TBD_TERMINAL_ID": plannedTerminalID.uuidString,
+            ]
+            let mergedEnvOverrides = EnvOverrideResolver.merge(
+                global: reviveConfig?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: resolvedProfile?.envOverrides
+            )
+            let terminal = try await spawnRevivedTerminal(
+                worktree: worktree,
+                plannedTerminalID: plannedTerminalID,
+                spawnCommand: spawn.command,
+                env: env,
+                sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
+                label: TerminalLabel.claudeCode,
+                kind: .claude,
+                claudeSessionID: sessionID,
+                profileID: resolvedProfile?.profileID,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+            logger.info("revive: resumed claude session \(sessionID, privacy: .public) as terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public)")
+            return try RPCResponse(result: terminal)
+        }
+
+        // Shell / codex / claude-with-nil-session → fresh shell with the
+        // capture visible above the prompt (the raw file keeps escapes, so
+        // `cat` renders its colors). Skip the `cat` if the file is gone.
+        let capturePath = db.terminalHistory.contentPath(
+            worktreeID: worktree.id, terminalID: entry.id)
+        let haveCapture = FileManager.default.fileExists(atPath: capturePath)
+        let command = Self.reviveShellCommand(
+            capturePath: haveCapture ? capturePath : nil,
+            closedAt: entry.closedAt,
+            shell: defaultShell
+        )
+        let env: [String: String] = [
+            "TBD_WORKTREE_ID": worktree.id.uuidString,
+            "TBD_TERMINAL_ID": plannedTerminalID.uuidString,
+        ]
+        let terminal = try await spawnRevivedTerminal(
+            worktree: worktree,
+            plannedTerminalID: plannedTerminalID,
+            spawnCommand: command,
+            env: env,
+            sensitiveEnv: [:],
+            label: nil,
+            kind: .shell,
+            claudeSessionID: nil,
+            profileID: nil,
+            cols: resolvedCols,
+            rows: resolvedRows
+        )
+        logger.info("revive: opened shell terminal \(terminal.id, privacy: .public) from history entry \(entry.id, privacy: .public) (capture present: \(haveCapture, privacy: .public))")
+        return try RPCResponse(result: terminal)
+    }
+
+    /// Shared plumbing for spawning an ADDITIONAL terminal into a live worktree
+    /// during revive: create the window, insert the row, append it to the
+    /// persisted tab order as the new active tab, and broadcast the same
+    /// `.terminalCreated` delta the normal create path emits.
+    private func spawnRevivedTerminal(
+        worktree: Worktree,
+        plannedTerminalID: UUID,
+        spawnCommand: String,
+        env: [String: String],
+        sensitiveEnv: [String: String],
+        label: String?,
+        kind: TerminalKind,
+        claudeSessionID: String?,
+        profileID: UUID?,
+        cols: Int,
+        rows: Int
+    ) async throws -> Terminal {
+        let window = try await tmux.createWindow(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path,
+            shellCommand: spawnCommand,
+            env: env,
+            sensitiveEnv: sensitiveEnv,
+            cols: cols,
+            rows: rows
+        )
+        let terminal = try await db.terminals.create(
+            id: plannedTerminalID,
+            worktreeID: worktree.id,
+            tmuxWindowID: window.windowID,
+            tmuxPaneID: window.paneID,
+            label: label,
+            claudeSessionID: claudeSessionID,
+            profileID: profileID,
+            kind: kind
+        )
+        var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+        if !order.contains(terminal.id) { order.append(terminal.id) }
+        try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: order)
+        try await db.worktrees.setActiveTabID(worktreeID: worktree.id, tabID: terminal.id)
+        subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
+        )))
+        return terminal
+    }
+
+    /// Build the fresh-shell revive command: a dimmed divider banner, an
+    /// optional `cat` of the raw capture file (escapes intact → colors render),
+    /// then `exec <shell>`. Single-quote escaping matches `preSessionCommand` /
+    /// `shellWrapped`, so a capture path containing a single quote is safe.
+    static func reviveShellCommand(capturePath: String?, closedAt: Date, shell: String) -> String {
+        func quoted(_ s: String) -> String {
+            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        let stamp = Self.reviveBannerDateFormatter.string(from: closedAt)
+        // Dim (SGR 2) divider; `\033`/`\n` interpreted by printf's format string.
+        var command = "printf \(quoted("\\033[2m── restored from close on %s ──\\033[0m\\n")) \(quoted(stamp)); "
+        if let capturePath {
+            command += "/bin/cat \(quoted(capturePath)); "
+        }
+        command += "exec \(shell)"
+        return command
+    }
+
+    private static let reviveBannerDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
 
     func handleTerminalSetPin(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSetPinParams.self, from: paramsData)
@@ -973,10 +1249,15 @@ extension RPCRouter {
         //   .fork — explicit "Fork session": spawn a NEW window + terminal row,
         //     leaving the source session untouched (the old behavior).
         //
-        // In both modes, if the existing session has conversation content,
-        // `claude --resume` forks it into a fresh session file (recaptured
-        // below). If the session is blank, resuming would produce "no
-        // conversation found", so we spawn a brand-new session instead.
+        // In both modes, if the existing session has conversation content we
+        // `claude --resume` it. `--resume` REUSES the original session ID;
+        // `.fork` mode additionally passes `--fork-session` so the fork gets a
+        // genuinely new ID (the source session stays live — same-ID resume
+        // would have both processes writing the same session JSONL), and the
+        // recapture below picks up that new ID. `.inPlace` keeps the same ID:
+        // the original process is killed, so same-ID resume is correct. If the
+        // session is blank, resuming would produce "no conversation found",
+        // so we spawn a brand-new session instead.
         let mode = params.resolvedMode
         let repo: Repo?
         if let rid = worktree.repoID {
@@ -1057,13 +1338,15 @@ extension RPCRouter {
             repo: repo?.envOverrides,
             profile: resolved?.envOverrides
         )
-        // Pre-accept the folder-trust dialog for scratch spaces before either
-        // swap spawn (resume or fresh) — a swap onto a new profile's isolated
-        // config dir would otherwise re-prompt. Both build calls below resolve
-        // the same `resolveConfigDir(for: resolved)`; seed it once here. This is
-        // a claude-only handler; the method self-gates on isScratch.
-        ClaudeTrustSeeder.ensureTrustedForScratch(
+        // Pre-accept the folder-trust dialog before either swap spawn (resume
+        // or fresh) — a swap onto a new profile's isolated config dir has never
+        // seen this path and would otherwise re-prompt. Both build calls below
+        // resolve the same `resolveConfigDir(for: resolved)`; seed it once here.
+        // Claude-only handler. `swapConfig` is a `try?` read; fall back to the
+        // shipped default.
+        await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree,
+            autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
             profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved))
 
         let spawn: ClaudeSpawnCommandBuilder.Result
@@ -1074,6 +1357,7 @@ extension RPCRouter {
             logger.debug("swap: resuming session \(resumeID, privacy: .public)")
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: resumeID,
+                forkSession: mode == .fork,
                 freshSessionID: nil,
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
@@ -1309,10 +1593,12 @@ extension RPCRouter {
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         // C-c C-c: interrupt / exit the TUI.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         // SIGTERM the pane pid as a backstop (respawn -k is the real guarantee).
         if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
@@ -1321,20 +1607,18 @@ extension RPCRouter {
         }
     }
 
-    /// Schedule the post-resume session-id recapture. `claude --resume <id>`
-    /// forks the conversation into a NEW session file with a fresh UUID; mirror
-    /// the wake path's pattern — wait ~5s for Claude to settle, then capture the
-    /// new id from the pane and persist it against `terminalID`.
+    /// Schedule the post-resume session-id recapture. `claude --resume <id>
+    /// --fork-session` (the `.fork` swap path) forks the conversation into a NEW
+    /// session file with a fresh UUID; mirror the wake path's pattern — wait ~5s
+    /// for Claude to settle, then capture the new id from the pane and persist it
+    /// against `terminalID`. (On the `.inPlace` path there is no `--fork-session`,
+    /// so the id is unchanged and the recapture is a harmless no-op.)
     private func scheduleSessionRecapture(terminalID: UUID, paneID: String, server: String) {
-        let tmuxRef = self.tmux
-        let dbRef = self.db
-        Task {
-            try? await Task.sleep(for: .seconds(5))
-            let detector = ClaudeStateDetector(tmux: tmuxRef)
-            if let recaptured = await detector.captureSessionID(server: server, paneID: paneID) {
-                try? await dbRef.terminals.updateSessionID(id: terminalID, sessionID: recaptured)
-            }
-        }
+        SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+            terminalID: terminalID,
+            paneID: paneID,
+            server: server
+        )
     }
 
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
@@ -1880,9 +2164,14 @@ extension RPCRouter {
             }
             primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         }
-        let text = TranscriptParser.lookupFullBody(filePath: primaryPath, itemID: params.itemID)
-            ?? "Output no longer available."
+        let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
 
-        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))
+        // `includeBody: false` only keeps the body off the wire: the body string
+        // falls out of the very same single JSONL pass that produces the
+        // metadata (an attachment row's payloads must be extracted just to
+        // recognize it as one), so there is no parser work to skip.
+        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(
+            text: params.includeBody ? (detail.text ?? "Output no longer available.") : "",
+            attachment: detail.attachment))
     }
 }

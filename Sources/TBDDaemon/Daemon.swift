@@ -68,6 +68,19 @@ public final class Daemon: Sendable {
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
     /// in mock mode (never constructed).
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// Remote-backends actor (Task 7). Owned here so shutdown can reach it —
+    /// the events supervisor's own supervision task retains the manager
+    /// strongly, so without an explicit `shutdown()` call it (and its child
+    /// processes) would outlive the daemon process. `nil` when
+    /// `config.remoteBackendsEnabled` was off at boot (mock mode, or the
+    /// flag genuinely off) — constructed only once, at startup; flipping the
+    /// flag on later takes effect on the next restart.
+    public nonisolated(unsafe) var remoteManager: RemoteProviderManager?
+    /// Deferred `remoteManager.start()` task (see call site below). Stored so
+    /// `stop()` can cancel it — otherwise a SIGTERM inside the boot window
+    /// leaves `loadRegistryAndDescribe` spawning `describe` child processes
+    /// after `shutdown()` has already torn down the manager, orphaning them.
+    public nonisolated(unsafe) var remoteStartTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -252,13 +265,16 @@ public final class Daemon: Sendable {
         // 2. Clean up stale PID/socket files
         pidFile.cleanupIfStale()
 
-        // 3. Check if another daemon is already running
-        if let existingPID = pidFile.read() {
-            // Process is alive (kill(pid, 0) == 0 means it exists)
-            if kill(existingPID, 0) == 0 {
-                daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
-                Foundation.exit(1)
-            }
+        // 3. Check if another daemon is already running. Verify the pid is a
+        // live TBDDaemon, not merely a live process: after a reboot the recorded
+        // pid can be recycled by something unrelated, and a bare kill(pid, 0)
+        // would make this fresh daemon abort forever until that pid frees —
+        // exactly the multi-minute "disconnected on restart" gap. cleanupIfStale
+        // above already removed the pid/socket in that case, so read() is nil.
+        if let existingPID = pidFile.read(),
+           ProcessLiveness.isLiveNamedProcess(pid: existingPID, name: ProcessLiveness.daemonExecutableName) {
+            daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
+            Foundation.exit(1)
         }
 
         // 4. Write PID file
@@ -288,6 +304,7 @@ public final class Daemon: Sendable {
         // 4c. Start periodic SSH agent refresh (every 60s)
         self.sshRefreshTask = Task {
             while !Task.isCancelled {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: .seconds(60))
                 if !(await sshResolver.isValid()) {
                     if await sshResolver.resolve() {
@@ -383,6 +400,30 @@ public final class Daemon: Sendable {
             }
         }
 
+        // Remote backends (Task 7): constructed at boot ONLY when the flag
+        // is already on — a user flipping `config.setRemoteBackends` on
+        // without restarting will see `remote.*` RPCs degrade to "remote
+        // backends disabled" (RPCRouter+RemoteHandlers.swift) rather than a
+        // crash, until the next restart picks it up. Skipped in mock mode,
+        // like every other background-task guard in this method.
+        //
+        // `self.remoteManager` is assigned IMMEDIATELY, before `start()` is
+        // even called (start() is deferred below, off the boot critical
+        // path, alongside the reaper/GC tasks) — so a SIGTERM that lands
+        // while `start()` is still describing providers still finds a
+        // non-nil `remoteManager` and `stop()` can reach `shutdown()`.
+        // Assigning only after an awaited `start()` would leave a mid-start
+        // shutdown request with nothing to call, orphaning the manager and
+        // any provider child processes it spawned.
+        var remoteManager: RemoteProviderManager?
+        if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
+            let manager = RemoteProviderManager(
+                db: database, subscriptions: subs, runner: ProviderRunner(),
+                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath))
+            self.remoteManager = manager
+            remoteManager = manager
+        }
+
         let prManager = PRStatusManager()
 
         // Hydrate PR status cache from the DB so PR icons survive restart, then
@@ -391,62 +432,6 @@ public final class Daemon: Sendable {
         await prManager.hydrate(persistedPRStatuses)
         await prManager.setOnStatusPersist { worktreeID, status in
             try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
-        }
-
-        // Wire nightwatch evaluation: when a PR status is refreshed, evaluate it through
-        // the merge gate and log the decision to the audit store (evaluate-only, no merging).
-        await prManager.setOnPRStatusComputed { worktreeID, status, repoPath in
-            let config = try? await database.config.get()
-            guard let config, config.nightwatchMode != .off else { return }
-
-            // Load policy from .nightwatch/policy.json (conservative defaults if absent/malformed)
-            let policy = NightwatchPolicy.load(repoPath: repoPath)
-            let gate = MergeGate(policy: policy)
-
-            // Build gate input from PR status. For Phase 1, we make conservative assumptions:
-            // - hasApprovedReview = false (not fetched yet, Phase 1 is evaluate-only)
-            // - checksClean = false (not fetched yet)
-            // - files/commits/author = nil (not fetched yet)
-            // This ensures Phase 1 gates are conservative (most PRs will escalate).
-            let input = GateInput(
-                prNumber: status.number,
-                repo: repoPath,
-                headSHA: "unknown",  // Not available in PRStatus
-                isDraft: status.state == .draft,
-                hasApprovedReview: false,
-                checksClean: status.state == .mergeable || status.state == .merged,
-                files: nil,
-                commits: nil,
-                authorWorktreeID: nil,
-                approvedSHA: nil,
-                touchesCI: false
-            )
-
-            let decision = gate.evaluate(input: input)
-            let action: AuditAction
-            let details: String
-
-            switch decision {
-            case .wouldMerge(clearanceID: let cid):
-                action = .wouldMerge
-                details = "Phase 1: would-merge marker (\(cid))"
-            case .hold(let reason):
-                action = .hold
-                details = "Hold reason: \(reason)"
-            case .escalate(let reason):
-                action = .escalate
-                details = "Escalate reason: \(reason)"
-            }
-
-            let entry = AuditLogEntry(
-                action: action,
-                prNumber: status.number,
-                repo: repoPath,
-                headSHA: "unknown",
-                timestamp: Date(),
-                details: details
-            )
-            try? await database.audit.logAction(entry)
         }
 
         // 8. Initialize RPC router
@@ -459,7 +444,8 @@ public final class Daemon: Sendable {
             subscriptions: subs,
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
-            pendingQuestions: pendingQuestions
+            pendingQuestions: pendingQuestions,
+            remoteManager: remoteManager
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
@@ -519,6 +505,13 @@ public final class Daemon: Sendable {
         // spawn landing before the sweep would miss a legacy column value.
         await database.repos.sweepClaudeSettingsOverlayColumnToFiles()
 
+        // 8c. One-time export of legacy DB note content to its file-backed
+        // home (`~/tbd/notes/<worktreeID>/<noteID>.md`). Unlike 8b the DB
+        // column is NOT cleared — it stays as a dormant fallback/backup; the
+        // file wins once it exists. Idempotent (file-exists guard), so no
+        // migration or marker is needed. Best-effort, never blocks startup.
+        await database.notes.exportContentColumnToFiles()
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -575,6 +568,7 @@ public final class Daemon: Sendable {
                 // Sweep once immediately (cold recovery), then every 60s.
                 await reaper.sweep(servers: await ownedServers())
                 while !Task.isCancelled {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
                     await reaper.sweep(servers: await ownedServers())
@@ -592,10 +586,26 @@ public final class Daemon: Sendable {
                     // Sweep once immediately (cold recovery), then every hour.
                     _ = await orphanGC.sweep()
                     while !Task.isCancelled {
+                        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
                         _ = await orphanGC.sweep()
                     }
+                }
+            }
+
+            // 11a-remote. Remote backends (Task 7): `manager.start()` runs a
+            // sequential `describe` (10s timeout each) per registered
+            // provider, then spawns poll loops. Fired off the boot critical
+            // path — same shape as the reaper/GC tasks above — so N slow or
+            // hung providers don't delay the RPC listener coming up.
+            // `remoteManager` was already assigned on `self` above, so a
+            // shutdown request racing this task still has a live handle to
+            // call `shutdown()` on (see the `shuttingDown` guard in
+            // `spawnPollLoops()`).
+            if let remoteManager {
+                self.remoteStartTask = Task {
+                    await remoteManager.start()
                 }
             }
 
@@ -656,14 +666,24 @@ public final class Daemon: Sendable {
             await poller.start()
 
             // 12c. Start per-profile OAuth usage poller (90s cadence,
-            // in-memory snapshots for the spawn-time account picker).
+            // snapshots for the spawn-time account picker, DB-cached so
+            // restarts show last-known bars instead of "usage unavailable").
             let configDirManager = rpcRouter.configDirManager
             let oauthPoller = OAuthProfileUsagePoller(
                 profilesProvider: { [database] in try await database.modelProfiles.list() },
                 loginIdentity: { id in configDirManager.loginIdentity(forProfileID: id) },
                 configDirPath: { id in configDirManager.configDirectory(forProfileID: id).path },
                 fetcher: LiveProfileUsageFetcher(),
-                broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) }
+                broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) },
+                loadPersisted: { [database] in
+                    (try? await database.oauthUsageSnapshots.loadAll()) ?? [:]
+                },
+                persist: { [database] id, snapshot in
+                    try? await database.oauthUsageSnapshots.upsert(profileID: id, snapshot: snapshot)
+                },
+                prunePersisted: { [database] eligibleIDs in
+                    try? await database.oauthUsageSnapshots.deleteExcept(profileIDs: eligibleIDs)
+                }
             )
             self.oauthUsagePoller = oauthPoller
             rpcRouter.oauthUsagePoller = oauthPoller
@@ -677,6 +697,10 @@ public final class Daemon: Sendable {
                 tmux: tmux,
                 inspector: ProductionPaneProcessInspector(),
                 readTranscript: { path in FileManager.default.contents(atPath: path) },
+                transcriptModifiedAt: { path in
+                    (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                },
+                // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the production value of `LimitResumeActuator`'s non-defaulted `waiter:` parameter (the seam itself), exercised by Tests/TBDDaemonTests/LimitResumeActuatorTests.swift which injects `waiter: { _ in }` at 5 construction sites; see docs/specs/2026-07-24-test-hardening-design.md
                 waiter: { duration in _ = try? await Task.sleep(for: duration) }
             )
             let resumeScheduler = LimitResumeScheduler(
@@ -771,6 +795,7 @@ public final class Daemon: Sendable {
             let hibernationCoordinator = rpcRouter.hibernationCoordinator
             self.hibernationSweepTask = Task {
                 while !Task.isCancelled {
+                    // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(30))
                     guard !Task.isCancelled else { break }
                     await hibernationCoordinator.sweep()
@@ -783,18 +808,36 @@ public final class Daemon: Sendable {
         daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
     }
 
-    /// Sleep in `GitPollCadence.pollTick` ticks until the gated interval has
-    /// elapsed. `interval` is re-evaluated every tick, so a foreground
+    /// Sleep in `tick`-sized steps (default `GitPollCadence.pollTick`) until the
+    /// gated interval has elapsed. `interval` is re-evaluated every tick, so a foreground
     /// transition or app disconnect changes the effective cadence within one
     /// tick instead of one full background interval (e.g. after a daemon
     /// restart under a foregrounded app, the first fetch still lands at ~60s
     /// rather than the 5min sampled before the app reconnected). Returns
     /// promptly on task cancellation.
-    static func sleepThroughGatedInterval(_ interval: @Sendable () async -> Duration) async {
+    ///
+    /// - Parameters:
+    ///   - tick: how long to wait between re-evaluations of `interval`.
+    ///     Injectable so a test can cross a threshold in two or three clock
+    ///     advances instead of a production-sized chain.
+    ///   - clock: delay seam (`Tests/CLAUDE.md`, "Clock and date seams"). This
+    ///     loop is pure `Duration` accumulation, so the existential's inability
+    ///     to express `Instant` math never bites.
+    static func sleepThroughGatedInterval(
+        _ interval: @Sendable () async -> Duration,
+        tick: Duration = GitPollCadence.pollTick,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) async {
         var waited = Duration.zero
         while !Task.isCancelled {
-            try? await Task.sleep(for: GitPollCadence.pollTick)
-            waited += GitPollCadence.pollTick
+            // `try?` swallows the cancellation error rather than checking for it;
+            // the loop head is what observes cancellation. A cancelled sleep
+            // therefore costs one extra `interval()` evaluation, which is
+            // side-effect-free today. That stops holding if `interval` ever gains
+            // side effects or if the `while` condition stops re-checking
+            // `Task.isCancelled`.
+            try? await clock.sleep(for: tick)
+            waited += tick
             let due = await interval()
             if waited >= due { return }
         }
@@ -816,6 +859,38 @@ public final class Daemon: Sendable {
             await resumeScheduler.stop()
         }
 
+        // Cancel the deferred remote-backends boot task BEFORE tearing down
+        // the manager, and AWAIT it here rather than merely signalling it
+        // (see the old bug this replaces, on `remoteStartTask?.cancel()`
+        // further down): `start()` runs `loadRegistryAndDescribe()` then
+        // `spawnPollLoops()` in sequence, and a SIGTERM landing in the first
+        // few seconds of boot can catch it mid `describe` — before
+        // `spawnPollLoops()` has ever run, `remoteManager.shutdown()` alone
+        // tears down loops/supervisors that don't exist yet and does
+        // nothing for the in-flight child. `runBoundedProcess` now wires
+        // outer-task cancellation into its own deadline (`CancellationRelay`
+        // in `BoundedProcessRunner.swift`), so `cancel()` here interrupts an
+        // in-flight `describe` immediately rather than only being observed
+        // between providers in `loadRegistryAndDescribe`'s loop — but that
+        // interruption still runs ON this task, so it needs the daemon
+        // process (and the `SubprocessWatchdog` thread that reaps the killed
+        // child) to still be alive to finish unwinding. Awaiting `.value`
+        // here, before `Foundation.exit(0)` below, is what guarantees that;
+        // without it the process could tear down mid-unwind and orphan the
+        // child exactly as before.
+        remoteStartTask?.cancel()
+        await remoteStartTask?.value
+
+        // Stop remote-backends poll loops / events supervisors. Required,
+        // not optional: the events supervisor's supervision task retains
+        // the manager strongly, so without this call the manager and its
+        // child provider processes are immortal. `shutdown()` (not the bare
+        // `stopAll()`) takes the manager's own reconfigure lock so this
+        // can't interleave with an in-flight `start()`/`spawnPollLoops()`.
+        if let remoteManager {
+            await remoteManager.shutdown()
+        }
+
         // Stop daywatch runner.
         if let runner = daywatchRunner {
             await runner.apply(mode: .off)
@@ -827,7 +902,9 @@ public final class Daemon: Sendable {
         // Stop the FD-vending sidecar (closes the listener + any client).
         await fdVendingServer.stop()
 
-        // Cancel background tasks
+        // Cancel background tasks. `remoteStartTask` is cancelled (and
+        // awaited) earlier, above — see that comment for why it can't wait
+        // until here.
         sshRefreshTask?.cancel()
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()

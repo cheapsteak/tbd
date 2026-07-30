@@ -24,6 +24,12 @@ public final class RPCRouter: Sendable {
     /// The `gc.*` handlers return an error response rather than crashing when
     /// this is nil.
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// Remote-backends actor. Constructed at boot ONLY when
+    /// `config.remoteBackendsEnabled` is true (see `Daemon.swift`); `nil`
+    /// otherwise, including when a user flips the flag on without
+    /// restarting. `remote.*` handlers return an error response rather than
+    /// crashing when this is nil — see `RPCRouter+RemoteHandlers.swift`.
+    let remoteManager: RemoteProviderManager?
     /// In-memory per-profile OAuth usage poller. Wired post-construction by
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
     /// mode, where usage snapshots are simply absent.
@@ -59,6 +65,11 @@ public final class RPCRouter: Sendable {
     /// Auto-`/login` typing + login-completion watching for profile login
     /// sessions. Injected so tests can zero out the trigger delays.
     public let loginSessions: LoginSessionCoordinator
+    /// Daemon-owned panel surface actor (spec C Phase 2). Gating lives inside
+    /// the coordinator (§7.2) — `panel.*` handlers route to it and must not
+    /// re-implement gating. Broadcasts through the same `subscriptions`
+    /// channel every other mutating handler uses.
+    public let panelCoordinator: PanelCoordinator
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -93,7 +104,8 @@ public final class RPCRouter: Sendable {
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator()
+        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
+        remoteManager: RemoteProviderManager? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -119,6 +131,9 @@ public final class RPCRouter: Sendable {
         self.controlMode = nil
         self.claudeCredentialsKeychain = claudeCredentialsKeychain
         self.loginSessions = loginSessions
+        self.panelCoordinator = PanelCoordinator(
+            db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
+        self.remoteManager = remoteManager
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -164,6 +179,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoSetExpanded(request.paramsData)
             case RPCMethod.repoListBranches:
                 return try await handleRepoListBranches(request.paramsData)
+            case RPCMethod.repoListOpenPRs:
+                return try await handleRepoListOpenPRs(request.paramsData)
             case RPCMethod.worktreeCreate:
                 return try await handleWorktreeCreate(request.paramsData)
             case RPCMethod.worktreeList:
@@ -174,6 +191,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeRerunPreSession(request.paramsData)
             case RPCMethod.worktreeRevive:
                 return try await handleWorktreeRevive(request.paramsData)
+            case RPCMethod.worktreeReviveConversationFresh:
+                return try await handleWorktreeReviveConversationFresh(request.paramsData)
             case RPCMethod.worktreeAdopt:
                 return try await handleWorktreeAdopt(request.paramsData)
             case RPCMethod.worktreeRename:
@@ -256,6 +275,10 @@ public final class RPCRouter: Sendable {
                 return try await handleNoteDelete(request.paramsData)
             case RPCMethod.noteList:
                 return try await handleNoteList(request.paramsData)
+            case RPCMethod.terminalHistoryList:
+                return try await handleTerminalHistoryList(request.paramsData)
+            case RPCMethod.terminalHistoryRevive:
+                return try await handleTerminalHistoryRevive(request.paramsData)
             case RPCMethod.terminalOutput:
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:
@@ -286,6 +309,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileSetPrimaryAgentPreference(request.paramsData)
             case RPCMethod.modelProfileSetRepoOverride:
                 return try await handleModelProfileSetRepoOverride(request.paramsData)
+            case RPCMethod.modelProfileReorder:
+                return try await handleModelProfileReorder(request.paramsData)
             case RPCMethod.configSetEnvOverrides:
                 return try await handleConfigSetEnvOverrides(request.paramsData)
             case RPCMethod.repoSetEnvOverrides:
@@ -331,6 +356,10 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeSetAutoArchive(request.paramsData)
             case RPCMethod.worktreeSetAutoHibernate:
                 return try await handleWorktreeSetAutoHibernate(request.paramsData)
+            case RPCMethod.worktreeSetPin:
+                return try await handleWorktreeSetPin(request.paramsData)
+            case RPCMethod.worktreeReorderPins:
+                return try await handleWorktreeReorderPins(request.paramsData)
             case RPCMethod.configGet:
                 return try await handleConfigGet()
             case RPCMethod.configSetAutoArchiveOnMergeDefault:
@@ -349,8 +378,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
             case RPCMethod.nightwatchSetMode:
                 return try await handleSetNightwatchMode(request.paramsData)
-            case RPCMethod.nightwatchReport:
-                return try await handleNightwatchReport(request.paramsData)
             case RPCMethod.terminalHibernate:
                 return try await handleTerminalHibernate(request.paramsData)
             case RPCMethod.terminalWake:
@@ -363,14 +390,46 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetHibernateInputVeto:
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
+            case RPCMethod.configSetAutoCloseSetup:
+                return try await handleConfigSetAutoCloseSetup(request.paramsData)
+            case RPCMethod.configSetAutoTrustWorktrees:
+                return try await handleConfigSetAutoTrustWorktrees(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
+            case RPCMethod.remoteProviders:
+                return try await handleRemoteProviders()
+            case RPCMethod.remoteSessions:
+                return try await handleRemoteSessions()
+            case RPCMethod.remoteCreate:
+                return try await handleRemoteCreate(request.paramsData)
+            case RPCMethod.remoteStop:
+                return try await handleRemoteStop(request.paramsData)
+            case RPCMethod.remoteSend:
+                return try await handleRemoteSend(request.paramsData)
+            case RPCMethod.remoteLog:
+                return try await handleRemoteLog(request.paramsData)
+            case RPCMethod.remoteRename:
+                return try await handleRemoteRename(request.paramsData)
+            case RPCMethod.remoteDismiss:
+                return try await handleRemoteDismiss(request.paramsData)
+            case RPCMethod.remoteSetPin:
+                return try await handleRemoteSetPin(request.paramsData)
+            case RPCMethod.remoteReportAttachExit:
+                return try await handleRemoteReportAttachExit(request.paramsData)
+            case RPCMethod.configSetRemoteBackends:
+                return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.gcList:
                 return try await handleGCList(request.paramsData)
             case RPCMethod.gcRestore:
                 return try await handleGCRestore(request.paramsData)
             case RPCMethod.gcSweepNow:
                 return try await handleGCSweepNow(request.paramsData)
+            case RPCMethod.panelGet:
+                return try await handlePanelGet(request.paramsData)
+            case RPCMethod.panelApply:
+                return try await handlePanelApply(request.paramsData)
+            case RPCMethod.panelImportLegacy:
+                return try await handlePanelImportLegacy(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -400,7 +459,12 @@ public final class RPCRouter: Sendable {
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
-            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled))
+            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
+            autoCloseSetupEnabled: config.autoCloseSetupEnabled,
+            autoTrustWorktrees: config.autoTrustWorktrees,
+            panelSurfaceEnabled: config.panelSurfaceEnabled,
+            remoteBackendsEnabled: config.remoteBackendsEnabled,
+            remoteBackendsLive: remoteManager != nil))
     }
 
     // MARK: - PR Status
@@ -422,7 +486,7 @@ public final class RPCRouter: Sendable {
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)] = []
+        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
             // Route the per-worktree `git config` lookup through the TTL cache
@@ -437,7 +501,8 @@ public final class RPCRouter: Sendable {
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
-                worktreePath: wt.path
+                worktreePath: wt.path,
+                prNumber: wt.prNumber
             ))
         }
         await prManager.fetchAll(worktrees: infos)
@@ -447,7 +512,8 @@ public final class RPCRouter: Sendable {
     }
 
     /// Scratch spaces are repo-less and have no PR — exclude them so the
-    /// poller's "all worktrees share one repo" assumption holds. Pulled out
+    /// poller only queries real checkouts (worktrees may span multiple repos;
+    /// by-number lookups scope to each worktree's own repo). Pulled out
     /// as a pure function (rather than inlined `.filter` in `computePRList`)
     /// so it's directly unit-testable without spinning up git/gh machinery.
     static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
@@ -470,7 +536,8 @@ public final class RPCRouter: Sendable {
             worktreeID: wt.id,
             branch: wt.branch,
             upstreamBranch: upstreamBranch,
-            repoPath: wt.path
+            repoPath: wt.path,
+            prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))
     }

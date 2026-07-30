@@ -8,7 +8,17 @@ final class FakeActuator: LimitResumeActuating, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeActuator")
     private var outcomes: [ResumeActuationOutcome]
     private var _calls: [ScheduledResume] = []
+    private var _alreadyContinued = false
+    private var _earlyProbes: [ScheduledResume] = []
     var calls: [ScheduledResume] { queue.sync { _calls } }
+    /// Rows the scheduler ran the early-cancel probe against.
+    var earlyProbes: [ScheduledResume] { queue.sync { _earlyProbes } }
+    /// What `userAlreadyContinued` answers — flip mid-test to simulate the
+    /// session's transcript growing while the row is still pending.
+    var alreadyContinued: Bool {
+        get { queue.sync { _alreadyContinued } }
+        set { queue.sync { _alreadyContinued = newValue } }
+    }
 
     init(_ outcomes: [ResumeActuationOutcome] = [.sent]) {
         self.outcomes = outcomes
@@ -18,6 +28,13 @@ final class FakeActuator: LimitResumeActuating, @unchecked Sendable {
         queue.sync {
             _calls.append(resume)
             return outcomes.count > 1 ? outcomes.removeFirst() : outcomes[0]
+        }
+    }
+
+    func userAlreadyContinued(_ resume: ScheduledResume) async -> Bool {
+        queue.sync {
+            _earlyProbes.append(resume)
+            return _alreadyContinued
         }
     }
 }
@@ -246,6 +263,7 @@ final class OutcomeCollector: @unchecked Sendable {
                 _ = try? await store.cancelPending(terminalID: resume.terminalID)
                 return .paneInCopyMode
             }
+            func userAlreadyContinued(_ resume: ScheduledResume) async -> Bool { false }
         }
         let actuator = CancellingActuator(store: db.scheduledResumes)
         let collector = OutcomeCollector()
@@ -261,6 +279,89 @@ final class OutcomeCollector: @unchecked Sendable {
         await pump()
         #expect(try await db.scheduledResumes.pending().isEmpty)
         #expect(collector.events.isEmpty)
+        await scheduler.stop()
+    }
+
+    // MARK: - Early cancel on transcript growth
+
+    /// Claude Code retried and recovered its OWN turn: no UserPromptSubmit
+    /// event fires, so the only signal is transcript growth. The loop's
+    /// capped sleep must catch it well before fireAt instead of leaving the
+    /// session badged "auto-resume scheduled" for the whole wait.
+    @Test func transcriptGrowthCancelsPendingRowLongBeforeFireAt() async throws {
+        let actuator = FakeActuator([.sent])
+        let collector = OutcomeCollector()
+        let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
+        await scheduler.start()
+        let scheduled = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(600),
+            limitType: "session", rawMessage: "m")
+        #expect(scheduled != nil)
+        await pump()
+        #expect(actuator.calls.isEmpty)   // parked, nowhere near fireAt
+
+        actuator.alreadyContinued = true
+        await clock.advance(by: LimitResumeScheduler.earlyCheckInterval + 1)
+        await pump()
+
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .cancelled)
+        // The UI mirror is nilled by the same write (setStatus).
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil)
+        #expect(actuator.calls.isEmpty)   // never actuated
+        #expect(collector.events.isEmpty)
+
+        // Still cancelled past the original fireAt — no late fire.
+        await clock.advance(by: 700)
+        await pump()
+        #expect(actuator.calls.isEmpty)
+        await scheduler.stop()
+    }
+
+    /// Other branch: the probe says the transcript did NOT grow, so the row
+    /// survives every early pass and fires normally at fireAt.
+    @Test func noTranscriptGrowthLeavesRowPendingAndStillFiresAtFireAt() async throws {
+        let actuator = FakeActuator([.sent])
+        let scheduler = makeScheduler(actuator: actuator)
+        await scheduler.start()
+        let scheduled = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(600),
+            limitType: "session", rawMessage: "m")
+        #expect(scheduled != nil)
+        await pump()
+
+        await clock.advance(by: LimitResumeScheduler.earlyCheckInterval + 1)
+        await pump()
+        #expect(!actuator.earlyProbes.isEmpty)   // the pass really ran
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) != nil)
+        #expect(actuator.calls.isEmpty)
+
+        await clock.advance(by: 700)             // past resetsAt + slack
+        await pump()
+        #expect(actuator.calls.count == 1)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .sent)
+        await scheduler.stop()
+    }
+
+    /// A due row is never early-probed — `actuate`'s own eligibility pass
+    /// runs the same predicate on fresher bytes moments later.
+    @Test func dueRowSkipsEarlyProbeAndFires() async throws {
+        let actuator = FakeActuator([.sent])
+        actuator.alreadyContinued = true   // would cancel if it were probed
+        let scheduler = makeScheduler(actuator: actuator)
+        await scheduler.start()
+        let scheduled = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(-120),
+            limitType: "session", rawMessage: "m")
+        await pump()
+        #expect(actuator.earlyProbes.isEmpty)
+        #expect(actuator.calls.count == 1)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .sent)
         await scheduler.stop()
     }
 

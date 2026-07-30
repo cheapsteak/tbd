@@ -82,7 +82,7 @@ private struct TabDropDelegate: DropDelegate {
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
 /// Replaces the former TerminalTabBar.
 struct TabBar: View {
-    let tabs: [Tab]
+    let tabs: [TBDShared.Tab]
     let worktreeID: UUID
     @EnvironmentObject private var appState: AppState
     @Binding var activeTabIndex: Int
@@ -234,6 +234,7 @@ struct AgentExecutableAvailability: Equatable {
             .map(String.init)
         let fallbackDirs = [
             "\(homeDir)/.local/bin",
+            "\(homeDir)/.volta/bin",
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "/usr/bin",
@@ -514,7 +515,7 @@ enum TabParkMenuModel {
 // MARK: - TabBarItem
 
 private struct TabBarItem: View {
-    let tab: Tab
+    let tab: TBDShared.Tab
     let index: Int
     let worktreeID: UUID
     let isSelected: Bool
@@ -530,6 +531,8 @@ private struct TabBarItem: View {
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
     @EnvironmentObject private var appState: AppState
 
     private var showClose: Bool {
@@ -571,6 +574,7 @@ private struct TabBarItem: View {
         return AccountHoverCards.claudeTabCard(
             terminal: terminal,
             profiles: appState.modelProfiles,
+            resetStyle: usageResetTimeStyle,
             enabled: showClaudeTabUsageTooltip
         )
     }
@@ -838,6 +842,17 @@ private struct TabBarItem: View {
         return "Copy Path"
     }
 
+    /// The terminal this tab renders, for deep-link anchoring — nil for
+    /// non-terminal panes (webview, code viewer, note), whose links fall back
+    /// to the worktree alone.
+    private var linkTerminalID: UUID? {
+        switch tab.content {
+        case .terminal(let terminalID): return terminalID
+        case .liveTranscript(_, let terminalID): return terminalID
+        default: return nil
+        }
+    }
+
     @ViewBuilder
     private var contextMenuContent: some View {
         if let path = copyablePath {
@@ -845,8 +860,16 @@ private struct TabBarItem: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(path, forType: .string)
             }
-            Divider()
         }
+
+        Button("Copy Link") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString,
+                forType: .string
+            )
+        }
+        Divider()
 
         if isClaudeTerminal {
             Button(formatProfileHeader(terminal?.profileID)) {}

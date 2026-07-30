@@ -76,6 +76,8 @@ struct RowActionMenuActions {
             pathIsEmpty: worktree.path.isEmpty,
             hasRepoID: worktree.repoID != nil,
             isScratch: worktree.isScratch,
+            isPinned: worktree.pinnedAt != nil,
+            isNightwatchDesk: worktree.isNightwatchDesk,
             status: worktree.status,
             isPromoted: worktree.promotedToRepoID != nil,
             branch: worktree.branch,
@@ -106,6 +108,13 @@ struct RowActionMenuActions {
         case .copyBranch:
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(worktree.branch, forType: .string)
+
+        case .copyLink:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                DeepLink.makeShareableOpenURL(worktree.id).absoluteString,
+                forType: .string
+            )
 
         case .archiveScratch:
             let wtID = worktree.id
@@ -161,6 +170,14 @@ struct RowActionMenuActions {
         case .archive:
             let wtID = worktree.id
             Task { await appState.archiveWorktree(id: wtID) }
+
+        case .pin:
+            let wtID = worktree.id
+            Task { await appState.setPinned(worktreeID: wtID, pinned: true) }
+
+        case .unpin:
+            let wtID = worktree.id
+            Task { await appState.setPinned(worktreeID: wtID, pinned: false) }
 
         case .rerunPreSessionHook:
             let wtID = worktree.id

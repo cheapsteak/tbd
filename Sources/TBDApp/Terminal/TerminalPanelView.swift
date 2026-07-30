@@ -155,6 +155,7 @@ struct TerminalPanelView: View {
 
         didProbe = true   // gate further attempts only once we actually probe
 
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(nanoseconds: 500_000_000)
         let result = await appState.healthCheckProfile(baseURL: baseURL)
         if !result.reachable {
@@ -726,6 +727,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // so the daemon-side `paste-buffer -p` is the SOLE wrapping
                 // authority — SwiftTerm's own 2004 tracking can be stale after
                 // a tab-switch re-attach, so no size rides the keystroke path.
+                // That sole-authority claim is CONTINGENT, not unconditional:
+                // `-p` wraps in ESC[200~/ESC[201~ only because the pane's
+                // application has enabled bracketed-paste mode (DECSET 2004).
+                // Against a pane that has NOT, the same `-p` delivers the bytes
+                // verbatim with no markers — measured on tmux 3.6a (22 wrapped
+                // bytes vs 10 bare). If an agent TUI ever stops setting 2004,
+                // nothing here wraps. Asserted nightly by probe P3 in
+                // scripts/nightly-tmux-probes.sh (PR #523), a two-arm probe:
+                // 2004 on → wrapped, 2004 off → verbatim.
                 // Returns true → the paste is consumed here (frame sent, or
                 // oversize refused); false → not attached, SwiftTerm's normal
                 // local paste runs.
@@ -1026,6 +1036,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             resizeDebounceTask?.cancel()
             let daemonClient = appState?.daemonClient
             resizeDebounceTask = Task { [weak self] in
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled, let self else { return }
                 guard var size = self.resizeSerializer.sizeToSend(cols: cols, rows: rows) else {

@@ -31,7 +31,9 @@ enum AccountHoverCards {
     /// is a feature-rich, easy-to-skim take on session-usage display.
     static func claudeTabCard(terminal: Terminal,
                               profiles: [ModelProfileWithUsage],
+                              resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
                               timeZone: TimeZone = .current,
+                              now: Date = Date(),
                               enabled: Bool = true) -> HoverCardModel? {
         guard enabled else { return nil }
         guard terminal.kind == .claude || terminal.isClaudeResumable else { return nil }
@@ -46,7 +48,8 @@ enum AccountHoverCards {
                     model.titleCaption = notLoggedInCaption
                 }
                 model.rows.append(contentsOf: usageRows(for: entry.usageSnapshot,
-                                                        timeZone: timeZone))
+                                                        resetStyle: resetStyle,
+                                                        timeZone: timeZone, now: now))
             } else {
                 model.title = removedProfileLabel
                 model.titleStyle = .mutedItalic
@@ -66,42 +69,48 @@ enum AccountHoverCards {
     }
 
     /// Usage rows for a snapshot: 5h window (with reset time), weekly, and
-    /// per-family scoped buckets. Numbers are monospaced digits; tinted only
-    /// when the bucket is warning/critical — calm otherwise. Empty when the
-    /// profile has no usage data.
+    /// per-family scoped buckets. Numbers are monospaced digits; tinted per
+    /// pace-aware fill level. Empty when the profile has no usage data.
+    /// The weekly row now shows its reset countdown when available (closing
+    /// a gap where it silently omitted the weekly reset).
     static func usageRows(for snapshot: ProfileUsageSnapshot?,
-                          timeZone: TimeZone = .current) -> [HoverCardRow] {
+                          resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
+                          timeZone: TimeZone = .current,
+                          now: Date = Date()) -> [HoverCardRow] {
         guard let snapshot, !snapshot.buckets.isEmpty else { return [] }
         var rows: [HoverCardRow] = []
         if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-            var value = ProfileUsagePresentation.percentText(session.percent)
-            if let resets = session.resetsAt {
-                value += " · resets \(ProfileUsagePresentation.resetTimeText(resets, timeZone: timeZone))"
+            let presentation = ProfileUsagePresentation.bucketPresentation(session, style: resetStyle, now: now, timeZone: timeZone)
+            var value = presentation.percentText
+            if let resetPhrase = presentation.resetPhrase {
+                value += " · \(resetPhrase)"
             }
             rows.append(HoverCardRow(label: "5h window", value: value,
-                                     monospacedDigits: true, tint: tint(for: session)))
+                                     monospacedDigits: true, tint: tint(for: presentation)))
         }
         if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
+            let presentation = ProfileUsagePresentation.bucketPresentation(weekly, style: resetStyle, now: now, timeZone: timeZone)
+            var value = presentation.percentText
+            if let resetPhrase = presentation.resetPhrase {
+                value += " · \(resetPhrase)"
+            }
             rows.append(HoverCardRow(label: "Week",
-                                     value: ProfileUsagePresentation.percentText(weekly.percent),
-                                     monospacedDigits: true, tint: tint(for: weekly)))
+                                     value: value,
+                                     monospacedDigits: true, tint: tint(for: presentation)))
         }
         for scoped in ProfileUsagePresentation.scopedBuckets(snapshot) {
+            let presentation = ProfileUsagePresentation.bucketPresentation(scoped, now: now, timeZone: timeZone)
             rows.append(HoverCardRow(label: scoped.modelDisplayName ?? "Model",
-                                     value: ProfileUsagePresentation.percentText(scoped.percent),
-                                     monospacedDigits: true, tint: tint(for: scoped)))
+                                     value: presentation.percentText,
+                                     monospacedDigits: true, tint: tint(for: presentation)))
         }
         return rows
     }
 
-    /// Map a bucket's severity to the card tint. `.normal` renders in the
-    /// calm primary color — color appears only for warning/critical.
-    static func tint(for bucket: ClaudeUsageLimitBucket) -> HoverCardTint {
-        switch ProfileUsagePresentation.severityLevel(severity: bucket.severity,
-                                                      percent: bucket.percent) {
-        case .normal: return .normal
-        case .warning: return .warning
-        case .critical: return .critical
-        }
+    /// Map a bucket presentation's pace-aware fill to the card tint.
+    /// The four-tier hierarchy (normal/caution/warning/critical) aligns with
+    /// `FillLevel`, so pace-aware coloring is consistent across all surfaces.
+    static func tint(for presentation: ProfileUsagePresentation.BucketPresentation) -> HoverCardTint {
+        ProfileUsagePresentation.hoverCardTint(for: presentation.fill)
     }
 }

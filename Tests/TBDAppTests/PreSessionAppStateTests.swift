@@ -117,7 +117,7 @@ struct PreSessionAppStateTests {
             state.terminals[worktreeID] = []
             state.tabs[worktreeID] = [Tab(id: rootID, content: .terminal(terminalID: rootID), label: nil)]
             state.layouts[rootID] = .split(
-                direction: .horizontal,
+                id: UUID(), direction: .horizontal,
                 children: [
                     .pane(.terminal(terminalID: rootID)),
                     .pane(.terminal(terminalID: splitChild.id)),

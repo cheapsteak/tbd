@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
     )
 }
 
@@ -192,6 +192,87 @@ struct TerminalWake: AsyncParsableCommand {
             print(result.woken
                 ? "Terminal woken."
                 : "Terminal already awake (no-op)\(prompt != nil ? " — prompt NOT delivered" : "").")
+        }
+    }
+}
+
+// MARK: - terminal close
+
+struct TerminalClose: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "close",
+        abstract: "Close a terminal: capture its scrollback to Closed Terminals history, kill its tmux window, remove it from TBD. Idempotent: closing an already-closed terminal is a no-op.",
+        discussion: """
+            Closing is immediate and final for the terminal row. The pane's
+            scrollback is captured into Session History → Closed Terminals
+            (best-effort), any pending session-limit auto-resume is cancelled,
+            and the tab disappears from the app. A Claude session's transcript
+            survives on disk, and a closed Claude terminal can be revived from
+            Closed Terminals history.
+
+            By default a terminal that is mid-turn or holding a permission
+            prompt is refused (exit 2) — pass --force to close it anyway. That
+            check applies only while the pane's window is alive, so a session
+            that died mid-turn stays closeable without --force.
+
+            A terminal cannot close itself: killing the window SIGHUPs the
+            calling shell, so this command could never report its own result.
+            Spawn a successor and have it close you.
+
+            Closing a worktree's last terminal does NOT archive the worktree —
+            it stays active with zero terminals. Use `tbd worktree archive`.
+            """
+    )
+
+    @Option(name: .long, help: "Terminal ID")
+    var terminal: String
+
+    @Flag(name: .long, help: "Close even if the terminal is mid-turn or waiting on a permission prompt")
+    var force = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        // Self-close is refused before the RPC, not skipped: with a single
+        // target, skipping would exit 0 having done nothing, which an
+        // autonomous caller reads as success.
+        if let selfID = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
+           UUID(uuidString: selfID) == terminalID {
+            FileHandle.standardError.write(Data("""
+                Refusing to close the calling terminal (\(terminalID)). A terminal cannot \
+                close itself — spawn a successor and have it close this one.\n
+                """.utf8))
+            throw ExitCode(2)
+        }
+
+        let client = SocketClient()
+        let response = try client.send(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            // --force drops the rails; otherwise the daemon applies them.
+            params: TerminalDeleteParams(
+                terminalID: terminalID,
+                respectActivityRails: force ? nil : true)
+        ))
+
+        guard response.success else {
+            // Branch on the machine-readable code, never the prose.
+            if response.errorCode == RPCErrorCode.terminalBusy.rawValue {
+                FileHandle.standardError.write(Data(((response.error ?? "Terminal is busy.") + "\n").utf8))
+                throw ExitCode(2)
+            }
+            throw CLIError.rpcError(response.error ?? "Unknown error")
+        }
+
+        let result = try response.decodeResult(TerminalDeleteResult.self)
+        if json {
+            printJSON(result)
+        } else {
+            print(result.alreadyGone ? "Terminal already closed (no-op)." : "Terminal closed.")
         }
     }
 }

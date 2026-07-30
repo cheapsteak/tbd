@@ -291,6 +291,32 @@ extension AppState {
         }
     }
 
+    /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
+    /// so the Settings toggle reflects the daemon's persisted state. Applies
+    /// to the next worktree creation.
+    func setAutoCloseSetupEnabled(_ enabled: Bool) async {
+        do {
+            try await autoCloseSetupSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set auto-close setup: \(error, privacy: .public)")
+            showAlert("Failed to set auto-close setup: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Persist the worktree auto-trust switch, then re-fetch capabilities so
+    /// the Settings toggle reflects the daemon's persisted state. Applies to
+    /// the next Claude spawn or wake; never un-trusts an already-seeded path.
+    func setAutoTrustWorktrees(_ enabled: Bool) async {
+        do {
+            try await autoTrustWorktreesSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set worktree auto-trust: \(error, privacy: .public)")
+            showAlert("Failed to set worktree auto-trust: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a per-repo model profile override.
     func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async {
         do {
@@ -453,11 +479,12 @@ extension AppState {
             }
     }
 
-    /// Force an immediate daemon-side OAuth usage sweep and merge the returned
-    /// snapshots into local state. The account picker calls this on open —
-    /// cached snapshots stay on screen and update in place when fresh data
-    /// lands. Failures are logged but never surfaced as a blocking alert
-    /// (the picker degrades to cached data).
+    /// Ask the daemon to refresh stale OAuth usage (fresh or backing-off
+    /// profiles are skipped server-side) and merge the returned snapshots
+    /// into local state. The account picker calls this on open — cached
+    /// snapshots stay on screen and update in place when fresh data lands.
+    /// Failures are logged but never surfaced as a blocking alert (the picker
+    /// degrades to cached data).
     func refreshUsageSnapshots(profileID: UUID? = nil) async {
         do {
             let result = try await daemonClient.refreshProfileUsage(id: profileID)
@@ -504,6 +531,30 @@ extension AppState {
         } catch {
             logger.error("Failed to fetch profile usage: \(error, privacy: .public)")
             showAlert("Failed to fetch profile usage: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Reorder
+
+    /// Reorder model profiles, triggered by SwiftUI `.onMove` in the settings
+    /// profile list. Mirrors `AppState.reorderTopLevelWorktrees`: updates
+    /// locally first (optimistic), then persists via RPC; rolls back on error.
+    /// Unlike worktrees, profiles are a flat global list — no nesting/repo
+    /// scoping to filter around.
+    func reorderModelProfiles(fromOffsets source: IndexSet, toOffset destination: Int) {
+        let previous = modelProfiles
+        var rows = modelProfiles
+        rows.move(fromOffsets: source, toOffset: destination)
+        modelProfiles = rows
+
+        let orderedIDs = rows.map(\.profile.id)
+        Task {
+            do {
+                try await daemonClient.reorderModelProfiles(profileIDs: orderedIDs)
+            } catch {
+                logger.error("reorderModelProfiles RPC failed: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run { self.modelProfiles = previous }
+            }
         }
     }
 

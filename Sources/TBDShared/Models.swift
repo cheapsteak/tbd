@@ -152,8 +152,45 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Set only on promoted scratch rows: the repo created by `tbd scratch promote`.
     public var promotedToRepoID: UUID?
 
+    /// Number of the GitHub PR this worktree was created from, if any. `nil` for
+    /// worktrees created from a plain branch. Lets `PRStatusManager` resolve
+    /// status by direct number lookup — the only way fork PRs (no matching
+    /// local branch) get tracked.
+    public var prNumber: Int?
+
+    /// True when this worktree's *contents* were checked out from a ref TBD
+    /// cannot vouch for — today, a `refs/pull/<n>/head` fetch of a PR whose
+    /// commits may come from a third-party fork. TBD created the directory, but
+    /// a stranger authored what is in it (`.claude/settings.json`, hooks, MCP
+    /// config, `CLAUDE.md`), so the folder-trust question does *not* have a
+    /// known answer and `ClaudeTrustSeeder` must not pre-answer it.
+    ///
+    /// Set only by the PR-head checkout branch of `completeCreateWorktree`.
+    /// `false` for everything else — including a *decorated* same-repo PR row,
+    /// which stamps `prNumber` for status tracking but checks out an ordinary
+    /// local branch, so it stays seedable.
+    public var foreignHead: Bool = false
+
+    /// When this worktree was pinned to the sidebar dock; `nil` = unpinned.
+    /// Purely a UI affordance — the daemon stores it but never acts on it.
+    /// Ordering in the dock is ascending by this timestamp, so new pins append.
+    public var pinnedAt: Date?
+
+    /// Position in the sidebar dock's pinned list, ascending. `nil` = never
+    /// explicitly ordered, in which case the dock falls back to `pinnedAt`
+    /// order — which is what lets the column ship with no backfill.
+    public var pinSortOrder: Int?
+
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
+
+    /// The mode-managed Watch Desk scratch worktree, identified by its fixed
+    /// display name. Not user-pinnable — the sidebar's Day/Night toggle controls
+    /// whether it is shown. Single definition shared by the dock's desk slot and
+    /// the row-action menu's pin suppression, so the two cannot drift.
+    public var isNightwatchDesk: Bool {
+        isScratch && displayName == NightwatchDeskPrompts.deskDisplayName
+    }
 
     /// True when `displayName` has never been customized away from the
     /// auto-generated `name`. Single source of truth for "still default"
@@ -172,7 +209,11 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 autoArchiveOnMerge: Bool? = nil,
                 autoHibernateOnMerge: Bool? = nil,
                 promotedToRepoID: UUID? = nil,
-                prStatus: PRStatus? = nil) {
+                prStatus: PRStatus? = nil,
+                prNumber: Int? = nil,
+                foreignHead: Bool = false,
+                pinnedAt: Date? = nil,
+                pinSortOrder: Int? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -193,6 +234,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.autoHibernateOnMerge = autoHibernateOnMerge
         self.promotedToRepoID = promotedToRepoID
         self.prStatus = prStatus
+        self.prNumber = prNumber
+        self.foreignHead = foreignHead
+        self.pinnedAt = pinnedAt
+        self.pinSortOrder = pinSortOrder
     }
 
     enum CodingKeys: String, CodingKey {
@@ -201,7 +246,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
-        case promotedToRepoID, prStatus
+        case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -226,6 +271,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         autoHibernateOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateOnMerge)
         promotedToRepoID = try c.decodeIfPresent(UUID.self, forKey: .promotedToRepoID)
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
+        prNumber = try c.decodeIfPresent(Int.self, forKey: .prNumber)
+        // Absent in JSON written before v67 — those rows predate fork-PR
+        // checkout tracking, so treat them as ordinary TBD-created contents.
+        foreignHead = try c.decodeIfPresent(Bool.self, forKey: .foreignHead) ?? false
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        pinSortOrder = try c.decodeIfPresent(Int.self, forKey: .pinSortOrder)
     }
 }
 
@@ -463,13 +514,17 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     public var envOverrides: [String: String]
     public var createdAt: Date
     public var lastUsedAt: Date?
+    /// Drag-and-drop display order (mirrors `Worktree.sortOrder`). Defaults to
+    /// 0 so existing JSON/rows without this field still decode.
+    public var sortOrder: Int
 
     public init(id: UUID = UUID(), name: String, kind: CredentialKind,
                 baseURL: String? = nil, model: String? = nil,
                 awsRegion: String? = nil, awsProfile: String? = nil,
                 fallbackModels: [String]? = nil,
                 envOverrides: [String: String] = [:],
-                createdAt: Date = Date(), lastUsedAt: Date? = nil) {
+                createdAt: Date = Date(), lastUsedAt: Date? = nil,
+                sortOrder: Int = 0) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -481,11 +536,12 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.envOverrides = envOverrides
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
+        self.sortOrder = sortOrder
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels
-        case envOverrides, createdAt, lastUsedAt
+        case envOverrides, createdAt, lastUsedAt, sortOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -502,6 +558,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
             [String: String].self, forKey: .envOverrides) ?? [:]
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+        sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
     }
 }
 
@@ -628,8 +685,11 @@ public enum ProfileUsageStatusKind: String, Codable, Sendable, Equatable {
     case unknown
 }
 
-/// In-memory per-profile usage snapshot for logged-in OAuth profiles,
-/// maintained by the daemon's background poller (never persisted).
+/// Per-profile usage snapshot for logged-in OAuth profiles, maintained by
+/// the daemon's background poller. Persisted by the daemon as a regenerating
+/// JSON cache (`oauth_profile_usage_snapshot` table, migration v55), so new
+/// fields MUST stay decode-compatible with older stored JSON (optional or
+/// defaulted).
 public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     /// Buckets from the last successful fetch (empty if none succeeded yet).
     public var buckets: [ClaudeUsageLimitBucket]
@@ -759,6 +819,38 @@ public struct Config: Codable, Sendable, Equatable {
     /// applies. The input veto is opt-in until it soaks and the v50 master
     /// default is reverted.
     public var hibernateInputVetoEnabled: Bool
+    /// Soak flag for auto-closing the setup-hook tab after a clean run.
+    /// When true AND a setup hook resolves, the hook's exit code is written
+    /// to a marker file; exit 0 closes the tab (kills the pane, deletes the
+    /// terminal/tab rows), nonzero leaves the tab open with an interactive
+    /// shell for debugging. Default OFF: this kills a pane and deletes rows
+    /// without a user gesture, so it is opt-in until it soaks.
+    public var autoCloseSetupEnabled: Bool
+    /// Pre-accept Claude Code's folder-trust dialog for the worktrees TBD
+    /// created in a registered repo, and for that repo's own checkout.
+    /// Default ON.
+    ///
+    /// The dialog asks "is this a project you created or one you trust?" — and
+    /// for a worktree TBD created from a repo the operator registered, TBD
+    /// already holds every fact the question is about, so the answer is yes by
+    /// construction. The repo's `.main` checkout is covered by the second half
+    /// of the question: TBD did not create it, but registering it with
+    /// `tbd repo add` was itself a deliberate trust gesture. Seeding writes that
+    /// answer through Claude's own config persistence and the dialog never
+    /// renders. That matters because the dialog blocks BEFORE SessionStart: no
+    /// hook fires while it is up, so a stalled-on-trust session is invisible to
+    /// TBD and prevention is the only available fix.
+    ///
+    /// Worktrees flagged `Worktree.foreignHead` — contents fetched from a PR
+    /// head that a third-party fork may have authored — are never seeded, on or
+    /// off: TBD vouches for the directory it created, not for what was fetched
+    /// into it.
+    ///
+    /// Turning this OFF only stops future seeding of non-scratch worktrees —
+    /// including worktrees that already exist but were never seeded — and never
+    /// un-trusts a path. Scratch spaces are seeded unconditionally and are not
+    /// governed by this flag.
+    public var autoTrustWorktrees: Bool
     /// Master switch for the daemon-owned orphan GC sweep. Default ON.
     public var gcEnabled: Bool
     /// Minimum age (seconds) an orphaned worktree/scratchpad must reach
@@ -767,6 +859,19 @@ public struct Config: Codable, Sendable, Equatable {
     /// Days a reap snapshot (`refs/tbd/snapshots/...`) is retained before
     /// being pruned.
     public var gcSnapshotRetentionDays: Int
+    /// Master switch for the daemon-owned panel-surface store (spec C Phase
+    /// 2 §8). Default OFF: the store is inert (no reads/writes) until this
+    /// flips on. See `Database/CLAUDE.md` three-place migration rule for the
+    /// `v59_panel_surface` migration that backs this column.
+    public var panelSurfaceEnabled: Bool
+    /// Gate for agent-originated panel-surface mutations. Default OFF, and
+    /// independent of `panelSurfaceEnabled` — an agent may only mutate panel
+    /// layout once both flags are true.
+    public var agentPanelControlEnabled: Bool
+    /// Master switch for remote agent backends (spec 2026-07-24). Default OFF:
+    /// the daemon polls provider executables in the background and can stop
+    /// remote sessions, so it is opt-in until it soaks.
+    public var remoteBackendsEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -791,9 +896,14 @@ public struct Config: Codable, Sendable, Equatable {
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = false,
+                autoTrustWorktrees: Bool = true,
                 gcEnabled: Bool = true,
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
-                gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays) {
+                gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays,
+                panelSurfaceEnabled: Bool = false,
+                agentPanelControlEnabled: Bool = false,
+                remoteBackendsEnabled: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -810,9 +920,14 @@ public struct Config: Codable, Sendable, Equatable {
         self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
+        self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.autoTrustWorktrees = autoTrustWorktrees
         self.gcEnabled = gcEnabled
         self.gcGraceSeconds = gcGraceSeconds
         self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
+        self.panelSurfaceEnabled = panelSurfaceEnabled
+        self.agentPanelControlEnabled = agentPanelControlEnabled
+        self.remoteBackendsEnabled = remoteBackendsEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -846,11 +961,22 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         hibernateInputVetoEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
+        autoCloseSetupEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // Absent (older daemon / older persisted JSON) defaults to ON, matching
+        // the column default — the trust answer is known by construction.
+        autoTrustWorktrees = try c.decodeIfPresent(
+            Bool.self, forKey: .autoTrustWorktrees) ?? true
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
         gcGraceSeconds = try c.decodeIfPresent(Int.self, forKey: .gcGraceSeconds)
             ?? Config.defaultGCGraceSeconds
         gcSnapshotRetentionDays = try c.decodeIfPresent(Int.self, forKey: .gcSnapshotRetentionDays)
             ?? Config.defaultGCSnapshotRetentionDays
+        panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
+        agentPanelControlEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .agentPanelControlEnabled) ?? false
+        remoteBackendsEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteBackendsEnabled) ?? false
     }
 }
 
@@ -930,6 +1056,35 @@ public struct Note: Codable, Sendable, Identifiable, Equatable {
         self.content = content
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// Metadata for a closed terminal whose scrollback was captured at close time.
+/// The captured text is file-backed at
+/// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
+/// (`TBDConstants.terminalHistoryPath`); the app reads the file directly and
+/// shows it read-only in Session History → Closed Terminals.
+public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
+    /// The closed terminal's UUID (also names the content file).
+    public let id: UUID
+    public var worktreeID: UUID
+    public var label: String?
+    public var kind: TerminalKind?
+    public var closedAt: Date
+    public var claudeSessionID: String?
+    /// Line count of the captured text (display metadata).
+    public var lineCount: Int
+
+    public init(id: UUID, worktreeID: UUID, label: String? = nil,
+                kind: TerminalKind? = nil, closedAt: Date = Date(),
+                claudeSessionID: String? = nil, lineCount: Int = 0) {
+        self.id = id
+        self.worktreeID = worktreeID
+        self.label = label
+        self.kind = kind
+        self.closedAt = closedAt
+        self.claudeSessionID = claudeSessionID
+        self.lineCount = lineCount
     }
 }
 
@@ -1168,7 +1323,17 @@ public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case slashEnvelope
     case skillBody
     case taskNotification
+    case nestedMemory
     case other
+
+    /// Lenient decode: an unrecognized raw value degrades to `.other` rather
+    /// than throwing. Adding a case would otherwise make an OLD app binary
+    /// fail to decode a NEW daemon's payload — the schema-skew failure class
+    /// documented in CLAUDE.md. The encoder stays synthesized.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SystemKind(rawValue: raw) ?? .other
+    }
 }
 
 public struct ToolResult: Codable, Sendable, Equatable, Hashable {
@@ -1222,7 +1387,13 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
                   result: ToolResult?, subagent: Subagent?, timestamp: Date?,
                   usage: TokenUsage? = nil)
     case thinking(id: String, text: String, timestamp: Date?)
-    case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
+    /// `source` names where injected context came from (a `displayPath` like
+    /// `.github/CLAUDE.md`, or a hook name like `PostToolUse:Read`) and
+    /// `truncatedTo` carries the ORIGINAL character count when `text` was
+    /// capped — same semantics as `toolCall.inputTruncatedTo`. Both default to
+    /// nil; only attachment-derived reminders populate them.
+    case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?,
+                        source: String? = nil, truncatedTo: Int? = nil)
     case slashCommand(id: String, name: String, args: String?, timestamp: Date?)
 
     public var id: String {
@@ -1231,7 +1402,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
         case .assistantText(let id, _, _, _): return id
         case .toolCall(let id, _, _, _, _, _, _, _): return id
         case .thinking(let id, _, _): return id
-        case .systemReminder(let id, _, _, _): return id
+        case .systemReminder(let id, _, _, _, _, _): return id
         case .slashCommand(let id, _, _, _): return id
         }
     }
@@ -1242,14 +1413,14 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
              .assistantText(_, _, let t, _),
              .toolCall(_, _, _, _, _, _, let t, _),
              .thinking(_, _, let t),
-             .systemReminder(_, _, _, let t),
+             .systemReminder(_, _, _, let t, _, _),
              .slashCommand(_, _, _, let t):
             return t
         }
     }
 
     /// The `TokenUsage` stamped on items derived from an assistant API call,
-    /// `nil` for all other item kinds. Used by `TranscriptItemsView` to find
+    /// `nil` for all other item kinds. Used by the transcript pane to find
     /// the latest item whose context size is worth surfacing in the UI.
     public var usage: TokenUsage? {
         switch self {

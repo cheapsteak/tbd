@@ -2,6 +2,13 @@ import Foundation
 
 /// Abstract clock used by `ClaudeUsagePoller` so tests can advance virtual time
 /// instead of sleeping. Production uses `SystemPollerClock`; tests use a fake.
+///
+/// This is NOT the standard clock seam and should not be copied as a template —
+/// new code that needs a delay/timer/debounce takes `clock: any Clock<Duration> =
+/// ContinuousClock()` (see `Tests/CLAUDE.md`, "Clock and date seams"). PollerClock
+/// exists only because Darwin's `Task.sleep` uses the suspending clock, so a single
+/// long sleep overshoots a wall-clock deadline by however long the machine slept —
+/// chunked re-checking is a genuinely different job.
 public protocol PollerClock: Sendable {
     func now() -> Date
     /// Sleep until `deadline`. May throw `CancellationError` to wake early.
@@ -16,6 +23,7 @@ public struct SystemPollerClock: PollerClock {
     /// `maxChunk`, `sleeper`, and `now` are injection seams for tests; production uses the defaults.
     public init(
         maxChunk: TimeInterval = 60,
+        // swiftlint:disable:next no_raw_task_sleep - sanctioned: suspend-aware wall-deadline chunking, see this file's docs
         sleeper: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {

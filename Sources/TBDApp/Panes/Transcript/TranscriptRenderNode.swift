@@ -1,13 +1,32 @@
 import Foundation
 import TBDShared
 
+/// Tool names whose activity is hidden from the timeline. Keep small;
+/// these are tools whose existence in the transcript adds no signal
+/// for the reader.
+let hiddenToolNames: Set<String> = ["TodoWrite", "TaskUpdate", "TaskCreate", "Skill"]
+
+/// True if this item is hidden from the timeline. Centralized so callers
+/// like `transcriptRenderNodes(from:)` can compute accurate counts and
+/// badge attribution without duplicating the rule.
+func isHiddenInTranscript(_ item: TranscriptItem) -> Bool {
+    switch item {
+    case .thinking:
+        return true
+    case .toolCall(_, let name, _, _, _, _, _, _):
+        return hiddenToolNames.contains(name)
+    default:
+        return false
+    }
+}
+
 /// Pre-computed, denormalized render-list entries for the transcript pane.
 /// Built once outside `body` from `[TranscriptItem]`; consumed by
-/// `TranscriptItemsView`'s `ForEach`. Constant view-shape per node — every
-/// node renders as a single `TranscriptRow` view — so the outer
-/// `LazyVStack`'s `ForEach` body becomes homogeneous, satisfying SwiftUI's
-/// documented constant-view-count rule and eliminating the
-/// `_ViewList_Group.estimatedCount` recursion driving issue #129.
+/// `TableTranscriptView`, which hosts one `TranscriptRow` per node. Constant
+/// view-shape per node — every node renders as a single `TranscriptRow` view —
+/// which is what let the original `LazyVStack` renderer escape the
+/// `_ViewList_Group.estimatedCount` recursion driving issue #129, and now keeps
+/// each table cell's height a pure function of its node.
 /// Hidden items are filtered upstream by `transcriptRenderNodes(from:)`,
 /// `ContextUsageBadge` is inlined as a node field rather than a sibling
 /// list entry, and subagent disclosure collapses into a single summary kind.
@@ -60,7 +79,8 @@ struct TranscriptRenderNode: Identifiable, Equatable {
 
     enum Kind: Hashable {
         case chatBubble(TranscriptItem)
-        case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
+        case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?,
+                            source: String? = nil, truncatedTo: Int? = nil)
         case skillBody(id: String, text: String, timestamp: Date?)
         case toolCall(id: String, name: String, inputJSON: String,
                       inputTruncatedTo: Int?, result: ToolResult?, timestamp: Date?)
@@ -76,9 +96,9 @@ struct TranscriptRenderNode: Identifiable, Equatable {
             switch (lhs, rhs) {
             case (.chatBubble(let l), .chatBubble(let r)):
                 return l == r
-            case (.systemReminder(let li, let lk, let lt, let lts),
-                  .systemReminder(let ri, let rk, let rt, let rts)):
-                return li == ri && lk == rk && lt == rt && lts == rts
+            case (.systemReminder(let li, let lk, let lt, let lts, let lsrc, let ltr),
+                  .systemReminder(let ri, let rk, let rt, let rts, let rsrc, let rtr)):
+                return li == ri && lk == rk && lt == rt && lts == rts && lsrc == rsrc && ltr == rtr
             case (.skillBody(let li, let lt, let lts),
                   .skillBody(let ri, let rt, let rts)):
                 return li == ri && lt == rt && lts == rts
@@ -124,7 +144,7 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
         case .userPrompt, .assistantText:
             out.append(TranscriptRenderNode(id: item.id, kind: .chatBubble(item), badgeUsage: badge))
 
-        case .systemReminder(let id, let kind, let text, let ts):
+        case .systemReminder(let id, let kind, let text, let ts, let source, let truncatedTo):
             if kind == .skillBody {
                 out.append(TranscriptRenderNode(
                     id: id,
@@ -134,7 +154,8 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
             } else {
                 out.append(TranscriptRenderNode(
                     id: id,
-                    kind: .systemReminder(id: id, kind: kind, text: text, timestamp: ts),
+                    kind: .systemReminder(id: id, kind: kind, text: text, timestamp: ts,
+                                          source: source, truncatedTo: truncatedTo),
                     badgeUsage: badge
                 ))
             }
@@ -160,28 +181,4 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
         }
     }
     return out
-}
-
-/// Returns the id of the *last rendered* TranscriptRenderNode for these items
-/// without materializing the full node array. Walks `items` from the end,
-/// skipping hidden items. Each visible item maps to exactly one render node
-/// sharing its id (`.toolCall` no longer emits a trailing subagent node).
-///
-/// Use this anywhere a scroll target previously read `items.last?.id`. With
-/// the render-node flattening the trailing rendered row is no longer
-/// guaranteed to share an id with the trailing TranscriptItem.
-nonisolated func lastRenderedNodeID(for items: [TranscriptItem]) -> String? {
-    for item in items.reversed() {
-        if isHiddenInTranscript(item) { continue }
-        switch item {
-        case .toolCall(let id, _, _, _, _, _, _, _),
-             .userPrompt(let id, _, _),
-             .assistantText(let id, _, _, _),
-             .systemReminder(let id, _, _, _):
-            return id
-        case .thinking, .slashCommand:
-            continue
-        }
-    }
-    return nil
 }

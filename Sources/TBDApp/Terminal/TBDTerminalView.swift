@@ -78,6 +78,15 @@ class TBDTerminalView: TerminalView {
     /// daemon-side `paste-buffer -p` owns bracketed-paste wrapping) or refused
     /// as oversize. Fall through to SwiftTerm's normal three-call bracketed
     /// paste ONLY when no control-mode attach is live.
+    ///
+    /// That ownership is CONTINGENT, not unconditional: `-p` wraps in
+    /// ESC[200~/ESC[201~ only because the pane's application has enabled
+    /// bracketed-paste mode (DECSET 2004). Against a pane that has NOT, the
+    /// same `-p` delivers the bytes verbatim with no markers — measured on
+    /// tmux 3.6a (22 wrapped bytes vs 10 bare). If an agent TUI ever stops
+    /// setting 2004, handing the paste to the daemon wraps nothing. Asserted
+    /// nightly by probe P3 in `scripts/nightly-tmux-probes.sh` (PR #523), a
+    /// two-arm probe: 2004 on → wrapped, 2004 off → verbatim.
     override func paste(_ sender: Any) {
         if let handler = onControlModePaste,
            let text = NSPasteboard.general.string(forType: .string),
@@ -344,15 +353,30 @@ class TBDTerminalView: TerminalView {
             .isDisjoint(with: [.command, .shift, .control, .option])
     }
 
+    /// This monitor is one of two possible forwarders of a click to the pty —
+    /// the other is SwiftTerm's own native mouseDown/mouseUp, gated by
+    /// `allowMouseReporting`. Exactly one must be active at a time, or a
+    /// single left click reaches the remote session twice. Callers with
+    /// `allowMouseReporting == true` (e.g. `RemoteAttachTerminalView`) rely on
+    /// SwiftTerm as the sole forwarder, so this monitor must stand down.
+    nonisolated static func clickPassthroughActive(allowMouseReporting: Bool) -> Bool {
+        !allowMouseReporting
+    }
+
     private func handleClickPassthrough(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
         guard !Self.clickPassthroughBlocked(by: modifiers) else { return }
+        guard Self.clickPassthroughActive(allowMouseReporting: allowMouseReporting) else { return }
         // If this was a click (not a drag) and tmux has mouse mode enabled,
         // forward the click to tmux so it can handle pane switching.
         //
-        // This won't produce duplicate events: allowMouseReporting is set to
-        // false in TerminalPanelView, so SwiftTerm's mouseDown/mouseUp only
-        // handle local text selection — they never forward to the pty.
-        // We are the sole path that sends mouse events to tmux.
+        // This won't produce duplicate events either way: the guard above
+        // means exactly one of us is live. When `allowMouseReporting` is
+        // false (e.g. `TerminalPanelView`), SwiftTerm's mouseDown/mouseUp
+        // only handle local text selection — they never forward to the pty —
+        // so we are the sole path that sends mouse events to tmux. When
+        // `allowMouseReporting` is true (e.g. `RemoteAttachTerminalView`),
+        // SwiftTerm's native reporting is the sole forwarder and we stand
+        // down via the guard above.
         let term = getTerminal()
         guard !didDrag && term.mouseMode != .off else { return }
 

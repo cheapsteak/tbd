@@ -173,10 +173,14 @@ struct ControlModeInputRouterTests {
         router.enqueuePaste(header: header, bytes: Data(repeating: 0x50, count: 8 * 1024))
         router.enqueue(header: header, bytes: Data([0x5a]))   // "Z" after the failed paste
 
-        // load-buffer, paste-buffer(fail), delete-buffer (cleanup on failure),
-        // then send-keys Z → 4 writes; the keystroke must be last.
-        try await waitForWrites(recorder, count: 4)
-        #expect(recorder.writes.last == "send-keys -H -t %0 5a")
+        // The follow-up keystroke must reach the stream despite the failed
+        // paste. Assert THAT invariant directly rather than pinning it to the
+        // LAST write: the failure-cleanup `delete-buffer` and the keystroke are
+        // order-independent (buffer GC vs a keypress), so `.last` couples the
+        // test to an incidental ordering. Wait for the keystroke itself.
+        try await waitFor("the post-paste keystroke reaches the stream") {
+            recorder.writes.contains("send-keys -H -t %0 5a")
+        }
         router.shutdown()
     }
 

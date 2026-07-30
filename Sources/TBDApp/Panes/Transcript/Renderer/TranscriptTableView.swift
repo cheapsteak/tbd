@@ -14,8 +14,8 @@ struct TranscriptTableData: Equatable {
 
 /// Renders a `TranscriptTableData` as a bordered grid, mirroring the look of the
 /// old MarkdownUI table (`ChatBubbleView`): header row bold, thin cell borders,
-/// padded cells. Used as the content of a `TranscriptCardAttachment` because
-/// `NSTextTable` does not lay out under STTextView's TextKit 2 layout. (#129)
+/// padded cells. Used as the content of a `TranscriptCardAttachment` rather
+/// than an `NSTextTable` grid. (#129)
 ///
 /// Borders are drawn per-cell as a top + leading edge, with one outer border on
 /// the whole grid. Interior lines therefore land exactly on the content-sized

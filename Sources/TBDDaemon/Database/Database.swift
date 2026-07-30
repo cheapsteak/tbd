@@ -17,19 +17,25 @@ public final class TBDDatabase: Sendable {
     public let notes: NoteStore
     public let modelProfiles: ModelProfileStore
     public let modelProfileUsage: ModelProfileUsageStore
+    public let oauthUsageSnapshots: OAuthUsageSnapshotStore
     public let config: ConfigStore
     public let meta: TBDMetaStore
     public let tabs: TabStore
     public let forgottenWorktrees: ForgottenWorktreeStore
-    public let clearance: ClearanceStore
-    public let audit: AuditStore
     public let scheduledResumes: ScheduledResumeStore
     public let reapRecords: ReapRecordStore
+    public let terminalHistory: TerminalHistoryStore
+    public let panelSurface: PanelSurfaceStore
+    public let remoteSessions: RemoteSessionStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
-    public init(path: String) throws {
+    /// `notesDir` overrides the note-content file directory (tests only; nil
+    /// resolves `TBDConstants.noteContentDir`, which honors TBD_HOME).
+    /// `terminalHistoryDir` is the same seam for closed-terminal captures
+    /// (nil resolves `TBDConstants.terminalHistoryDir`).
+    public init(path: String, notesDir: String? = nil, terminalHistoryDir: String? = nil) throws {
         // Capture existence BEFORE DatabasePool opens the file — opening
         // creates an empty DB on the first launch, so we'd otherwise lose the
         // ability to distinguish "first launch" from "upgrade".
@@ -47,17 +53,19 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: pool)
         self.terminals = TerminalStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
-        self.notes = NoteStore(writer: pool)
+        self.notes = NoteStore(writer: pool, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: pool)
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
+        self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: pool)
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
-        self.clearance = ClearanceStore(writer: pool)
-        self.audit = AuditStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
         self.reapRecords = ReapRecordStore(writer: pool)
+        self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
+        self.panelSurface = PanelSurfaceStore(writer: pool)
+        self.remoteSessions = RemoteSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -72,7 +80,11 @@ public final class TBDDatabase: Sendable {
     }
 
     /// Create an in-memory database for testing using DatabaseQueue.
-    public init(inMemory: Bool) throws {
+    /// `notesDir` overrides the note-content file directory so tests never
+    /// touch the real `~/tbd/notes` (injection seam, like
+    /// `ThemeStore(themesDirectory:)`). `terminalHistoryDir` is the same seam
+    /// for closed-terminal captures (`~/tbd/terminal-history`).
+    public init(inMemory: Bool, notesDir: String? = nil, terminalHistoryDir: String? = nil) throws {
         precondition(inMemory, "Use init(path:) for file-backed databases")
         let queue = try DatabaseQueue()
         self.writer = queue
@@ -80,17 +92,19 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: queue)
         self.terminals = TerminalStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
-        self.notes = NoteStore(writer: queue)
+        self.notes = NoteStore(writer: queue, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: queue)
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
+        self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: queue)
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
-        self.clearance = ClearanceStore(writer: queue)
-        self.audit = AuditStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
         self.reapRecords = ReapRecordStore(writer: queue)
+        self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
+        self.panelSurface = PanelSurfaceStore(writer: queue)
+        self.remoteSessions = RemoteSessionStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -898,6 +912,260 @@ public final class TBDDatabase: Sendable {
         // docs/claude-settings-overlay.md.
         migrator.registerMigration("v53_repo_claude_settings_overlay") { db in
             try db.addColumnIfMissing(table: "repo", column: "claude_settings_overlay", type: .text)
+        }
+
+        // Number of the GitHub PR a worktree was created from, if any. Nullable —
+        // NULL means "not created from a PR". Lets PRStatusManager resolve status
+        // by direct number lookup instead of viewer-authored/branch-name matching,
+        // which is the only way fork PRs (no matching local branch) get tracked.
+        migrator.registerMigration("v54_worktree_pr_number") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "pr_number", type: .integer)
+        }
+
+        // Last-known OAuth usage snapshot per profile (JSON blob of the shared
+        // ProfileUsageSnapshot model), so daemon restarts render stale-but-real
+        // usage bars immediately instead of "usage unavailable" and the
+        // startup sweep can skip profiles whose data is still fresh. Cache
+        // state — rows regenerate on the next successful fetch.
+        migrator.registerMigration("v55_oauth_usage_snapshot_cache") { db in
+            try db.createTableIfNotExists("oauth_profile_usage_snapshot") { t in
+                t.primaryKey("profile_id", .text).notNull()
+                    .references("model_profiles", onDelete: .cascade)
+                t.column("snapshot_json", .text).notNull()
+            }
+        }
+
+        // Drag-and-drop reordering for model profiles (mirrors v11's worktree
+        // sortOrder). Initialize existing rows from rowid to preserve current
+        // insertion order.
+        migrator.registerMigration("v56_model_profiles_sort_order") { db in
+            try db.addColumnIfMissing(
+                table: "model_profiles", column: "sort_order", type: .integer, defaults: 0)
+            try db.execute(sql: "UPDATE model_profiles SET sort_order = rowid")
+        }
+
+        // Soak flag for auto-closing the setup-hook tab after a clean run
+        // (default OFF per the default-off-flag rule: it kills a pane and
+        // deletes terminal/tab rows without a user gesture). When on, a
+        // resolved setup hook's exit code is written to a marker file and a
+        // clean exit tears the tab down; nonzero keeps the tab open (execs
+        // the interactive shell) for debugging.
+        // (Renumbered v56→v57 on rebase: main's #482 took v56.)
+        migrator.registerMigration("v57_config_auto_close_setup") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_close_setup_enabled",
+                type: .boolean, defaults: false)
+        }
+
+        // Read-only closed-terminal history: metadata for scrollback captured
+        // at terminal close (content is file-backed at
+        // ~/tbd/terminal-history/<worktreeID>/<terminalID>.txt). Additive —
+        // close semantics are unchanged; capture is best-effort. Rows are
+        // pruned to the newest 50 per worktree on insert and removed (with
+        // their files) on worktree hard-delete; archive keeps them.
+        // (Renumbered v57→v58 on rebase: main's #482 took v56, shifting this branch's ids.)
+        migrator.registerMigration("v58_terminal_history") { db in
+            try db.createTableIfNotExists("terminal_history") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                t.column("label", .text)
+                t.column("kind", .text)
+                t.column("closedAt", .datetime).notNull()
+                t.column("claudeSessionID", .text)
+                t.column("lineCount", .integer).notNull().defaults(to: 0)
+            }
+            try db.addIndexIfMissing(
+                "idx_terminal_history_worktree", on: "terminal_history", columns: ["worktreeID"])
+        }
+
+        // (Renumbered v57→v59 on rebase: main's #485 took v57 and v58.)
+        // Spec C Phase 2 (§8): daemon-owned panel-surface rows — one row per
+        // workspace tab (layout tree + primary + revision), per-panel MRU
+        // history, and bounded operation receipts for §7.4 idempotency. Both
+        // feature flags land default-OFF per the repo flag policy: the store
+        // is inert until `daemon_panel_surface_enabled` is turned on, and
+        // agent-originated mutations additionally require
+        // `agent_panel_control_enabled`. `worktree.panel_surface_imported_at`
+        // distinguishes "imported an empty layout" from "never imported".
+        migrator.registerMigration("v59_panel_surface") { db in
+            try db.createTableIfNotExists("workspace_tab_surface") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("primaryContent", .text).notNull()   // PrimaryContent JSON
+                t.column("label", .text)
+                t.column("position", .integer).notNull()
+                t.column("layout", .text).notNull()           // PanelLayoutNode JSON
+                t.column("revision", .integer).notNull().defaults(to: 0)
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing("idx_workspace_tab_surface_worktree",
+                                     on: "workspace_tab_surface", columns: ["worktreeID", "position"])
+            // history rows cascade via tabID → workspace_tab_surface, which
+            // itself cascades to worktree — so deleting a worktree reaps its
+            // surfaces and their history rows in one chain.
+            try db.createTableIfNotExists("panel_history") { t in
+                t.primaryKey("panelID", .text).notNull()
+                t.column("tabID", .text).notNull()
+                    .references("workspace_tab_surface", onDelete: .cascade)
+                t.column("history", .text).notNull()          // PanelHistory JSON
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing("idx_panel_history_tab", on: "panel_history", columns: ["tabID"])
+            try db.createTableIfNotExists("panel_operation_receipt") { t in
+                t.primaryKey("operationID", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("tabID", .text).notNull()
+                t.column("revision", .integer).notNull()
+                t.column("result", .text).notNull()           // PanelApplyResult JSON
+                t.column("appliedAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing("idx_panel_receipt_worktree",
+                                     on: "panel_operation_receipt", columns: ["worktreeID", "appliedAt"])
+            try db.addColumnIfMissing(table: "config", column: "daemon_panel_surface_enabled",
+                                      type: .boolean, defaults: false)
+            try db.addColumnIfMissing(table: "config", column: "agent_panel_control_enabled",
+                                      type: .boolean, defaults: false)
+            try db.addColumnIfMissing(table: "worktree", column: "panel_surface_imported_at",
+                                      type: .datetime)
+        }
+
+        // The compiled merge gate (MergeGate / NightwatchPolicy) and its two
+        // stores were deleted: the gate built its input from placeholder
+        // values (`headSHA: "unknown"`, `hasApprovedReview: false`), so every
+        // row it ever wrote recorded the same `escalate` decision, and the
+        // `clearance` table never had a production writer or reader at all.
+        // Nothing of value is lost by dropping them. Merge authorization is
+        // delegated to the forge (GitHub branch protection + auto-merge),
+        // which sits outside the trust boundary of the machine running the
+        // agents. v41/v42 stay registered and untouched — a fresh DB creates
+        // the tables and this migration drops them again, which is cheap and
+        // keeps the migration history append-only.
+        migrator.registerMigration("v60_drop_nightwatch_merge_gate_tables") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS clearance")
+            try db.execute(sql: "DROP TABLE IF EXISTS audit_log")
+        }
+
+        // Remote agent backends (spec 2026-07-24). Flag lands default-OFF per
+        // the repo flag policy: the feature polls in the background, spawns
+        // provider subprocesses, and can stop remote sessions. `remote_session`
+        // mirrors provider-owned sessions keyed (provider, sessionID); the
+        // provider is the source of truth — rows here are a cache with drift
+        // bookkeeping (missingCount/gone per the two-absence rule).
+        // (Renumbered v60→v61 on merge: main's #514-adjacent work took v60 as
+        // `v60_drop_nightwatch_merge_gate_tables`. Safe because the migration
+        // body uses the idempotent helpers — see Database/CLAUDE.md.)
+        migrator.registerMigration("v61_remote_backends") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "remote_backends_enabled",
+                type: .boolean, defaults: false)
+            try db.createTableIfNotExists("remote_session") { t in
+                t.column("provider", .text).notNull()
+                t.column("sessionID", .text).notNull()
+                t.column("payload", .text).notNull()      // raw contract Session JSON
+                t.column("state", .text).notNull()
+                t.column("agentState", .text)
+                t.column("firstSeen", .datetime).notNull()
+                t.column("lastSeen", .datetime).notNull()
+                t.column("missingCount", .integer).notNull().defaults(to: 0)
+                t.column("gone", .boolean).notNull().defaults(to: false)
+                t.column("dismissed", .boolean).notNull().defaults(to: false)
+                t.primaryKey(["provider", "sessionID"])
+            }
+        }
+
+        // Pin remote sessions to a local repo (spec 2026-07-24, follow-up to
+        // v61): `resolvedRepoID` caches the outcome of matching a provider's
+        // `meta["repo"]` against registered repos' `remoteURL`
+        // (`RemoteRepoMatching`), computed once at first sighting and never
+        // re-derived once non-null — see `RemoteSessionStore.upsert`.
+        // (Renumbered v61→v62 on merge: see comment on v61_remote_backends above.)
+        migrator.registerMigration("v62_remote_session_resolved_repo") { db in
+            try db.addColumnIfMissing(
+                table: "remote_session", column: "resolvedRepoID",
+                type: .text)
+        }
+
+        // Pin a worktree to the sidebar dock. Nullable with NO default: existing
+        // rows must land on NULL (= unpinned), and there is no Swift-side default
+        // to flip later, so the `ADD COLUMN ... DEFAULT` backfill trap does not
+        // apply. Purely presentational — nothing in the daemon reads this value.
+        // (Renumbered v60→v63 on rebase: main took v60/v61/v62 first. Safe
+        // because the body uses the idempotent `addColumnIfMissing` helper —
+        // see Database/CLAUDE.md — so a DB that already ran this under the old
+        // identifier just no-ops.)
+        migrator.registerMigration("v63_worktree_pinned_at") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "pinnedAt", type: .datetime)
+        }
+
+        // Custom ordering for the sidebar's pinned dock. Nullable with NO
+        // default and NO backfill: `PinnedDockContent` falls back to `pinnedAt`
+        // order for rows that are still NULL, so existing pins keep their
+        // current visual order the moment this lands and the first drag assigns
+        // real values. Separate from `sortOrder`, which drives repo-section tree
+        // ordering — writing pin order there would scramble the sidebar.
+        migrator.registerMigration("v64_worktree_pin_sort_order") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "pinSortOrder", type: .integer)
+        }
+
+        // Pin a remote session to the same sidebar dock worktrees pin to.
+        // Nullable with NO default and NO backfill, for the same reasons
+        // v63 gives for `worktree.pinnedAt`: existing rows must land on NULL
+        // (= unpinned), and there is no Swift-side default to flip later, so
+        // the `ADD COLUMN ... DEFAULT` backfill trap does not apply. The pin
+        // rides on the mirror row rather than a side table because the row's
+        // primary key `(provider, sessionID)` is already the durable identity
+        // for a remote session (see `RemoteSessionIdentity`) and mirror rows
+        // are never deleted — only marked gone/dismissed — so a pin survives
+        // provider drift and daemon restarts.
+        migrator.registerMigration("v65_remote_session_pinned_at") { db in
+            try db.addColumnIfMissing(table: "remote_session", column: "pinnedAt", type: .datetime)
+        }
+
+        // Pre-accept Claude Code's folder-trust dialog for worktrees TBD itself
+        // created. Default ON — deliberately, and NOT a soak flag:
+        //
+        // The dialog asks "is this a project you created or one you trust?" For
+        // a worktree TBD created from a repo the operator explicitly registered,
+        // the answer is yes *by construction* — TBD holds every fact the dialog
+        // is asking about. Pre-seeding just writes that already-known answer
+        // through Claude's own config persistence, so the dialog never renders.
+        //
+        // Prevention is the only available fix: the dialog blocks BEFORE
+        // SessionStart, so no hook fires while it is up and a stalled-on-trust
+        // session is machine-invisible to TBD. A default-OFF flag would leave
+        // the stall in place for everyone who never finds the toggle.
+        //
+        // `ADD COLUMN ... DEFAULT true` backfills existing rows to true, which
+        // IS the intent here (see the CLAUDE.md default-flip note): every
+        // existing install should stop stalling on first spawn.
+        migrator.registerMigration("v66_config_auto_trust_worktrees") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_trust_worktrees",
+                type: .boolean, defaults: true)
+        }
+
+        // Marks a worktree whose CONTENTS came from a ref TBD cannot vouch for
+        // — a `refs/pull/<n>/head` checkout, whose commits may be authored by a
+        // third-party fork contributor. TBD created the directory; it did not
+        // create what is inside it, so v66's auto-trust seeding must skip these
+        // rows and let Claude ask (see `ClaudeTrustSeeder`).
+        //
+        // Persisted rather than passed as a create-time parameter because
+        // seeding happens at six call sites — create, extra-session restore,
+        // terminal create, revive, profile swap, hibernation wake — and all but
+        // the first see only the stored row.
+        //
+        // `ADD COLUMN ... DEFAULT false` backfills existing rows to false, which
+        // is the intended reading: rows created before this column existed are
+        // treated as ordinary TBD-created contents (the status quo ante). The
+        // default-flip trap in CLAUDE.md does not apply — this is not a
+        // user-facing toggle and there is no plan to flip its default.
+        migrator.registerMigration("v67_worktree_foreign_head") { db in
+            try db.addColumnIfMissing(
+                table: "worktree", column: "foreign_head",
+                type: .boolean, defaults: false)
         }
 
         return migrator

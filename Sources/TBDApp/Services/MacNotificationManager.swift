@@ -114,6 +114,30 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// Post a banner for a remote session crossing a notify-worthy agent-state
+    /// edge (→ waiting_input or → exited). Remote sessions have no worktree,
+    /// so this deliberately bypasses `postIfEnabled`'s worktree-keyed
+    /// identifier and click-routing: `identifier` is a synthetic
+    /// provider/session key, not a worktree UUID, so a click on this banner
+    /// safely no-ops through `handleClick`'s UUID-parse guard instead of
+    /// attempting to focus a tab or select a worktree.
+    func postRemoteAttention(identifier: String, title: String, body: String) {
+        guard Self.shouldPost(enabled: enabled, isAvailable: isAvailable, mockActive: MockMode.isActive()) else { return }
+        requestPermissionIfNeeded()
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = nil
+
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                logger.error("Post error: \(error)")
+            }
+        }
+    }
+
     // MARK: - UNUserNotificationCenterDelegate
 
     /// Show banners even when TBD is the frontmost app.

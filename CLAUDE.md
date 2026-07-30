@@ -13,6 +13,7 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Only stage and commit files you actually changed — never commit unrelated or other agents' modifications.
 - Always commit after completing work. Don't wait to be asked.
 - Use conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
+- Banned words — never use these in code or in PR titles, descriptions, or commit messages: "blessed", "golden"
 - Verify your changes compile (`swift build`) before committing.
 - Run `swift test` if you changed daemon or shared code.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
@@ -30,6 +31,14 @@ Not required for bug fixes, small additive UI, or refactors — don't sprawl fla
 Mechanics: daemon-side behavior gates on a `config` column added by migration (follow "Database migrations must update the shared model" below); app-only behavior may gate on a UserDefaults key (precedent: `enableTranscript`, default-off). Test both branches (see Workflow above). State the flag name, how to enable it for the soak, and the graduation plan in the PR description.
 
 Cautionary precedent: `auto_hibernate_enabled` shipped default-ON in `v39_session_hibernation` and had to be force-disabled in `v50` once the eat-typed-input risk was understood. Because `ADD COLUMN ... DEFAULT` backfills existing rows, flipping a default later needs a forcing `UPDATE` migration (a Swift-side default change alone is a no-op for existing installs) — and after the force-off, a user's deliberate opt-in is indistinguishable from the backfilled value, so it got reset too. Shipping default-OFF first avoids all of this. Good precedents: `control_mode_enabled`, `hibernate_input_veto_enabled` (v51).
+
+### Blast-radius work starts with a brainstormed spec
+
+Work that trips the triggers above — a new subsystem, adding or changing a feature flag or `config` column, a database migration, a wholesale replacement of a load-bearing path — runs `/tbd-brainstorming` **before** implementation and commits the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
+
+**A human answers the brainstorming questions.** An agent may not answer its own. If no human is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
+
+Not required for bug fixes, small additive UI, or refactors. If a trigger fires but a brainstorm is genuinely unnecessary, say so in the PR description. This is convention, not a gate — no linter can see whether thinking happened. Use `/tbd-brainstorming`, not `superpowers:brainstorming`; a guardrail redirects the wrong one.
 
 ### Restart must use the worktree's own script
 Always run `scripts/restart.sh` (relative, from the worktree cwd), never an absolute path to the main project's copy. Using `/Users/chang/projects/tbd/scripts/restart.sh` builds and starts binaries from the main branch, leaving old worktree processes running and causing "Unknown method" RPC errors. After any restart, verify with:
@@ -93,6 +102,18 @@ Applies to `TBDShared`, `TBDDaemonLib`, `TBDDaemon`, and `TBDApp`. **`TBDCLI` is
 Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.app`, `com.tbd.daemon`) and a feature-shaped category. `.debug` is the right level for traces you'd previously have used `print()` for — they're silent by default and activated with `log stream --level debug`. Always pass an explicit `privacy:` argument on dynamic interpolations (default `.public` for this dev tool, `.private`/`.sensitive` for secrets). Full rationale and category taxonomy: [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md).
 
 This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in the dedicated `lint` CI job and the pre-push git hook, both invoking a Homebrew-installed `swiftlint --strict` directly. To lint manually: `swiftlint --strict`. Prerequisite: `brew install swiftlint`. See `.swiftlint.yml`.
+
+### New delays and timers take an injected clock
+
+Anything that sleeps, debounces, polls, or times out takes the clock as its last initializer parameter, defaulted so no call site changes:
+
+```swift
+init(..., clock: any Clock<Duration> = ContinuousClock())
+```
+
+Existential, not generic — a generic parameter would infect the actor types these subsystems already carry `Sendable` conformances on. Timestamps that get *persisted or compared* use the separate date seam instead (`date: Date = Date()` on the method, or `now: @Sendable () -> Date` on the type): **`Duration` is behavior, `Date` is data.**
+
+Enforced mechanically by the SwiftLint rule `no_raw_task_sleep` (same `lint` job and pre-push hook as `no_print_in_sources`). Pre-existing sites carry a visible `// swiftlint:disable:next no_raw_task_sleep - legacy sleep, …` suppression and are being burned down; adding a new one draws review scrutiny. `PollerClock` is a sanctioned exception for suspend-aware *wall*-deadline sleeping and is not a template. Seam details, test helpers, and the existential's `Instant` limitation: [`Tests/CLAUDE.md`](Tests/CLAUDE.md) "Clock and date seams".
 
 ### No TUI screen-scraping
 

@@ -79,8 +79,15 @@ public struct GitManager: Sendable {
     /// Per-instance timeout; tests inject a tiny value to exercise the kill path.
     let subprocessTimeout: Duration
 
-    public init(subprocessTimeout: Duration = GitManager.commandTimeout) {
+    /// Behavior seam for the subprocess deadline (`Tests/CLAUDE.md`, "Clock and
+    /// date seams"). Tests pass a `TestClock` to fire — or never fire — the
+    /// timeout in virtual time instead of racing a real one on a loaded runner.
+    let clock: any Clock<Duration>
+
+    public init(subprocessTimeout: Duration = GitManager.commandTimeout,
+                clock: any Clock<Duration> = ContinuousClock()) {
         self.subprocessTimeout = subprocessTimeout
+        self.clock = clock
     }
 
     // MARK: - Public API
@@ -163,6 +170,35 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["fetch", "origin"], at: repoPath, timeout: timeout)
     }
 
+    /// True if `refs/heads/<name>` exists locally. Used to pick a
+    /// non-clobbering local branch name before force-fetching a pull ref.
+    ///
+    /// Fails closed, unlike the read-only `refExists`: this result gates
+    /// whether `fetchPullRequestHead`'s `+refs/pull/<n>/head:refs/heads/<name>`
+    /// force-refspec is safe to run against `name`. Only the benign "ref
+    /// missing" case (`show-ref --quiet` exits 1) is treated as absent — any
+    /// other failure (timeout, spawn failure, other exit codes) is rethrown so
+    /// a bad answer here can't let the force-fetch silently clobber a branch.
+    public func localBranchExists(repoPath: String, name: String) async throws -> Bool {
+        do {
+            _ = try await run(arguments: ["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], at: repoPath)
+            return true
+        } catch let error as GitError where error.exitCode == 1 {
+            return false
+        }
+    }
+
+    /// Fetches a PR head (same-repo or fork — `refs/pull/<n>/head` exists for
+    /// both) into a local branch. The `+` force-updates, so callers MUST pass a
+    /// branch name verified free via `localBranchExists` / uniquification, or an
+    /// unrelated same-named branch is silently rewritten.
+    public func fetchPullRequestHead(repoPath: String, number: Int, localBranch: String) async throws {
+        _ = try await run(
+            arguments: ["fetch", "origin", "+refs/pull/\(number)/head:refs/heads/\(localBranch)"],
+            at: repoPath
+        )
+    }
+
     /// Returns the HEAD SHA for a branch or ref.
     public func headSHA(repoPath: String, ref: String = "HEAD") async throws -> String {
         let output = try await run(arguments: ["rev-parse", ref], at: repoPath)
@@ -175,6 +211,22 @@ public struct GitManager: Sendable {
             )
         }
         return trimmed
+    }
+
+    /// Returns the committer date for a ref.
+    public func commitDate(repoPath: String, ref: String = "HEAD") async throws -> Date {
+        let output = try await run(
+            arguments: ["show", "-s", "--format=%cI", ref],
+            at: repoPath
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let date = ISO8601DateFormatter().date(from: output) else {
+            throw GitError(
+                command: "git show -s --format=%cI \(ref)",
+                exitCode: 0,
+                stderr: "git returned an invalid commit date: \(output)"
+            )
+        }
+        return date
     }
 
     /// Returns `true` if the repo at `path` has at least one commit (HEAD resolves).
@@ -628,7 +680,8 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
-            timeout: resolvedTimeout
+            timeout: resolvedTimeout,
+            clock: clock
         ) {
         case .timedOut:
             logger.warning("git subprocess timed out after \(resolvedTimeout, privacy: .public): \(commandDescription, privacy: .public)")

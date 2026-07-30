@@ -355,6 +355,73 @@ struct ModelProfileSpawnTests {
         #expect(recorder.joinedAll.contains("CLAUDE_CODE_USE_BEDROCK=1"))
     }
 
+    // MARK: - Spawn: per-creation model override (picker model buttons)
+
+    /// A worktree-create spawn with a model override injects it as
+    /// ANTHROPIC_MODEL, winning over the profile's own model for this spawn.
+    @Test("spawn: modelOverride wins over the profile's model as ANTHROPIC_MODEL")
+    func spawnModelOverrideWinsOverProfileModel() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let profile = try await db.modelProfiles.create(
+            name: "WithModel", kind: .oauth, model: "claude-opus-4-8"
+        )
+        try await db.config.setDefaultProfileID(profile.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil,
+            modelOverride: "claude-fable-5"
+        )
+
+        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-fable-5"))
+        #expect(!recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-opus-4-8"))
+    }
+
+    /// Branch guard: with no override, the profile's own model is injected
+    /// unchanged (today's behavior).
+    @Test("spawn: nil modelOverride keeps the profile's model")
+    func spawnNilModelOverrideKeepsProfileModel() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let profile = try await db.modelProfiles.create(
+            name: "WithModel", kind: .oauth, model: "claude-opus-4-8"
+        )
+        try await db.config.setDefaultProfileID(profile.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil
+        )
+
+        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-opus-4-8"))
+        #expect(!recorder.joinedAll.contains("claude-fable-5"))
+    }
+
+    /// Branch guard: an override on a profile WITHOUT a model still injects
+    /// the override (the `??` fallback isn't required for injection).
+    @Test("spawn: modelOverride injects even when the profile has no model")
+    func spawnModelOverrideWithoutProfileModel() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+        let profile = try await seedOAuthProfile(db, name: "NoModel")
+        try await db.config.setDefaultProfileID(profile.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil,
+            modelOverride: "claude-sonnet-5"
+        )
+
+        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-sonnet-5"))
+    }
+
     // MARK: - Spawn: fallbackModels overlay routing
 
     @Test("spawn: profile WITHOUT fallbackModels uses the global overlay path")
@@ -567,6 +634,96 @@ struct ModelProfileSpawnTests {
         #expect(joined.contains(originalWindowID))
         #expect(!joined.contains("new-window"))
         #expect(joined.contains("CLAUDE_CONFIG_DIR="))
+    }
+
+    // MARK: - Swap over a NON-BLANK session: resume + --fork-session flag
+
+    /// Seed a real claude terminal, then give its session a NON-blank transcript
+    /// on disk (via `transcriptPath`) so `ClaudeSessionScanner.isSessionBlank`
+    /// returns false and `planTerminalSwap` picks the `.resume` branch. Returns
+    /// the created terminal.
+    private func seedNonBlankClaudeTerminal(
+        _ router: RPCRouter, _ db: TBDDatabase, worktreeID: UUID
+    ) async throws -> Terminal {
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: worktreeID, type: .claude)
+        ))
+        #expect(createResp.success)
+        let term = try createResp.decodeResult(Terminal.self)
+        let sessionID = try #require(term.claudeSessionID)
+
+        // Write a transcript carrying a real user message; point the row at it so
+        // isSessionBlank reads content (not the empty projects scan) → non-blank.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-swap-transcript-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("\(sessionID).jsonl")
+        try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
+            .write(to: file, atomically: true, encoding: .utf8)
+        try await db.terminals.updateSession(id: term.id, sessionID: sessionID, transcriptPath: file.path)
+        return term
+    }
+
+    /// REGRESSION (PR #480): a `.fork` swap over a NON-BLANK session must reach
+    /// the `.resume` plan AND emit `--fork-session`, so the fork gets a genuinely
+    /// new session id while the source session keeps writing its own JSONL. The
+    /// blank-session sibling (`swapToDifferentToken`) can't catch this — it takes
+    /// the `.fresh` path, which never adds the flag.
+    @Test("fork on non-blank session: router emits claude --resume WITH --fork-session")
+    func forkOverNonBlankEmitsForkSessionFlag() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
+        ))
+        #expect(swapResp.success)
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        // Non-blank → resume plan, and .fork adds --fork-session.
+        #expect(joined.contains("claude --resume \(oldTerm.claudeSessionID!)"),
+                "fork over a non-blank session must resume the source id; got: \(joined)")
+        #expect(joined.contains("--fork-session"),
+                "fork mode must append --fork-session so the fork gets a new id; got: \(joined)")
+    }
+
+    /// Inverse branch guard: the same non-blank session swapped `.inPlace` still
+    /// resumes but must NOT carry `--fork-session` (the source process is killed,
+    /// so a same-id resume is correct — no fork).
+    @Test("in-place swap on non-blank session: resumes WITHOUT --fork-session")
+    func inPlaceOverNonBlankOmitsForkSessionFlag() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success)
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(joined.contains("claude --resume \(oldTerm.claudeSessionID!)"),
+                "in-place swap over a non-blank session must resume the source id; got: \(joined)")
+        #expect(!joined.contains("--fork-session"),
+                "in-place swap must NOT fork the session; got: \(joined)")
     }
 
     // MARK: - Swap: to nil

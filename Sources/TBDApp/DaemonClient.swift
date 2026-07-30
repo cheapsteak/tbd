@@ -109,6 +109,7 @@ actor DaemonClient {
 
             // Wait for daemon to start (up to 4 seconds, polling every 0.5s)
             for attempt in 1...8 {
+                // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
                 if tryConnect() {
                     daemonClientLogger.info("Connected to daemon after \(attempt) attempts")
@@ -455,10 +456,10 @@ actor DaemonClient {
     /// When `useExistingBranch` is true, `branch` MUST be set to an existing
     /// ref name (local like `foo` or remote like `origin/foo`) — the daemon
     /// checks it out instead of creating a new `tbd/*` branch.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil) async throws -> Worktree {
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil, model: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID, model: model, prNumber: prNumber, checkoutPRHead: checkoutPRHead),
             resultType: Worktree.self
         )
     }
@@ -507,6 +508,17 @@ actor DaemonClient {
         return result.branches
     }
 
+    /// List open PRs for a repo (branch picker, two-phase load). Degrades to
+    /// `[]` daemon-side on any `gh`/GraphQL failure — never an RPC error.
+    func listOpenPRs(repoID: UUID) async throws -> [OpenPRInfo] {
+        let result = try await callAsync(
+            method: RPCMethod.repoListOpenPRs,
+            params: RepoListOpenPRsParams(repoID: repoID),
+            resultType: RepoListOpenPRsResult.self
+        )
+        return result.prs
+    }
+
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
     /// Pass `excludeArchived: true` to skip archived rows (used by the 2 s poll so
     /// the 87 % of payload that is immediately dropped client-side never crosses the wire).
@@ -520,7 +532,8 @@ actor DaemonClient {
         offset: Int? = nil,
         excludeArchived: Bool = false,
         scratchOnly: Bool = false,
-        includeSessionCounts: Bool? = nil
+        includeSessionCounts: Bool? = nil,
+        nameQuery: String? = nil
     ) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
@@ -531,7 +544,8 @@ actor DaemonClient {
                 offset: offset,
                 excludeArchived: excludeArchived,
                 scratchOnly: scratchOnly,
-                includeSessionCounts: includeSessionCounts
+                includeSessionCounts: includeSessionCounts,
+                nameQuery: nameQuery
             ),
             resultType: [Worktree].self
         )
@@ -562,6 +576,25 @@ actor DaemonClient {
             method: RPCMethod.worktreeRevive,
             params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID),
             resultType: Worktree.self
+        )
+    }
+
+    /// Revive an archived conversation in a newly created worktree branch.
+    func reviveConversationOnFreshBranch(
+        worktreeID: UUID,
+        sessionID: String,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) async throws -> WorktreeReviveConversationFreshResult {
+        try await callAsync(
+            method: RPCMethod.worktreeReviveConversationFresh,
+            params: WorktreeReviveConversationFreshParams(
+                archivedWorktreeID: worktreeID,
+                sessionID: sessionID,
+                cols: cols,
+                rows: rows
+            ),
+            resultType: WorktreeReviveConversationFreshResult.self
         )
     }
 
@@ -770,6 +803,22 @@ actor DaemonClient {
         )
     }
 
+    /// Pin or unpin a worktree for the sidebar dock.
+    func setWorktreePin(id: UUID, pinned: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetPin,
+            params: WorktreeSetPinParams(worktreeID: id, pinned: pinned)
+        )
+    }
+
+    /// Persist a new order for the sidebar dock's pinned worktrees.
+    func reorderPinnedWorktrees(worktreeIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeReorderPins,
+            params: WorktreeReorderPinsParams(worktreeIDs: worktreeIDs)
+        )
+    }
+
     /// Set the global default for auto-hibernate-on-PR-merge.
     func setAutoHibernateOnMergeDefault(_ enabled: Bool) async throws {
         try await callVoidAsync(
@@ -861,6 +910,24 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the auto-close-setup-tab soak flag (default OFF). Applies to
+    /// the next worktree creation.
+    func setAutoCloseSetup(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoCloseSetup,
+            params: ConfigSetAutoCloseSetupParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the worktree auto-trust switch (default ON). Applies to the
+    /// next Claude spawn or wake.
+    func setAutoTrustWorktrees(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoTrustWorktrees,
+            params: ConfigSetAutoTrustWorktreesParams(enabled: enabled)
+        )
+    }
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(
@@ -874,6 +941,104 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetEnvOverrides,
             params: SetProfileEnvOverridesParams(profileID: profileID, overrides: overrides)
+        )
+    }
+
+    // MARK: - Remote agent backends
+
+    /// List every registered remote-agent provider's negotiated contract + current health.
+    func remoteProviders() async throws -> RemoteProvidersResult {
+        try await callNoParamsAsync(method: RPCMethod.remoteProviders, resultType: RemoteProvidersResult.self)
+    }
+
+    /// List the daemon's remote-session mirror across all providers.
+    func remoteSessions() async throws -> RemoteSessionsResult {
+        try await callNoParamsAsync(method: RPCMethod.remoteSessions, resultType: RemoteSessionsResult.self)
+    }
+
+    /// Create a new remote session via `provider`. `paramsJSON` is the raw JSON
+    /// object of create-form values, passed through to the provider verbatim.
+    func remoteCreate(provider: String, paramsJSON: String) async throws -> RemoteSessionPayload {
+        try await callAsync(
+            method: RPCMethod.remoteCreate,
+            params: RemoteCreateParams(provider: provider, paramsJSON: paramsJSON),
+            resultType: RemoteSessionPayload.self
+        )
+    }
+
+    /// Stop a remote session.
+    func remoteStop(provider: String, sessionID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteStop,
+            params: RemoteStopParams(provider: provider, sessionID: sessionID)
+        )
+    }
+
+    /// Send text input to a remote session.
+    func remoteSend(provider: String, sessionID: String, text: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteSend,
+            params: RemoteSendParams(provider: provider, sessionID: sessionID, text: text)
+        )
+    }
+
+    /// Fetch recent log lines for a remote session. `lines` nil == provider default.
+    func remoteLog(provider: String, sessionID: String, lines: Int? = nil) async throws -> RemoteLogResult {
+        try await callAsync(
+            method: RPCMethod.remoteLog,
+            params: RemoteLogParams(provider: provider, sessionID: sessionID, lines: lines),
+            resultType: RemoteLogResult.self
+        )
+    }
+
+    /// Push a display-name rename to a provider that declares the `rename`
+    /// capability (docs/remote-provider-contract.md § `rename`). Callers must
+    /// check the capability themselves (`AppState.pushRemoteRenameIfSupported`)
+    /// before calling — this method, like `remoteSend`/`remoteLog`, does not
+    /// re-check it.
+    func remoteRename(provider: String, sessionID: String, title: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteRename,
+            params: RemoteRenameParams(provider: provider, sessionID: sessionID, title: title)
+        )
+    }
+
+    /// Dismiss a gone/errored remote session from the mirror.
+    func remoteDismiss(provider: String, sessionID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteDismiss,
+            params: RemoteDismissParams(provider: provider, sessionID: sessionID)
+        )
+    }
+
+    /// Pin or unpin a remote session for the sidebar's pinned dock. The
+    /// `pinnedAt` timestamp is stamped daemon-side, so pin ORDER is
+    /// server-assigned — the client only says whether it wants the pin on or
+    /// off (mirrors `setWorktreePin`).
+    func setRemoteSessionPin(provider: String, sessionID: String, pinned: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteSetPin,
+            params: RemoteSetPinParams(provider: provider, sessionID: sessionID, pinned: pinned)
+        )
+    }
+
+    /// Report the exit code of an `attach` process this app spawned, so the
+    /// daemon can correlate an auth-class exit with provider health. The
+    /// daemon ignores every non-auth class (transport failures are already
+    /// handled app-side by reconnect backoff) — see
+    /// `RemoteProviderManager.recordAttachExit`.
+    func reportRemoteAttachExit(provider: String, sessionID: String, exitCode: Int32) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteReportAttachExit,
+            params: RemoteReportAttachExitParams(provider: provider, sessionID: sessionID, exitCode: exitCode)
+        )
+    }
+
+    /// Set the remote-agent-backends master switch.
+    func setRemoteBackends(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteBackends,
+            params: ConfigSetRemoteBackendsParams(enabled: enabled)
         )
     }
 
@@ -979,6 +1144,38 @@ actor DaemonClient {
         try await callNoParamsAsync(
             method: RPCMethod.daemonCapabilities,
             resultType: DaemonCapabilitiesResult.self
+        )
+    }
+
+    /// Read daemon-owned panel-surface state for a worktree (ungated —
+    /// spec C §10.2). `tabID` narrows to one tab; nil returns every tab.
+    func panelGet(worktreeID: UUID, tabID: UUID? = nil) async throws -> PanelGetResult {
+        try await callAsync(
+            method: RPCMethod.panelGet,
+            params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
+            resultType: PanelGetResult.self
+        )
+    }
+
+    /// Apply one panel-surface operation. Gated daemon-side
+    /// (`daemon_panel_surface_enabled` / `agent_panel_control_enabled`,
+    /// spec C §7.2) — a gated rejection surfaces as `DaemonClientError.rpcError`
+    /// naming the flag.
+    func panelApply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
+        try await callAsync(
+            method: RPCMethod.panelApply,
+            params: PanelApplyParams(envelope: envelope),
+            resultType: PanelApplyResult.self
+        )
+    }
+
+    /// One-time legacy-tab import into the daemon-owned panel surface.
+    /// The daemon returns a "not implemented" error until Task 11 lands.
+    func panelImportLegacy(_ params: PanelImportParams) async throws -> PanelImportResult {
+        try await callAsync(
+            method: RPCMethod.panelImportLegacy,
+            params: params,
+            resultType: PanelImportResult.self
         )
     }
 
@@ -1221,6 +1418,27 @@ actor DaemonClient {
         )
     }
 
+    /// List closed-terminal capture metadata for a worktree (newest first).
+    /// Captured content is read directly from the file at
+    /// `TBDConstants.terminalHistoryPath` — not fetched over RPC.
+    func listTerminalHistory(worktreeID: UUID) async throws -> [TerminalHistoryEntry] {
+        return try await callAsync(
+            method: RPCMethod.terminalHistoryList,
+            params: TerminalHistoryListParams(worktreeID: worktreeID),
+            resultType: [TerminalHistoryEntry].self
+        )
+    }
+
+    /// Revive a closed terminal from its history entry into a new terminal in
+    /// the same worktree. Returns the created terminal.
+    func reviveTerminalHistory(worktreeID: UUID, id: UUID, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+        return try await callAsync(
+            method: RPCMethod.terminalHistoryRevive,
+            params: TerminalHistoryReviveParams(worktreeID: worktreeID, id: id, cols: cols, rows: rows),
+            resultType: Terminal.self
+        )
+    }
+
     // MARK: - Model Profiles
     //
     // IMPORTANT: never log raw secret bytes. The `addModelProfile` wrapper is
@@ -1312,6 +1530,14 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetRepoOverride,
             params: ModelProfileSetRepoOverrideParams(repoID: repoID, profileID: profileID)
+        )
+    }
+
+    /// Reorder model profiles.
+    func reorderModelProfiles(profileIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileReorder,
+            params: ModelProfileReorderParams(profileIDs: profileIDs)
         )
     }
 
@@ -1433,11 +1659,15 @@ actor DaemonClient {
     }
 
     /// Fetch the un-truncated body for a single transcript item (for
-    /// "Show full output" expansion).
-    func terminalTranscriptItemFullBody(terminalID: UUID, itemID: String) async throws -> TerminalTranscriptItemFullBodyResult {
+    /// "Show full output" expansion). Pass `includeBody: false` to fetch only
+    /// the injection metadata, leaving a potentially huge body off the wire.
+    func terminalTranscriptItemFullBody(
+        terminalID: UUID, itemID: String, includeBody: Bool = true
+    ) async throws -> TerminalTranscriptItemFullBodyResult {
         return try await callAsync(
             method: RPCMethod.terminalTranscriptItemFullBody,
-            params: TerminalTranscriptItemFullBodyParams(terminalID: terminalID, itemID: itemID),
+            params: TerminalTranscriptItemFullBodyParams(
+                terminalID: terminalID, itemID: itemID, includeBody: includeBody),
             resultType: TerminalTranscriptItemFullBodyResult.self
         )
     }

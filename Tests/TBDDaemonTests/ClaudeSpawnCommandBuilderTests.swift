@@ -28,6 +28,35 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1", "DISABLE_AUTO_UPDATE": "true"])
     }
 
+    @Test("resume + forkSession appends --fork-session (fork needs a new session ID)")
+    func resumeWithForkSession() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            forkSession: true,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.command == "claude --resume abc-123 --fork-session --dangerously-skip-permissions")
+    }
+
+    @Test("resume default (forkSession false) omits --fork-session")
+    func resumeDefaultOmitsForkSession() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(!r.command.contains("--fork-session"))
+    }
+
     @Test("fresh session id only")
     func freshOnly() {
         let r = ClaudeSpawnCommandBuilder.build(

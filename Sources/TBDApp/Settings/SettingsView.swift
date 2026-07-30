@@ -35,11 +35,12 @@ struct GeneralSettingsTab: View {
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
-    @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
-    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript: Bool = true
+    @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -155,6 +156,7 @@ struct GeneralSettingsTab: View {
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
+                autoTrustWorktreesToggle
                 Toggle("Auto-resume Claude sessions when the usage limit resets",
                        isOn: Binding(
                     get: { appState.autoResumeOnLimitReset },
@@ -167,8 +169,15 @@ struct GeneralSettingsTab: View {
                     set: { newValue in Task { await appState.setAutoResumeOnApiError(newValue) } }
                 ))
                 .help("When a turn dies on a transient API error (connection drop, server error, overload), TBD types \"continue\" after a backoff (60s, 2m, 5m, 10m) and gives up after 4 straight failures. Off by default. Auth and billing errors are never retried.")
+                Toggle("Live transcript pane", isOn: $enableTranscript)
+                    .help("Show a chat-style live transcript pane for Claude sessions, following the session's conversation as it streams. On by default; turn it off to keep the pane out of new tabs.")
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
+                Picker("Usage reset times", selection: $usageResetTimeStyle) {
+                    Text("Time of reset").tag(ProfileUsagePresentation.ResetTimeStyle.timeOfReset)
+                    Text("Time until reset").tag(ProfileUsagePresentation.ResetTimeStyle.timeUntilReset)
+                }
+                .help("How usage-window resets are shown: the wall-clock time they reset (\"at 7:59pm\", \"at Fri 7pm\") or the time remaining (\"in 2h 10m\", \"in 4d 2h\").")
             }
 
             Section("Session Hibernation") {
@@ -198,6 +207,11 @@ struct GeneralSettingsTab: View {
                 }
             }
 
+            Section("Remote Sessions") {
+                remoteBackendsToggle
+                remoteProvidersRegistryRow
+            }
+
             Section {
                 EnvOverridesEditor(
                     initial: appState.globalEnvOverrides,
@@ -205,29 +219,29 @@ struct GeneralSettingsTab: View {
                 ) { await appState.setGlobalEnvOverrides($0) }
             }
 
-            Section("Experimental") {
-                Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
-                    .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
-                Toggle("Live transcript pane", isOn: $enableTranscript)
-                    .help("Experimental: show a chat-style live transcript pane for Claude sessions. Off by default — may freeze the app on very large transcripts.")
-                Toggle("New transcript renderer", isOn: $useTableViewTranscript)
-                    .help("On by default. Off falls back to the legacy renderer (for comparison).")
-                    .disabled(!enableTranscript)
+            Section("Fleet Automation") {
                 Toggle("Nightwatch / Daywatch", isOn: $nightwatchExperimental)
                     .help("""
-                    Experimental — an autonomous fleet babysitter. It sweeps your \
+                    An autonomous fleet babysitter. It sweeps your \
                     worktrees, keeps stuck agents unblocked, and gates open PRs, using \
                     cheap local scripts and only paging a model for genuine judgment \
                     calls. Daywatch (◐) is a lighter pass for when you're at the \
                     keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
-                    you're away. Evaluate-only for now — it records what it would do \
-                    without acting, and its behavior and safety rules are still \
-                    changing. Turning this on reveals the mode controls (sidebar \
-                    footer and menu bar); off hides both. You still merge PRs and \
-                    make prod/access calls yourself.
+                    you're away. It acts on your live fleet — nudging stuck \
+                    sessions and dispatching work — and its behavior and safety \
+                    rules are still changing. Turning this \
+                    on reveals the mode controls (sidebar footer and menu bar); \
+                    off hides both. You still merge PRs and make prod/access \
+                    calls yourself.
                     """)
+            }
+
+            Section("Experimental") {
+                Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
+                    .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 hibernateInputVetoToggle
+                autoCloseSetupToggle
             }
         }
         .formStyle(.grouped)
@@ -270,6 +284,132 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setHibernateInputVetoEnabled(newValue) } }
         ))
         .help("Guard that prevents hibernation of sessions with typed-but-unsent input (machine-interface input detector). Off by default (soaking). Independent of the auto-hibernate idle sweep, which is also off by default.")
+    }
+
+    /// Auto-close the setup-hook tab after a clean run. Reads the persisted
+    /// flag from `daemon.capabilities` and writes via
+    /// `config.setAutoCloseSetup`. Off by default (soaking).
+    @ViewBuilder
+    private var autoCloseSetupToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Auto-close the setup tab on success", isOn: Binding(
+            get: { capabilities?.autoCloseSetupEnabled ?? false },
+            set: { newValue in Task { await appState.setAutoCloseSetupEnabled(newValue) } }
+        ))
+        .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. Off by default (soaking). Applies to newly created worktrees.")
+    }
+
+    /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
+    /// repos. Reads the persisted flag from `daemon.capabilities` and writes via
+    /// `config.setAutoTrustWorktrees`. ON by default — the trust question has
+    /// a known answer for a worktree TBD made from a repo you registered (and
+    /// for that repo's own checkout, which you registered deliberately), and
+    /// the dialog blocks before any hook fires, so a stalled session is
+    /// invisible to TBD. Worktrees checked out from a PR head are excluded:
+    /// their contents may be fork-authored, which is what the prompt gates.
+    @ViewBuilder
+    private var autoTrustWorktreesToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Trust repos you add and the worktrees TBD makes in them", isOn: Binding(
+            get: { capabilities?.autoTrustWorktrees ?? true },
+            set: { newValue in Task { await appState.setAutoTrustWorktrees(newValue) } }
+        ))
+        .help("Answer Claude's \u{201C}do you trust the files in this folder?\u{201D} prompt ahead of time for worktrees TBD created and for the checkout of each repo you added. You registered the repo and TBD made the worktree, so the answer is already known \u{2014} and the prompt blocks before any Claude hook fires, so a session waiting on it looks idle to TBD instead of stuck. Worktrees checked out from a pull request head are never pre-trusted, on or off: their files may come from someone else's fork, which is exactly what the prompt is for. On by default. Turning it off stops any further pre-trusting, including for worktrees that already exist; nothing already trusted is undone, and TBD's own scratch spaces are always trusted.")
+    }
+
+    /// Remote agent sessions master switch. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setRemoteBackends`
+    /// (`AppState.setRemoteBackendsEnabled`). The caption below the toggle
+    /// distinguishes "on" from "on and actually polling" — the daemon only
+    /// constructs its provider manager at boot, so a fresh toggle needs a
+    /// restart before anything happens (see `AppState.remoteBackendsStatusCaption`).
+    @ViewBuilder
+    private var remoteBackendsToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let enabled = capabilities?.remoteBackendsEnabled ?? false
+        let live = capabilities?.remoteBackendsLive ?? false
+        Toggle("Enable remote agent sessions", isOn: Binding(
+            get: { enabled },
+            set: { newValue in Task { await appState.setRemoteBackendsEnabled(newValue) } }
+        ))
+        .help("Providers are registered in the file below. The daemon only builds its provider manager at boot, so turning this on requires a daemon restart before polling starts.")
+        Text(AppState.remoteBackendsStatusCaption(enabled: enabled, live: live))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    /// The registry file row — tilde-abbreviated path + copy-path button,
+    /// copying the exact row implementation style `RepoHooksSettingsView`
+    /// uses for every other file-backed settings surface (repo convention:
+    /// user-authored blobs get a path+copy editor, not a DB column). The
+    /// file may not exist yet; when providers ARE loaded, list them with
+    /// their health so the user can see whether their JSON took effect
+    /// without leaving Settings.
+    @ViewBuilder
+    private var remoteProvidersRegistryRow: some View {
+        let path = TBDConstants.agentProvidersPath
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(path, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Copy full path")
+
+                Spacer()
+            }
+
+            if appState.remoteProviders.isEmpty {
+                Text("No providers loaded yet. Add entries to the file above, then restart the daemon.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(appState.remoteProviders) { provider in
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Self.healthColor(provider.health))
+                            .frame(width: 6, height: 6)
+                        Text(provider.config.name)
+                            .font(.caption)
+                        Text(Self.healthLabel(provider.health))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Short human label for a provider's health, as reported by
+    /// `remote.providers`. Presentation-only — not behavior-gating, so no
+    /// dedicated test per the repo's branching-conditional rule.
+    private static func healthLabel(_ health: ProviderHealth) -> String {
+        switch health {
+        case .ok: return "OK"
+        case .stale: return "Stale"
+        case .needsAuth: return "Needs auth"
+        case .error: return "Error"
+        }
+    }
+
+    private static func healthColor(_ health: ProviderHealth) -> Color {
+        switch health {
+        case .ok: return .green
+        case .stale: return .yellow
+        case .needsAuth: return .orange
+        case .error: return .red
+        }
     }
 
     private var primaryAgentPreferenceBinding: Binding<PrimaryAgentPreference> {

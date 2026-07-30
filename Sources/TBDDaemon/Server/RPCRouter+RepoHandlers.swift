@@ -178,6 +178,51 @@ extension RPCRouter {
         return try RPCResponse(result: RepoListBranchesResult(branches: branches))
     }
 
+    /// Repo-scoped open-PR list for the branch picker (spec §1). Degrades to an
+    /// empty list rather than an RPC error on any `gh`/GraphQL failure — see
+    /// `PRStatusManager.fetchOpenPRs`. Drops PRs already checked out in a
+    /// worktree, mirroring `listBranches`' in-use filter.
+    func handleRepoListOpenPRs(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoListOpenPRsParams.self, from: paramsData)
+
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        let prs = await prManager.fetchOpenPRs(repoPath: repo.path)
+        let inUseBranches = Set((try? await git.worktreeList(repoPath: repo.path))?.map(\.branch).filter { !$0.isEmpty } ?? [])
+        // A PR head fetched into a uniquified/renamed local branch (e.g. head
+        // "foo" checked out as "foo-2") no longer matches by head name, but the
+        // worktree row carries the PR number — filter on that too. Use
+        // excludeArchived (not status: .active) so a worktree still
+        // `.creating` — several seconds of tmux/terminal spawn — still counts
+        // as in-use; otherwise its PR is selectable again during that window,
+        // letting a second worktree land on the same PR (matches the
+        // "globalLiveRows" excludeArchived convention in
+        // WorktreeLifecycle+Reconcile.swift).
+        let inUsePRNumbers = Set((try? await db.worktrees.list(repoID: repo.id, excludeArchived: true))?.compactMap(\.prNumber) ?? [])
+        let filtered = Self.filterOpenPRsNotInUse(prs, inUseBranches: inUseBranches, inUsePRNumbers: inUsePRNumbers)
+
+        return try RPCResponse(result: RepoListOpenPRsResult(prs: filtered))
+    }
+
+    /// Drop PRs already checked out in a worktree — by head branch name OR by a
+    /// number stamped on an active worktree row (covers a PR whose head was
+    /// fetched under a uniquified local branch, whose name no longer matches).
+    /// The branch-name check applies only to same-repo PRs: a fork PR's head
+    /// branch lives in the contributor's namespace, so a name matching a
+    /// checked-out origin branch (e.g. a fork PR opened off "main") is
+    /// coincidental, not the same ref — only the stored-PR-number check
+    /// applies to fork PRs. Pure so it's unit-testable without git/gh/db.
+    static func filterOpenPRsNotInUse(
+        _ prs: [OpenPRInfo], inUseBranches: Set<String>, inUsePRNumbers: Set<Int>
+    ) -> [OpenPRInfo] {
+        prs.filter { pr in
+            let branchInUse = !pr.isCrossRepository && inUseBranches.contains(pr.headRefName)
+            return !branchInUse && !inUsePRNumbers.contains(pr.number)
+        }
+    }
+
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRenameParams.self, from: paramsData)
 

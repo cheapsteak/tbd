@@ -19,6 +19,23 @@ public enum WorktreeCreateCompletion: Sendable {
     case preSessionPending(phase3: Task<Void, Never>)
 }
 
+/// Carries an archived conversation onto a freshly created worktree.
+///
+/// Deliberately carries no prompt: a carryover spawn opens idle at the
+/// composer, exactly like an ordinary resume. An earlier revision passed a
+/// "you have been moved" context prompt as the spawn's trailing argument,
+/// which Claude answered immediately — an unwanted turn on every revive.
+/// Provenance lives solely in `notesSeed`, which seeds the Notes tab.
+public struct ConversationCarryover: Sendable {
+    let sourceSessionID: String
+    let notesSeed: String
+
+    init(sourceSessionID: String, notesSeed: String) {
+        self.sourceSessionID = sourceSessionID
+        self.notesSeed = notesSeed
+    }
+}
+
 extension WorktreeLifecycle {
     // MARK: - Create
 
@@ -26,12 +43,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
-        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch)
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
+        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, claudeSettingsOverlay: claudeSettingsOverlay)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -48,7 +65,7 @@ extension WorktreeLifecycle {
     /// Phase 1: Synchronous-fast. Generates a name, inserts a DB row with
     /// `status = .creating`, and returns the worktree immediately.
     /// NO git operations happen here.
-    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false) async throws -> Worktree {
+    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
@@ -138,7 +155,8 @@ extension WorktreeLifecycle {
             path: worktreePath,
             tmuxServer: tmuxServer,
             status: .creating,
-            parentWorktreeID: resolvedParent
+            parentWorktreeID: resolvedParent,
+            prNumber: prNumber
         )
 
         return worktree
@@ -170,6 +188,27 @@ extension WorktreeLifecycle {
         return base
     }
 
+    /// Returns `base`, or `base-2`, `base-3`, … — the first name for which no
+    /// local `refs/heads/<name>` exists. Mirrors `uniqueFolderName`'s loop but
+    /// probes git refs instead of paths: the PR-head fetch uses a `+` force
+    /// refspec, so a colliding name would silently rewrite an unrelated branch;
+    /// this picks a free name first. Caps at -1000; if every candidate through
+    /// `base-1000` is taken it THROWS rather than returning the taken `base` —
+    /// returning it would let the force refspec clobber that existing branch.
+    private func uniqueLocalBranchName(repoPath: String, base: String) async throws -> String {
+        if try await git.localBranchExists(repoPath: repoPath, name: base) == false {
+            return base
+        }
+        for suffix in 2...1000 {
+            let candidate = "\(base)-\(suffix)"
+            if try await git.localBranchExists(repoPath: repoPath, name: candidate) == false {
+                return candidate
+            }
+        }
+        throw WorktreeLifecycleError.createFailed(
+            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the force-fetch refspec would clobber the existing branch)")
+    }
+
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
     ///
@@ -180,8 +219,10 @@ extension WorktreeLifecycle {
     ///
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
+    /// Set `retryGeneratedNameOnCollision` to false when callers have already
+    /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, overrideProfileID: UUID? = nil, claudeSettingsOverlay: String? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -207,13 +248,49 @@ extension WorktreeLifecycle {
             // 2. git worktree add (fetch was run beforehand in the RPC handler)
             let worktreeAddStart = clock.now
             let resultPath: String
+            // Set by the PR-head branch below: this worktree's contents came
+            // from `refs/pull/<n>/head`, which a third-party fork may have
+            // authored. Persisted on the row so the five *later* trust-seeding
+            // call sites (wake, revive, terminal create, profile swap,
+            // extra-session restore) can see it too.
+            var checkedOutForeignHead = false
             if let ref = existingBranchRef {
                 // Existing-branch flow: check out the chosen ref. Local branches
                 // get `git worktree add <path> <branch>`; remote refs get
                 // `--track -b <localName> <path> origin/<name>` to create a
                 // local tracking branch.
                 do {
-                    if ref.hasPrefix("origin/") {
+                    if checkoutPRHead, let prNumber = worktree.prNumber {
+                        // Fork-PR checkout: the PR head has no local ref, so
+                        // fetch refs/pull/<n>/head into a collision-free local
+                        // branch (the `+` refspec force-updates, so reusing an
+                        // existing ref name would silently rewrite an unrelated
+                        // branch), then check it out via the plain
+                        // existing-branch path. No fork remote is ever added.
+                        //
+                        // Decorated same-repo rows (prNumber set, checkoutPRHead
+                        // false) fall through to the else-branches below and
+                        // check out the existing branch unchanged — prNumber is
+                        // already stamped on the row for status tracking.
+                        let localBranch = try await uniqueLocalBranchName(
+                            repoPath: repo.path, base: worktree.branch
+                        )
+                        try await git.fetchPullRequestHead(
+                            repoPath: repo.path, number: prNumber, localBranch: localBranch
+                        )
+                        try await git.worktreeAddExisting(
+                            repoPath: repo.path,
+                            worktreePath: worktree.path,
+                            branch: localBranch
+                        )
+                        if localBranch != worktree.branch {
+                            try await db.worktrees.updateBranch(id: worktreeID, branch: localBranch)
+                        }
+                        // TBD made this directory but not its contents: stamp
+                        // the row so folder-trust is never pre-answered for it.
+                        checkedOutForeignHead = true
+                        try await db.worktrees.markForeignHead(id: worktreeID)
+                    } else if ref.hasPrefix("origin/") {
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,
                             worktreePath: worktree.path,
@@ -240,7 +317,8 @@ extension WorktreeLifecycle {
                     repo: repo, name: worktree.name, branch: worktree.branch,
                     worktreePath: worktree.path,
                     userSpecifiedFolder: userSpecifiedFolder,
-                    userSpecifiedBranch: userSpecifiedBranch
+                    userSpecifiedBranch: userSpecifiedBranch,
+                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision
                 )
 
                 // 4. If the name changed due to collision, update the DB record
@@ -254,6 +332,14 @@ extension WorktreeLifecycle {
             let worktreeAddElapsedMs = worktreeAddStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(Int(worktreeAddElapsedMs))ms")
 
+            // The spawn paths below take this value rather than re-reading the
+            // row, so carry the `foreignHead` stamp onto the in-memory copy —
+            // otherwise the very first Claude spawn would still seed trust for
+            // a tree it just fetched from a fork.
+            var stamped = worktree
+            stamped.foreignHead = stamped.foreignHead || checkedOutForeignHead
+            let spawnWorktree = stamped
+
             // 3. Setup tmux terminals.
             let terminalSpawnStart = clock.now
             // 3a. Blocking preSession hook: spawn its terminal FIRST and gate
@@ -261,7 +347,7 @@ extension WorktreeLifecycle {
             // a background task so the caller's RepoSerializer lane is freed
             // immediately — never block it for the duration of the hook.
             if let preSession = try await spawnPreSessionTerminal(
-                worktree: worktree, repo: repo,
+                worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
                 cols: cols, rows: rows
             ) {
@@ -285,14 +371,25 @@ extension WorktreeLifecycle {
                 let phase3 = Task.detached { [self] in
                     await runPreSessionPhase3(
                         preSession: preSession,
-                        worktree: worktree, repo: repo,
+                        worktree: spawnWorktree, repo: repo,
                         worktreePath: resultPath,
                         skipClaude: skipClaude,
                         initialPrompt: initialPrompt,
                         cols: cols, rows: rows,
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
-                        claudeSettingsOverlay: claudeSettingsOverlay
+                        modelOverride: modelOverride,
+                        claudeSettingsOverlay: claudeSettingsOverlay,
+                        carryover: carryover
+                    )
+                    // Fresh creates get an initial note tab, appended after the
+                    // primary spawn set the tab order. Create path only — a
+                    // revive's surviving note rows re-materialize via the app's
+                    // reconcile instead. Best-effort: if the worktree row
+                    // vanished mid-wait, the note insert FK-fails and is logged.
+                    await createInitialNoteTab(
+                        worktreeID: worktree.id,
+                        seed: carryover?.notesSeed
                     )
                 }
                 return .preSessionPending(phase3: phase3)
@@ -301,7 +398,7 @@ extension WorktreeLifecycle {
             // 3b. No preSession hook: spawn primary terminals inline
             // (behavior identical to before the preSession hook existed).
             _ = try await spawnPrimaryTerminals(
-                worktree: worktree, repo: repo,
+                worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
                 skipClaude: skipClaude,
                 initialPrompt: initialPrompt,
@@ -309,10 +406,19 @@ extension WorktreeLifecycle {
                 rows: rows,
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
-                claudeSettingsOverlay: claudeSettingsOverlay
+                modelOverride: modelOverride,
+                claudeSettingsOverlay: claudeSettingsOverlay,
+                carryover: carryover
             )
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
+
+            // 3c. Fresh repo-backed creates get an initial note tab (appended
+            // last; the primary terminal keeps focus).
+            await createInitialNoteTab(
+                worktreeID: worktreeID,
+                seed: carryover?.notesSeed
+            )
 
             // 4. Update status to active
             let markActiveStart = clock.now
@@ -331,18 +437,47 @@ extension WorktreeLifecycle {
         }
     }
 
+    /// Creates the initial "Notes" tab for a freshly created repo-backed
+    /// worktree and appends it to the tab order (last; the primary terminal
+    /// keeps focus). Ordinary creates leave the note empty; callers may provide
+    /// a seed for flows whose initial Notes should carry context. The app
+    /// materializes the tab from the note row via its `reconcileNoteTabs` poll
+    /// — note tabs use the note row's UUID as the tab ID. Best-effort: a failure
+    /// (e.g. the worktree row vanished mid-create, FK-failing the insert) must
+    /// never fail the create, whose checkout and terminals are already valid.
+    func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
+        do {
+            let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
+            if let seed {
+                _ = try await db.notes.update(
+                    id: note.id,
+                    title: note.title,
+                    content: seed
+                )
+            }
+            var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
+            order.append(note.id)
+            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
+        } catch {
+            logger.warning("failed to create initial note tab for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Attempts to create a git worktree, trying origin/<default> then falling back
     /// to local <default> as the base branch. Retries once with a new name on collision.
     private func attemptWorktreeAdd(
         repo: Repo, name: String, branch: String,
         worktreePath: String,
         userSpecifiedFolder: Bool,
-        userSpecifiedBranch: Bool
+        userSpecifiedBranch: Bool,
+        retryGeneratedNameOnCollision: Bool
     ) async throws -> (name: String, branch: String, path: String) {
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
         // Try with origin/<default> first, then local <default>
         let baseBranches = ["origin/\(defaultBranch)", defaultBranch]
+
+        var lastError: Error? = nil
 
         for baseBranch in baseBranches {
             do {
@@ -354,15 +489,19 @@ extension WorktreeLifecycle {
                 )
                 return (name: name, branch: branch, path: worktreePath)
             } catch {
+                lastError = error
+                logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 // Clean up the directory if it was partially created
                 try? FileManager.default.removeItem(atPath: worktreePath)
             }
         }
 
-        // Fail immediately if user specified the folder — can't silently change it
-        if userSpecifiedFolder {
+        // Explicit folders and identity-sensitive callers cannot silently
+        // switch to a different generated folder and branch.
+        if userSpecifiedFolder || !retryGeneratedNameOnCollision {
+            let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
-                "git worktree add failed — the folder or branch may already exist"
+                "git worktree add failed — the folder or branch may already exist\(errorDetail)"
             )
         }
 
@@ -386,13 +525,36 @@ extension WorktreeLifecycle {
                 )
                 return (name: retryName, branch: retryBranch, path: retryPath)
             } catch {
+                lastError = error
+                logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 try? FileManager.default.removeItem(atPath: retryPath)
             }
         }
 
+        let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
         throw WorktreeLifecycleError.createFailed(
-            "git worktree add failed after all attempts"
+            "git worktree add failed after all attempts\(errorDetail)"
         )
+    }
+
+    /// Formats an error for inclusion in a user-facing message, truncated to ~500 chars.
+    private func formatErrorForMessage(_ error: Error) -> String {
+        var detail = ""
+        if let gitError = error as? GitError {
+            let stderr = gitError.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            detail = stderr
+        } else {
+            detail = error.localizedDescription
+        }
+        if detail.isEmpty {
+            return ""
+        }
+        // Truncate to ~500 chars and clean up
+        let maxLen = 500
+        if detail.count > maxLen {
+            detail = String(detail.prefix(maxLen)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+        }
+        return "\nDetails: \(detail)"
     }
 
     private func resolvePrimaryTerminalKind(
@@ -436,18 +598,22 @@ extension WorktreeLifecycle {
         rows: Int? = nil,
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
-        claudeSettingsOverlay: String? = nil
+        modelOverride: String? = nil,
+        claudeSettingsOverlay: String? = nil,
+        carryover: ConversationCarryover? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
-        let primaryTerminalKind = resolvePrimaryTerminalKind(
-            skipClaude: skipClaude,
-            archivedClaudeSessions: archivedClaudeSessions,
-            configuredPreference: config.primaryAgentPreference
-        )
+        let primaryTerminalKind: TerminalKind = carryover == nil
+            ? resolvePrimaryTerminalKind(
+                skipClaude: skipClaude,
+                archivedClaudeSessions: archivedClaudeSessions,
+                configuredPreference: config.primaryAgentPreference
+            )
+            : .claude
         let archivedSessions = archivedClaudeSessions ?? []
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
@@ -529,10 +695,10 @@ extension WorktreeLifecycle {
             primaryProfileID = nil
             primaryLabel = TerminalLabel.codex
         case .claude:
-            let archivedSession = archivedSessions.first
-            let sessionUUID = archivedSession ?? UUID().uuidString
+            let archivedSession = carryover == nil ? archivedSessions.first : nil
+            let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
-            let isResume = archivedSession != nil
+            let isResume = archivedSession != nil || carryover != nil
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
             // UUID (used on fresh create). Reviving with `--session-id` on an
@@ -544,11 +710,17 @@ extension WorktreeLifecycle {
                     scratchInstructions: config.scratchInstructions,
                     scratchRenamePrompt: config.scratchRenamePrompt)
             let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-            // Pre-accept Claude Code's folder-trust dialog for scratch spaces so
-            // fresh, TBD-owned scratch dirs don't prompt on every launch.
-            // Self-gates on isScratch; best-effort, never throws.
-            ClaudeTrustSeeder.ensureTrustedForScratch(
-                worktree: worktree, profileConfigDir: profileConfigDir)
+            // Pre-accept Claude Code's folder-trust dialog. TBD just created
+            // this worktree from a repo the operator registered, so the trust
+            // answer is known by construction — and the dialog blocks before
+            // SessionStart, so a stall here would be machine-invisible.
+            // Scratch always seeds; non-scratch honors the config flag and is
+            // skipped entirely when the row is `foreignHead` (PR-head checkout,
+            // possibly fork-authored contents). Best-effort, never throws.
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree,
+                autoTrustNonScratch: config.autoTrustWorktrees,
+                profileConfigDir: profileConfigDir)
             if isResume {
                 // Pre-resume freshness: `claude --resume` only looks in the
                 // project dir derived from the current cwd. If the archived
@@ -568,13 +740,21 @@ extension WorktreeLifecycle {
             }
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
+                forkSession: carryover != nil,
                 freshSessionID: isResume ? nil : sessionUUID,
                 appendSystemPrompt: appendPrompt,
+                // A carryover spawn sends NO initial prompt — it must open idle
+                // at the composer like any other resume. `isResume` is true
+                // whenever a carryover is present, so this expression also
+                // preserves the pre-existing behavior for plain resumes (never
+                // a prompt) and fresh creates (the caller's prompt).
                 initialPrompt: isResume ? nil : initialPrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
-                profileModel: resolvedProfile?.model,
+                // Per-spawn model override (picker model buttons) wins over
+                // the profile default for this initial spawn only.
+                profileModel: modelOverride ?? resolvedProfile?.model,
                 profileAwsRegion: resolvedProfile?.awsRegion,
                 profileAwsProfile: resolvedProfile?.awsProfile,
                 profileConfigDir: profileConfigDir,
@@ -626,6 +806,13 @@ extension WorktreeLifecycle {
             profileID: primaryProfileID,
             kind: primaryTerminalKind
         )
+        if carryover != nil {
+            SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+                terminalID: plannedTerminalID1,
+                paneID: window1.paneID,
+                server: tmuxServer
+            )
+        }
         var createdTerminals: [(id: UUID, label: String)] = [
             (id: plannedTerminalID1, label: primaryLabel)
         ]
@@ -633,6 +820,7 @@ extension WorktreeLifecycle {
         // Create terminal 2: setup hook. Repo-backed worktrees only — scratch
         // spaces (repo == nil) have no repo path/setup hook and get just the
         // primary terminal, so the tab order stays `[primary]`.
+        var setupAutoCloseSpawn: PreSessionSpawn?
         if let repo {
             let plannedTerminalID2 = UUID()
             createdTerminalIDs.append(plannedTerminalID2)
@@ -643,7 +831,26 @@ extension WorktreeLifecycle {
                     TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
                 }
             )
-            let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+            let setupCommand: String
+            var setupMarkerPath: String?
+            if config.autoCloseSetupEnabled, let setupHookPath {
+                // Auto-close soak flag ON with a resolved hook: wrap so the
+                // exit code lands in a marker (the watcher spawned below tears
+                // the tab down on exit 0). Delete any stale marker from a
+                // previous run of this worktree ID before the pane spawns.
+                let markerPath = Self.setupMarkerPath(worktreeID: worktreeID)
+                try? FileManager.default.removeItem(atPath: markerPath)
+                setupMarkerPath = markerPath
+                setupCommand = Self.setupAutoCloseCommand(
+                    hookPath: setupHookPath,
+                    runtimeDir: Self.setupRuntimeDir,
+                    markerPath: markerPath,
+                    shell: defaultShell
+                )
+            } else {
+                // Flag off (default) or no hook: today's behavior unchanged.
+                setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+            }
             // Suppress the omz update prompt only when a setup hook actually
             // resolves — a hook-less "Setup" tab is just a regular shell and must
             // keep oh-my-zsh update checks (see `hookPaneEnv`).
@@ -679,6 +886,26 @@ extension WorktreeLifecycle {
                 kind: .shell
             )
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
+            if let setupMarkerPath, let setupHookPath {
+                // The auto-close wrapper lets the pane EXIT on hook success,
+                // and tmux destroys the window the instant it does — before
+                // the watcher's teardown can capture the scrollback for
+                // closed-terminal history. Keep the dead pane around; the
+                // teardown's killWindow removes it after capturing.
+                // Best-effort: a failure only costs the captured history.
+                do {
+                    try await tmux.setRemainOnExit(server: tmuxServer, windowID: window2.windowID)
+                } catch {
+                    logger.warning("setup auto-close: remain-on-exit failed for window \(window2.windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+                setupAutoCloseSpawn = PreSessionSpawn(
+                    terminalID: plannedTerminalID2,
+                    windowID: window2.windowID,
+                    paneID: window2.paneID,
+                    markerPath: setupMarkerPath,
+                    hookPath: setupHookPath
+                )
+            }
         }
 
         // Restore any archived Claude sessions that were not consumed by the
@@ -686,7 +913,9 @@ extension WorktreeLifecycle {
         let additionalArchivedClaudeSessions: [String]
         switch primaryTerminalKind {
         case .claude:
-            additionalArchivedClaudeSessions = Array(archivedSessions.dropFirst())
+            additionalArchivedClaudeSessions = carryover == nil
+                ? Array(archivedSessions.dropFirst())
+                : archivedSessions
         case .codex:
             additionalArchivedClaudeSessions = archivedSessions
         case .shell:
@@ -697,10 +926,12 @@ extension WorktreeLifecycle {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
                 let restoreProfileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-                // Pre-accept the folder-trust dialog for scratch spaces so restoring
-                // an extra archived session onto a fresh profile dir doesn't re-prompt.
-                ClaudeTrustSeeder.ensureTrustedForScratch(
-                    worktree: worktree, profileConfigDir: restoreProfileConfigDir)
+                // Pre-accept the folder-trust dialog so restoring an extra
+                // archived session onto a fresh profile dir doesn't re-prompt.
+                await ClaudeTrustSeeder.ensureTrusted(
+                    worktree: worktree,
+                    autoTrustNonScratch: config.autoTrustWorktrees,
+                    profileConfigDir: restoreProfileConfigDir)
                 // Same pre-resume freshness sync as the primary terminal above.
                 await TranscriptProjectDirSync.ensureSessionResumableDetached(
                     sessionID: sessionID,
@@ -716,6 +947,9 @@ extension WorktreeLifecycle {
                     profileSecret: resolvedProfile?.secret,
                     profileKind: resolvedProfile?.kind,
                     profileBaseURL: resolvedProfile?.baseURL,
+                    // No per-spawn model override here: archived-session
+                    // restores only happen on revive/recovery, whose callers
+                    // never pass one (create never carries archived sessions).
                     profileModel: resolvedProfile?.model,
                     profileAwsRegion: resolvedProfile?.awsRegion,
                     profileAwsProfile: resolvedProfile?.awsProfile,
@@ -772,6 +1006,18 @@ extension WorktreeLifecycle {
         // Kill the untracked initial window that new-session created
         if let windowID = initialWindowID {
             try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
+        }
+
+        // Flag-on setup spawn: arm the detached auto-close watcher. Started
+        // only AFTER the tab order above is persisted, so its teardown can
+        // never race the setTabOrder write and resurrect the closed tab.
+        if let setupAutoCloseSpawn {
+            let lifecycle = self
+            Task.detached {
+                await lifecycle.finishAutoCloseSetup(
+                    worktree: worktree, setup: setupAutoCloseSpawn
+                )
+            }
         }
 
         return createdTerminals

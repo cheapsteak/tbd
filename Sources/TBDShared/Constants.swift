@@ -133,6 +133,46 @@ public enum TBDConstants {
         claudeSettingsOverlayPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Base directory for per-note (tab) content files. Honors TBD_HOME.
+    public static func noteContentDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("notes")
+    }
+    public static var noteContentDir: URL { noteContentDir(environment: ProcessInfo.processInfo.environment) }
+
+    /// Path to one note tab's content file:
+    /// `~/tbd/notes/<worktreeID>/<noteID>.md`. Note content is file-backed
+    /// (the DB `content` column is a dormant legacy fallback); the DB note
+    /// row keeps tab identity + title. Honors TBD_HOME.
+    public static func noteContentPath(worktreeID: UUID, noteID: UUID, environment: [String: String]) -> String {
+        noteContentDir(environment: environment)
+            .appendingPathComponent(worktreeID.uuidString)
+            .appendingPathComponent("\(noteID.uuidString).md")
+            .path
+    }
+    public static func noteContentPath(worktreeID: UUID, noteID: UUID) -> String {
+        noteContentPath(worktreeID: worktreeID, noteID: noteID, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Base directory for captured scrollback of closed terminals. Honors TBD_HOME.
+    public static func terminalHistoryDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("terminal-history")
+    }
+    public static var terminalHistoryDir: URL { terminalHistoryDir(environment: ProcessInfo.processInfo.environment) }
+
+    /// Path to one closed terminal's captured scrollback:
+    /// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`. Content is
+    /// file-backed (the `terminal_history` DB row keeps metadata only); the
+    /// app reads this file directly. Honors TBD_HOME.
+    public static func terminalHistoryPath(worktreeID: UUID, terminalID: UUID, environment: [String: String]) -> String {
+        terminalHistoryDir(environment: environment)
+            .appendingPathComponent(worktreeID.uuidString)
+            .appendingPathComponent("\(terminalID.uuidString).txt")
+            .path
+    }
+    public static func terminalHistoryPath(worktreeID: UUID, terminalID: UUID) -> String {
+        terminalHistoryPath(worktreeID: worktreeID, terminalID: terminalID, environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Path to a scratch worktree's notepad file:
     /// `~/tbd/worktrees/<worktreeID>/notes.md`. Honors TBD_HOME.
     public static func notesPath(worktreeID: UUID, environment: [String: String]) -> String {
@@ -143,5 +183,14 @@ public enum TBDConstants {
     }
     public static func notesPath(worktreeID: UUID) -> String {
         notesPath(worktreeID: worktreeID, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Path to the remote-provider registry file: `~/tbd/agent-providers.json`.
+    /// User-authored JSON array of `{name, exec, args?}`. Honors TBD_HOME.
+    public static func agentProvidersPath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("agent-providers.json").path
+    }
+    public static var agentProvidersPath: String {
+        agentProvidersPath(environment: ProcessInfo.processInfo.environment)
     }
 }

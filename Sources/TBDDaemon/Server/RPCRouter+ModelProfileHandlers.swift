@@ -340,6 +340,15 @@ extension RPCRouter {
         return .ok()
     }
 
+    // MARK: - Reorder
+
+    func handleModelProfileReorder(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileReorderParams.self, from: paramsData)
+        try await db.modelProfiles.reorder(profileIDs: params.profileIDs)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     func handleModelProfileSetRepoOverride(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileSetRepoOverrideParams.self, from: paramsData)
         guard try await db.repos.get(id: params.repoID) != nil else {
@@ -407,12 +416,14 @@ extension RPCRouter {
         }
     }
 
-    // MARK: - Usage Refresh (forced sweep of the in-memory OAuth usage poller)
+    // MARK: - Usage Refresh (refresh-if-stale sweep of the OAuth usage poller)
 
-    /// `modelProfile.usageRefresh` — force a fresh usage sweep for all
-    /// logged-in OAuth profiles (params.id == nil) or one profile, and return
-    /// the post-sweep snapshots. The spawn-time account picker calls this on
-    /// open; background staleness is otherwise bounded by the poller cadence.
+    /// `modelProfile.usageRefresh` — sweep stale, eligible profiles (all
+    /// logged-in OAuth profiles when params.id == nil, else one) and return
+    /// the post-sweep snapshots. Profiles with a snapshot fresher than
+    /// `OAuthProfileUsagePoller.refreshFreshness` or inside a backoff window
+    /// are skipped (cached snapshot returned) — the picker calls this on
+    /// every open, and that must never re-hammer a rate-limited endpoint.
     /// The poller broadcasts `.modelProfilesChanged` itself when data changes.
     func handleModelProfileUsageRefresh(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileUsageRefreshParams.self, from: paramsData)

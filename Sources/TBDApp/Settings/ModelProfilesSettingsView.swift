@@ -70,6 +70,9 @@ struct ModelProfilesSettingsView: View {
                 ModelProfileRow(entry: entry)
                     .environmentObject(appState)
             }
+            .onMove { source, destination in
+                appState.reorderModelProfiles(fromOffsets: source, toOffset: destination)
+            }
         }
         .listStyle(.inset)
         .frame(minHeight: 200)
@@ -550,6 +553,7 @@ struct AddModelProfileSheet: View {
         .task(id: "\(preset)|\(awsRegion)|\(awsProfile)") {
             guard preset == .bedrock else { return }
             // Debounce so rapid keystrokes don't spam subprocess calls.
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 500_000_000)
             if Task.isCancelled { return }
             modelDiscovery = .loading
@@ -1127,6 +1131,7 @@ struct EditBedrockSheet: View {
         .onAppear { awsProfileSuggestions = AWSProfiles.discover() }
         .task(id: "\(awsRegion)|\(awsProfile)") {
             // Debounce so rapid keystrokes don't spam subprocess calls.
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 500_000_000)
             if Task.isCancelled { return }
             modelDiscovery = .loading

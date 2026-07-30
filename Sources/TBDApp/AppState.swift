@@ -6,6 +6,9 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
+/// Spec C §11.3 — log-only shadow-compare diagnostic. Dedicated category so
+/// it can be streamed/filtered independently of the rest of AppState.
+private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "panelShadow")
 /// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
@@ -56,6 +59,8 @@ final class AppState: ObservableObject {
     }
     /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
     private var appearanceSubscription: AnyCancellable?
+    /// Owns the trailing-edge quiet window in front of that subscription.
+    private let appearanceDebouncer = AppearanceBroadcastDebouncer()
     /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
     private var themeStoreSubscription: AnyCancellable?
 
@@ -73,6 +78,13 @@ final class AppState: ObservableObject {
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
     @Published var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    /// Unread notification summaries for remote sessions, keyed by
+    /// `RemoteSessionSelection` (provider + provider-minted session id —
+    /// remote sessions have no UUID). Mirrors `unreadByWorktree`: written by
+    /// `handleRemoteSessionAttentionDelta` when an attention delta arrives,
+    /// cleared by `selectRemoteSession`. App-local and in-memory only, same
+    /// as `unreadByWorktree` — not persisted across restarts.
+    @Published var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
     /// Terminal IDs that fired a `.responseComplete` notification while their
     /// tab was NOT the active tab of a focused worktree. Drives the bold tab
     /// label in `TabBar`, mirroring the worktree-row bold. App-local and
@@ -88,6 +100,71 @@ final class AppState: ObservableObject {
             if !selectedRepoIDs.isEmpty {
                 selectedWorktreeIDs.subtract(selectedRepoIDs)
                 // selectRepo() already handles this; avoid overriding it
+                return
+            }
+
+            // Remote session rows are tagged into this same List (and thus
+            // this same Set) purely so they're List-native keyboard
+            // reachable — arrow-key traversal and the focus ring — the same
+            // reason repo header tags are handled just above. UNLIKE the
+            // repo-header case, a PURE remote selection (the remote tag(s)
+            // were the entire selection) routes the stripped id through
+            // `selectRemoteSession` (not just discard) so keyboard-only
+            // navigation — which never fires `RemoteSessionRowView`'s
+            // `.onTapGesture` — still ends up setting `selectedRemoteSession`
+            // and the row's own highlight engages. Every other consumer of
+            // `selectedWorktreeIDs` in this codebase assumes every member is
+            // a real `Worktree.id` (keyboard shortcuts, the jump menu,
+            // navigation history, persisted restore); stripping here before
+            // any of that runs keeps that invariant exactly as it was.
+            //
+            // A MIXED selection (real worktree ids survive after stripping
+            // the remote tag(s) — e.g. shift+↓ extending from a local
+            // worktree row onto a remote row, or a shift-range crossing a
+            // repo section's appended remote rows) must NOT route through
+            // `selectRemoteSession`: that call unconditionally sets
+            // `selectedWorktreeIDs = []`, which would silently wipe every
+            // local id this same gesture just selected. The `subtract` call
+            // below is itself an assignment to `selectedWorktreeIDs`, so it
+            // re-invokes this same `didSet` (nested, synchronously, before
+            // `subtract` returns) with the remote tag(s) already gone — that
+            // nested invocation runs the ordinary worktree-selection
+            // bookkeeping below for whatever local ids survived (or, if
+            // none survived, is a no-op, since the bottom bookkeeping is
+            // itself gated on `!selectedWorktreeIDs.isEmpty`). This
+            // invocation must therefore `return` unconditionally right
+            // after, exactly like the repo-header branch above — falling
+            // through here as well would re-run that bookkeeping a SECOND
+            // time (double `recordNavigation`/`recentWorktreeIDs` entries).
+            //
+            // Known cost of stripping the remote tag back out rather than
+            // letting it live in the set at rest: the AppKit table backing
+            // this List has no selection anchor on a remote row once this
+            // `didSet` returns, since the row's tag no longer appears in the
+            // bound Set. Arrow-key traversal starting FROM a remote row, and
+            // the List-native focus ring, are therefore not guaranteed to
+            // work — only the row's own highlight (driven by
+            // `selectedRemoteSession`/`unreadByRemoteSession`) is guaranteed
+            // to reflect the selection correctly. See the Task 9d fix-pass
+            // report for why letting the tag persist at rest was rejected
+            // (multiple consumers of `selectedWorktreeIDs` — e.g.
+            // `newTerminalTab()` — read `.first` unguarded and would act on
+            // a non-worktree id; `ContentView`'s detail-pane routing checks
+            // `selectedWorktreeIDs.isEmpty` to decide whether to show the
+            // empty state).
+            let remoteIDs = Set(remoteSessions.map(\.id))
+            let selectedRemoteIDs = selectedWorktreeIDs.intersection(remoteIDs)
+            if !selectedRemoteIDs.isEmpty {
+                selectedWorktreeIDs.subtract(selectedRemoteIDs)
+                // Only a PURE remote selection (nothing local survived the
+                // subtract) routes through `selectRemoteSession` — a mixed
+                // selection already got its local-id bookkeeping from the
+                // nested `didSet` triggered by the subtract above.
+                if selectedWorktreeIDs.isEmpty,
+                   let remoteID = selectedRemoteIDs.first,
+                   let session = remoteSessions.first(where: { $0.id == remoteID }) {
+                    selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
+                }
                 return
             }
 
@@ -109,6 +186,7 @@ final class AppState: ObservableObject {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 selectedScratchSection = false
+                selectedRemoteSession = nil
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
@@ -162,6 +240,26 @@ final class AppState: ObservableObject {
     /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`
     /// integration for v1 (documented scope cut — see `selectScratchSection()`).
     @Published var selectedScratchSection: Bool = false
+    /// Selected — set when a `RemoteSectionView` session row is clicked, shows
+    /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
+    /// `selectedScratchSection` but keyed by the provider/session composite id
+    /// rather than a UUID (see `RemoteSessionSelection` in
+    /// `AppState+Navigation.swift`). UNLIKE `selectedScratchSection`, this one
+    /// DOES participate in back/forward history — `selectRemoteSession`
+    /// records a `.remoteSession` `NavigationEntry` — since remote sessions
+    /// now sit inside a repo's own sidebar section beside local worktrees
+    /// (see `selectRemoteSession`'s doc comment).
+    @Published var selectedRemoteSession: RemoteSessionSelection? = nil
+    /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
+    /// set when a sidebar context-menu action (e.g. "View Log") jumps
+    /// straight to a specific tab instead of the default. Consumed (read AND
+    /// cleared) by the detail view on appear/selection-change — mirrors the
+    /// reveal-nonce discipline documented for `RepoDetailView`'s persistent
+    /// `@State`: a reveal must be a one-shot consumed by the acting child,
+    /// checked in BOTH onAppear and onChange, or a stale hint replays on an
+    /// unrelated later selection. `selectRemoteSession(provider:sessionID:tab:)`
+    /// sets this alongside `selectedRemoteSession`; nil means "default tab".
+    @Published var remoteSessionRequestedTab: RemoteSessionDetailTab?
 
     // MARK: - Navigation history (back/forward)
 
@@ -205,9 +303,65 @@ final class AppState: ObservableObject {
     /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
     @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
 
+    // MARK: Archived-worktree search
+    //
+    // The archived list is paginated (50/page), so a purely client-side filter
+    // would silently miss older, unloaded archives — and fetching every
+    // remaining page is unaffordable (`handleWorktreeList` enriches each
+    // archived row with a `~/.claude/projects` scan; full enrichment measured
+    // ~19 s). So search is a daemon-side SQL filter with its OWN paginated
+    // result set, held separately from the unsearched `archivedWorktrees`
+    // pages so clearing the query restores them without a refetch.
+
+    /// The query whose search RPC is currently IN FLIGHT for a repo, stamped
+    /// before the await so a superseded response can be dropped.
+    ///
+    /// This is deliberately NOT the query the stored rows answer — that lives
+    /// inside `ArchivedSearchResults`. Deciding what to *display* from this
+    /// value would render the previous query's rows as if they were the answer
+    /// for the new one during the whole in-flight window.
+    @Published var archivedSearchQuery: [UUID: String] = [:]
+    /// Daemon-side search results (page-accumulated) and the query they answer,
+    /// keyed by repo ID. Absent until some response has landed.
+    @Published var archivedSearchResults: [UUID: ArchivedSearchResults] = [:]
+    /// Repos whose most recent archived-search RPC failed. Set only for the
+    /// query that was in flight, cleared when the next search starts or the
+    /// search is cleared. The rail reads it so a failed search degrades to a
+    /// *labelled* client-side view rather than silently claiming the loaded
+    /// rows are the whole answer.
+    @Published var archivedSearchFailed: [UUID: Bool] = [:]
+    /// Guards against concurrent `loadMoreArchivedSearchResults` calls.
+    @Published var isLoadingMoreArchivedSearch: [UUID: Bool] = [:]
+
     /// Orphan-GC reap records (History → Reclaimed), keyed by repo ID and
     /// fetched on demand alongside `archivedWorktrees`.
     @Published var reapRecords: [UUID: [ReapRecord]] = [:]
+
+    /// Every registered remote-agent provider's negotiated contract + health,
+    /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
+    @Published var remoteProviders: [RemoteProviderStatus] = []
+    /// The daemon's remote-session mirror across all providers, fetched by
+    /// `refreshRemote()`. See `AppState+Remote.swift`.
+    @Published var remoteSessions: [RemoteSessionInfo] = []
+    /// TBD-owned display-name overrides for remote sessions, keyed by
+    /// `AppState.remoteSessionKey(provider:sessionID:)`. Mirrors the
+    /// worktree pattern (`Worktree.displayName` living in TBD's own DB
+    /// rather than being derived from git) — except a remote session has no
+    /// TBD-owned DB row of its own (the daemon's `remote_session` table is
+    /// explicitly a drift-tracking mirror of provider-owned state, never
+    /// authoritative — see `docs/remote-provider-contract.md` § Identity &
+    /// drift), so this lives client-side in UserDefaults instead of a new
+    /// daemon column. Emoji has no separate field, same as `Worktree` — the
+    /// user types `:emoji:` inline via `RenameableLabel` and it ends up as
+    /// plain leading characters in the stored string. This map is the
+    /// source of truth even for a provider that declares the `rename`
+    /// capability (contract v1 amendment): `renameRemoteSession(provider:
+    /// sessionID:displayName:)` writes here first, then fires the provider
+    /// push (`pushRemoteRenameIfSupported`) fire-and-forget, so a rename is
+    /// never gated on — or rolled back by — whether that push lands.
+    @Published var remoteSessionDisplayNames: [String: String] = [:] {
+        didSet { persistRemoteSessionDisplayNames() }
+    }
 
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
@@ -335,10 +489,7 @@ final class AppState: ObservableObject {
     var visibleTerminalIDs: Set<UUID> {
         var ids = Set<UUID>()
         for worktreeID in selectedWorktreeIDs {
-            let wtTabs = tabs[worktreeID] ?? []
-            guard !wtTabs.isEmpty else { continue }
-            let activeIndex = activeTabIndices[worktreeID] ?? 0
-            let tab = wtTabs[min(activeIndex, wtTabs.count - 1)]
+            guard let tab = resolvedActiveTab(worktreeID: worktreeID) else { continue }
             let layout = layouts[tab.id] ?? .pane(tab.content)
             for id in layout.allTerminalIDs() {
                 ids.insert(id)
@@ -401,9 +552,45 @@ final class AppState: ObservableObject {
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }
-    @Published var tabs: [UUID: [Tab]] = [:]
+    /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
+    /// (spec C §3.12): never persisted, never mirrored, never part of the
+    /// panel surface. Kept separate from `layouts` (tab-ID-keyed) so the two
+    /// keying schemes can't collide in one dictionary.
+    @Published var gridLayouts: [UUID: LayoutNode] = [:]
+    /// Back/forward history per viewer-class slot pane, keyed by the slot's
+    /// paneID (stable across in-place content replacements).
+    @Published var paneHistories: [UUID: PaneHistory] = [:] {
+        didSet { persistPaneHistories() }
+    }
+    @Published var tabs: [UUID: [TBDShared.Tab]] = [:]
+    /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
+    /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
+    /// than defaulting to 0 or clamping at the call site.
     @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
+    /// Worktrees whose persisted tab order / active tab has been hydrated from
+    /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
+    /// which is also true for the empty response a poll gets while the daemon is
+    /// still mid-create — treating that as loaded stranded the worktree without
+    /// its persisted "active = agent" selection for the rest of the session.
+    var tabStateHydratedWorktreeIDs: Set<UUID> = []
+    /// `listTabs` fetches already spent trying to hydrate a worktree, capped at
+    /// `maxTabStateHydrationAttempts`. Without a cap, a worktree whose tab state
+    /// is legitimately and permanently empty re-fires the RPC on every
+    /// `reconcileTabs` — which is every terminal-list change — forever.
+    var tabStateFetchAttempts: [UUID: Int] = [:]
+    /// The in-flight hydration `Task` per worktree, so overlapping reconciles
+    /// can't stack `Task`s for the same worktree. Holding the handle rather than
+    /// a bare `Set<UUID>` marker means the completion of that work is directly
+    /// awaitable — tests observe it with `await task.value` instead of polling
+    /// wall time for the flag to clear, and only the scheduler's own `Task`
+    /// clears the entry, so a direct `loadTabStates(worktreeID:)` call can no
+    /// longer clear an in-flight marker it does not own.
+    var tabStateFetchTasks: [UUID: Task<Void, Never>] = [:]
+    /// Hydration attempt budget. The gap this covers is one poll wide — the
+    /// daemon persists tab order milliseconds after inserting the terminal
+    /// rows — so a single retry is always enough; the extra one is slack.
+    static let maxTabStateHydrationAttempts = 3
     @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
@@ -500,6 +687,12 @@ final class AppState: ObservableObject {
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
+    // Closed-terminal history (Session History → Closed Terminals).
+    @Published var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
+    @Published var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
+    /// Captured text of the currently selected closed terminal only —
+    /// deliberately a one-entry cache so large scrollbacks never accumulate.
+    @Published var closedTerminalContents: [UUID: String] = [:]                   // entry id → text
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency
     /// input to the keep-alive policy. Bounded by `touchVisitedWorktree`, which
@@ -518,6 +711,186 @@ final class AppState: ObservableObject {
     private static let recentWorktreeCap = 32
 
     private let keepAliveLimit = 8
+
+    // MARK: - Remote attach lifecycle (see `AppState+RemoteAttach.swift`)
+
+    /// Raw most-recent-first log of recently-VIEWED remote sessions, the
+    /// recency input to `RemoteAttachLifecycle.attachedSelections`. Mirrors
+    /// `recentlyVisitedWorktreeIDs`'s split from the computed mount set —
+    /// `attachedRemoteSelections` re-merges the current selection (protected)
+    /// and eligibility/detach state on every read, so this log alone doesn't
+    /// say what's actually attached right now.
+    @Published private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
+
+    /// Sessions whose attach terminal ended (pty exit — clean or not; the
+    /// pane exiting never means the remote session died, only that the
+    /// LOCAL viewer process stopped) and must NOT be silently re-attached
+    /// merely by staying the current selection. Cleared only by an explicit
+    /// user gesture — see `activateRemoteSession`'s doc comment for exactly
+    /// which gestures qualify, and `reattachRemoteSession` for the Reattach
+    /// button's path. This is the state that makes "select = auto-attach"
+    /// safe: without it, a pty exiting while its row is still selected would
+    /// re-enter `attachedRemoteSelections` (still protected) and the pager
+    /// would spawn a fresh process every render, an unbounded respawn loop
+    /// against a resource this codebase must not spam (SSM/ssh concurrency
+    /// and cost — see `RemoteAttachLifecycle`'s doc comment).
+    @Published private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
+
+    /// Sessions whose attach terminal ended UNEXPECTEDLY (nonzero/unreadable
+    /// exit — `RemoteAttachTerminalView.isUnexpectedExit`) — the transport's
+    /// fault, not a user detach. Distinct from `explicitlyDetachedRemoteSessions`
+    /// in how it clears: instead of requiring a user gesture, entries here
+    /// clear THEMSELVES the moment `RemoteReconnectPolicy.isBlocked` stops
+    /// excluding them — i.e. once their provider reports healthy again and
+    /// this entry's own backoff window has elapsed (see that type's doc
+    /// comment). `AppState.attachedRemoteSelections` recomputes this
+    /// evaluation on every read, driven by the app's existing provider-health
+    /// poll cycle — no dedicated timer. Still respects every other
+    /// constraint `explicitlyDetached` does (capability gating, `gone`/
+    /// `dismissed` exclusion, and above all `remoteAttachKeepAliveLimit`),
+    /// so a laptop waking from a long outage can't reattach more than the
+    /// cap at once even with many pending entries at once.
+    @Published private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
+
+    /// Cap on how many WARM BACKGROUND remote sessions may keep a live
+    /// attach terminal around at once. The current selection is separately
+    /// force-protected (see `RemoteAttachLifecycle`) and does NOT consume
+    /// this budget, so the real ceiling on concurrent provider `attach`
+    /// processes is `remoteAttachKeepAliveLimit + 1` — 4 at the constant's
+    /// current value of 3 — which matters because this is exactly the
+    /// billed, concurrency-limited resource the rest of this comment is
+    /// about. Deliberately SMALLER than `keepAliveLimit` (the local
+    /// worktree cap, 8) even though both share the same protected-selection
+    /// + capped-recency shape: a warm LOCAL tmux attach is free (the daemon
+    /// already keeps the tmux session running regardless), but a warm
+    /// REMOTE attach is a real, live connection to another machine — for an
+    /// SSM- or ssh-backed provider, a billed and concurrency-limited
+    /// resource — that buys nothing the user can see, since awareness of a
+    /// remote session's state rides the provider's shared events/poll
+    /// channel, not its per-session attach. A smaller cap only costs
+    /// reattach latency (a fresh spawn instead of an already-warm one) when
+    /// switching back to a session evicted past the cap. Easy
+    /// single-constant tuning point if the maintainer wants it different
+    /// after soaking — but remember any change moves the REAL ceiling by
+    /// the same amount, one more than this constant's value.
+    let remoteAttachKeepAliveLimit = 3
+
+    /// Move `selection` to the front of the attach-recency log, trimming it
+    /// so it never grows unbounded over a long-running app session. Mirrors
+    /// `touchVisitedWorktree`'s shape; unlike that function this trim is
+    /// purely a bound on the stored log's length (there's no "working"-style
+    /// force-protection budget to interact with here — only the current
+    /// selection is ever force-protected by `RemoteAttachLifecycle`, and it
+    /// doesn't consume this log's slots any more than a worktree's
+    /// protection consumes `recentlyVisitedWorktreeIDs`'s).
+    func touchAttachedRemoteSession(_ selection: RemoteSessionSelection) {
+        recentlyAttachedRemoteSessions.removeAll { $0 == selection }
+        recentlyAttachedRemoteSessions.insert(selection, at: 0)
+        let cap = remoteAttachKeepAliveLimit + 1 // +1 headroom for "selected but not yet re-touched"
+        if recentlyAttachedRemoteSessions.count > cap {
+            recentlyAttachedRemoteSessions.removeLast(recentlyAttachedRemoteSessions.count - cap)
+        }
+    }
+
+    /// Records that `selection`'s attach terminal ended — called from the
+    /// pager's `onDetached` bridge. Per the contract
+    /// (`docs/remote-provider-contract.md` § `attach`), this NEVER means the
+    /// remote session died, only that the local viewer process stopped;
+    /// `remoteSessions`/`gone` remain the only authoritative source for the
+    /// session's actual fate.
+    ///
+    /// Branches on `RemoteAttachExitClass.classify(exitCode:)` — the
+    /// three-way split of the contract's error model — to decide which
+    /// "don't respawn yet" mechanism applies:
+    ///
+    /// - **Clean exit** (0 or unreadable, the user deliberately detached) →
+    ///   `explicitlyDetachedRemoteSessions`, cleared only by an explicit
+    ///   gesture (see `activateRemoteSession` in `AppState+Navigation.swift`,
+    ///   and `reattachRemoteSession` below).
+    /// - **Unexpected exit** (a network drop or crashed shim, not a user
+    ///   choice) → `pendingReconnectRemoteSessions`, which clears ITSELF once
+    ///   the provider is healthy again and this entry's backoff window has
+    ///   elapsed (`RemoteReconnectPolicy`) — no Reattach click required. Any
+    ///   pre-existing pending entry for this selection has its `attempts`
+    ///   incremented (a session that keeps failing immediately after each
+    ///   automatic retry backs off further each time).
+    /// - **Auth-needed exit** (exit class 4 — the provider can't
+    ///   authenticate) → the SAME escalating `pendingReconnectRemoteSessions`
+    ///   entry as an unexpected exit, so it self-clears once health recovers
+    ///   with no user gesture. In the normal flow the escalation never
+    ///   actually bites: there is exactly one auth exit, because
+    ///   `RemoteReconnectPolicy.isBlocked` then refuses every retry while
+    ///   health is `.needsAuth`, so `attempts` stays 1 and re-authentication
+    ///   is followed by a prompt reattach. It only climbs in the
+    ///   pathological case where `list` authenticates but `attach` doesn't —
+    ///   which is exactly the respawn loop that needs a bound. See
+    ///   `RemoteReconnectPolicy.nextPending`.
+    ///
+    ///   Only this class additionally reports the exit to the daemon
+    ///   (fire-and-forget) so provider health picks up the auth state
+    ///   without waiting for the next 60s poll. The two classes stay
+    ///   distinct in every OTHER respect — an auth exit is never worded as
+    ///   an unexpected session exit (see
+    ///   `RemoteAttachTerminalView.isUnexpectedExit`).
+    ///
+    /// Either way `selection` is excluded from `attachedRemoteSelections`
+    /// until its respective clearing condition is met — the rule that
+    /// prevents a respawn loop while the row stays selected.
+    func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?) {
+        switch RemoteAttachExitClass.classify(exitCode: exitCode) {
+        case .unexpected:
+            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+            )
+        case .authNeeded:
+            pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+            )
+            reportRemoteAttachExit(selection, exitCode: exitCode)
+        case .clean:
+            explicitlyDetachedRemoteSessions[selection] = RemoteAttachDetachInfo(exitCode: exitCode)
+            // A clean detach always wins over any stale pending-reconnect
+            // bookkeeping from an earlier flapping run — the user's clean
+            // exit is the more recent, more authoritative signal.
+            pendingReconnectRemoteSessions.removeValue(forKey: selection)
+        }
+    }
+
+    /// The explicit "Reattach" affordance shown by `RemoteSessionDetailView`
+    /// once a session has detached. Clears BOTH detach flags AND re-touches
+    /// recency (so a session that had aged toward eviction gets a fresh
+    /// position at the front) — an unambiguous user gesture, always allowed
+    /// to re-attach immediately regardless of the transition/`.attach`-tab
+    /// rule `activateRemoteSession` applies to selection itself, and
+    /// regardless of any still-pending reconnect backoff window.
+    func reattachRemoteSession(_ selection: RemoteSessionSelection) {
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+        pendingReconnectRemoteSessions.removeValue(forKey: selection)
+        touchAttachedRemoteSession(selection)
+    }
+
+    /// Clears a stale explicit-detach flag for `selection`, if present —
+    /// the narrow write `activateRemoteSession` (in
+    /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
+    /// rule, kept here (not duplicated) so `explicitlyDetachedRemoteSessions`
+    /// has exactly one file's worth of direct mutators. Deliberately does
+    /// NOT touch `pendingReconnectRemoteSessions` — re-selecting (even via a
+    /// genuine transition) must not bypass provider-health/backoff gating
+    /// the way an explicit Reattach click does; see `reattachRemoteSession`.
+    func clearRemoteSessionDetachedFlag(_ selection: RemoteSessionSelection) {
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+    }
+
+    /// Drops attach-lifecycle bookkeeping for sessions the daemon no longer
+    /// reports — called from `pruneRemoteSessionState` alongside its other
+    /// maps, for the same reason: without this, `explicitlyDetachedRemoteSessions`,
+    /// `pendingReconnectRemoteSessions`, and `recentlyAttachedRemoteSessions`
+    /// would accumulate dead entries for the lifetime of the app.
+    func pruneRemoteAttachState(toKnownSelections selections: Set<RemoteSessionSelection>) {
+        explicitlyDetachedRemoteSessions = explicitlyDetachedRemoteSessions.filter { selections.contains($0.key) }
+        pendingReconnectRemoteSessions = pendingReconnectRemoteSessions.filter { selections.contains($0.key) }
+        recentlyAttachedRemoteSessions = recentlyAttachedRemoteSessions.filter { selections.contains($0) }
+    }
 
     /// Move `id` to the front of `recentlyVisitedWorktreeIDs`, then trim the LRU
     /// so it never grows unbounded. Protected worktrees (`protectedWorktreeIDs`)
@@ -655,6 +1028,19 @@ final class AppState: ObservableObject {
     /// RPC here. Production default asks the daemon; nil result = fetch failed.
     lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
         { [daemonClient] in try? await daemonClient.daemonCapabilities() }
+    /// How `reviveConversationOnFreshBranch` asks the daemon to create the
+    /// destination worktree and resume its selected session. Injectable so
+    /// AppState tests can exercise the action without a live daemon.
+    lazy var freshConversationReviver:
+        @MainActor (UUID, String, Int?, Int?) async throws
+            -> WorktreeReviveConversationFreshResult = { [daemonClient] worktreeID, sessionID, cols, rows in
+                try await daemonClient.reviveConversationOnFreshBranch(
+                    worktreeID: worktreeID,
+                    sessionID: sessionID,
+                    cols: cols,
+                    rows: rows
+                )
+            }
     /// How `setControlModeEnabled` persists the flag — injectable for the same
     /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
     /// protocol), so the Settings-toggle tests can exercise the success branch.
@@ -664,6 +1050,97 @@ final class AppState: ObservableObject {
     /// the same reason as `controlModeSetter`.
     lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHibernateInputVeto(enabled: enabled) }
+    /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
+    /// How `setAutoTrustWorktrees` persists the flag — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
+    /// Asks the user to confirm closing a note tab whose note has content —
+    /// closing a note tab hard-deletes the note row (`closeTab` →
+    /// `deleteNote`). Injectable so tests can exercise both branches without
+    /// a real modal NSAlert.
+    lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
+        let filePath = TBDConstants.noteContentPath(worktreeID: note.worktreeID, noteID: note.id)
+            .replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Close note \u{201C}\(note.title)\u{201D}?"
+        alert.informativeText = "Closing this tab removes the note from TBD. Its contents are kept on disk at \(filePath)."
+        alert.addButton(withTitle: "Close Note")
+        alert.addButton(withTitle: "Cancel")
+        // HIG: destructive action shouldn't be the Return-key default (same
+        // pattern as LegacyHooksCoordinator's migrate dialog).
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+    /// How `loadTabStates` fetches a worktree's persisted tab order / labels /
+    /// active tab — injectable for the same reason as `daemonCapabilitiesFetcher`
+    /// (`DaemonClient` is concrete, no protocol), so hydration tests can drive
+    /// the sequence of responses without a daemon.
+    lazy var tabStatesFetcher: @MainActor (UUID) async throws -> TabListResponse =
+        { [daemonClient] worktreeID in try await daemonClient.listTabs(worktreeID: worktreeID) }
+    /// How the one-shot legacy panel import fires its RPC — injectable for the
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so trigger tests can record calls without a real daemon.
+    lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
+        { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
+    /// How the shadow-compare diagnostic (spec C §11.3) fetches the daemon's
+    /// imported surface — injectable for the same reason as `panelImportTrigger`.
+    lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
+        { [daemonClient] worktreeID in try await daemonClient.panelGet(worktreeID: worktreeID) }
+    /// Guards the one-shot legacy panel import to at most once per launch.
+    /// Deliberately NOT persisted — the daemon's create-if-absent import guard
+    /// (spec C §11.2) is the real idempotence boundary; this only avoids
+    /// redundant RPC fan-out as `loadTabStates` runs per worktree.
+    private var hasAttemptedPanelImport = false
+    /// How `refreshRemote()` fetches the provider roster — injectable for the
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so tests can exercise the disabled-refusal and
+    /// genuine-error branches without a real daemon.
+    lazy var remoteProvidersFetcher: @MainActor () async throws -> RemoteProvidersResult =
+        { [daemonClient] in try await daemonClient.remoteProviders() }
+    /// How `refreshRemote()` fetches the session mirror — injectable for the
+    /// same reason as `remoteProvidersFetcher`.
+    lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
+        { [daemonClient] in try await daemonClient.remoteSessions() }
+    /// How `pushRemoteRenameIfSupported` pushes a rename to the provider —
+    /// injectable for the same reason as `remoteProvidersFetcher` (`DaemonClient`
+    /// is concrete, no protocol), so tests can assert whether it fires per
+    /// capability without a real daemon.
+    lazy var remoteRenamePusher: @MainActor (String, String, String) async throws -> Void =
+        { [daemonClient] provider, sessionID, title in
+            try await daemonClient.remoteRename(provider: provider, sessionID: sessionID, title: title)
+        }
+    /// How `setRemoteBackendsEnabled` persists the remote-backends master
+    /// switch — injectable for the same reason as `controlModeSetter`
+    /// (`DaemonClient` is concrete, no protocol), so the Settings toggle
+    /// tests can exercise the success branch without a real daemon.
+    lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setRemoteBackends(enabled: enabled) }
+    /// How `setRemoteSessionPinned` pins/unpins a remote session for the
+    /// sidebar dock — injectable for the same reason as `remoteRenamePusher`,
+    /// so the pin action's success and failure branches are testable without
+    /// a real daemon.
+    lazy var remoteSessionPinSetter: @MainActor (String, String, Bool) async throws -> Void =
+        { [daemonClient] provider, sessionID, pinned in
+            try await daemonClient.setRemoteSessionPin(
+                provider: provider, sessionID: sessionID, pinned: pinned)
+        }
+
+    /// How `reportRemoteAttachExit` tells the daemon an app-spawned `attach`
+    /// exited — injectable for the same reason as `remoteSessionPinSetter`
+    /// (`DaemonClient` is concrete, no protocol), so the auth-exit routing
+    /// tests can assert the report fires without a real daemon (tests must
+    /// never touch `~/tbd`).
+    lazy var remoteAttachExitReporter: @MainActor (String, String, Int32) async throws -> Void =
+        { [daemonClient] provider, sessionID, exitCode in
+            try await daemonClient.reportRemoteAttachExit(
+                provider: provider, sessionID: sessionID, exitCode: exitCode)
+        }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from
@@ -692,9 +1169,11 @@ final class AppState: ObservableObject {
     let macNotificationManager = MacNotificationManager()
 
     private static let layoutsKey = "com.tbd.app.layouts"
+    private static let paneHistoriesKey = "com.tbd.app.paneHistories"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+    private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
@@ -707,6 +1186,8 @@ final class AppState: ObservableObject {
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         restoreLayouts()
+        restorePaneHistories()
+        restoreRemoteSessionDisplayNames()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
@@ -727,6 +1208,14 @@ final class AppState: ObservableObject {
         if !Self.isRunningUnderTests {
             Task {
                 await connectAndLoadInitialState()
+                // Eager ensure: a macOS-driven relaunch (reboot + Spotlight, OS
+                // "quit and reopen") often finds the daemon dead with stale
+                // socket/pid files. `connectAndLoadInitialState`'s plain connect
+                // can't clear those, so recovery would otherwise wait for the
+                // 2s poll to route to the cleanup-aware spawn. Run it now.
+                if !isConnected {
+                    await startDaemonAndConnect()
+                }
                 startPolling()
             }
         }
@@ -830,24 +1319,24 @@ final class AppState: ObservableObject {
         // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
         // multiple RPCs into a single request. The 200ms window is long enough to capture
         // rapid picker changes but short enough to feel responsive.
-        appearanceSubscription = appearance.$schemeID
-            // `@Published` delivers the current value at subscription time. Without
-            // `dropFirst()`, broadcastAppearanceColorFgBg runs on app launch before
-            // the daemon connection is even established — the RPC fails, the error
-            // gets logged and swallowed. Drop that subscriber-time emission so we
-            // only react to actual user-driven scheme changes.
-            .dropFirst()
-            .removeDuplicates()
-            // `DispatchQueue.main` rather than `RunLoop.main`: Combine's RunLoop
-            // scheduler fires its debounce Timer in `.default` mode only, so while
-            // the user scrubs the scheme picker (run loop in `.eventTracking` mode)
-            // the trailing emission stalls until the drag ends. The dispatch
-            // scheduler delivers regardless of run-loop mode — and is reliably
-            // serviced under structured concurrency, which the unit test depends on.
-            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.broadcastAppearanceColorFgBg(appearance)
-            }
+        // The debounce lives in `AppearanceBroadcastDebouncer` rather than in a
+        // Combine `.debounce` operator: that operator takes a `Scheduler`, which
+        // cannot be an `any Clock<Duration>`, so the delay was untestable except
+        // by reconstructing the whole chain in the test and waiting on a real
+        // 200ms timer. The debouncer keeps `dropFirst()`/`removeDuplicates()`
+        // (pure, no time) in Combine and replaces only the timed stage with
+        // cancel-and-replace on the injected clock. Run-loop-mode independence
+        // is unchanged, not new: the operator being replaced was already
+        // `DispatchQueue.main` for exactly that reason (a picker scrub puts the
+        // run loop in `.eventTracking`, which stalls a `RunLoop.main` timer).
+        //
+        // Drop any fire still pending from a previous `appearance`: this runs
+        // from that property's `didSet`, and releasing the old subscription no
+        // longer kills an armed timer the way tearing down a Combine chain did.
+        appearanceDebouncer.cancel()
+        appearanceSubscription = appearanceDebouncer.start(observing: appearance) { [weak self] _ in
+            self?.broadcastAppearanceColorFgBg(appearance)
+        }
 
         // When the theme store reloads (external file add/delete/edit), reconcile
         // the active schemeID so a deleted theme falls back to the default rather
@@ -884,6 +1373,223 @@ final class AppState: ObservableObject {
         guard let data = userDefaults.data(forKey: Self.layoutsKey),
               let restored = try? JSONDecoder().decode([UUID: LayoutNode].self, from: data) else { return }
         layouts = restored
+    }
+
+    private func persistPaneHistories() {
+        guard let data = try? JSONEncoder().encode(paneHistories) else { return }
+        userDefaults.set(data, forKey: Self.paneHistoriesKey)
+    }
+
+    private func restorePaneHistories() {
+        guard let data = userDefaults.data(forKey: Self.paneHistoriesKey),
+              let restored = try? JSONDecoder().decode([UUID: PaneHistory].self, from: data) else { return }
+        // Corrupt/skewed persisted data with an out-of-range cursor would
+        // crash entries[cursor] lookups in the pane header's view body.
+        paneHistories = restored.filter { $0.value.isWellFormed }
+    }
+
+    private func persistRemoteSessionDisplayNames() {
+        guard let data = try? JSONEncoder().encode(remoteSessionDisplayNames) else { return }
+        userDefaults.set(data, forKey: Self.remoteSessionDisplayNamesKey)
+    }
+
+    private func restoreRemoteSessionDisplayNames() {
+        guard let data = userDefaults.data(forKey: Self.remoteSessionDisplayNamesKey),
+              let restored = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        remoteSessionDisplayNames = restored
+    }
+
+    /// Composite key into `remoteSessionDisplayNames`. `\u{0}` separates the
+    /// two components so a provider name/session id containing `::` (or any
+    /// other printable separator) can't collide two distinct sessions onto
+    /// the same key.
+    nonisolated static func remoteSessionKey(provider: String, sessionID: String) -> String {
+        "\(provider)\u{0}\(sessionID)"
+    }
+
+    /// The name a remote-session row should render: the local TBD-owned
+    /// override when the user has renamed it, else the provider's reported
+    /// `title`, else the raw session id. Mirrors `Worktree.displayName`
+    /// falling back to git-derived `name` — a TBD-owned name always wins
+    /// over an externally-sourced one.
+    func remoteSessionDisplayName(provider: String, sessionID: String, providerTitle: String?) -> String {
+        remoteSessionDisplayNames[Self.remoteSessionKey(provider: provider, sessionID: sessionID)]
+            ?? providerTitle ?? sessionID
+    }
+
+    /// Rename a remote session. TBD-owned: the local override below is
+    /// always the source of truth for this client, and is additionally
+    /// pushed to the provider when it declares the `rename` capability (see
+    /// `remoteSessionDisplayNames` doc comment and `pushRemoteRenameIfSupported`).
+    /// A blank name
+    /// (`RenameableLabel`'s `allowsEmptyCommit`) REMOVES the override rather
+    /// than storing an empty string, so `remoteSessionDisplayName` falls back
+    /// to the provider's `title` again — the same "clear to default"
+    /// affordance a blank tab rename has (`AppState+Tabs.renameTab`).
+    func renameRemoteSession(provider: String, sessionID: String, displayName: String) {
+        let key = Self.remoteSessionKey(provider: provider, sessionID: sessionID)
+        let trimmed = displayName.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            remoteSessionDisplayNames.removeValue(forKey: key)
+        } else {
+            remoteSessionDisplayNames[key] = trimmed
+        }
+        // Fire-and-forget: the local override above is already the source of
+        // truth for this client regardless of whether the provider push
+        // lands (see `pushRemoteRenameIfSupported`'s doc comment). Wrapped in
+        // a Task so the synchronous rename-commit path
+        // (`RenameableLabel.onCommit`) never blocks on network I/O.
+        Task { await pushRemoteRenameIfSupported(provider: provider, sessionID: sessionID, title: trimmed) }
+    }
+
+    /// Pushes the outgoing content of an in-place slot replacement onto that
+    /// slot's history (see `ViewerRouteResult.replaced`).
+    func recordPaneReplacement(_ replacement: ViewerRouteResult.Replacement) {
+        paneHistories[replacement.paneID, default: PaneHistory()]
+            .recordReplacement(outgoing: replacement.outgoing, incoming: replacement.incoming)
+    }
+
+    /// Resolves the removal side of a viewer route (transcript toggle-off).
+    /// A reused slot keeps its pre-transcript content in history: jump the
+    /// cursor to the nearest non-transcript entry (older side first — that's
+    /// what the transcript replaced — then newer) and return it to restore in
+    /// place. Skipping transcript entries means chained
+    /// transcript-for-another-terminal swaps never resurrect another
+    /// terminal's transcript. With no non-transcript entry the pane is
+    /// really going away, so forget its history.
+    func popHistoryForRemovedPane(_ paneID: UUID) -> PaneContent? {
+        if var history = paneHistories[paneID] {
+            let older = Array((history.cursor + 1)..<history.entries.count)
+            let newer = Array(stride(from: history.cursor - 1, through: 0, by: -1))
+            for index in older + newer {
+                if case .liveTranscript = history.entries[index] { continue }
+                guard let restored = history.go(to: index) else { continue }
+                paneHistories[paneID] = history
+                return restored
+            }
+        }
+        paneHistories.removeValue(forKey: paneID)
+        return nil
+    }
+
+    /// Drops histories for slot panes no longer present in any tab layout or
+    /// tab root — closed panes and panes dropped by reconciliation. Keyed off
+    /// live TAB IDs (mirrors the `visibleTerminalIDs` fix, #478) rather than
+    /// `layouts.values` — the persisted `layouts` blob can carry stale
+    /// worktree-keyed entries left over from pre-#478 installs, which are not
+    /// tabs and must not keep their slot histories alive forever (#477).
+    /// `gridLayouts` (presentation-only, never persisted) is scanned
+    /// separately since its entries are legitimately live but not tab-keyed.
+    func prunePaneHistories() {
+        guard !paneHistories.isEmpty else { return }
+        var liveIDs = Set<UUID>()
+        for tabList in tabs.values {
+            for tab in tabList {
+                liveIDs.insert(tab.content.paneID)
+                if let layout = layouts[tab.id] {
+                    liveIDs.formUnion(layout.allPaneIDs())
+                }
+            }
+        }
+        for layout in gridLayouts.values { liveIDs.formUnion(layout.allPaneIDs()) }
+        let pruned = paneHistories.filter { liveIDs.contains($0.key) }
+        if pruned.count != paneHistories.count {
+            paneHistories = pruned
+        }
+    }
+
+    // MARK: - Legacy panel import (spec C §11.2)
+
+    /// Builds the legacy-import payload for one worktree from AppState's
+    /// current in-memory tab/layout/history state. Grid-layout entries — the
+    /// persisted `layouts` blob's stale worktree-keyed rows from pre-#478
+    /// installs — are excluded BY CONSTRUCTION: only `layouts[tab.id]` is
+    /// ever consulted, never `layouts.values` (spec §11.2.2, "grid state is
+    /// not imported"). `paneHistories` is filtered to pane IDs that actually
+    /// appear in the included tabs' layouts, absorbing the #477
+    /// over-retention concern at the import boundary rather than trusting
+    /// the caller.
+    func buildPanelImportParams(worktreeID: UUID) -> PanelImportParams {
+        let wtTabs = tabs[worktreeID] ?? []
+        var includedPaneIDs = Set<UUID>()
+        let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
+            let layout = layouts[tab.id]
+            includedPaneIDs.insert(tab.content.paneID)
+            if let layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
+            return LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layout)
+        }
+        let tabOrder = worktreeTabOrders[worktreeID] ?? wtTabs.map(\.id)
+        let activeTabID: UUID? = activeTabIndices[worktreeID].flatMap { idx in
+            wtTabs.indices.contains(idx) ? wtTabs[idx].id : nil
+        }
+        let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
+        return PanelImportParams(
+            worktreeID: worktreeID,
+            tabs: legacyTabs,
+            tabOrder: tabOrder,
+            activeTabID: activeTabID,
+            paneHistories: includedPaneHistories
+        )
+    }
+
+    /// Fires the one-shot legacy panel import once per launch, once the
+    /// daemon confirms panel-surface ownership is enabled (default OFF while
+    /// the feature soaks — this whole path is inert until then). Called from
+    /// the tail of `loadTabStates` for every worktree; imports every worktree
+    /// whose tabs are already loaded at that point. Failures are logged and
+    /// non-fatal — the daemon's create-if-absent guard means a skipped
+    /// worktree simply retries on the next launch.
+    func triggerPanelImportIfNeeded() {
+        guard !hasAttemptedPanelImport, daemonCapabilities?.panelSurfaceEnabled == true else { return }
+        hasAttemptedPanelImport = true
+        let worktreeIDs = Array(tabs.keys)
+        Task {
+            for worktreeID in worktreeIDs {
+                let params = buildPanelImportParams(worktreeID: worktreeID)
+                do {
+                    _ = try await panelImportTrigger(params)
+                } catch {
+                    logger.error("panelImportLegacy failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+                    continue
+                }
+                // Spec C §11.3 — shadow compare runs once, right after this
+                // worktree's import call succeeds (whether it imported just
+                // now or the daemon already had a surface from a prior
+                // launch). Diagnostics only; never blocks/gates the import
+                // above, which has already completed by this point.
+                await runPanelShadowCompare(worktreeID: worktreeID)
+            }
+        }
+    }
+
+    /// Spec C §11.3 — migration-validation shadow compare. Log-only: never
+    /// mutates state, never surfaces to the user, never throws in a way that
+    /// affects the caller (all failures are logged and swallowed here).
+    /// Re-converts the CURRENT live legacy state (not the params already sent
+    /// to `panelImportTrigger` — state may have moved on since) via the same
+    /// `LegacySurfaceImporter.convert` the daemon's import path used, fetches
+    /// the daemon's imported surface, and logs any divergence.
+    private func runPanelShadowCompare(worktreeID: UUID) async {
+        let params = buildPanelImportParams(worktreeID: worktreeID)
+        let local = LegacySurfaceImporter.convert(
+            worktreeID: worktreeID, tabs: params.tabs, tabOrder: params.tabOrder,
+            paneHistories: params.paneHistories)
+        let daemon: PanelGetResult
+        do {
+            daemon = try await panelGetFetcher(worktreeID)
+        } catch {
+            shadowCompareLogger.error("panel.get failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+            return
+        }
+        let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
+        guard !mismatches.isEmpty else {
+            shadowCompareLogger.debug("\(worktreeID, privacy: .public): no divergence")
+            return
+        }
+        for mismatch in mismatches {
+            shadowCompareLogger.error("\(worktreeID, privacy: .public): \(mismatch, privacy: .public)")
+        }
+        shadowCompareLogger.info("\(worktreeID, privacy: .public): \(mismatches.count, privacy: .public) mismatch(es)")
     }
 
     // MARK: - Selection Persistence
@@ -1000,6 +1706,10 @@ final class AppState: ObservableObject {
             if let repoID = selectedRepoID {
                 Task { [weak self] in await self?.refreshReapRecords(repoID: repoID) }
             }
+        case .remoteSessionsChanged:
+            Task { [weak self] in await self?.refreshRemote() }
+        case .remoteSessionAttention(let d):
+            handleRemoteSessionAttentionDelta(d)
         default:
             break
         }
@@ -1100,11 +1810,45 @@ final class AppState: ObservableObject {
     /// client). Tombstone it and drop the row so it cannot be resurrected by a
     /// poll snapshot that predates the archive.
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
+        // Look the row up before it gets removed so we can name it in the alert.
+        let worktree = findWorktree(id: delta.worktreeID)
+        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+
         removeArchivedWorktreeFromState(id: delta.worktreeID)
+
+        // The daemon tells us whether creation actually failed; we never infer
+        // it from `.creating` status. A deliberate archive of a still-creating
+        // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
+        // pre-session hook — arrives with creationFailed == false and must stay
+        // silent, even though the row is `.creating` at this moment.
+        if let message = failureMessage {
+            showAlert(message, isError: true)
+        }
+    }
+
+    /// Returns a failure alert message when the daemon reported that this
+    /// worktree's *creation* failed, or nil otherwise (deliberate archive, or
+    /// an unknown row we can't name).
+    ///
+    /// `creationFailed` comes from the daemon via `WorktreeIDDelta`; status is
+    /// deliberately NOT consulted, because a `.creating` row can also be
+    /// archived on purpose from the CLI and the two are indistinguishable by
+    /// status alone.
+    ///
+    /// Pure static helper for testability — every branch is unit-testable
+    /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
+    nonisolated static func creationFailureMessage(
+        _ worktree: Worktree?, creationFailed: Bool
+    ) -> String? {
+        guard creationFailed, let worktree else {
+            return nil
+        }
+        return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
+               "See Console (log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)
-    /// directly to the in-memory Terminal so LiveTranscriptPaneView re-targets
+    /// directly to the in-memory Terminal so TableTranscriptPaneView re-targets
     /// without waiting for the next 2s `terminal.list` poll. Silently ignores
     /// terminals we don't know about — the next refresh will reconcile.
     private func applyTerminalSessionDelta(_ delta: TerminalSessionDelta) {
@@ -1206,7 +1950,7 @@ final class AppState: ObservableObject {
     /// uses (`layouts[tab.id] ?? .pane(tab.content)` then `allTerminalIDs()`),
     /// then unions the `tab.content` terminal so `.liveTranscript` tabs — whose
     /// IDs `allTerminalIDs()` does not enumerate — stay covered.
-    func terminalIDs(in tab: Tab) -> Set<UUID> {
+    func terminalIDs(in tab: TBDShared.Tab) -> Set<UUID> {
         let layout = layouts[tab.id] ?? .pane(tab.content)
         var ids = Set(layout.allTerminalIDs())
         switch tab.content {
@@ -1226,20 +1970,16 @@ final class AppState: ObservableObject {
     /// looking at must never bold.
     func isActiveTabTerminal(_ terminalID: UUID, inFocusedWorktree worktreeID: UUID) -> Bool {
         guard selectedWorktreeIDs == [worktreeID] else { return false }
-        guard let arr = tabs[worktreeID], !arr.isEmpty else { return false }
-        let activeIndex = activeTabIndices[worktreeID] ?? 0
-        guard arr.indices.contains(activeIndex) else { return false }
-        return terminalIDs(in: arr[activeIndex]).contains(terminalID)
+        guard let tab = resolvedActiveTab(worktreeID: worktreeID) else { return false }
+        return terminalIDs(in: tab).contains(terminalID)
     }
 
     /// Remove the active tab's terminal(s) from `unreadTerminals` for the given
     /// worktree. Called when the user activates a tab or focuses a worktree so
     /// the surface they're now looking at clears its bold.
     func clearUnreadForActiveTab(worktreeID: UUID) {
-        guard let arr = tabs[worktreeID], !arr.isEmpty else { return }
-        let activeIndex = activeTabIndices[worktreeID] ?? 0
-        guard arr.indices.contains(activeIndex) else { return }
-        let tids = terminalIDs(in: arr[activeIndex])
+        guard let tab = resolvedActiveTab(worktreeID: worktreeID) else { return }
+        let tids = terminalIDs(in: tab)
         guard !tids.isEmpty else { return }
         unreadTerminals.subtract(tids)
     }
@@ -1411,6 +2151,7 @@ final class AppState: ObservableObject {
             }
             await loadModelProfiles()
             await loadHibernationConfig()
+            await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
@@ -1521,6 +2262,7 @@ final class AppState: ObservableObject {
 
         // Wait for socket
         for _ in 0..<20 {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .milliseconds(200))
             if FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
                 break
@@ -1662,6 +2404,14 @@ final class AppState: ObservableObject {
                     reconcileNoteTabs(worktreeID: wtID, notes: fetched)
                 }
             }
+
+            // Prune slot histories only after every visible worktree's tabs
+            // have been reconciled this cycle. Doing it inside the per-worktree
+            // `reconcileTabs` loop above would run against a partially-populated
+            // `tabs` on the first launch pass, deleting (and persisting as `[]`)
+            // histories for worktrees not yet loaded — the pane back/forward
+            // history was lost on every restart because of that.
+            prunePaneHistories()
         } catch {
             logger.error("Failed to list worktrees: \(error)")
             handleConnectionError(error)
@@ -1688,7 +2438,11 @@ final class AppState: ObservableObject {
     /// terminals that aren't already represented (either as a tab root or
     /// embedded in another tab's split layout).
     func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
-        let alreadyLoadedOrder = worktreeTabOrders[worktreeID] != nil
+        // Capture the active tab's IDENTITY before touching the array: every
+        // mutation below shifts indices, so a stored index re-binds to whatever
+        // slid into its slot. The auto-close of the `setup` tab makes that a
+        // routine event, not an edge case, and the note tab is always last.
+        let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
 
@@ -1734,7 +2488,7 @@ final class AppState: ObservableObject {
 
         // 3. Add tabs for terminals not already in any surviving layout.
         for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
-            currentTabs.append(Tab(
+            currentTabs.append(TBDShared.Tab(
                 id: terminal.id,
                 content: .terminal(terminalID: terminal.id),
                 label: initialTabLabel(for: terminal)
@@ -1742,15 +2496,21 @@ final class AppState: ObservableObject {
         }
 
         tabs[worktreeID] = currentTabs
-        applyStoredOrder(worktreeID: worktreeID)
-        if !alreadyLoadedOrder {
-            Task { await loadTabStates(worktreeID: worktreeID) }
-        }
+        applyStoredOrder(worktreeID: worktreeID, anchor: .pinned(previousActiveTabID))
+        // Re-fetch until the daemon has actually persisted tab order / active
+        // tab. `worktreeTabOrders[worktreeID] != nil` was the old gate and it
+        // latched on the empty response a poll gets while the daemon is still
+        // mid-create, permanently stranding the worktree with no stored order
+        // and no hydrated selection. The scheduler owns the dedup and the
+        // attempt cap that keep this from becoming a poll loop.
+        scheduleTabStateHydration(worktreeID: worktreeID)
     }
 
     /// Reconcile note tabs — remove tabs whose note no longer exists,
     /// add tabs for notes not already represented.
-    private func reconcileNoteTabs(worktreeID: UUID, notes: [Note]) {
+    func reconcileNoteTabs(worktreeID: UUID, notes: [Note]) {
+        // Same identity capture as reconcileTabs — see the comment there.
+        let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
         var currentTabs = tabs[worktreeID] ?? []
         let noteIDs = Set(notes.map(\.id))
 
@@ -1769,11 +2529,11 @@ final class AppState: ObservableObject {
 
         // Add tabs for notes not already represented
         for note in notes where !noteIDsInTabs.contains(note.id) {
-            currentTabs.append(Tab(id: note.id, content: .note(noteID: note.id), label: nil))
+            currentTabs.append(TBDShared.Tab(id: note.id, content: .note(noteID: note.id), label: nil))
         }
 
         tabs[worktreeID] = currentTabs
-        applyStoredOrder(worktreeID: worktreeID)
+        applyStoredOrder(worktreeID: worktreeID, anchor: .pinned(previousActiveTabID))
     }
 
     /// Poll all cached PR statuses from the daemon (background, every ~30s).
@@ -1878,6 +2638,15 @@ final class AppState: ObservableObject {
         setting
     }
 
+    /// Pure, testable mirror of the sidebar's Remote-section gate: shown only
+    /// when at least one provider is registered. Unlike Scratch, there's no
+    /// user-facing "create the first one" affordance to keep reachable — a
+    /// provider is registered out-of-band (config), not created from this
+    /// section — so an empty roster simply hides the section entirely.
+    nonisolated static func remoteSectionVisible(providers: [RemoteProviderStatus]) -> Bool {
+        !providers.isEmpty
+    }
+
     /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:
     /// a scratch row dims only when its directory is missing AND it was
     /// never promoted. `tbd scratch promote` MOVES the folder to its
@@ -1917,14 +2686,16 @@ final class AppState: ObservableObject {
     }
 
     /// UserDefaults key mirroring the `@AppStorage` toggle in
-    /// Settings → Experimental that gates the Nightwatch / Daywatch feature.
+    /// Settings → Fleet Automation that gates the Nightwatch / Daywatch feature.
     /// When off (the default), the sidebar mode control is hidden entirely —
-    /// the feature is unfinished and evaluate-only, so it stays opt-in.
+    /// the desk agent acts on the live fleet (nudging stuck sessions,
+    /// dispatching work) and its safety rules are still changing, so it
+    /// stays opt-in.
     static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
 
     /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails
     /// closed: defaults to false so the sidebar control only appears once the
-    /// user opts in from Settings → Experimental. Tests pass a private
+    /// user opts in from Settings → Fleet Automation. Tests pass a private
     /// `UserDefaults(suiteName:)` so they never touch live app preferences.
     static func nightwatchExperimentalEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: nightwatchExperimentalKey) as? Bool ?? false
@@ -1982,51 +2753,35 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// UserDefaults key for the `@AppStorage` toggle in the
-    /// Settings → Experimental section that gates the experimental live
-    /// transcript pane. The View layer (`PanePlaceholder`) reads it directly
-    /// via `@AppStorage`; `transcriptFeatureEnabled(defaults:)` exposes the
-    /// same fail-closed read for non-View callers. The feature can freeze the
-    /// UI on very large transcripts, so it is opt-in and fails closed.
+    /// UserDefaults key for the `@AppStorage` toggle in the Settings → Claude
+    /// section that gates the live transcript pane. The View layer
+    /// (`PanePlaceholder`) reads it directly via `@AppStorage`;
+    /// `transcriptFeatureEnabled(defaults:)` exposes the same read for non-View
+    /// callers. On by default — the toggle only exists so a user can turn the
+    /// pane off.
     static let enableTranscriptKey = "enableTranscript"
 
-    /// Fail-closed read of the experimental live-transcript toggle for
-    /// non-View callers (the View layer uses `@AppStorage` directly).
-    /// Defaults to false when the user has never touched the toggle, matching
-    /// the `@AppStorage` default.
+    /// The one default for `enableTranscriptKey`. Every read site — this
+    /// helper and each View's `@AppStorage` — must spell the default with this
+    /// constant, never a bare literal: an `@AppStorage` default that disagrees
+    /// with the helper is invisible (both compile, both "work") and silently
+    /// makes the pane appear enabled to one caller and disabled to another.
+    static let enableTranscriptDefault = true
+
+    /// UserDefaults key for the usage reset-time display preference
+    /// (Settings → Claude → "Usage reset times"). Stores the raw value of
+    /// `ProfileUsagePresentation.ResetTimeStyle`; defaults to `.timeOfReset`.
+    /// Read via `@AppStorage` in the view layer and injected into the
+    /// presentation helpers as a parameter — never read from
+    /// `UserDefaults.standard` inside them (tests construct with explicit
+    /// values).
+    static let usageResetTimeStyleKey = "usageResetTimeStyle"
+
+    /// Read of the live-transcript toggle for non-View callers (the View layer
+    /// uses `@AppStorage` directly). Defaults to true when the user has never
+    /// touched the toggle, matching the `@AppStorage` default.
     static func transcriptFeatureEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key for the second-stage gate: when the experimental
-    /// transcript is enabled, this picks the TextKit 2 / STTextView renderer
-    /// over the SwiftUI `LiveTranscriptPaneView`. Defaults false. (#129)
-    static let useTextKitTranscriptKey = "useTextKitTranscript"
-
-    /// Fail-closed read of the TextKit 2 transcript toggle for non-View callers
-    /// (the View layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true.
-    static func useTextKitTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTextKitTranscriptKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key for the NSTableView-based transcript renderer. When the
-    /// experimental transcript is enabled, this gate takes precedence over the
-    /// TextKit 2 / STTextView renderer: the table pane reuses the existing
-    /// SwiftUI row views (`SelectableTranscriptRow`) hosted per-cell with an
-    /// explicit height cache, replacing the fragile single-document TextKit
-    /// approach. Defaults true — the table pane is the default renderer; the
-    /// Settings toggle can turn it off to fall back to the legacy SwiftUI pane
-    /// for comparison. (#129)
-    static let useTableViewTranscriptKey = "useTableViewTranscript"
-
-    /// Read of the NSTableView transcript toggle for non-View callers (the View
-    /// layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true. Defaults true (the table pane is
-    /// the default renderer); returns false only when the user explicitly turns
-    /// it off. Takes precedence over `useTextKitTranscript` when set.
-    static func useTableViewTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? true
+        defaults.object(forKey: enableTranscriptKey) as? Bool ?? enableTranscriptDefault
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
@@ -2114,6 +2869,7 @@ final class AppState: ObservableObject {
         // Skip noop broadcasts: same cell dims as the previous send.
         guard cols != lastBroadcastCols || rows != lastBroadcastRows else { return }
         mainAreaSizeBroadcastTask = Task { [weak self] in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
             guard !Task.isCancelled, let self else { return }
             do {

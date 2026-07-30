@@ -229,7 +229,7 @@ struct FileViewerPanel: View {
         } else {
             // Create new code viewer tab
             let newID = UUID()
-            let tab = Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: fileName)
+            let tab = TBDShared.Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: fileName)
             appState.tabs[worktree.id, default: []].append(tab)
             appState.activeTabIndices[worktree.id] = (appState.tabs[worktree.id]?.count ?? 1) - 1
         }

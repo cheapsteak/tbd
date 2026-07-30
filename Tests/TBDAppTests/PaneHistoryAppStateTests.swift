@@ -1,0 +1,273 @@
+import Foundation
+import Testing
+import TBDShared
+
+@testable import TBDApp
+
+// MARK: - AppState integration
+//
+// PaneHistory (== MRUHistory<PaneContent>, see TBDShared/PanelSurface/MRUHistory.swift)
+// moved to TBDShared so it can be reused generically. These tests exercise
+// AppState's use of it and stay here since AppState (SwiftUI/AppKit) is
+// TBDApp-only and isn't reachable from TBDSharedTests.
+
+@MainActor
+@Suite("PaneHistory AppState integration")
+struct PaneHistoryAppStateTests {
+    private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
+        let suiteName = "TBDAppTests.PaneHistory.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        body(defaults)
+    }
+
+    @Test func persistenceRoundTrip() {
+        withIsolatedDefaults { defaults in
+            let slotID = UUID()
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .liveTranscript(id: slotID, terminalID: UUID()),
+                incoming: .codeViewer(id: slotID, path: "/a.md")
+            )
+
+            let state = AppState(userDefaults: defaults)
+            state.paneHistories[slotID] = history
+
+            // A fresh AppState on the same suite restores the identical history.
+            let restored = AppState(userDefaults: defaults)
+            #expect(restored.paneHistories[slotID] == history)
+        }
+    }
+
+    @Test func recordPaneReplacementPushesIntoKeyedHistory() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+
+            state.recordPaneReplacement(.init(
+                paneID: slotID,
+                outgoing: .codeViewer(id: slotID, path: "/a"),
+                incoming: .codeViewer(id: slotID, path: "/b")
+            ))
+
+            #expect(state.paneHistories[slotID]?.canGoBack == true)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneRestoresPreviousContent() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let viewer = PaneContent.codeViewer(id: slotID, path: "/a")
+            let transcript = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: viewer, incoming: transcript))
+
+            // Toggle-off on a reused slot restores the pre-transcript content
+            // instead of destroying the pane; the transcript stays reachable.
+            #expect(state.popHistoryForRemovedPane(slotID) == viewer)
+            #expect(state.paneHistories[slotID]?.canGoForward == true)
+
+            // Only the transcript remains besides the cursor entry: the pane
+            // really goes away, history with it.
+            #expect(state.popHistoryForRemovedPane(slotID) == nil)
+            #expect(state.paneHistories[slotID] == nil)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneSkipsChainedTranscripts() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let viewer = PaneContent.codeViewer(id: slotID, path: "/a")
+            let transcriptT1 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            let transcriptT2 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: viewer, incoming: transcriptT1))
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: transcriptT1, incoming: transcriptT2))
+
+            // Toggling T2's transcript off must not resurrect T1's transcript.
+            #expect(state.popHistoryForRemovedPane(slotID) == viewer)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneRemovesWhenOnlyTranscriptsRemain() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let transcriptT1 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            let transcriptT2 = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: transcriptT1, incoming: transcriptT2))
+
+            // Nothing non-transcript to restore: pane really closes, history goes.
+            #expect(state.popHistoryForRemovedPane(slotID) == nil)
+            #expect(state.paneHistories[slotID] == nil)
+        }
+    }
+
+    @Test func popHistoryForRemovedPaneFindsViewerOnTheNewerSide() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let slotID = UUID()
+            let transcript = PaneContent.liveTranscript(id: slotID, terminalID: UUID())
+            let viewer = PaneContent.codeViewer(id: slotID, path: "/a")
+            // transcript → viewer, then jump BACK onto the transcript entry.
+            state.recordPaneReplacement(.init(paneID: slotID, outgoing: transcript, incoming: viewer))
+            _ = state.paneHistories[slotID]?.goBack()
+
+            // No older non-transcript entry — the newer viewer is restored.
+            #expect(state.popHistoryForRemovedPane(slotID) == viewer)
+        }
+    }
+
+    @Test func restoreDropsMalformedPersistedHistory() {
+        withIsolatedDefaults { defaults in
+            let slotID = UUID()
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: slotID, path: "/a"),
+                incoming: .codeViewer(id: slotID, path: "/b")
+            )
+
+            let state = AppState(userDefaults: defaults)
+            state.paneHistories = [slotID: history]
+
+            // Corrupt the persisted blob: cursor beyond entries.count.
+            let key = "com.tbd.app.paneHistories"
+            let blob = String(data: defaults.data(forKey: key)!, encoding: .utf8)!
+                .replacingOccurrences(of: "\"cursor\":0", with: "\"cursor\":9")
+            defaults.set(Data(blob.utf8), forKey: key)
+
+            let restored = AppState(userDefaults: defaults)
+            #expect(restored.paneHistories[slotID] == nil,
+                    "an out-of-range cursor must not be restored (crashes entries[cursor])")
+        }
+    }
+
+    @Test func prunePaneHistoriesDropsOrphansKeepsLiveSlots() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let liveSlotID = UUID()
+            let orphanID = UUID()
+            state.layouts[tabID] = .split(
+                id: UUID(), direction: .horizontal,
+                children: [
+                    .pane(.terminal(terminalID: tabID)),
+                    .pane(.codeViewer(id: liveSlotID, path: "/a")),
+                ],
+                ratios: [0.5, 0.5]
+            )
+            // #477 fix: retention is keyed off live TAB ids, so the layout
+            // above only counts as live because `tabID` is a real tab root.
+            state.tabs[worktreeID] = [TBDShared.Tab(id: tabID, content: .terminal(terminalID: tabID), label: nil)]
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: liveSlotID, path: "/old"),
+                incoming: .codeViewer(id: liveSlotID, path: "/a")
+            )
+            state.paneHistories = [liveSlotID: history, orphanID: history]
+
+            state.prunePaneHistories()
+
+            #expect(state.paneHistories[liveSlotID] == history)
+            #expect(state.paneHistories[orphanID] == nil, "orphaned histories must not accumulate")
+        }
+    }
+
+    /// Grid-layout slots (worktree-keyed, presentation-only, never persisted)
+    /// are legitimately live even though they aren't tab-keyed — pruning must
+    /// consult `gridLayouts` alongside the tab-keyed scan.
+    @Test func prunePaneHistoriesKeepsGridLayoutSlotHistories() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let worktreeID = UUID()
+            let gridSlotID = UUID()
+            state.gridLayouts[worktreeID] = .pane(.codeViewer(id: gridSlotID, path: "/grid"))
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: gridSlotID, path: "/old"),
+                incoming: .codeViewer(id: gridSlotID, path: "/grid")
+            )
+            state.paneHistories = [gridSlotID: history]
+
+            state.prunePaneHistories()
+
+            #expect(state.paneHistories[gridSlotID] == history,
+                    "grid-layout slot histories must survive pruning")
+        }
+    }
+
+    /// Restart regression: on launch, worktrees reconcile one at a time as
+    /// their terminal lists arrive. Reconciling the FIRST worktree must not
+    /// delete a second worktree's slot history just because that worktree's
+    /// tabs haven't been loaded yet. Before the fix, `reconcileTabs` pruned
+    /// against the partially-populated `tabs`, wiping (and persisting as `[]`)
+    /// every other worktree's history on the first pass.
+    @Test func startupReconcileKeepsOtherWorktreesHistoriesUntilAllLoaded() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+
+            // Two worktrees, each with a viewer slot recorded in a persisted
+            // layout + a persisted history — the on-disk state after a restart.
+            let wtA = UUID(), tabA = UUID(), slotA = UUID()
+            let wtB = UUID(), tabB = UUID(), slotB = UUID()
+
+            func viewerLayout(tabTerminal: UUID, slot: UUID) -> LayoutNode {
+                .split(
+                    id: UUID(), direction: .horizontal,
+                    children: [
+                        .pane(.terminal(terminalID: tabTerminal)),
+                        .pane(.codeViewer(id: slot, path: "/a")),
+                    ],
+                    ratios: [0.5, 0.5]
+                )
+            }
+            state.layouts[tabA] = viewerLayout(tabTerminal: tabA, slot: slotA)
+            state.layouts[tabB] = viewerLayout(tabTerminal: tabB, slot: slotB)
+
+            func history(for slot: UUID) -> PaneHistory {
+                var h = PaneHistory()
+                h.recordReplacement(
+                    outgoing: .codeViewer(id: slot, path: "/old"),
+                    incoming: .codeViewer(id: slot, path: "/a")
+                )
+                return h
+            }
+            state.paneHistories = [slotA: history(for: slotA), slotB: history(for: slotB)]
+
+            let terminalA = Terminal(id: tabA, worktreeID: wtA, tmuxWindowID: "@a",
+                                     tmuxPaneID: "%a", label: "A", kind: .shell)
+
+            // First loop iteration: only worktree A reconciles. Worktree B's
+            // tabs are still absent — its history must survive regardless.
+            state.reconcileTabs(worktreeID: wtA, terminals: [terminalA])
+
+            #expect(state.paneHistories[slotB] != nil,
+                    "a not-yet-reconciled worktree's history must not be wiped on the first startup pass")
+            #expect(state.paneHistories[slotA] != nil)
+        }
+    }
+
+    /// #477 regression: a stale worktree-keyed entry left in the tab-keyed
+    /// `layouts` dict (pre-#478 pollution — not a real tab) must not keep its
+    /// history alive just because `layouts.values` used to include it.
+    @Test func prunePaneHistoriesDropsHistoryForStaleWorktreeKeyedLayoutsEntry() {
+        withIsolatedDefaults { defaults in
+            let state = AppState(userDefaults: defaults)
+            let worktreeID = UUID()
+            let staleSlotID = UUID()
+            state.layouts[worktreeID] = .pane(.codeViewer(id: staleSlotID, path: "/stale"))
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .codeViewer(id: staleSlotID, path: "/old"),
+                incoming: .codeViewer(id: staleSlotID, path: "/stale")
+            )
+            state.paneHistories = [staleSlotID: history]
+
+            state.prunePaneHistories()
+
+            #expect(state.paneHistories[staleSlotID] == nil,
+                    "a stale worktree-keyed layouts entry must not over-retain its history")
+        }
+    }
+}

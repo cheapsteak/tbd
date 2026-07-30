@@ -252,6 +252,7 @@ extension WorktreeLifecycle {
                 }
                 return .paneKilled
             }
+            // swiftlint:disable:next no_raw_task_sleep - already seamed: `preSessionPollInterval` / `preSessionTimeout` are injected `WorktreeLifecycle.init` parameters, exercised by Tests/TBDDaemonTests/PreSessionHookTests.swift (via PreSessionTestSupport's `makeLifecycle`, which injects 0.05); migrating to `any Clock<Duration>` would also have to restructure the `Date()`-based deadline above, since the existential pins `Duration` but not `Instant`; see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: pollNanos)
         }
         // Deadline race: the marker may have landed during the final poll
@@ -281,7 +282,9 @@ extension WorktreeLifecycle {
         cols: Int? = nil, rows: Int? = nil,
         completionAction: PreSessionCompletionAction,
         overrideProfileID: UUID? = nil,
-        claudeSettingsOverlay: String? = nil
+        modelOverride: String? = nil,
+        claudeSettingsOverlay: String? = nil,
+        carryover: ConversationCarryover? = nil
     ) async {
         let outcome = await waitForPreSessionCompletion(
             preSession: preSession, tmuxServer: worktree.tmuxServer
@@ -349,7 +352,9 @@ extension WorktreeLifecycle {
                 // it into tab order. On failure it stays, at index 1 as before.
                 preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID,
-                claudeSettingsOverlay: claudeSettingsOverlay
+                modelOverride: modelOverride,
+                claudeSettingsOverlay: claudeSettingsOverlay,
+                carryover: carryover
             )
             for terminal in created {
                 subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -418,17 +423,44 @@ extension WorktreeLifecycle {
     /// Best-effort: a failure here must never take down the worktree, whose
     /// checkout and agent terminals are already valid.
     func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
-        try? await tmux.killWindow(
-            server: worktree.tmuxServer, windowID: preSession.windowID
+        await closeHookTerminal(
+            worktree: worktree,
+            terminalID: preSession.terminalID,
+            windowID: preSession.windowID
         )
+    }
+
+    /// Shared hook-tab teardown (pre-session and auto-closed setup tabs):
+    /// kill the tmux window, delete the terminal + tab rows, prune the tab
+    /// from the persisted tab order, broadcast `.terminalRemoved`. The prune
+    /// is a no-op on the create-success path (the primary spawn already set
+    /// an order without the hook tab) and keeps the stored order consistent
+    /// on the paths that appended the tab (manual re-run, setup auto-close).
+    func closeHookTerminal(worktree: Worktree, terminalID: UUID, windowID: String) async {
+        // Preserve the hook tab's output before the window dies so a user can
+        // read an auto-closed setup/pre-session run later (Session History →
+        // Closed Terminals). Best-effort: captureOnClose logs failures and
+        // the teardown proceeds unchanged.
+        if let terminal = try? await db.terminals.get(id: terminalID) {
+            await db.terminalHistory.captureOnClose(terminal: terminal) {
+                try await tmux.capturePaneScrollback(
+                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            }
+        }
+        try? await tmux.killWindow(server: worktree.tmuxServer, windowID: windowID)
         do {
-            try await db.terminals.delete(id: preSession.terminalID)
-            try await db.tabs.delete(tabID: preSession.terminalID)
+            try await db.terminals.delete(id: terminalID)
+            try await db.tabs.delete(tabID: terminalID)
+            var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+            if order.contains(terminalID) {
+                order.removeAll { $0 == terminalID }
+                try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: order)
+            }
             subscriptions?.broadcast(delta: .terminalRemoved(TerminalIDDelta(
-                terminalID: preSession.terminalID
+                terminalID: terminalID
             )))
         } catch {
-            logger.warning("failed to close pre-session terminal \(preSession.terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("failed to close hook terminal \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

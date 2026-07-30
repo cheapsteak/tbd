@@ -13,10 +13,4 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
-
-    func handleNightwatchReport(_ data: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(NightwatchReportParams.self, from: data)
-        let entries = try await db.audit.list(since: params.since, action: params.action)
-        return try RPCResponse(result: entries)
-    }
 }

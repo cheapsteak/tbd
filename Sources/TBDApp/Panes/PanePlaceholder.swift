@@ -51,11 +51,11 @@ struct PanePlaceholder: View {
     @State private var isHeaderHovering = false
     @State private var showSourceCode = false
     @State private var hasRenderableContent = false
+    @State private var showHistoryPalette = false
     @StateObject private var webviewState = WebviewState()
     @State private var didCopyURL = false
-    @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
-    @AppStorage(AppState.useTextKitTranscriptKey) private var useTextKitTranscript = false
-    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = true
+    @AppStorage(AppState.enableTranscriptKey)
+    private var transcriptFeatureEnabled = AppState.enableTranscriptDefault
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -101,10 +101,22 @@ struct PanePlaceholder: View {
     @ViewBuilder
     private var toolbar: some View {
         HStack(spacing: 8) {
+            // Leading so the chevrons sit in a stable spot on every viewer
+            // pane, unaffected by which trailing buttons a pane type has.
+            // Both buttons always render (16x16 fixed frames, disabled when
+            // unavailable), so the title never jumps.
+            if content.isViewerClass {
+                historyNavigation
+            }
+
             paneLabel
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                // Scoped to the title only (not the whole header row) so
+                // right-click on the history chevrons / close button isn't
+                // swallowed by the file menu.
+                .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
 
             Spacer()
 
@@ -125,7 +137,6 @@ struct PanePlaceholder: View {
         .onHover { hovering in
             isHeaderHovering = hovering
         }
-        .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
     }
 
     /// Resolved Claude session JSONL path for liveTranscript panes; nil otherwise.
@@ -186,25 +197,6 @@ struct PanePlaceholder: View {
     private var toolbarActions: some View {
         switch content {
         case .terminal(let terminalID):
-            Button(action: splitRight) {
-                HStack(spacing: 2) {
-                    Image(systemName: "rectangle.split.1x2")
-                        .rotationEffect(.degrees(90))
-                    Text("Split Right")
-                }
-                .font(.caption)
-            }
-            .buttonStyle(.borderless)
-
-            Button(action: splitDown) {
-                HStack(spacing: 2) {
-                    Image(systemName: "rectangle.split.1x2")
-                    Text("Split Down")
-                }
-                .font(.caption)
-            }
-            .buttonStyle(.borderless)
-
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
                 let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
                 Button(action: { toggleTranscriptPane(terminalID: terminalID) }) {
@@ -222,21 +214,6 @@ struct PanePlaceholder: View {
             }
 
         case .webview:
-            // Placeholder for back/forward — will be wired in Task 6
-            Button(action: {}) {
-                Image(systemName: "chevron.left")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
-
-            Button(action: {}) {
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
-
             Button(action: copyWebviewURL) {
                 Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
                     .font(.caption)
@@ -255,12 +232,103 @@ struct PanePlaceholder: View {
                 .help(showSourceCode ? "Show rendered view" : "Show source code")
             }
 
-        case .note:
-            EmptyView()
-
-        case .liveTranscript:
+        case .note, .liveTranscript:
             EmptyView()
         }
+    }
+
+    // MARK: - Slot History Navigation
+
+    /// Search icon + back/forward chevrons for viewer-class slot panes. The
+    /// search icon opens the MRU history palette (searchable replacement for
+    /// the old right-click dropdown — see `historySearchButton`); the
+    /// chevrons still left-click step one entry at a time.
+    @ViewBuilder
+    private var historyNavigation: some View {
+        // A pane that hasn't navigated yet has no recorded history — but it
+        // always has its current content, so fall back to a single-entry
+        // history seeded with it rather than an empty one. Otherwise the
+        // search button would wrongly read as "nothing to show" for the
+        // common case of a freshly opened viewer slot.
+        let history = appState.paneHistories[content.paneID] ?? PaneHistory.seeded(with: content)
+
+        historySearchButton(history: history)
+
+        historyButton(
+            icon: "chevron.left",
+            help: "Back",
+            action: { navigateHistory { $0.goBack() } }
+        )
+        .disabled(!history.canGoBack)
+
+        historyButton(
+            icon: "chevron.right",
+            help: "Forward",
+            action: { navigateHistory { $0.goForward() } }
+        )
+        .disabled(!history.canGoForward)
+    }
+
+    /// Search icon opening the searchable MRU-history palette (replaces the
+    /// former right-click dropdown on the chevrons, which was
+    /// undiscoverable). Always enabled for a live viewer slot — it always
+    /// has at least its current entry to show, checkmarked, even before any
+    /// navigation has happened. Disabled only at zero entries, which in
+    /// practice never happens here.
+    private func historySearchButton(history: PaneHistory) -> some View {
+        Button(action: { showHistoryPalette = true }) {
+            // A couple points larger and a lighter weight than the 8pt/bold
+            // chevrons/close glyph: at 8pt bold, "line.3.horizontal"'s three
+            // bars crowd into a smudge. Regular weight + a touch more size
+            // gives the bars air while still reading as the lightest glyph
+            // in the row (not heavier than its neighbors).
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10, weight: .regular))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help("Search pane history")
+        .disabled(!PaneHistoryPaletteButtonModel.isEnabled(entryCount: history.entries.count))
+        .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
+            PaneHistoryPaletteView(history: history) { index in
+                navigateHistory { $0.go(to: index) }
+            }
+        }
+    }
+
+    /// Plain Button — no `.contextMenu` (that dropdown is now the palette
+    /// above); never `.onTapGesture`, which blocks `.contextMenu` on macOS
+    /// (moot here since there's none left, but keeping the plain-Button
+    /// shape avoids reintroducing the trap).
+    private func historyButton(
+        icon: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            // Glyph sized a notch below the close button's 9pt; the 16x16
+            // frame + contentShape keeps the full hit target.
+            Image(systemName: icon)
+                .font(.system(size: 8, weight: .bold))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+    }
+
+    /// Applies a history navigation to this slot: mutate the slot's history,
+    /// then swap the layout content in place keeping the pane UUID. Goes
+    /// through `replacingContent` directly — never through the routing
+    /// functions — so navigating does not push new history entries.
+    private func navigateHistory(_ step: (inout PaneHistory) -> PaneContent?) {
+        guard var history = appState.paneHistories[content.paneID],
+              let target = step(&history),
+              let updated = layout.replacingContent(at: content.paneID, with: target)
+        else { return }
+        appState.paneHistories[content.paneID] = history
+        layout = updated
     }
 
     // MARK: - Pane Body
@@ -278,15 +346,7 @@ struct PanePlaceholder: View {
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             if transcriptFeatureEnabled {
-                Group {
-                    if useTableViewTranscript {
-                        TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    } else if useTextKitTranscript {
-                        STTextViewTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    } else {
-                        LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    }
-                }
+                TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                 .environment(\.openFilePreview, { path in
                     let newContent = PaneContent.codeViewer(id: UUID(), path: path)
                     layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
@@ -352,7 +412,11 @@ struct PanePlaceholder: View {
                     worktreePath: worktree.path,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
-                        layout = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                        let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                        if let replaced = result.replaced {
+                            appState.recordPaneReplacement(replaced)
+                        }
+                        layout = result.layout
                     },
                     onTerminalNotification: { title, body in
                         debugLog("OSC 777: \(title) — \(body)")
@@ -476,7 +540,7 @@ struct PanePlaceholder: View {
             Text("Transcript view is turned off")
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            Text("Enable it in Settings → Experimental")
+            Text("Enable it in Settings → General → Claude")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
@@ -490,6 +554,8 @@ struct PanePlaceholder: View {
         if case .note(let noteID) = content {
             Task { await appState.deleteNote(noteID: noteID, worktreeID: worktree.id) }
         }
+
+        appState.paneHistories.removeValue(forKey: content.paneID)
 
         if let newLayout = layout.removePane(id: content.paneID) {
             layout = newLayout
@@ -513,43 +579,31 @@ struct PanePlaceholder: View {
         pasteboard.setString(urlString, forType: .string)
         didCopyURL = true
         Task { @MainActor in
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             didCopyURL = false
         }
     }
 
-    // MARK: - Split Actions
-
-    private func splitRight() {
-        Task {
-            await createTerminalSplit(direction: .horizontal)
-        }
-    }
-
-    private func splitDown() {
-        Task {
-            await createTerminalSplit(direction: .vertical)
-        }
-    }
-
     private func toggleTranscriptPane(terminalID: UUID) {
-        layout = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+        let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+        if let replaced = result.replaced {
+            appState.recordPaneReplacement(replaced)
+        }
+        if let removed = result.removedPaneID {
+            // Reused slot: restore its pre-transcript content in place instead
+            // of applying the removal layout.
+            if let previous = appState.popHistoryForRemovedPane(removed),
+               let restored = layout.replacingContent(at: removed, with: previous) {
+                layout = restored
+                return
+            }
+        }
+        layout = result.layout
     }
 
     private func isTranscriptOpen(terminalID: UUID) -> Bool {
         layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) != nil
-    }
-
-    /// Creates a real terminal via the daemon, then inserts it as a split pane.
-    /// Uses createTerminalForSplit so no extra tab is created — the terminal
-    /// lives inside this tab's layout tree.
-    private func createTerminalSplit(direction: SplitDirection) async {
-        guard let newTerminal = await appState.createTerminalForSplit(worktreeID: worktree.id) else { return }
-        layout = layout.splitPane(
-            id: content.paneID,
-            direction: direction,
-            newContent: .terminal(terminalID: newTerminal.id)
-        )
     }
 }
 

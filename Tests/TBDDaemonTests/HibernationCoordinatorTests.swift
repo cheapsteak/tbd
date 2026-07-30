@@ -1,5 +1,7 @@
+import Clocks
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -17,7 +19,15 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
     )
 }
 
-@Suite("HibernationCoordinator")
+/// `.clockDriven` is applied at SUITE level even though only the three
+/// park-poll tests below drive a `TestClock`. The trait is a four-minute time
+/// limit — a hang-catcher, not a perf budget — so it costs the other tests
+/// nothing and it catches the one failure mode virtual time introduces here (a
+/// `TestClock` sleep nobody advances hangs forever instead of going red).
+/// `.serialized` is deliberately NOT applied: three clock-driven tests out of
+/// ~35 don't justify serializing the whole suite, and it stays available as
+/// the documented escape hatch if the arming handshake ever flakes under load.
+@Suite("HibernationCoordinator", .clockDriven)
 struct HibernationCoordinatorTests {
 
     /// In-memory DB + repo + worktree + an idle Claude terminal.
@@ -113,23 +123,44 @@ struct HibernationCoordinatorTests {
 
     // MARK: - Park path: polite /exit success vs SIGTERM fallback
     //
-    // The unified park sequence tries an in-band `/exit` first and polls up to
-    // ~3s for the claude process to leave; only if it's STILL claude after the
-    // poll does it escalate to the graceful-interrupt SIGTERM fallback. These
-    // two branches are tested SEPARATELY.
+    // The unified park sequence tries an in-band `/exit` first and polls
+    // `exitPollAttempts` × `exitPollInterval` (production: 15 × 200ms ≈ 3s) for
+    // the claude process to leave; only if it's STILL claude after the whole
+    // window does it escalate to the graceful-interrupt SIGTERM fallback.
+    //
+    // DEFECT these three tests exist to catch: *the poll gives up too early or
+    // never escalates* — so a hung claude is SIGTERMed while it is still
+    // exiting, or a wedged one is never escalated at all.
+    //
+    // The poll's pacing is injected (`exitPollAttempts` / `exitPollInterval`)
+    // and its delay runs on an injected `clock`, so the exhaustion branch is
+    // crossed in virtual time. Before that seam existed, the fallback test paid
+    // ~3s of REAL wall time on every run to prove one branch, and nothing
+    // pinned the attempt count at all.
 
     /// `/exit` succeeds: the pane's current command reads as a non-claude shell
     /// during the poll, so the polite exit is observed and NO SIGTERM-fallback
     /// interrupt (Escape / C-c) is sent. The row is still marked hibernated.
+    ///
+    /// Runs the PRODUCTION pacing (15 × 200ms) deliberately: exactly ONE
+    /// interval is ever advanced, so the test also pins "the poll returns on
+    /// the first successful observation". A poll that kept checking would park
+    /// on an un-advanced sleep and be surfaced by `.clockDriven`.
     @Test func parkViaExitSucceedsWithoutSigtermFallback() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
         // dryRun default paneCurrentCommand is "zsh" (not claude) → poll sees the
         // process leave immediately after `/exit`.
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager())
+        let clock = TestClock<Duration>()
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), clock: clock)
 
-        let result = await coord.manualHibernate(terminalID: terminalID)
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        // Unblocks the single verify-exit poll attempt.
+        await clock.advanceWhenSuspended(by: coord.exitPollInterval)
+        let result = await park.value
+
         #expect(result == .ok)
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil)
 
@@ -143,9 +174,17 @@ struct HibernationCoordinatorTests {
     }
 
     /// `/exit` does NOT terminate claude within the poll window: the pane keeps
-    /// reporting a claude process, so the park escalates to the graceful
-    /// interrupt (Escape → C-c C-c → SIGTERM). The row is still marked
-    /// hibernated afterward (respawn-window -k guarantees termination).
+    /// reporting a claude process for EVERY attempt, so the park exhausts the
+    /// whole window and escalates to the graceful interrupt (Escape → C-c C-c →
+    /// SIGTERM). The row is still marked hibernated afterward (respawn-window
+    /// -k guarantees termination).
+    ///
+    /// The window is 3 attempts here rather than the production 15 — pacing is
+    /// injected precisely so the exhaustion threshold is still fully crossed
+    /// (every attempt is advanced, and the escalation happens only after the
+    /// last one) inside a 3-advance budget instead of 15 real 200ms sleeps.
+    /// `defaultPollPacingIsFifteenTimesTwoHundredMillis` keeps the production
+    /// ~3s window itself pinned.
     @Test func parkFallsBackToSigtermWhenExitDoesNotKill() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
@@ -155,9 +194,19 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // claude reports its version as pane_current_command
         )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager())
+        let clock = TestClock<Duration>()
+        let pollInterval: Duration = .milliseconds(200)
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            exitPollAttempts: 3, exitPollInterval: pollInterval, clock: clock)
 
-        let result = await coord.manualHibernate(terminalID: terminalID)
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        // Exhaust the whole poll window: one advance per attempt.
+        for _ in 0..<3 {
+            await clock.advanceWhenSuspended(by: pollInterval)
+        }
+        let result = await park.value
+
         #expect(result == .ok)
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil)
 
@@ -168,6 +217,67 @@ struct HibernationCoordinatorTests {
         // Then the SIGTERM-fallback graceful interrupt (C-c) must have fired.
         #expect(joined.contains { $0.contains("send-keys") && $0.contains("C-c") },
                 "expected a C-c interrupt in the SIGTERM-fallback branch; got: \(joined)")
+    }
+
+    /// The escalation BOUNDARY: with `exitPollAttempts == 3` the park must
+    /// still be polling after 2 attempts (no interrupt sent yet) and must
+    /// escalate on the 3rd. Both halves matter and neither was pinned before
+    /// the pacing seam existed — the defect has two directions, giving up early
+    /// (SIGTERM while claude is still exiting) and never escalating (a wedged
+    /// claude polled forever).
+    ///
+    /// The "hasn't escalated yet" half is proved by `waitForSuspension()`: the
+    /// coordinator is parked on attempt 3's sleep, which means it completed
+    /// attempts 1–2, observed claude both times, and did NOT leave the loop.
+    @Test func escalatesOnlyAfterExactlyTheConfiguredAttemptCount() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // still claude, every attempt
+        )
+        let clock = TestClock<Duration>()
+        let pollInterval: Duration = .milliseconds(200)
+        let attempts = 3
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            exitPollAttempts: attempts, exitPollInterval: pollInterval, clock: clock)
+        func interruptSent() -> Bool {
+            recorded.snapshot()
+                .map { $0.joined(separator: " ") }
+                .contains { $0.contains("send-keys") && $0.contains("C-c") }
+        }
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+
+        // N-1 attempts: still inside the poll window.
+        for _ in 0..<(attempts - 1) {
+            await clock.advanceWhenSuspended(by: pollInterval)
+        }
+        await clock.waitForSuspension()  // armed for attempt N ⇒ N-1 are done
+        #expect(!interruptSent(),
+                "must not escalate before the poll window is exhausted; got: \(recorded.snapshot())")
+
+        // The Nth (final) attempt: the window is exhausted, so escalate.
+        await clock.advanceWhenSuspended(by: pollInterval)
+        let result = await park.value
+        #expect(result == .ok)
+        #expect(interruptSent(),
+                "must escalate once all \(attempts) attempts observed claude; got: \(recorded.snapshot())")
+    }
+
+    /// Pins the SHIPPED poll window, which the two injected-pacing tests above
+    /// deliberately no longer run: 15 × 200ms ≈ 3s. Making the pacing
+    /// injectable must not quietly change what production waits before it
+    /// SIGTERMs a claude that is still shutting down.
+    @Test func defaultPollPacingIsFifteenTimesTwoHundredMillis() async throws {
+        let (db, _, _) = try await setup()
+        let coord = coordinator(db)
+        #expect(coord.exitPollAttempts == 15)
+        #expect(coord.exitPollInterval == .milliseconds(200))
+        #expect(coord.exitPollInterval * coord.exitPollAttempts == .seconds(3),
+                "the shipped verify-exit window must stay ~3s")
     }
 
     /// The ANSI pane snapshot captured before the kill is persisted into

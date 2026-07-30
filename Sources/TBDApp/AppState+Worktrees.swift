@@ -20,7 +20,10 @@ extension AppState {
     /// `profileID` is an optional explicit model-profile override chosen at
     /// creation time (sidebar `+` profile picker). nil resolves the profile via
     /// the daemon's normal repo/scratch/global precedence chain (today's behavior).
-    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil) {
+    /// `model` is an optional per-spawn Claude model override (picker model
+    /// buttons); it applies to the initial spawn only — later respawns fall
+    /// back to the profile default.
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, model: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, displayName: String? = nil) {
         // Optimistic placeholder so the row appears instantly. When picking an
         // existing branch we use its local name so the placeholder name
         // doesn't briefly show a fake `tbd/*` value.
@@ -36,7 +39,7 @@ extension AppState {
         let placeholder = Worktree(
             repoID: repoID,
             name: placeholderName,
-            displayName: placeholderName,
+            displayName: displayName ?? placeholderName,
             branch: placeholderBranch,
             path: "",
             status: .creating,
@@ -64,10 +67,14 @@ extension AppState {
                 let wt = try await daemonClient.createWorktree(
                     repoID: repoID,
                     branch: existingBranch?.name,
+                    displayName: displayName,
                     cols: size.cols, rows: size.rows,
                     parentWorktreeID: parentWorktreeID,
                     useExistingBranch: existingBranch != nil,
-                    profileID: profileID
+                    profileID: profileID,
+                    model: model,
+                    prNumber: prNumber,
+                    checkoutPRHead: checkoutPRHead
                 )
                 // Replace the placeholder with the real worktree, carrying
                 // over any rename the user typed while creation was in
@@ -264,6 +271,18 @@ extension AppState {
         }
     }
 
+    /// List open PRs for a repo, for the branch picker's second load phase.
+    /// Rethrows so callers can distinguish a fetch failure (keep showing
+    /// branches, no PR pills) from a genuinely empty list.
+    func listOpenPRs(repoID: UUID) async throws -> [OpenPRInfo] {
+        do {
+            return try await daemonClient.listOpenPRs(repoID: repoID)
+        } catch {
+            logger.error("Failed to list open PRs: \(error)")
+            throw error
+        }
+    }
+
     /// Archive a worktree. Scratch-aware by construction: repo-less scratch
     /// spaces are delegated to `archiveScratch(id:)` — the repo-worktree
     /// `worktree.archive` RPC rejects them with `repoNotFound` — so callers
@@ -312,10 +331,11 @@ extension AppState {
         // Idempotency: see `reviveWithSession`. Concurrent invocations
         // would race the `.done` state to nil on the second call's error.
         guard revivingArchived[id] == nil else { return }
-        guard let snapshot = archivedWorktrees.values
-            .flatMap({ $0 })
-            .first(where: { $0.id == id })
-        else {
+        // `archivedSnapshot` covers BOTH row sources. Resolving against
+        // `archivedWorktrees` alone made this guard fail — silently, with no
+        // RPC and no alert — for any row the user reached via search, i.e. any
+        // row past the first loaded page.
+        guard let snapshot = archivedSnapshot(id: id) else {
             logger.warning("reviveWorktree: no archived snapshot for \(id, privacy: .public)")
             return
         }
@@ -542,6 +562,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = repoID
         selectedScratchSection = false
+        selectedRemoteSession = nil
         archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
         archivedWorktreesHasMore[repoID] = false
         highlightedArchivedWorktreeID = worktreeID
@@ -597,6 +618,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = id
         selectedScratchSection = false
+        selectedRemoteSession = nil
         Task { await refreshArchivedWorktrees(repoID: id) }
     }
 
@@ -628,27 +650,202 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = nil
         selectedScratchSection = true
+        selectedRemoteSession = nil
     }
 
-    private static let archivedPageSize = 50
+    static let archivedPageSize = 50
 
     /// Fetch archived worktrees for a repo, preserving any pages the user has
     /// already loaded (re-fetches up to `max(currentCount, pageSize)` items).
     func refreshArchivedWorktrees(repoID: UUID) async {
-        let currentCount = archivedWorktrees[repoID]?.count ?? 0
-        let fetchCount = max(currentCount, Self.archivedPageSize)
-        let knownExhausted = currentCount > 0 && currentCount % Self.archivedPageSize != 0
+        let plan = ArchivedRefreshPlan(
+            currentCount: archivedWorktrees[repoID]?.count ?? 0,
+            pageSize: Self.archivedPageSize
+        )
         do {
             let archived = try await daemonClient.listWorktrees(
                 repoID: repoID, status: .archived,
-                limit: fetchCount
+                limit: plan.fetchCount
             )
             archivedWorktrees[repoID] = archived
-            archivedWorktreesHasMore[repoID] = knownExhausted ? false : archived.count >= fetchCount
+            archivedWorktreesHasMore[repoID] = plan.hasMore(fetched: archived.count)
             ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
         }
+        // Re-run any active search so a revive/archive doesn't leave stale
+        // search rows on screen (the search set is fetched separately and is
+        // not touched by the refetch above).
+        await refreshArchivedSearch(repoID: repoID)
+    }
+
+    // MARK: - Archived row sources
+
+    /// Union of the two sources the archived UI renders from, de-duplicated by
+    /// id preferring `loaded` (which every `refreshArchivedWorktrees` re-fetches
+    /// and is therefore the fresher of the two).
+    ///
+    /// Search results are a genuinely SECOND row source: the whole point of the
+    /// daemon-side `nameQuery` filter is surfacing matches from pages
+    /// `archivedWorktrees` never loaded. Any lookup written against the loaded
+    /// pages alone silently fails for those rows — which is how Revive came to
+    /// no-op on exactly the row a user searched to find. Keep every archived-row
+    /// lookup routed through here rather than re-deriving the union.
+    nonisolated static func mergeArchivedSnapshots(
+        loaded: [Worktree],
+        searchResults: [Worktree]
+    ) -> [Worktree] {
+        var seen = Set(loaded.map(\.id))
+        var merged = loaded
+        for wt in searchResults where seen.insert(wt.id).inserted {
+            merged.append(wt)
+        }
+        return merged
+    }
+
+    /// Every archived snapshot the UI can currently render for `repoID`.
+    func archivedSnapshots(repoID: UUID) -> [Worktree] {
+        Self.mergeArchivedSnapshots(
+            loaded: archivedWorktrees[repoID] ?? [],
+            searchResults: archivedSearchResults[repoID]?.worktrees ?? []
+        )
+    }
+
+    /// Resolve one archived snapshot by id across every repo — for callers
+    /// (the revive paths) that hold a row id but not its repo.
+    func archivedSnapshot(id: UUID) -> Worktree? {
+        Self.mergeArchivedSnapshots(
+            loaded: archivedWorktrees.values.flatMap { $0 },
+            searchResults: archivedSearchResults.values.flatMap(\.worktrees)
+        ).first { $0.id == id }
+    }
+
+    // MARK: - Archived-worktree search
+
+    /// Re-fetch the active search after the archived set changed, preserving the
+    /// pages the user already pulled in — the same invariant
+    /// `refreshArchivedWorktrees` maintains for the unsearched list, via the
+    /// same `ArchivedRefreshPlan`.
+    ///
+    /// Calling plain `searchArchivedWorktrees` here instead would always refetch
+    /// page 0 and replace the stored results, silently collapsing Load
+    /// More–accumulated search pages back to the first 50 — triggered by the
+    /// feature's own primary action (revive), plus `selectRepo`, deep-link
+    /// archived navigation, and back/forward restore.
+    ///
+    /// Keys off the query the stored results ANSWER, not the in-flight one: if
+    /// a newer search is already in flight its own response is the right answer
+    /// and this refresh has nothing useful to add.
+    func refreshArchivedSearch(repoID: UUID) async {
+        guard let current = archivedSearchResults[repoID] else { return }
+        let query = current.query
+        let plan = ArchivedRefreshPlan(
+            currentCount: current.worktrees.count,
+            pageSize: Self.archivedPageSize
+        )
+        do {
+            let matches = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: plan.fetchCount,
+                nameQuery: query
+            )
+            // Drop the response if the user has since typed a different query
+            // (or cleared the search) — it answers a question nobody is asking.
+            guard archivedSearchQuery[repoID] == query else { return }
+            archivedSearchResults[repoID] = ArchivedSearchResults(
+                query: query,
+                worktrees: matches,
+                hasMore: plan.hasMore(fetched: matches.count)
+            )
+        } catch {
+            logger.error("Failed to refresh archived search: \(error)")
+        }
+    }
+
+    /// Fetch the first page of archived worktrees matching `query` for a repo.
+    ///
+    /// The filter runs in the daemon's SQL (`nameQuery`), not client-side, so
+    /// matches in pages the user hasn't loaded still show up — and pagination
+    /// continues to page over the *matching* set (`loadMoreArchivedSearchResults`).
+    /// A blank query clears the search instead of fetching.
+    func searchArchivedWorktrees(repoID: UUID, query: String) async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            clearArchivedSearch(repoID: repoID)
+            return
+        }
+        // Stamp the in-flight query BEFORE awaiting so a later keystroke's
+        // search supersedes this one; the post-await checks drop the stale
+        // response rather than letting it overwrite newer results.
+        //
+        // The previous query's RESULTS are deliberately left in place: the view
+        // keys off `ArchivedSearchResults.query`, sees it no longer matches
+        // what's typed, and falls back to the client-side preview on its own.
+        archivedSearchQuery[repoID] = trimmed
+        archivedSearchFailed[repoID] = false
+        do {
+            let matches = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: Self.archivedPageSize,
+                nameQuery: trimmed
+            )
+            guard archivedSearchQuery[repoID] == trimmed else { return }
+            archivedSearchResults[repoID] = ArchivedSearchResults(
+                query: trimmed,
+                worktrees: matches,
+                hasMore: matches.count >= Self.archivedPageSize
+            )
+        } catch {
+            logger.error("Failed to search archived worktrees: \(error)")
+            // Only flag the failure if this is still the query the user is
+            // waiting on — a superseded search's failure is not their problem.
+            guard archivedSearchQuery[repoID] == trimmed else { return }
+            archivedSearchFailed[repoID] = true
+        }
+    }
+
+    /// Load the next page of archived search results, appending to the existing
+    /// ones. Mirrors `loadMoreArchivedWorktrees`, including its concurrent-call
+    /// guard and its "did the list shift under us" append check.
+    func loadMoreArchivedSearchResults(repoID: UUID) async {
+        guard isLoadingMoreArchivedSearch[repoID] != true else { return }
+        // Only a SETTLED result set can be paged: the stored rows must answer
+        // the query that is still in flight/current, or the next page would be
+        // offset into a different search's answer.
+        guard let current = archivedSearchResults[repoID],
+              archivedSearchQuery[repoID] == current.query else { return }
+        isLoadingMoreArchivedSearch[repoID] = true
+        defer { isLoadingMoreArchivedSearch[repoID] = false }
+
+        let currentCount = current.worktrees.count
+        do {
+            let more = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: Self.archivedPageSize, offset: currentCount,
+                nameQuery: current.query
+            )
+            // Drop the page if the stored results were replaced or extended
+            // while it was in flight (query changed, or a refresh re-ran the
+            // search) — it belongs to a result set that no longer exists.
+            guard let latest = archivedSearchResults[repoID],
+                  latest.query == current.query,
+                  latest.worktrees.count == currentCount else { return }
+            archivedSearchResults[repoID] = ArchivedSearchResults(
+                query: current.query,
+                worktrees: latest.worktrees + more,
+                hasMore: more.count >= Self.archivedPageSize
+            )
+        } catch {
+            logger.error("Failed to load more archived search results: \(error)")
+        }
+    }
+
+    /// Drop all search state for a repo — called when the query goes empty, so
+    /// the view falls back to the unsearched `archivedWorktrees` pages.
+    func clearArchivedSearch(repoID: UUID) {
+        archivedSearchQuery.removeValue(forKey: repoID)
+        archivedSearchResults.removeValue(forKey: repoID)
+        archivedSearchFailed.removeValue(forKey: repoID)
     }
 
     /// Fetch orphan-GC reap records for a repo (History → Reclaimed).
@@ -713,7 +910,14 @@ extension AppState {
         let lingering = revivingArchived.values
             .map(\.snapshot)
             .filter { $0.repoID == repoID }
-        let allIDs = Set(archived.map(\.id) + lingering.map(\.id))
+        // Validity spans BOTH row sources: a selection on a search-only row is
+        // legitimate, and judging it stale against the loaded pages alone would
+        // silently re-point the detail pane at the most recent loaded row on
+        // the next refresh. The fallback PICK below deliberately stays on the
+        // loaded set — a loaded row is always a row we still hold.
+        let allIDs = Set(
+            archivedSnapshots(repoID: repoID).map(\.id) + lingering.map(\.id)
+        )
 
         let current = selectedArchivedWorktreeIDs[repoID]
         let needsNew = current == nil || !allIDs.contains(current!)
@@ -875,6 +1079,82 @@ extension AppState {
         }
     }
 
+    /// Pin or unpin a worktree for the sidebar dock.
+    ///
+    /// No optimistic local update, deliberately: the dock reflects daemon state,
+    /// and the daemon stamps `pinnedAt` (so pin ORDER is server-assigned). A
+    /// guessed local timestamp could order the dock differently from the next
+    /// refresh. A failed pin therefore visibly does not take, which is honest.
+    func setPinned(worktreeID: UUID, pinned: Bool) async {
+        do {
+            try await daemonClient.setWorktreePin(id: worktreeID, pinned: pinned)
+            await refreshWorktrees()
+        } catch {
+            logger.error("Failed to set worktree pin: \(error, privacy: .public)")
+            showAlert("Couldn't update pin: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Reorder the sidebar dock's pinned worktrees, triggered by SwiftUI
+    /// `.onMove` whose indices address the dock's PINNED ROOTS (the outer
+    /// ForEach), not the flattened row list.
+    ///
+    /// Optimistic, unlike `setPinned`: the client knows the entire resulting
+    /// order rather than depending on a daemon-assigned timestamp, so the row
+    /// can land under the cursor immediately and roll back if the RPC fails.
+    func reorderPins(fromOffsets source: IndexSet, toOffset destination: Int) {
+        // Snapshot BOTH collections — pinned worktrees span repo-keyed
+        // `worktrees` and repo-less `scratchWorktrees`, so a rollback that
+        // restored only one would leave the other half mutated.
+        let previousWorktrees = worktrees
+        let previousScratch = scratchWorktrees
+
+        // `children: { _ in [] }` collapses every subtree, which is exactly the
+        // root list the outer ForEach renders — so the indices line up by
+        // construction.
+        let currentRoots = PinnedDockContent
+            .rows(allWorktrees: allWorktrees, selectedIDs: [], children: { _ in [] })
+            .map(\.worktree.id)
+
+        guard let newOrder = PinnedDockReorder.reordered(
+            roots: currentRoots, fromOffsets: source, toOffset: destination) else {
+            logger.warning("reorderPins skipped: stale indices (roots=\(currentRoots.count, privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public))")
+            return
+        }
+
+        // Optimistic local update: assign contiguous orders in the new sequence.
+        for (index, id) in newOrder.enumerated() {
+            applyPinSortOrder(index, to: id)
+        }
+
+        Task {
+            do {
+                try await daemonClient.reorderPinnedWorktrees(worktreeIDs: newOrder)
+            } catch {
+                logger.error("reorderPins RPC failed: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run {
+                    self.worktrees = previousWorktrees
+                    self.scratchWorktrees = previousScratch
+                }
+            }
+        }
+    }
+
+    /// Write `pinSortOrder` into whichever collection holds this worktree:
+    /// a pinned worktree can be a repo-keyed row or a repo-less scratch space,
+    /// and only one of the two ever holds it.
+    private func applyPinSortOrder(_ order: Int, to id: UUID) {
+        for (key, list) in worktrees {
+            if let idx = list.firstIndex(where: { $0.id == id }) {
+                worktrees[key]?[idx].pinSortOrder = order
+                return
+            }
+        }
+        if let idx = scratchWorktrees.firstIndex(where: { $0.id == id }) {
+            scratchWorktrees[idx].pinSortOrder = order
+        }
+    }
+
     /// Resolve the effective auto-hibernate-on-merge setting for a worktree.
     /// Returns the per-worktree override when explicitly set; otherwise falls
     /// back to the global default (`autoHibernateOnMergeDefault`).
@@ -1021,15 +1301,5 @@ extension AppState {
     /// current terminal tab. The close target now comes only from focus.
     func closeTerminalTab() {
         closeFocusedTab()
-    }
-
-    /// Placeholder: split terminal horizontally.
-    func splitTerminalHorizontally() {
-        // TODO: implement horizontal split
-    }
-
-    /// Placeholder: split terminal vertically.
-    func splitTerminalVertically() {
-        // TODO: implement vertical split
     }
 }

@@ -100,6 +100,9 @@ private struct AccountPickerRow: View {
     let onPick: () -> Void
 
     @State private var isHovering = false
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
 
     private var isSelectable: Bool {
         ProfileUsagePresentation.isSelectable(entry)
@@ -169,57 +172,42 @@ private struct AccountPickerRow: View {
     private func bucketRows(_ snapshot: ProfileUsageSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                bucketRow(label: "5h", bucket: session, showsReset: true)
+                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(session, style: usageResetTimeStyle), label: "5h")
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                bucketRow(label: "week", bucket: weekly, showsReset: false)
+                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: usageResetTimeStyle), label: "week")
             }
             ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()),
                     id: \.offset) { _, scoped in
-                bucketRow(label: scoped.modelDisplayName ?? "model",
-                          bucket: scoped, showsReset: false)
+                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: usageResetTimeStyle),
+                          label: scoped.modelDisplayName ?? "model")
             }
         }
     }
 
-    private func bucketRow(label: String, bucket: ClaudeUsageLimitBucket,
-                           showsReset: Bool) -> some View {
-        let level = ProfileUsagePresentation.severityLevel(
-            severity: bucket.severity, percent: bucket.percent
-        )
+    private func bucketRow(presentation: ProfileUsagePresentation.BucketPresentation,
+                           label: String) -> some View {
+        let fillColor = presentation.fill.barColor(colorScheme)
         return HStack(spacing: 6) {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 40, alignment: .leading)
-            ProgressView(value: min(max(bucket.percent, 0), 100), total: 100)
+            ProgressView(value: min(max(presentation.percent, 0), 100), total: 100)
                 .progressViewStyle(.linear)
-                .tint(level.color)
+                .tint(fillColor)
                 .frame(width: 140)
-            Text(ProfileUsagePresentation.percentText(bucket.percent))
+            Text(presentation.percentText)
                 .font(.caption)
                 .monospacedDigit()
-                .foregroundStyle(level == .normal ? AnyShapeStyle(.secondary) : AnyShapeStyle(level.color))
+                .foregroundStyle(presentation.fill == .normal ? AnyShapeStyle(.secondary) : AnyShapeStyle(fillColor))
                 .frame(width: 38, alignment: .trailing)
-            if showsReset, let resets = bucket.resetsAt {
-                Text("resets \(ProfileUsagePresentation.resetTimeText(resets))")
+            if presentation.resetDisplay != .tooltipOnly, let resetPhrase = presentation.resetPhrase {
+                Text(resetPhrase)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 0)
-        }
-    }
-}
-
-// MARK: - Severity color
-
-extension ProfileUsagePresentation.SeverityLevel {
-    /// Bar/percent tint per severity tier.
-    var color: Color {
-        switch self {
-        case .normal: return .green
-        case .warning: return .orange
-        case .critical: return .red
         }
     }
 }

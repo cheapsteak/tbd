@@ -75,14 +75,28 @@ extension AppState {
 
     // MARK: - Helpers
 
+    /// Whether an error means "the daemon is gone" rather than "this one call
+    /// failed". Only these two cases stop the poll timer; every other
+    /// `DaemonClientError` — a decode failure, an RPC-level rejection, a
+    /// timeout — leaves the app connected and the ~2s poll running, so the
+    /// caller keeps being re-driven.
+    ///
+    /// Shared so retry budgets and the connection flag cannot disagree about
+    /// what counts as a disconnect: a budget that forgave *every* error would
+    /// never bite on the persistent per-worktree failures this does not cover.
+    static func isDisconnectError(_ error: Error) -> Bool {
+        guard let dcError = error as? DaemonClientError else { return false }
+        switch dcError {
+        case .daemonNotRunning, .connectionFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
     func handleConnectionError(_ error: Error) {
-        if let dcError = error as? DaemonClientError {
-            switch dcError {
-            case .daemonNotRunning, .connectionFailed:
-                isConnected = false
-            default:
-                break
-            }
+        if Self.isDisconnectError(error) {
+            isConnected = false
         }
     }
 

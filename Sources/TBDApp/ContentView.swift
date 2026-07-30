@@ -8,7 +8,6 @@ struct ContentView: View {
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
-    @State private var contentAreaHeight: CGFloat = 600
     // Part of the PR split button's .id key: the baked (non-template) icon
     // colors depend on the appearance, and the materialized-once toolbar item
     // only picks up a re-bake when the id changes.
@@ -29,18 +28,6 @@ struct ContentView: View {
                 repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
             )
         }
-    }
-
-    /// Returns the set of terminal IDs currently rendered anywhere in the
-    /// detail layout. Used so the window-root fallback overlay only fires
-    /// when the bound terminal is NOT visible (closed terminal, History
-    /// pane, single-pane mode, etc.).
-    private var visibleTerminalIDs: Set<UUID> {
-        var ids: Set<UUID> = []
-        for layout in appState.layouts.values {
-            ids.formUnion(layout.allTerminalIDs())
-        }
-        return ids
     }
 
     var body: some View {
@@ -65,69 +52,11 @@ struct ContentView: View {
                 .background(Color.yellow.opacity(0.2))
             }
 
-            // Nightwatch desk session status banner (Phase A visible worker).
-            // Gated on the experimental flag like every other nightwatch surface
-            // (fail-closed to hidden when the user never opted in).
-            if nightwatchExperimental {
-                NightwatchDeskStatusBanner()
-            }
-
             NavigationSplitView {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
             } detail: {
-                if !appState.isConnected {
-                    disconnectedView
-                } else if appState.selectedScratchSection {
-                    ScratchDetailView()
-                } else if appState.repos.isEmpty {
-                    emptyStateView
-                } else if let repoID = appState.selectedRepoID {
-                    RepoDetailView(repoID: repoID)
-                } else if appState.selectedWorktreeIDs.isEmpty {
-                    Text("Select a worktree or click + to create one")
-                        .foregroundStyle(.secondary)
-                } else {
-                    HStack(spacing: 0) {
-                        TerminalContainerView()
-                        if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
-                            FilePanelDivider(panelWidth: Binding(
-                                get: { CGFloat(filePanelWidth) },
-                                set: { filePanelWidth = Double($0) }
-                            ))
-                            FileViewerPanel(worktree: worktree)
-                                .frame(width: CGFloat(filePanelWidth))
-                                .id(worktree.id)
-                        }
-                    }
-                    .background(GeometryReader { geometry in
-                        Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
-                    })
-                    .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
-                    .overlay {
-                        if let frame = overlayCoordinator.current,
-                           overlayFrameIsWindowRoot(frame, visibleTerminalIDs: visibleTerminalIDs) {
-                            TranscriptOverlayView(
-                                frame: frame,
-                                hasBack: overlayCoordinator.hasBack,
-                                onBack: { overlayCoordinator.pop() },
-                                onClose: { overlayCoordinator.close() }
-                            )
-                            .frame(maxWidth: 900, maxHeight: 700)
-                            .padding(20)
-                        }
-                    }
-                    .background {
-                        // Window-wide click-outside catcher. Renders transparently behind
-                        // the entire detail area; only consumes taps when an overlay is
-                        // currently open, so it doesn't interfere with normal interaction.
-                        if overlayCoordinator.isOpen {
-                            Color.black.opacity(0.001)
-                                .onTapGesture { overlayCoordinator.close() }
-                                .allowsHitTesting(true)
-                        }
-                    }
-                }
+                DetailSectionHostPager(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
             }
             .toolbar(removing: .sidebarToggle)
             .toolbar {
@@ -243,7 +172,7 @@ struct ContentView: View {
                                 } else {
                                     // Create and focus new PR tab
                                     let webviewID = UUID()
-                                    let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
+                                    let tab = TBDShared.Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
                                     appState.tabs[worktreeID, default: []].append(tab)
                                     appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
                                 }
@@ -367,7 +296,174 @@ struct ContentView: View {
                 appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
         }
-        .nightwatchModeTint(appState.nightwatchMode, experimentalEnabled: nightwatchExperimental)
+    }
+
+    private func markSelectedWorktreesAsRead(_ selection: Set<UUID>) {
+        for worktreeID in selection {
+            appState.unreadByWorktree[worktreeID] = nil
+            Task {
+                await appState.markNotificationsRead(worktreeID: worktreeID)
+            }
+        }
+        appState.macNotificationManager.dismissDelivered(worktreeIDs: selection)
+    }
+
+}
+
+// MARK: - DetailSectionHostPager
+
+/// NSViewControllerRepresentable hosting `ContentView`'s entire `detail:`
+/// content as exactly two `NSTabViewController` tab items: `.remote` (the
+/// sticky `RemoteSessionDetailView` host — mounted once a remote session
+/// has ever been selected and NEVER removed afterward) and `.other`
+/// (whichever worktree/repo/scratch/empty/disconnected content currently
+/// applies — cheap to recreate on every switch, exactly as before; local
+/// worktree reattach is already instant via the daemon's own tmux sessions,
+/// so that half never needed keep-alive).
+///
+/// This exists because navigating OUT of remote-session mode (selecting a
+/// worktree/repo/scratch section) used to unmount `RemoteSessionDetailView`
+/// entirely, tearing down every live `RemoteAttachPager` connection it
+/// hosted — turning "switch back to the remote session" into a slow, full
+/// SSM/ssh reconnect instead of an instant resume. Hoisting the `.remote`
+/// slot here, one level above where sections get fully swapped, is what
+/// lets it survive that excursion.
+///
+/// Why `NSTabViewController` rather than a plain SwiftUI `ZStack` +
+/// `.opacity`/`.allowsHitTesting`: this codebase already hit exactly this
+/// class of bug once — see `WorktreePager`'s doc comment and
+/// `docs/superpowers/specs/research-2026-05-06-zstack-event-leak.md`.
+/// `.opacity(0)` leaves the underlying AppKit view fully attached to the
+/// window (`window != nil`, `isHidden == false`), so `TBDTerminalView`'s
+/// shared click-passthrough `NSEvent` monitor — which decides whether to
+/// fire based on `window != nil` plus a raw geometric bounds check, not
+/// SwiftUI's hit-testing/opacity — would keep matching a merely-invisible
+/// remote terminal that happens to share the exact same screen rect as
+/// whatever IS visible on top of it, forwarding clicks meant for the
+/// worktree page into the hidden remote session's pty. `NSTabViewController`
+/// tab-switching genuinely detaches the non-selected tab's content view
+/// (`window == nil`), which is the actual invariant `TBDTerminalView`'s
+/// monitor teardown already depends on for local worktree terminals (see
+/// the `tv.window != nil` guards in `TerminalPanelView`).
+///
+/// Each tab's content is a small internally-reactive wrapper — it reads
+/// `@EnvironmentObject`/`@Binding` state itself rather than being handed a
+/// fresh value on every `updateNSViewController` — so its
+/// `NSHostingController` is created exactly once and its `rootView` is
+/// never reassigned: the same "stable identity, reactive interior" shape
+/// `WorktreePager`/`RemoteAttachPager` already use for their own tab items.
+struct DetailSectionHostPager: NSViewControllerRepresentable {
+    @Binding var showFilePanel: Bool
+    @Binding var filePanelWidth: Double
+
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var appearance: AppearanceSettings
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+
+    private static let remoteTabID = "remote"
+    private static let otherTabID = "other"
+
+    func makeNSViewController(context: Context) -> NSTabViewController {
+        let vc = NSTabViewController()
+        vc.tabStyle = .unspecified
+        vc.transitionOptions = []
+        return vc
+    }
+
+    func updateNSViewController(_ vc: NSTabViewController, context: Context) {
+        let currentIDs = Set(vc.tabViewItems.compactMap { $0.identifier as? String })
+
+        if !currentIDs.contains(Self.remoteTabID) {
+            let host = NSHostingController(
+                rootView: RemoteSessionHostSlot()
+                    .environmentObject(appState)
+                    .environmentObject(appearance)
+            )
+            let item = NSTabViewItem(viewController: host)
+            item.identifier = Self.remoteTabID
+            vc.addTabViewItem(item)
+        }
+
+        if !currentIDs.contains(Self.otherTabID) {
+            let host = NSHostingController(
+                rootView: OtherSectionContent(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
+                    .environmentObject(appState)
+                    .environmentObject(overlayCoordinator)
+            )
+            let item = NSTabViewItem(viewController: host)
+            item.identifier = Self.otherTabID
+            vc.addTabViewItem(item)
+        }
+
+        let showingRemote = Self.showsRemoteTab(
+            isConnected: appState.isConnected, selectedRemoteSession: appState.selectedRemoteSession
+        )
+        let targetID = showingRemote ? Self.remoteTabID : Self.otherTabID
+        if let idx = vc.tabViewItems.firstIndex(where: { $0.identifier as? String == targetID }),
+           vc.selectedTabViewItemIndex != idx {
+            vc.selectedTabViewItemIndex = idx
+        }
+    }
+
+    /// Which tab should be in front. Disconnected always wins, matching the
+    /// former if/else's top-priority `!appState.isConnected` check —
+    /// `OtherSectionContent` renders the disconnected message itself, so
+    /// this just makes sure that's the tab actually in front while
+    /// disconnected, regardless of whatever remote session was selected
+    /// before the daemon dropped. Pure and `nonisolated` so it's directly
+    /// unit-testable without an `NSTabViewController`.
+    nonisolated static func showsRemoteTab(isConnected: Bool, selectedRemoteSession: RemoteSessionSelection?) -> Bool {
+        isConnected && selectedRemoteSession != nil
+    }
+}
+
+/// The `.remote` tab's content. Internally reactive — reads
+/// `AppState.remoteSessionHostSelection` itself on every body evaluation —
+/// so `DetailSectionHostPager` never needs to reassign this tab's
+/// `NSHostingController.rootView`; only the `selection` value `body`
+/// resolves to changes across renders, which is exactly the "same view
+/// identity, new property value" update `RemoteSessionDetailView` is
+/// already built to handle (see its own doc comment on why it's not
+/// `.id()`-keyed).
+private struct RemoteSessionHostSlot: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if let selection = appState.remoteSessionHostSelection {
+            RemoteSessionDetailView(selection: selection)
+        } else {
+            EmptyView()
+        }
+    }
+}
+
+/// The `.other` tab's content: the non-remote top-level sections
+/// (disconnected/scratch/repo/empty/worktree). Pure relocation of
+/// `ContentView`'s former `detailContent` computed property, minus the
+/// remote-session branch (now `RemoteSessionHostSlot`'s job) — same
+/// conditions, same order, same views.
+private struct OtherSectionContent: View {
+    @Binding var showFilePanel: Bool
+    @Binding var filePanelWidth: Double
+
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+
+    var body: some View {
+        if !appState.isConnected {
+            disconnectedView
+        } else if appState.selectedScratchSection {
+            ScratchDetailView()
+        } else if appState.repos.isEmpty {
+            emptyStateView
+        } else if let repoID = appState.selectedRepoID {
+            RepoDetailView(repoID: repoID)
+        } else if appState.selectedWorktreeIDs.isEmpty {
+            Text("Select a worktree or click + to create one")
+                .foregroundStyle(.secondary)
+        } else {
+            WorktreeDetailAreaView(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
+        }
     }
 
     // MARK: - Empty State
@@ -439,17 +535,83 @@ struct ContentView: View {
             }
         }
     }
+}
 
-    private func markSelectedWorktreesAsRead(_ selection: Set<UUID>) {
-        for worktreeID in selection {
-            appState.unreadByWorktree[worktreeID] = nil
-            Task {
-                await appState.markNotificationsRead(worktreeID: worktreeID)
-            }
-        }
-        appState.macNotificationManager.dismissDelivered(worktreeIDs: selection)
+// MARK: - WorktreeDetailAreaView
+
+/// The terminal-grid branch of `OtherSectionContent` (`DetailSectionHostPager`'s
+/// `.other` tab) — rendered when a worktree (not a remote session, scratch
+/// section, or repo-only selection) is what's showing: `TerminalContainerView`
+/// + the optional file panel, the overlay coordinator's transcript overlay,
+/// and the window-wide click-outside catcher.
+///
+/// `showFilePanel`/`filePanelWidth` stay `@Binding` (not independent
+/// `@AppStorage` re-declarations of the same keys) — `ContentView`'s
+/// toolbar toggle button needs the SAME state, and threading one `Binding`
+/// through (via `DetailSectionHostPager` → `OtherSectionContent`) avoids two
+/// literal copies of the UserDefaults key strings ever drifting apart.
+/// `contentAreaHeight` moves in as this view's own `@State` instead: nothing
+/// outside this branch ever read it in `ContentView`.
+private struct WorktreeDetailAreaView: View {
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+    @Binding var showFilePanel: Bool
+    @Binding var filePanelWidth: Double
+    @State private var contentAreaHeight: CGFloat = 600
+
+    private var selectedWorktree: Worktree? {
+        guard let id = appState.selectedWorktreeIDs.first else { return nil }
+        // findWorktree also resolves scratch spaces (repo-less worktrees).
+        return appState.findWorktree(id: id)
     }
 
+    var body: some View {
+        HStack(spacing: 0) {
+            TerminalContainerView()
+            if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
+                FilePanelDivider(panelWidth: Binding(
+                    get: { CGFloat(filePanelWidth) },
+                    set: { filePanelWidth = Double($0) }
+                ))
+                FileViewerPanel(worktree: worktree)
+                    .frame(width: CGFloat(filePanelWidth))
+                    .id(worktree.id)
+            }
+        }
+        .background(GeometryReader { geometry in
+            Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
+        })
+        .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
+        .overlay {
+            // Uses the canonical tab-keyed set — never iterate
+            // `layouts.values` unkeyed: stale worktree-keyed
+            // entries persisted by the pre-split grid path would
+            // make hidden terminals look visible. Those entries
+            // are not pruned at restore time (keys can't be
+            // classified at init; Phase 2 import drops them).
+            if let frame = overlayCoordinator.current,
+               overlayFrameIsWindowRoot(frame, visibleTerminalIDs: appState.visibleTerminalIDs) {
+                TranscriptOverlayView(
+                    frame: frame,
+                    hasBack: overlayCoordinator.hasBack,
+                    onBack: { overlayCoordinator.pop() },
+                    onClose: { overlayCoordinator.close() }
+                )
+                .frame(maxWidth: 900, maxHeight: 700)
+                .padding(20)
+            }
+        }
+        .background {
+            // Window-wide click-outside catcher. Renders transparently behind
+            // the entire detail area; only consumes taps when an overlay is
+            // currently open, so it doesn't interfere with normal interaction.
+            if overlayCoordinator.isOpen {
+                Color.black.opacity(0.001)
+                    .onTapGesture { overlayCoordinator.close() }
+                    .allowsHitTesting(true)
+            }
+        }
+    }
 }
 
 // MARK: - Overlay helpers

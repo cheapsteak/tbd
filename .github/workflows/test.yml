@@ -34,6 +34,19 @@ jobs:
 
   test:
     runs-on: macos-26
+    # All three test steps below append their `.flaky(issue:)` retry records
+    # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
+    # produces one artifact covering both fast passes and the quiet pass
+    # together. Unset locally, where the trait writes nothing.
+    #
+    # A LITERAL path, not `${{ runner.temp }}`: the `runner` context is not
+    # available in a job-level `env:` block, and GitHub resolves an unavailable
+    # context to the empty string instead of erroring — so that spelling would
+    # silently hand the tests `/retry-metrics.jsonl`, fail to open at the
+    # filesystem root, and upload an empty artifact forever. The existing test
+    # steps already `tee` to /tmp on these runners.
+    env:
+      TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,8 +63,8 @@ jobs:
         uses: chetan/git-restore-mtime-action@d186aca54f8760da4dec55313195e51ed3ebb0b3 # v2
 
       - name: Install tmux
-        # macos-26 runners don't ship tmux. The reconcile reboot-recovery
-        # regression test (WorktreeLifecycleTests.testRecreateAfterRebootBootstrapKillOrdering)
+        # macos-26 runners don't ship tmux. The whole TBDDaemonLiveTests target
+        # (e.g. WorktreeLifecycleLiveTests.testReconcileRebootParksClaudeAndDeletesShell)
         # drives TmuxManager against a real tmux server on a unique socket.
         run: brew install tmux
 
@@ -111,8 +124,179 @@ jobs:
       # Swift 6.3 the two big modules build WMO in debug (~1.35 GB peak
       # frontend RSS each, measured), so the cap is likely over-conservative
       # now — kept as safety margin; candidate for re-validation.
-      - name: Test
-        run: swift test --parallel -j 2
+      #
+      # Three sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
+      # §4): the tier-3 live suites live in their own target so they can run
+      # serially on an otherwise idle machine instead of contending with the
+      # parallel pass. A second *job* would draw from the 5-concurrent-macOS-job
+      # cap and re-pay the build, so all passes share this one.
+      #
+      # ---------------------------------------------------------------------
+      # Why the fast pass is TWO steps instead of one
+      #
+      # Swift Testing parallelizes every non-serialized test in ONE process with
+      # no concurrency cap. All targets compile into that process, so per-test
+      # scheduling latency scales with the *total* population, not with the
+      # suite you are looking at. Evidence from 9 mined CI runs: p50 per-test
+      # reported duration is ~1/3 of total wall time in every run, red AND
+      # green — a trivial test "takes" 16–29 s because it is mostly suspended
+      # waiting for a turn. Population grew 3013 -> 4536 in three weeks. What
+      # flips a run red is whether one of the fixed wall-clock scheduling
+      # handshakes (ControlModeInputHealth, ControlModeInputRouter, the archived
+      # search debounce) loses a coin flip inside a ~2 s band; the failures are
+      # all handshake timeouts, never logic assertions.
+      #
+      # Halving the in-flight population halves the tail those deadlines must
+      # absorb. Measured locally under induced load, arms INTERLEAVED (not run
+      # in blocks — an earlier attempt at this comparison was invalidated by
+      # load drift on a shared box) and population held constant, means over 5
+      # iterations: p90 26.4 s -> 14.6 s, p50 8.8 s -> 7.6 s.
+      #
+      # The cost is +26 s of wall time (56 s -> 82 s mean), because the second
+      # invocation re-pays SPM's no-op build check and process startup. That is
+      # the honest figure: a single iteration showed +6 s and it did not hold up
+      # across the run. Set against a step that already spends 139-404 s on the
+      # compile, it is a good trade for halving the tail.
+      #
+      # This is NOT the "sharding across runners" that §1 considered and
+      # rejected and §2 lists as a non-goal. That rejection was about extra
+      # *jobs*: the 5-concurrent-macOS-job cap, and each shard re-paying the
+      # ~2 min build. These are two sequential `swift test` invocations in ONE
+      # job sharing ONE build — the same shape this file already uses for the
+      # fast/quiet split. It pays neither the job cap nor a second build.
+      #
+      # Why step 2 is a COMPLEMENT (`--skip`) and not an enumeration
+      #
+      # The three passes must partition the package exhaustively, and that has
+      # to hold *by construction* rather than by anyone remembering to update a
+      # list. The spec makes exactly this point about the target boundary in §3
+      # ("Enforcement mechanism = target boundary"): it is "compiler-enforced,
+      # cannot silently zero-match like a `--filter` regex". A fast pass
+      # expressed as two `--filter` enumerations gives that
+      # property up — `swift test --filter` exits GREEN on zero matches, so a
+      # newly added `TBDFooTests` would simply appear in no list, run in NO
+      # pass, and nothing would go red.
+      #
+      # The floors cannot cover that hole, and it is worth being precise about
+      # why: adding a target does not *reduce* any listed step's count, so both
+      # floors still clear and both steps stay green while the new target's
+      # tests execute nowhere. Expressing step 2 as "everything except
+      # TBDDaemonTests and TBDDaemonLiveTests" closes it — a new target lands
+      # in step 2 automatically and runs. Step 1 takes TBDDaemonTests, step 2
+      # takes the complement of steps 1+3, the quiet pass takes
+      # TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
+      #
+      # Floors: `swift test --list-tests` today reports TBDDaemonTests 2194,
+      # TBDAppTests 1725, TBDSharedTests 502, TBDCLITests 127,
+      # TBDDaemonLiveTests 57 (4605 total). What actually EXECUTES is slightly
+      # lower for step 2 — 2342, not 1725+502+127=2354 — because a handful of
+      # tests are conditionally skipped at runtime. The floors are set against
+      # the executed counts (the summary line these steps grep), which is the
+      # only number the check can see; don't "correct" them to the listed
+      # totals.
+      #
+      # And the executed count is NOT stable run to run: two CI runs on this PR,
+      # on commits differing only in doc comments (zero tests added,
+      # `--list-tests` unchanged), executed 2194 and 2204 for step 1. The cause
+      # is not established — it is not conditional skips (the only
+      # `.enabled(if:)` here is gated on an env var CI does not set) and not
+      # parameterization (all `arguments:` are static literals). Left unexplained
+      # rather than guessed at. The practical consequence is the point: pin a
+      # floor near the exact count and it WILL fire spuriously. Keep the margin.
+      # The floors sit well below each step's total
+      # so ordinary test additions/removals never trip them. Their job is NOT
+      # to catch an unlisted new target (the complement shape already does
+      # that) — it is to catch a *collapse or rename* of a target that is
+      # named in one of these regexes, where `--filter`/`--skip` would
+      # otherwise zero-match or over-skip its way to a green run of nothing.
+      # ---------------------------------------------------------------------
+      - name: Test (fast parallel pass 1/2 — TBDDaemonTests)
+        # A tier-1 test can still hang indefinitely: an over-long TestClock
+        # advance chain wedged for >10 min and `.clockDriven` did NOT bound it
+        # (the hung work sits where the time limit cannot cancel it). Without
+        # this the job falls back to the 6 h default.
+        #
+        # 30, not 10: this step runs the FIRST `swift test`, so it pays the
+        # whole test-target compile, not just the ~30 s of test runtime. Three
+        # consecutive warm-cache runs on main measured 2m22s / 3m33s / 6m02s —
+        # a 10-minute budget is under 2x the observed worst case and a cold
+        # cache (Package.resolved change, cache eviction) would blow through it
+        # and kill a healthy build. This bounds a hang at 1/12 of the default
+        # while staying far above any legitimate run.
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          swift test --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1)
+          # `swift test --filter/--skip` exits GREEN on zero matches, so a bad
+          # regex or a renamed target would silently run nothing and pass.
+          if [ -z "$count" ] || [ "$count" -lt 1800 ]; then
+            echo "::error::Fast pass 1/2 ran ${count:-no} tests (floor 1800) — the --filter regex matched nothing or the target was renamed."
+            exit 1
+          fi
+          echo "Fast pass 1/2 (TBDDaemonTests) executed $count tests."
+
+      - name: Test (fast parallel pass 2/2 — everything except TBDDaemonTests and the live target)
+        # Expressed as a COMPLEMENT, not a list of targets — see the "Why step 2
+        # is a COMPLEMENT" block above. A new test target lands here on its own.
+        #
+        # 30, matching step 1. The earlier 15 was justified by "the previous
+        # step already paid the test-target compile, so this one is warm" — but
+        # compile time is no longer the binding constraint. With `.clockDriven`
+        # raised to 4 minutes the per-test worst case went 60 s -> 240 s, and a
+        # wedged `.clockDriven, .serialized` suite pays that *per test, in
+        # series*: FileWatcherTests (11 tests, in this pass) passes 15 minutes
+        # after only four of them. The step would then die on the GitHub
+        # timeout, which names no suite — precisely the uninformative outcome
+        # this `timeout-minutes` exists to prevent. 30 gives the per-test limits
+        # room to fire first and attribute the hang to a named test. (A suite
+        # wedged in *every* test still overruns 30; the aim is to make the
+        # ordinary case report itself, not to bound the pathological one.)
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          swift test --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1)
+          # `swift test --filter/--skip` exits GREEN on zero matches, so an
+          # over-broad skip or a renamed target would silently run nothing and
+          # pass.
+          if [ -z "$count" ] || [ "$count" -lt 1900 ]; then
+            echo "::error::Fast pass 2/2 ran ${count:-no} tests (floor 1900) — the --skip regex over-matched or a target was renamed."
+            exit 1
+          fi
+          echo "Fast pass 2/2 (everything except TBDDaemonTests) executed $count tests."
+
+      - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
+        # `--no-parallel` is REQUIRED and is not the same as omitting
+        # `--parallel`. SwiftPM's `--parallel` governs XCTest's process-level
+        # sharding; Swift Testing parallelizes suites in-process on its own and
+        # ignores the absence of the flag. Measured on this target: without
+        # `--no-parallel` all 17 suites start simultaneously and the pass
+        # finishes in 10 s — i.e. the live suites contend with each other and
+        # the step is not quiet at all, defeating its entire purpose. With the
+        # flag they run strictly one at a time (24 s). Serial execution on an
+        # idle machine IS this step; do not "optimize" the flag away.
+        # timeout-minutes so a wedged tmux test can't eat the job's 6 h default.
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          swift test --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1)
+          if [ -z "$count" ] || [ "$count" -lt 35 ]; then
+            echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
+            exit 1
+          fi
+          echo "Quiet pass executed $count tests."
+
+      # `warn`, not `ignore`: an absent file means the metrics wiring broke, and
+      # that must be visible rather than silently producing an empty dashboard.
+      - name: Upload retry metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retry-metrics
+          path: /tmp/retry-metrics.jsonl
+          if-no-files-found: warn
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j 2

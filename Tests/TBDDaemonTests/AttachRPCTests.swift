@@ -1,5 +1,7 @@
+import Clocks
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -106,7 +108,7 @@ struct AttachRPCStubTests {
     }
 }
 
-@Suite("Attach RPC orchestration")
+@Suite("Attach RPC orchestration", .clockDriven, .serialized)
 struct AttachRPCOrchestrationTests {
 
     private func makeSocketPair() throws -> (Int32, Int32) {
@@ -133,7 +135,11 @@ struct AttachRPCOrchestrationTests {
         // that exercises the timeout, `unackedAttachTornDownAfterTimeout`,
         // passes its own short value explicitly.
         readyTimeout: Duration = .seconds(600),
-        commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil
+        commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil,
+        // The two tests that exercise the ready-timer pass a `TestClock` and
+        // advance it; everyone else keeps the real clock plus the sentinel
+        // timeout above, so the timer simply never fires.
+        clock: (any Clock<Duration>)? = nil
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
             supervisor: supervisor,
@@ -141,7 +147,8 @@ struct AttachRPCOrchestrationTests {
             environment: gateOn ? ["TBD_TMUX_CONTROL_MODE": "1"] : [:],
             fdVending: vending,
             readyTimeout: readyTimeout,
-            commandProvider: commandProvider)
+            commandProvider: commandProvider,
+            clock: clock ?? ContinuousClock())
     }
 
     /// Thread-safe monotonic counter — lets a commandProvider hand each
@@ -270,8 +277,10 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
+        let clock = TestClock<Duration>()
+        let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, readyTimeout: .milliseconds(100))
+            supervisor: supervisor, vending: vending, readyTimeout: readyTimeout, clock: clock)
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -281,9 +290,13 @@ struct AttachRPCOrchestrationTests {
         let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(rxFD) }
 
-        // No attach.ready is ever sent. After the timeout, the daemon must
-        // detach — closing the write end, so the vended read fd sees EOF.
-        try await Task.sleep(for: .milliseconds(400))
+        // No attach.ready is ever sent. Advancing past the timeout fires the
+        // ready-timer — `advanceWhenSuspended` also proves the detached timer
+        // task actually armed, which the old wall-clock sleep only assumed.
+        // The daemon must then detach, closing the write end: EOF on the
+        // vended read fd (a blocking read, so it is the teardown itself that
+        // unblocks the assertion).
+        await clock.advanceWhenSuspended(by: readyTimeout)
         var buffer = [UInt8](repeating: 0, count: 8)
         let count = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
         #expect(count == 0, "un-acked attach must be torn down (EOF on the vended fd)")
@@ -352,9 +365,11 @@ struct AttachRPCOrchestrationTests {
         let (router, db) = try makeRouterAndDB()
         let (client, recorder) = makeFakeClient()
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-timeout-test")
+        let clock = TestClock<Duration>()
+        let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
             supervisor: supervisor, vending: vending,
-            readyTimeout: .milliseconds(100), commandProvider: { _ in client })
+            readyTimeout: readyTimeout, commandProvider: { _ in client }, clock: clock)
 
         let attach = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -370,9 +385,9 @@ struct AttachRPCOrchestrationTests {
         let readyTask = Task { await router.handle(ready) }
         try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
-        // Let the 100 ms ready-timeout fire while the replay is in flight:
-        // the acked attach must NOT be torn down (no EOF on the vended fd).
-        try await Task.sleep(for: .milliseconds(400))
+        // Let the ready-timeout fire while the replay is in flight: the acked
+        // attach must NOT be torn down (no EOF on the vended fd).
+        await clock.advanceWhenSuspended(by: readyTimeout)
         let flags = fcntl(rxFD, F_GETFL)
         _ = fcntl(rxFD, F_SETFL, flags | O_NONBLOCK)
         var probe = [UInt8](repeating: 0, count: 8)

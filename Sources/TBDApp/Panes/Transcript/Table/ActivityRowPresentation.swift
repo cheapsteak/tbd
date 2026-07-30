@@ -59,8 +59,14 @@ struct ActivityRowPresentation: Equatable {
     let badges: [ActivityRowBadge]
     /// `openTranscriptOverlay(id)` target — most kinds.
     let openTargetID: String?
-    /// Title truncation: `.byTruncatingMiddle` for Read (file path), else tail.
+    /// Title truncation: `.byTruncatingMiddle` for Read (file path),
+    /// `.byTruncatingHead` for injected file paths (keep the whole filename),
+    /// else tail.
     let titleTruncation: NSLineBreakMode
+    /// `NSView.toolTip` for the title field — set only where the visible title
+    /// hides something (a middle-truncated path). Nil elsewhere: a tooltip that
+    /// merely repeats a fully-visible short title is noise.
+    let titleTooltip: String?
     let style: RowStyle
 
     init(
@@ -71,6 +77,7 @@ struct ActivityRowPresentation: Equatable {
         badges: [ActivityRowBadge],
         openTargetID: String?,
         titleTruncation: NSLineBreakMode = .byTruncatingTail,
+        titleTooltip: String? = nil,
         style: RowStyle = .chrome
     ) {
         self.iconSystemName = iconSystemName
@@ -80,6 +87,7 @@ struct ActivityRowPresentation: Equatable {
         self.badges = badges
         self.openTargetID = openTargetID
         self.titleTruncation = titleTruncation
+        self.titleTooltip = titleTooltip
         self.style = style
     }
 }
@@ -97,8 +105,9 @@ enum ActivityRowFormatter {
         switch node.kind {
         case .chatBubble:
             return nil
-        case let .systemReminder(id, kind, text, ts):
-            return systemReminder(id: id, kind: kind, text: text, timestamp: ts)
+        case let .systemReminder(id, kind, text, ts, source, truncatedTo):
+            return systemReminder(id: id, kind: kind, text: text, timestamp: ts,
+                                  source: source, truncatedTo: truncatedTo)
         case let .skillBody(id, text, ts):
             return skillBody(id: id, text: text, timestamp: ts)
         case let .toolCall(id, name, inputJSON, inputTruncatedTo, result, ts):
@@ -381,7 +390,8 @@ enum ActivityRowFormatter {
     // MARK: System reminder (SystemReminderRow)
 
     private static func systemReminder(
-        id: String, kind: SystemKind, text: String, timestamp: Date?
+        id: String, kind: SystemKind, text: String, timestamp: Date?,
+        source: String?, truncatedTo: Int?
     ) -> ActivityRowPresentation {
         // Background-task notifications get a richer presentation: a
         // "Background · <summary>" title with the status surfaced as a badge.
@@ -397,17 +407,70 @@ enum ActivityRowFormatter {
             case .slashEnvelope: return "command"
             case .skillBody: return "skill"
             case .taskNotification: return "background"
+            // Covers both an injected CLAUDE.md and an @-mentioned file body;
+            // the source segment below carries the path that tells them apart.
+            case .nestedMemory: return "file"
             case .other: return "info"
             }
         }()
+
+        // Injected-context rows (hooks, CLAUDE.md) are otherwise near-identical
+        // re-injections of the same rule: the source name disambiguates them
+        // and the size is the whole point — one 15-line Read can pull 88 KB.
+        var segments: [ActivityRowSegment] = []
+        if let source, !source.isEmpty {
+            segments = [
+                ActivityRowSegment(text: source, style: .secondary),
+                ActivityRowSegment(text: "·", style: .tertiary),
+                ActivityRowSegment(text: injectedSize(text: text, truncatedTo: truncatedTo), style: .tertiary)
+            ]
+        }
+
         return ActivityRowPresentation(
             iconSystemName: "info.circle",
-            titleSegments: [],
+            titleSegments: segments,
             timestamp: timestamp,
             isError: false,
             badges: [ActivityRowBadge(text: label, kind: .neutral)],
-            openTargetID: id
+            openTargetID: id,
+            // Path sources head-truncate: the whole filename must survive, and
+            // middle truncation kept a short tail that cut into it
+            // (`/private/tmp/claude-5…pr-body.md` for `iam-pr-body.md`).
+            // Non-path sources keep middle truncation — head-truncating
+            // `PostToolUse:Read` would eat the informative front.
+            titleTruncation: (kind == .nestedMemory) ? .byTruncatingHead : .byTruncatingMiddle,
+            // Truncated paths need hovering to reveal the whole thing. Hook
+            // names are short and fully visible — no tooltip for those.
+            titleTooltip: (kind == .nestedMemory) ? source.flatMap { $0.isEmpty ? nil : $0 } : nil
         )
+    }
+
+    /// Human-readable size of an injected-context payload. `truncatedTo` holds
+    /// the ORIGINAL length when `text` was capped, so it wins when present.
+    ///
+    /// Both numbers are `String.count` — grapheme clusters, not bytes — so the
+    /// unit is spelled "chars". Feeding them to `ByteCountFormatter` understated
+    /// smart-quote / box-drawing / emoji-heavy CLAUDE.md bodies by up to 4x,
+    /// which defeats the badge's whole purpose.
+    static func injectedSize(text: String, truncatedTo: Int?) -> String {
+        let count = truncatedTo ?? text.count
+        if count < 1000 {
+            return "\(count) chars"
+        }
+        // Cascade smallest → largest, picking the first unit whose ROUNDED
+        // mantissa stays under 1000 — checking the raw count against a fixed
+        // threshold (the old `count >= 1_000_000` shape) lets values like
+        // 999_950 round up to "1000.0K" instead of bumping to "1.0M".
+        let units: [(divisor: Double, suffix: String)] = [
+            (1_000, "K"), (1_000_000, "M"), (1_000_000_000, "G"),
+        ]
+        for (index, unit) in units.enumerated() {
+            let mantissa = (Double(count) / unit.divisor * 10).rounded() / 10
+            if mantissa < 1000 || index == units.count - 1 {
+                return String(format: "%.1f\(unit.suffix) chars", mantissa)
+            }
+        }
+        return "\(count) chars" // unreachable: loop always returns on its last iteration
     }
 
     // MARK: Task notification (background-task activity row)

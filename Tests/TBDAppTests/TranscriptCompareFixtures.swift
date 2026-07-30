@@ -2,14 +2,13 @@ import Foundation
 import TBDShared
 
 /// Content fixtures for the env-gated old-vs-new visual comparison harness
-/// (`TranscriptVisualCompareHarness`). Each `scenario` returns the SAME
+/// (`TableTranscriptHarness`). Each `scenario` returns the SAME
 /// `[TranscriptItem]` array fed to BOTH render paths so any visual delta comes
 /// from the renderer, not the data. (#129)
 ///
 /// Kept separate from `TranscriptRenderNodeFixtures` (which builds
 /// `TranscriptRenderNode`s for document-layer unit tests) because these are
-/// `TranscriptItem`s — the upstream input both the SwiftUI `TranscriptItemsView`
-/// and the TextKit2 `transcriptRenderNodes(from:)` consume.
+/// `TranscriptItem`s — the upstream input `transcriptRenderNodes(from:)` consumes.
 enum TranscriptCompareFixtures {
 
     /// All scenarios in the order they should be rendered/indexed.
@@ -175,7 +174,7 @@ enum TranscriptCompareFixtures {
             name: "Grep",
             inputJSON: #"{"pattern":"transcriptRenderNodes","path":"Sources","output_mode":"files_with_matches"}"#,
             inputTruncatedTo: nil,
-            result: ToolResult(text: "Sources/TBDApp/Panes/Transcript/TranscriptRenderNode.swift\nSources/TBDApp/Panes/Transcript/TranscriptItemsView.swift", truncatedTo: nil, isError: false),
+            result: ToolResult(text: "Sources/TBDApp/Panes/Transcript/TranscriptRenderNode.swift\nSources/TBDApp/Panes/Transcript/TranscriptRow.swift", truncatedTo: nil, isError: false),
             subagent: nil,
             timestamp: nil,
             usage: nil

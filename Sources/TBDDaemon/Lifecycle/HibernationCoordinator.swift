@@ -126,8 +126,22 @@ public actor HibernationCoordinator {
     /// re-check the pane's current command, and how long we wait between checks.
     /// 15 × 200ms ≈ 3s — ported from the old Suspend feature. If claude is still
     /// the pane's program after the whole window, we fall back to SIGTERM.
-    static let exitPollAttempts = 15
-    static let exitPollInterval: Duration = .milliseconds(200)
+    ///
+    /// Injectable (defaulted init parameters) rather than `static let`, so a
+    /// test can cross the exhaustion threshold in a handful of `TestClock`
+    /// advances instead of paying ~3s of real wall time to prove one branch.
+    /// Deliberately not `private`: the production defaults are pinned by a test.
+    /// `nonisolated` because both are immutable and `Sendable`, so reading them
+    /// needs no actor hop — without it a test's synchronous `#expect` against
+    /// them fails to compile. Safe only while they stay `let`; a `var` here
+    /// would have to drop `nonisolated` and every reader would need `await`.
+    nonisolated let exitPollAttempts: Int
+    nonisolated let exitPollInterval: Duration
+
+    /// Delay seam for the verify-exit poll (`Duration` is behavior). Tests
+    /// inject a `TestClock` so the poll's pacing is virtual and the
+    /// "escalate after exactly N attempts" boundary is exact.
+    private let clock: any Clock<Duration>
 
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -139,7 +153,10 @@ public actor HibernationCoordinator {
         modelProfileResolver: ModelProfileResolver? = nil,
         subscriptions: StateSubscriptionManager? = nil,
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        exitPollAttempts: Int = 15,
+        exitPollInterval: Duration = .milliseconds(200),
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
         self.tmux = tmux
@@ -149,6 +166,9 @@ public actor HibernationCoordinator {
         self.configDirManager = configDirManager
         self.inputActivity = InputActivityTracker()
         self.now = now
+        self.exitPollAttempts = exitPollAttempts
+        self.exitPollInterval = exitPollInterval
+        self.clock = clock
     }
 
     /// Projects root for a wake spawn's resolved profile config dir path,
@@ -516,11 +536,15 @@ public actor HibernationCoordinator {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
         )
         let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
-        // Pre-accept Claude's folder-trust dialog for scratch spaces so a wake
-        // onto a fresh isolated profile dir (never seeded before) doesn't re-prompt.
-        // Self-gates on isScratch; a cheap no-op once already trusted.
-        ClaudeTrustSeeder.ensureTrustedForScratch(
-            worktree: worktree, profileConfigDir: profileConfigDir)
+        // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
+        // isolated profile dir (never seeded before) doesn't re-prompt — the
+        // dialog blocks before SessionStart, so the stalled wake would be
+        // machine-invisible. Cheap no-op once already trusted. `config` is a
+        // `try?` read; fall back to the shipped default.
+        await ClaudeTrustSeeder.ensureTrusted(
+            worktree: worktree,
+            autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
+            profileConfigDir: profileConfigDir)
         // Pre-resume freshness: if the worktree was moved/promoted while this
         // session was parked, its transcript still lives under the OLD munged
         // project dir; the cwd-scoped `claude --resume` below only checks the
@@ -610,6 +634,7 @@ public actor HibernationCoordinator {
         // fresh id so subsequent hibernate/wake reference the live session.
         let termID = terminal.id
         Task {
+            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(for: .seconds(5))
             if let newID = await self.detector.captureSessionID(server: server, paneID: livePaneID) {
                 try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
@@ -893,8 +918,16 @@ public actor HibernationCoordinator {
             logger.debug("hibernate: /exit send failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return false
         }
-        for _ in 0..<Self.exitPollAttempts {
-            try? await Task.sleep(for: Self.exitPollInterval)
+        // Invariant, preserved verbatim from the pre-clock version: `try?` is
+        // NOT a cancellation check. On a cancelled task every `sleep` throws
+        // immediately, so this loop burns all `exitPollAttempts` iterations at
+        // zero delay, returns false, and the caller escalates straight to
+        // SIGTERM. That is a real defect, filed separately; it is deliberately
+        // NOT fixed here — an untested cancellation guard on a kill path is
+        // exactly the accretion this migration refuses. Anything added to this
+        // loop must keep that behaviour or change it with its own test.
+        for _ in 0..<exitPollAttempts {
+            try? await clock.sleep(for: exitPollInterval)
             if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: paneID),
                !ClaudeStateDetector.isClaudeProcess(cmd) {
                 return true
@@ -908,9 +941,11 @@ public actor HibernationCoordinator {
     /// swap path so hibernate and account-switch interrupt identically.
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
+        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
         try? await Task.sleep(for: .milliseconds(150))
         if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
            let pid = Int32(pidStr), pid > 0 {

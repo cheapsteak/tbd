@@ -314,8 +314,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// also arms a one-shot dispatch to log how many `heightOfRow` calls AppKit
         /// made shortly after open.
         ///
-        /// Called ONLY from the table pane's `makeNSView`, so the cost is
-        /// confined behind the `useTableViewTranscript` gate. (#129)
+        /// Called ONLY from the table pane's `makeNSView`. (#129)
         func precomputeBottomWindowInstrumented() {
             openPerf = OpenPerf()
             heightOfRowCalls = 0

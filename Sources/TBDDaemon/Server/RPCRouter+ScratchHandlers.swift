@@ -128,6 +128,9 @@ extension RPCRouter {
             await orphanGC.scratchpadCleanup(forRemovedWorktreePath: wt.path, repoPath: "")
         }
 
+        // Hard delete: closed-terminal history (rows + captured files) goes
+        // too. Archive (below) deliberately keeps it.
+        try? await db.terminalHistory.deleteForWorktree(worktreeID: wt.id)
         try await db.worktrees.delete(id: wt.id)
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
         return .ok()
