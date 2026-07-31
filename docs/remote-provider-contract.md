@@ -241,6 +241,15 @@ Failure follows the standard error model below: `not_found` if `<id>` no longer 
 
 The caller execs the provider directly on the controlling TTY of a terminal pane and gets out of the way — the provider becomes a live shim between that TTY and the remote session. This gives the provider a live hook to refresh credentials, retry a dropped channel, or exit with code 4 plus remediation on an auth failure.
 
+**A successful attach MUST target the requested `<id>`.** If the provider
+cannot establish that targeted attach, it MUST exit non-zero using the standard
+error model; it MUST NOT silently fall back to a provider-wide session picker,
+an unrelated session, or a plain remote shell. Human-facing commands outside
+this contract may offer those fallbacks, but a machine caller cannot distinguish
+such a terminal from a successful attach without parsing rendered terminal
+output, which this contract explicitly forbids. A retryable targeting or
+transport failure uses exit 3.
+
 **Pane exit means the viewer detached — it never means the session is dead.** The only source of truth for whether a session is still alive is `list` (or `events`); `attach` exiting is purely a local, viewer-side event.
 
 **`attach`'s stdout is a PTY byte stream and MUST NOT be parsed.** Unlike every other verb, there is no JSON object — not even the error object — to read here. A pre-connection auth failure still exits 4 per the error model below, and that **exit code alone** is what the caller correlates. A caller that wants the accompanying `message`/`remediation` gets it from a subsequent structured verb (`list`), never by reading attach's bytes.
