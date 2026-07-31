@@ -13,6 +13,15 @@ enum RemoteSessionDetailTab: String, CaseIterable, Equatable, Hashable {
     case log = "Log"
 }
 
+/// Constructs the raw terminal input for the send field. A terminal's Enter
+/// key is carriage return, not line feed; the provider receives these bytes
+/// verbatim.
+enum RemoteSessionSendPayload {
+    static func submitting(_ text: String) -> String {
+        text + "\r"
+    }
+}
+
 /// Detail pane shown when a remote-session sidebar row is selected
 /// (`AppState.selectedRemoteSession`), hosted (via `RemoteSessionHostSlot`)
 /// inside `DetailSectionHostPager`'s `.remote` tab — mounted continuously
@@ -480,7 +489,7 @@ struct RemoteSessionDetailView: View {
 
     private func performSend() {
         guard !sendText.isEmpty else { return }
-        let text = sendText + "\n"
+        let text = RemoteSessionSendPayload.submitting(sendText)
         sendText = ""
         isSending = true
         Task {

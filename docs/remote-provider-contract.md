@@ -180,6 +180,8 @@ stdin:
 
 `profile` (optional) is a Profile object (see above) selecting the identity the new session's agent should run as. It is meaningful only when the provider declares the `profile` capability; a provider that doesn't declare it MUST ignore the field — per the ignore-unknown-fields rule in Versioning — and create the session against its own default identity rather than error. An absent `profile` always means the provider's default identity, regardless of capability.
 
+If `create_params` exposes the well-known `prompt` field, the provider owns clearing any agent startup or trust gate before delivering that prompt. Writing prompt bytes while another interactive gate owns the TTY does not count as delivery. Providers SHOULD use agent flags or machine interfaces to clear and verify such gates, and MUST NOT infer readiness by parsing cosmetic TUI output.
+
 Response: a Session object.
 
 `create` MUST return within seconds. If provisioning is slow, return immediately with `state: "starting"` and let `list` (or `events`) carry the session to `running` later.
@@ -191,6 +193,8 @@ The caller may retry a timed-out `create` call using the **same** `idempotency_k
 Returns `{"sessions": [Session, ...]}`.
 
 Providers SHOULD keep exited sessions listable for at least 24 hours (with `state: "exited"`) rather than dropping them from the list immediately. A session disappearing from the list is indistinguishable from transport drift unless exited sessions stick around long enough to be told apart from a genuine loss.
+
+A transport-overload or unreachable failure MUST be returned as a transient error (exit 3), never as a successful empty list. The caller keeps its last successful snapshot and marks the provider stale; an empty successful snapshot instead counts toward the two-absence rule and can incorrectly mark live sessions gone.
 
 ## `stop <id>`
 
@@ -206,7 +210,7 @@ Rendering scrollback to a human is not the thing the machine-interface rule (abo
 
 ## `send <id>`
 
-stdin bytes are delivered verbatim to the session as keystrokes. The caller decides whether to append a trailing newline — the provider does not add one on its own. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
+stdin bytes are delivered verbatim to the session as keystrokes. The provider does not add a terminator. When a caller means the terminal Enter key, it MUST append carriage return (`\r`, byte `0x0D`); line feed (`\n`, byte `0x0A`) is not equivalent in a raw PTY and may fail to submit the line. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
 
 ## `rename <id> <title>` (optional)
 
