@@ -40,7 +40,10 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
-        codexExecutableResolver: { "/usr/bin/true" }
+        codexExecutableResolver: { "/usr/bin/true" },
+        codexHomeEnsurer: {
+            tempDir.appendingPathComponent("codex-home", isDirectory: true)
+        }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -63,7 +66,10 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
-        codexExecutableResolver: { "/usr/bin/true" }
+        codexExecutableResolver: { "/usr/bin/true" },
+        codexHomeEnsurer: {
+            tempDir.appendingPathComponent("codex-home", isDirectory: true)
+        }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -109,7 +115,10 @@ import Testing
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         modelProfileResolver: resolver,
-        codexExecutableResolver: { "/usr/bin/true" }
+        codexExecutableResolver: { "/usr/bin/true" },
+        codexHomeEnsurer: {
+            tempDir.appendingPathComponent("codex-home", isDirectory: true)
+        }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -473,7 +482,10 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
-        codexExecutableResolver: { "/usr/bin/true" }
+        codexExecutableResolver: { "/usr/bin/true" },
+        codexHomeEnsurer: {
+            tempDir.appendingPathComponent("codex-home", isDirectory: true)
+        }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

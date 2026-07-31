@@ -118,6 +118,8 @@ import TBDShared
         )
         #expect(profile.contains(#"[plugins."tbd@tbd"]"#))
         #expect(profile.contains("enabled = true"))
+        #expect(profile.contains(CodexProfileWriter.shadcnServerHeader))
+        #expect(profile.contains("enabled = false"))
     }
 
     @Test func ensurePluginEnabledPreservesProfileAndEnablesExistingSection() {
@@ -169,6 +171,29 @@ import TBDShared
         }
     }
 
+    @Test func ensureShadcnDisabledPreservesProfileAndIsIdempotent() {
+        let input = """
+        model = "gpt-5.1"
+
+        [mcp_servers.shadcn]
+        enabled = true
+        command = "npx"
+
+        [tools]
+        web_search = true
+        """
+
+        let first = CodexProfileWriter.ensureShadcnDisabled(in: input)
+        let second = CodexProfileWriter.ensureShadcnDisabled(in: first)
+
+        #expect(first.contains(#"model = "gpt-5.1""#))
+        #expect(first.contains(#"command = "npx""#))
+        #expect(first.contains("[tools]"))
+        #expect(first.contains("enabled = false"))
+        #expect(!first.contains("enabled = true"))
+        #expect(second == first, "shadcn profile override must be idempotent")
+    }
+
     @Test func ensureProfileIsIdempotentAndDoesNotRewrite() throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-profile-idem-\(UUID().uuidString)", isDirectory: true)
@@ -185,6 +210,8 @@ import TBDShared
         let secondModified = try FileManager.default
             .attributesOfItem(atPath: path.path)[.modificationDate] as? Date
 
+        #expect(firstContent.contains(CodexProfileWriter.shadcnServerHeader))
+        #expect(firstContent.contains("enabled = false"))
         #expect(firstContent == secondContent, "profile content must be byte-identical after second run")
         #expect(firstModified == secondModified, "second ensureProfile run must not rewrite the file")
     }

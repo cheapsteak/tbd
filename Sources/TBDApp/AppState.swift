@@ -1046,6 +1046,20 @@ final class AppState: ObservableObject {
                     rows: rows
                 )
             }
+    /// How `continueInCodex` crosses the daemon boundary. Injectable so
+    /// AppState tests can prove overlapping-click suppression, result
+    /// integration, and error cleanup without a live daemon.
+    lazy var continueInCodexPerformer:
+        @MainActor (UUID, Int?, Int?, String?) async throws
+            -> TerminalContinueInCodexResult = {
+                [daemonClient] sourceTerminalID, cols, rows, colorFgBg in
+                try await daemonClient.continueInCodex(
+                    sourceTerminalID: sourceTerminalID,
+                    cols: cols,
+                    rows: rows,
+                    colorFgBg: colorFgBg
+                )
+            }
     /// How `setControlModeEnabled` persists the flag — injectable for the same
     /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
     /// protocol), so the Settings-toggle tests can exercise the success branch.

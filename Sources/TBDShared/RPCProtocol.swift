@@ -2046,7 +2046,7 @@ public struct TerminalConversationResult: Codable, Sendable {
 /// Extensible takeover destination contract. Only `.localCodex` is supported
 /// today; the string kind and optional worker identifier leave a stable wire
 /// seam for future remote worker implementations such as Agent Box.
-public struct TerminalContinueInCodexTarget: Codable, Sendable, Equatable {
+public struct TerminalContinueInCodexTarget: Codable, Sendable, Equatable, Hashable {
     public static let localCodexKind = "local_codex"
     public static let localCodex = TerminalContinueInCodexTarget(
         kind: localCodexKind)

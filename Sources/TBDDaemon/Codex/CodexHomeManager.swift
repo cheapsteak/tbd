@@ -180,6 +180,7 @@ enum CodexPluginWriter {
 
 enum CodexProfileWriter {
     static let profileFileName = "\(CodexPlugin.profileName).config.toml"
+    static let shadcnServerHeader = "[mcp_servers.shadcn]"
 
     static func profilePath(in codexHome: URL) -> URL {
         codexHome.appendingPathComponent(profileFileName, isDirectory: false)
@@ -188,7 +189,9 @@ enum CodexProfileWriter {
     static func ensureProfile(in codexHome: URL) throws {
         let path = profilePath(in: codexHome)
         let current = (try? String(contentsOf: path, encoding: .utf8)) ?? ""
-        let updated = ensurePluginEnabled(in: current)
+        let updated = ensureShadcnDisabled(
+            in: ensurePluginEnabled(in: current)
+        )
 
         guard updated != current else {
             return
@@ -203,6 +206,27 @@ enum CodexProfileWriter {
 
     static func ensurePluginEnabled(in toml: String) -> String {
         let header = #"[plugins."\#(CodexPlugin.pluginKey)"]"#
+        return ensureEnabledSetting(in: toml, header: header, enabled: true)
+    }
+
+    /// TBD Codex sessions can start in many worktrees at once. Disable the
+    /// project-discovered shadcn MCP server in TBD's profile so those sessions
+    /// do not fan out one resident stdio server each. This is profile-scoped:
+    /// it does not alter the user's default Codex configuration.
+    static func ensureShadcnDisabled(in toml: String) -> String {
+        ensureEnabledSetting(
+            in: toml,
+            header: shadcnServerHeader,
+            enabled: false
+        )
+    }
+
+    private static func ensureEnabledSetting(
+        in toml: String,
+        header: String,
+        enabled: Bool
+    ) -> String {
+        let enabledLine = "enabled = \(enabled)"
 
         // Normalize line endings to `\n` before splitting. A CRLF-terminated
         // `tbd.config.toml` would otherwise leave a trailing `\r` on every
@@ -240,7 +264,7 @@ enum CodexProfileWriter {
             if !updated.isEmpty {
                 updated += "\n"
             }
-            updated += "\(header)\nenabled = true\n"
+            updated += "\(header)\n\(enabledLine)\n"
             return updated
         }
 
@@ -263,9 +287,9 @@ enum CodexProfileWriter {
                     .trimmingCharacters(in: .whitespaces)
                 return key == "enabled"
             }) {
-            lines[enabledIndex] = "enabled = true"
+            lines[enabledIndex] = enabledLine
         } else {
-            lines.insert("enabled = true", at: headerIndex + 1)
+            lines.insert(enabledLine, at: headerIndex + 1)
         }
 
         return lines.joined(separator: "\n") + (hadTrailingNewline ? "\n" : "")
@@ -300,7 +324,9 @@ enum CodexExecutableResolutionError: LocalizedError, Equatable {
 /// Resolves the Codex CLI before TBD creates a tmux window or terminal row.
 ///
 /// A configured `TBD_CODEX_EXECUTABLE` absolute path wins, followed by every
-/// PATH entry in order. ChatGPT.app's bundled CLI is the fallback because
+/// absolute PATH entry in order. Relative and empty PATH entries are ignored:
+/// resolving them against the daemon's current directory could execute an
+/// untrusted worktree-local `codex`. ChatGPT.app's bundled CLI is the fallback because
 /// GUI-launched daemons often have a minimal PATH that cannot name it even
 /// though the app (and the user's existing global Codex login) is installed.
 /// The returned path is always absolute so the later interactive shell does
@@ -315,7 +341,7 @@ enum CodexExecutableResolver {
         currentDirectory: String = FileManager.default.currentDirectoryPath,
         fallbackPath: String = chatGPTBundlePath,
         isExecutable: (String) -> Bool = {
-            FileManager.default.isExecutableFile(atPath: $0)
+            isUsableExecutable(atPath: $0)
         }
     ) throws -> String {
         let currentDirectoryURL = URL(
@@ -359,7 +385,11 @@ enum CodexExecutableResolver {
             omittingEmptySubsequences: false
         )
         for entry in pathEntries {
-            let directory = entry.isEmpty ? currentDirectory : String(entry)
+            let directory = String(entry)
+            guard !directory.isEmpty,
+                  (directory as NSString).isAbsolutePath else {
+                continue
+            }
             let candidate = absolutePath(
                 (directory as NSString).appendingPathComponent("codex")
             )
@@ -377,6 +407,35 @@ enum CodexExecutableResolver {
         throw CodexExecutableResolutionError.notFound(
             searchPath: searchPath,
             fallbackPath: absoluteFallback
+        )
+    }
+
+    private static func isUsableExecutable(atPath path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: path, isDirectory: &isDirectory
+        ), !isDirectory.boolValue else {
+            return false
+        }
+        return FileManager.default.isExecutableFile(atPath: path)
+    }
+}
+
+struct CodexLaunchPreparation: Sendable {
+    let executablePath: String
+    let codexHome: URL
+
+    static func prepare(
+        executableResolver: @Sendable () throws -> String,
+        homeEnsurer: @Sendable () throws -> URL
+    ) throws -> CodexLaunchPreparation {
+        // Keep this order explicit: executable resolution is read-only and
+        // should fail before the profile writer touches the global Codex home.
+        let executablePath = try executableResolver()
+        let codexHome = try homeEnsurer()
+        return CodexLaunchPreparation(
+            executablePath: executablePath,
+            codexHome: codexHome
         )
     }
 }

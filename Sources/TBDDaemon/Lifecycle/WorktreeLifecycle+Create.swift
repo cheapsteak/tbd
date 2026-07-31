@@ -234,6 +234,23 @@ extension WorktreeLifecycle {
         do {
             let clock = ContinuousClock()
             let phaseStart = clock.now
+            let creationConfig = try await db.config.get()
+            let creationPrimaryKind: TerminalKind = carryover == nil
+                ? resolvePrimaryTerminalKind(
+                    skipClaude: skipClaude,
+                    archivedClaudeSessions: nil,
+                    configuredPreference: creationConfig.primaryAgentPreference
+                )
+                : .claude
+            // Preflight the full Codex launch before creating a directory,
+            // checking out a worktree, or starting a pre-session pane. Passing
+            // the prepared values through phase 3 also prevents a second,
+            // post-mutation resolution attempt after a long-running hook.
+            let preparedCodexLaunch = creationPrimaryKind == .codex
+                ? try CodexLaunchPreparation.prepare(
+                    executableResolver: codexExecutableResolver,
+                    homeEnsurer: codexHomeEnsurer)
+                : nil
 
             // 1. Create parent directory
             let createDirStart = clock.now
@@ -380,7 +397,8 @@ extension WorktreeLifecycle {
                         overrideProfileID: overrideProfileID,
                         modelOverride: modelOverride,
                         claudeSettingsOverlay: claudeSettingsOverlay,
-                        carryover: carryover
+                        carryover: carryover,
+                        preparedCodexLaunch: preparedCodexLaunch
                     )
                     // Fresh creates get an initial note tab, appended after the
                     // primary spawn set the tab order. Create path only — a
@@ -408,7 +426,8 @@ extension WorktreeLifecycle {
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
                 claudeSettingsOverlay: claudeSettingsOverlay,
-                carryover: carryover
+                carryover: carryover,
+                preparedCodexLaunch: preparedCodexLaunch
             )
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
@@ -600,7 +619,8 @@ extension WorktreeLifecycle {
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
         claudeSettingsOverlay: String? = nil,
-        carryover: ConversationCarryover? = nil
+        carryover: ConversationCarryover? = nil,
+        preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -620,9 +640,18 @@ extension WorktreeLifecycle {
         // command, which previously left behind a terminal row whose pane had
         // already exited. The absolute path also avoids re-resolving through
         // the interactive shell's potentially different PATH.
-        let codexExecutablePath = primaryTerminalKind == .codex
-            ? try codexExecutableResolver()
-            : nil
+        let codexLaunch: CodexLaunchPreparation?
+        if primaryTerminalKind == .codex {
+            codexLaunch = if let preparedCodexLaunch {
+                preparedCodexLaunch
+            } else {
+                try CodexLaunchPreparation.prepare(
+                    executableResolver: codexExecutableResolver,
+                    homeEnsurer: codexHomeEnsurer)
+            }
+        } else {
+            codexLaunch = nil
+        }
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
         // render into hard-wrapped scrollback that can never be reflowed when
@@ -686,18 +715,17 @@ extension WorktreeLifecycle {
             primaryProfileID = nil
             primaryLabel = TerminalLabel.shell
         case .codex:
-            guard let codexExecutablePath else {
-                preconditionFailure("Codex executable must be resolved before the Codex spawn branch")
+            guard let codexLaunch else {
+                preconditionFailure("Codex launch must be prepared before the Codex spawn branch")
             }
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
             primaryCommand = CodexSpawnCommandBuilder.build(
                 initialPrompt: initialPrompt,
-                executablePath: codexExecutablePath
+                executablePath: codexLaunch.executablePath
             )
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
-                "CODEX_HOME": codexHome.path,
+                "CODEX_HOME": codexLaunch.codexHome.path,
             ]
             // omz-update suppression rides `-e` (process env before .zshrc)
             // so the update prompt can't block the codex command; FORCED over

@@ -97,8 +97,10 @@ extension RPCRouter {
         // Resolve Codex before creating any tmux state. A GUI-launched daemon
         // can have a minimal PATH, and a resolution failure must not leave an
         // orphan window or terminal row behind.
-        let codexExecutable = params.type == .codex
-            ? try codexExecutableResolver()
+        let codexPreparation = params.type == .codex
+            ? try CodexLaunchPreparation.prepare(
+                executableResolver: codexExecutableResolver,
+                homeEnsurer: codexHomeEnsurer)
             : nil
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
@@ -158,10 +160,9 @@ extension RPCRouter {
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
         if params.type == .codex {
-            guard let codexExecutable else {
-                return RPCResponse(error: "Codex executable resolution unexpectedly returned no path.")
+            guard let codexPreparation else {
+                return RPCResponse(error: "Codex launch preparation unexpectedly returned no result.")
             }
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
             codexEnv["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
@@ -169,7 +170,7 @@ extension RPCRouter {
             // the design's allowed "set the global path" option — not leftover
             // per-repo isolation: it pins deterministic behavior and lets the
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
-            codexEnv["CODEX_HOME"] = codexHome.path
+            codexEnv["CODEX_HOME"] = codexPreparation.codexHome.path
             // COLORFGBG isn't Claude-specific — Codex shells benefit from it too,
             // so include it at spawn time. (Live updates also reach Codex via
             // `tmux setenv -g COLORFGBG` fanned out by handleAppearanceUpdateColorFgBg.)
@@ -195,7 +196,7 @@ extension RPCRouter {
                 cwd: worktree.path,
                 shellCommand: CodexSpawnCommandBuilder.build(
                     initialPrompt: params.prompt,
-                    executablePath: codexExecutable
+                    executablePath: codexPreparation.executablePath
                 ),
                 env: codexEnv,
                 sensitiveEnv: codexEnvOverrides,
@@ -829,8 +830,10 @@ extension RPCRouter {
         // A missing Codex executable is a recoverable configuration error, not
         // a reason to destroy the user's existing (possibly still inspectable)
         // tmux window.
-        let codexExecutable = terminal.isCodexTerminal
-            ? try codexExecutableResolver()
+        let codexPreparation = terminal.isCodexTerminal
+            ? try CodexLaunchPreparation.prepare(
+                executableResolver: codexExecutableResolver,
+                homeEnsurer: codexHomeEnsurer)
             : nil
 
         // Kill the old window if it still exists (avoids orphans)
@@ -851,11 +854,10 @@ extension RPCRouter {
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
-            guard let codexExecutable else {
-                return RPCResponse(error: "Codex executable resolution unexpectedly returned no path.")
+            guard let codexPreparation else {
+                return RPCResponse(error: "Codex launch preparation unexpectedly returned no result.")
             }
             // Recreate as codex — preserve identity
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
             codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString
@@ -863,7 +865,7 @@ extension RPCRouter {
             // the design's allowed "set the global path" option — not leftover
             // per-repo isolation: it pins deterministic behavior and lets the
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
-            codexEnv["CODEX_HOME"] = codexHome.path
+            codexEnv["CODEX_HOME"] = codexPreparation.codexHome.path
 
             // Codex: re-apply the merged free-form overrides (global < repo) so a
             // recreated Codex pane keeps them, plus omz-update suppression via
@@ -887,7 +889,7 @@ extension RPCRouter {
                 session: "main",
                 cwd: worktree.path,
                 shellCommand: CodexSpawnCommandBuilder.command(
-                    executablePath: codexExecutable),
+                    executablePath: codexPreparation.executablePath),
                 env: codexEnv,
                 sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,
@@ -1159,7 +1161,13 @@ extension RPCRouter {
         sourceConfigDir: URL
     ) -> URL? {
         let fm = FileManager.default
-        if let p = transcriptPath, !p.isEmpty, fm.fileExists(atPath: p) {
+        func isReadableFile(_ path: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: path, isDirectory: &isDirectory)
+                && !isDirectory.boolValue
+                && fm.isReadableFile(atPath: path)
+        }
+        if let p = transcriptPath, !p.isEmpty, isReadableFile(p) {
             return URL(fileURLWithPath: p)
         }
         // Fall back to the source config dir's projects/ tree. Resolve the
@@ -1172,7 +1180,7 @@ extension RPCRouter {
             return nil
         }
         let candidate = projectDir.appendingPathComponent("\(sessionID).jsonl")
-        return fm.fileExists(atPath: candidate.path) ? candidate : nil
+        return isReadableFile(candidate.path) ? candidate : nil
     }
 
     func handleTerminalSwapProfile(_ paramsData: Data) async throws -> RPCResponse {

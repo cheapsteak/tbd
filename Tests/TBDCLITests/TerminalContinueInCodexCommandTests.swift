@@ -15,6 +15,13 @@ struct TerminalContinueInCodexCommandTests {
         )
     }
 
+    @Test func commandIsRegisteredUnderTerminal() {
+        let names = TerminalCommand.configuration.subcommands.map {
+            $0.configuration.commandName
+        }
+        #expect(names.contains("continue-in-codex"))
+    }
+
     @Test func parsesRequiredTerminalAndJSONFlag() throws {
         let id = UUID()
         let command = try TerminalContinueInCodex.parse([
@@ -99,5 +106,44 @@ struct TerminalContinueInCodexCommandTests {
         #expect(summary.contains(
             "[context_reference_missing] One referenced skill path was unavailable."
         ))
+    }
+
+    @Test func jsonResultKeepsMachineReadableOutcomeWarningsAndCapture() throws {
+        let terminal = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.codex, kind: .codex
+        )
+        let result = TerminalContinueInCodexResult(
+            terminal: terminal,
+            handoffPath: "/private/tmp/CODEX_HANDOFF.md",
+            created: false,
+            warnings: [
+                TerminalContinueInCodexWarning(
+                    code: "readiness_pending",
+                    message: "Codex readiness is pending."
+                ),
+            ],
+            capture: capture(truncated: true)
+        )
+
+        // `--json` passes this result directly to `printJSON`; assert the
+        // public wire fields scripting clients receive, independently of the
+        // human summary wording.
+        let data = try JSONEncoder().encode(result)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let terminalObject = try #require(object["terminal"] as? [String: Any])
+        let warnings = try #require(object["warnings"] as? [[String: Any]])
+        let capture = try #require(object["capture"] as? [String: Any])
+        let target = try #require(object["target"] as? [String: Any])
+
+        #expect(object["created"] as? Bool == false)
+        #expect(object["handoffPath"] as? String == result.handoffPath)
+        #expect(terminalObject["id"] as? String == terminal.id.uuidString)
+        #expect(warnings.first?["code"] as? String == "readiness_pending")
+        #expect(capture["transcriptBytesRead"] as? Int == 65_536)
+        #expect(capture["transcriptTailTruncated"] as? Bool == true)
+        #expect(target["kind"] as? String == "local_codex")
     }
 }

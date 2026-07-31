@@ -94,6 +94,33 @@ struct CodexExecutableResolverTests {
         #expect(result == "/usr/bin/codex")
     }
 
+    @Test("an executable directory is rejected as an override")
+    func executableDirectoryIsRejected() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tbd-codex-directory-\(UUID().uuidString)",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        do {
+            _ = try CodexExecutableResolver.resolve(
+                configuredOverride: directory.path,
+                searchPath: "",
+                currentDirectory: directory.deletingLastPathComponent().path)
+            Issue.record("Expected a directory override to be rejected")
+        } catch let error as CodexExecutableResolutionError {
+            #expect(error == .invalidOverride(
+                environmentKey: CodexExecutableResolver.executableOverrideEnvironmentKey,
+                value: directory.path,
+                reason: "the path is not executable"
+            ))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
     @Test("PATH entries win over the ChatGPT.app fallback")
     func pathEntriesWinInOrder() throws {
         var checked: [String] = []
@@ -123,15 +150,22 @@ struct CodexExecutableResolverTests {
         #expect(result == CodexExecutableResolver.chatGPTBundlePath)
     }
 
-    @Test("relative PATH entries resolve to an absolute executable path")
-    func relativePathEntryBecomesAbsolute() throws {
+    @Test("relative and empty PATH entries cannot resolve a worktree-local executable")
+    func relativeAndEmptyPathEntriesAreIgnored() throws {
+        var checked: [String] = []
         let result = try CodexExecutableResolver.resolve(
-            searchPath: "tools",
+            searchPath: "tools::/usr/bin",
             currentDirectory: "/tmp/project",
-            isExecutable: { $0 == "/tmp/project/tools/codex" }
+            isExecutable: { candidate in
+                checked.append(candidate)
+                return candidate == CodexExecutableResolver.chatGPTBundlePath
+            }
         )
 
-        #expect(result == "/tmp/project/tools/codex")
+        #expect(result == CodexExecutableResolver.chatGPTBundlePath)
+        #expect(!checked.contains("/tmp/project/tools/codex"))
+        #expect(!checked.contains("/tmp/project/codex"))
+        #expect(checked.contains("/usr/bin/codex"))
     }
 
     @Test("non-executable candidates produce an actionable error")

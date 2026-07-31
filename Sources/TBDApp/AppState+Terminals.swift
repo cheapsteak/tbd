@@ -360,11 +360,11 @@ extension AppState {
 
         do {
             let size = mainAreaTerminalSize()
-            let result = try await daemonClient.continueInCodex(
-                sourceTerminalID: sourceTerminalID,
-                cols: size.cols,
-                rows: size.rows,
-                colorFgBg: appearance?.currentColorFgBg
+            let result = try await continueInCodexPerformer(
+                sourceTerminalID,
+                size.cols,
+                size.rows,
+                appearance?.currentColorFgBg
             )
             let terminal = result.terminal
             appendCreatedTerminal(terminal)

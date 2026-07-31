@@ -11,6 +11,7 @@ import Testing
 extension TBDHomeSerialized {
 @Suite("Pre-session hook")
 struct PreSessionHookTests {
+    private struct ExpectedCodexPreparationFailure: Error {}
 
     // MARK: - Helpers
     //
@@ -234,6 +235,36 @@ struct PreSessionHookTests {
     }
 
     // MARK: - With hook: gated spawn
+
+    @Test func codexPreparationFailurePrecedesCheckoutAndPreSessionMutation() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPrimaryAgentPreference(.codex)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeLifecycle(
+            db: db,
+            recorder: recorder,
+            codexExecutableResolver: { "/opt/test/bin/codex" },
+            codexHomeEnsurer: { throw ExpectedCodexPreparationFailure() })
+        let repo = try await makeTestRepo(
+            db: db, tempDir: tempDir, repoDir: repoDir)
+        try await installPreSessionHook(repoDir: repoDir)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+
+        await #expect(throws: ExpectedCodexPreparationFailure.self) {
+            try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id)
+        }
+
+        #expect(recorder.snapshot().isEmpty)
+        #expect(try await db.terminals.list(worktreeID: pending.id).isEmpty)
+        #expect(try await db.worktrees.get(id: pending.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: pending.path))
+    }
 
     @Test func hookGatesPrimarySpawnUntilMarker() async throws {
         let (_, cleanup) = isolateTBDHome()

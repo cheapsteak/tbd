@@ -486,14 +486,25 @@ enum SwapProfileMenu {
     }
 }
 
-/// Pure presentation/eligibility model for the Claude tab's takeover action.
-/// Keeping this outside SwiftUI makes the Claude-only gate and plain-language
-/// copy directly testable.
-enum ContinueInCodexMenu {
-    static let title = "Continue in Codex"
+/// Ordered session actions shown in a resumable Claude tab's context menu.
+/// Keeping the order and labels outside SwiftUI makes it possible to prove
+/// that takeover remains beside Fork Session without conflating it with the
+/// ordinary Codex item in the "+" new-tab menu.
+enum ClaudeTabSessionMenu {
+    enum Action: CaseIterable, Hashable {
+        case forkSession
+        case continueInCodex
 
-    static func isAvailable(for terminal: Terminal?) -> Bool {
-        terminal?.isClaudeResumable == true
+        var title: String {
+            switch self {
+            case .forkSession: "Fork Session"
+            case .continueInCodex: "Continue in Codex"
+            }
+        }
+    }
+
+    static func actions(for terminal: Terminal?) -> [Action] {
+        terminal?.isClaudeResumable == true ? Action.allCases : []
     }
 }
 
@@ -866,6 +877,8 @@ private struct TabBarItem: View {
 
     @ViewBuilder
     private var contextMenuContent: some View {
+        let claudeSessionActions = ClaudeTabSessionMenu.actions(for: terminal)
+
         if let path = copyablePath {
             Button(copyPathLabel) {
                 NSPasteboard.general.clearContents()
@@ -882,7 +895,7 @@ private struct TabBarItem: View {
         }
         Divider()
 
-        if ContinueInCodexMenu.isAvailable(for: terminal) {
+        if !claudeSessionActions.isEmpty {
             Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)
 
@@ -892,17 +905,22 @@ private struct TabBarItem: View {
 
             Divider()
 
-            Menu {
-                swapProfileMenuItems(mode: .fork)
-            } label: {
-                Label("Fork Session", systemImage: "arrow.triangle.branch")
-            }
-
-            Button {
-                guard let terminalID = terminal?.id else { return }
-                Task { await appState.continueInCodex(sourceTerminalID: terminalID) }
-            } label: {
-                Label(ContinueInCodexMenu.title, systemImage: "arrow.right.circle")
+            ForEach(claudeSessionActions, id: \.self) { action in
+                switch action {
+                case .forkSession:
+                    Menu {
+                        swapProfileMenuItems(mode: .fork)
+                    } label: {
+                        Label(action.title, systemImage: "arrow.triangle.branch")
+                    }
+                case .continueInCodex:
+                    Button {
+                        guard let terminalID = terminal?.id else { return }
+                        Task { await appState.continueInCodex(sourceTerminalID: terminalID) }
+                    } label: {
+                        Label(action.title, systemImage: "arrow.right.circle")
+                    }
+                }
             }
 
             // Park (formerly the Suspend/Resume play/pause button) lives here

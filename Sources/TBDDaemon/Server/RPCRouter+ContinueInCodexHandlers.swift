@@ -9,7 +9,8 @@ extension RPCRouter {
     func handleTerminalContinueInCodex(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalContinueInCodexParams.self, from: paramsData)
         let result = try await continueInCodexCoordinator.run(
-            sourceTerminalID: params.sourceTerminalID
+            sourceTerminalID: params.sourceTerminalID,
+            target: params.target
         ) { [self] in
             try await continueInCodex(params)
         }
@@ -87,8 +88,9 @@ extension RPCRouter {
 
         // Resolve before creating a tmux window or terminal row. An absolute
         // executable path survives the GUI daemon's minimal PATH and .zshrc.
-        let codexExecutable = try codexExecutableResolver()
-        let codexHome = try continueInCodexHomeEnsurer()
+        let codexPreparation = try CodexLaunchPreparation.prepare(
+            executableResolver: codexExecutableResolver,
+            homeEnsurer: codexHomeEnsurer)
 
         let repo: Repo?
         if let repoID = worktree.repoID {
@@ -143,7 +145,8 @@ extension RPCRouter {
         unrelated changes.
         """
         let command = CodexSpawnCommandBuilder.build(
-            initialPrompt: initialPrompt, executablePath: codexExecutable)
+            initialPrompt: initialPrompt,
+            executablePath: codexPreparation.executablePath)
         let config = try? await db.config.get()
         let mergedOverrides = EnvOverrideResolver.merge(
             global: config?.envOverrides, repo: repo?.envOverrides, profile: nil)
@@ -151,7 +154,7 @@ extension RPCRouter {
         var env = [
             "TBD_WORKTREE_ID": worktree.id.uuidString,
             "TBD_TERMINAL_ID": plannedTerminalID.uuidString,
-            "CODEX_HOME": codexHome.path,
+            "CODEX_HOME": codexPreparation.codexHome.path,
         ]
         if let color = params.colorFgBg {
             env["COLORFGBG"] = color
@@ -206,34 +209,63 @@ extension RPCRouter {
         worktree: Worktree,
         requestedTarget: TerminalContinueInCodexTarget
     ) async throws -> ReusableCodexTakeover? {
-        guard let data = try? Data(contentsOf: manifestURL),
-              let manifest = try? JSONDecoder().decode(
-                ContinueInCodexManifest.self, from: data),
-              manifest.sourceTerminalID == source.id,
-              manifest.worktreeID == worktree.id,
-              (manifest.target ?? .localCodex) == requestedTarget,
-              let target = try await db.terminals.get(id: manifest.targetTerminalID),
-              target.worktreeID == worktree.id,
-              target.isCodexTerminal else {
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             return nil
+        }
+        let manifest: ContinueInCodexManifest
+        do {
+            manifest = try JSONDecoder().decode(
+                ContinueInCodexManifest.self,
+                from: Data(contentsOf: manifestURL))
+        } catch {
+            throw ContinueInCodexError.userFacing(
+                "The existing Continue in Codex mapping is unreadable. TBD left all terminals untouched; inspect \(manifestURL.path) before retrying.")
+        }
+        guard manifest.sourceTerminalID == source.id,
+              manifest.worktreeID == worktree.id,
+              (manifest.target ?? .localCodex) == requestedTarget else {
+            throw ContinueInCodexError.userFacing(
+                "The existing Continue in Codex mapping does not match this source, worktree, and target. TBD left all terminals untouched; inspect \(manifestURL.path) before retrying.")
+        }
+        guard let target = try await db.terminals.get(
+            id: manifest.targetTerminalID
+        ) else {
+            // A manifest written before a failed tmux/DB spawn is a safe stale
+            // intent. No terminal row exists to duplicate, so a retry may
+            // replace the mapping with a new immutable handoff.
+            return nil
+        }
+        guard target.worktreeID == worktree.id, target.isCodexTerminal else {
+            throw ContinueInCodexError.userFacing(
+                "The existing Continue in Codex mapping points to an unexpected terminal. TBD left all terminals untouched; inspect \(manifestURL.path) before retrying.")
         }
         guard await tmux.windowExists(
             server: worktree.tmuxServer, windowID: target.tmuxWindowID
         ) else {
-            return nil
+            throw ContinueInCodexError.userFacing(
+                "The existing Codex takeover terminal is no longer live. TBD did not create a duplicate; close or recreate terminal \(target.id) before retrying.")
         }
         let handoffPath = manifest.handoffPath
             ?? sourceHandoffDirectory
                 .appendingPathComponent("CODEX_HANDOFF.md", isDirectory: false).path
-        guard FileManager.default.fileExists(atPath: handoffPath) else {
-            return nil
+        let sourceDirectoryPath =
+            sourceHandoffDirectory.standardizedFileURL.path + "/"
+        let handoffURL = URL(fileURLWithPath: handoffPath).standardizedFileURL
+        guard handoffURL.path.hasPrefix(sourceDirectoryPath),
+              handoffURL.lastPathComponent == "CODEX_HANDOFF.md" else {
+            throw ContinueInCodexError.userFacing(
+                "The existing Codex handoff path is outside its private source directory. TBD did not create a duplicate; inspect \(manifestURL.path) before retrying.")
+        }
+        guard FileManager.default.fileExists(atPath: handoffURL.path) else {
+            throw ContinueInCodexError.userFacing(
+                "The existing Codex takeover is live, but its handoff is missing. TBD did not create a duplicate; inspect \(manifestURL.path) before retrying.")
         }
         let attributes = try? FileManager.default.attributesOfItem(
-            atPath: handoffPath)
+            atPath: handoffURL.path)
         let outputBytes = (attributes?[.size] as? NSNumber)?.intValue ?? 0
         return ReusableCodexTakeover(
             terminal: target,
-            handoffPath: handoffPath,
+            handoffPath: handoffURL.path,
             warnings: manifest.warnings ?? Self.takeoverWarnings,
             capture: manifest.capture ?? TerminalContinueInCodexCaptureMetadata(
                 transcriptBytesRead: 0,

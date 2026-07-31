@@ -5,6 +5,8 @@ import Testing
 
 @Suite("Codex handoff generator")
 struct CodexHandoffGeneratorTests {
+    private struct ExpectedTargetOperation: Error {}
+
     @Test("extracts bounded untrusted transcript and repository state")
     func extractsBoundedContent() throws {
         let root = FileManager.default.temporaryDirectory
@@ -126,5 +128,67 @@ struct CodexHandoffGeneratorTests {
         let fileAttributes = try FileManager.default.attributesOfItem(atPath: file.path)
         #expect((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
         #expect((fileAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    }
+
+    @Test("singleflight separates future takeover targets")
+    func singleflightSeparatesTargets() async throws {
+        let coordinator = ContinueInCodexCoordinator()
+        let sourceID = UUID()
+        let remoteTarget = TerminalContinueInCodexTarget(
+            kind: "agent_box", workerID: "worker-1")
+        let localResult = TerminalContinueInCodexResult(
+            terminal: Terminal(
+                worktreeID: UUID(),
+                tmuxWindowID: "@codex",
+                tmuxPaneID: "%codex",
+                label: TerminalLabel.codex,
+                kind: .codex),
+            handoffPath: "/private/CODEX_HANDOFF.md",
+            created: true,
+            warnings: [],
+            capture: TerminalContinueInCodexCaptureMetadata(
+                transcriptBytesRead: 0,
+                transcriptBytesRendered: 0,
+                handoffBytesOutput: 0,
+                transcriptTailTruncated: false))
+        let (enteredStream, enteredContinuation) =
+            AsyncStream.makeStream(of: Void.self)
+        let (releaseStream, releaseContinuation) =
+            AsyncStream.makeStream(of: Void.self)
+        let localTask = Task {
+            try await coordinator.run(
+                sourceTerminalID: sourceID,
+                target: .localCodex
+            ) {
+                enteredContinuation.yield()
+                var iterator = releaseStream.makeAsyncIterator()
+                _ = await iterator.next()
+                return localResult
+            }
+        }
+        var enteredIterator = enteredStream.makeAsyncIterator()
+        _ = await enteredIterator.next()
+
+        let remoteTask = Task {
+            try await coordinator.run(
+                sourceTerminalID: sourceID,
+                target: remoteTarget
+            ) {
+                throw ExpectedTargetOperation()
+            }
+        }
+        // Give the remote request a turn to enter the coordinator while the
+        // local operation is provably held open.
+        await Task.yield()
+        releaseContinuation.yield()
+
+        do {
+            _ = try await remoteTask.value
+            Issue.record("different targets must not share an in-flight result")
+        } catch is ExpectedTargetOperation {
+            // The remote operation ran independently, as required.
+        }
+
+        #expect(try await localTask.value.target == .localCodex)
     }
 }

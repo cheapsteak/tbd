@@ -58,7 +58,9 @@ func makeLifecycle(
     subscriptions: StateSubscriptionManager? = nil,
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
     windowIsDead: (@Sendable (String) -> Bool)? = nil,
-    listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil
+    listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil,
+    codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+    codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
 ) -> WorktreeLifecycle {
     var dryRunRecorder: (@Sendable ([String]) -> Void)?
     if let recorder {
@@ -76,7 +78,9 @@ func makeLifecycle(
         hooks: HookResolver(),
         subscriptions: subscriptions,
         preSessionTimeout: timeout,
-        preSessionPollInterval: 0.05
+        preSessionPollInterval: 0.05,
+        codexExecutableResolver: codexExecutableResolver,
+        codexHomeEnsurer: codexHomeEnsurer
     )
 }
 

@@ -79,7 +79,7 @@ public final class RPCRouter: Sendable {
     nonisolated(unsafe) var continueInCodexHandoffRoot: URL?
     nonisolated(unsafe) var codexExecutableResolver:
         @Sendable () throws -> String = { try CodexExecutableResolver.resolve() }
-    nonisolated(unsafe) var continueInCodexHomeEnsurer:
+    nonisolated(unsafe) var codexHomeEnsurer:
         @Sendable () throws -> URL = { try CodexHomeManager().ensureProfilePlugin() }
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into

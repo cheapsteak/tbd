@@ -276,23 +276,32 @@ enum CodexHandoffFiles {
 }
 
 actor ContinueInCodexCoordinator {
-    private var inFlight: [UUID: Task<TerminalContinueInCodexResult, Error>] = [:]
+    private struct Key: Hashable {
+        let sourceTerminalID: UUID
+        let target: TerminalContinueInCodexTarget
+    }
+
+    private var inFlight: [
+        Key: Task<TerminalContinueInCodexResult, Error>
+    ] = [:]
 
     func run(
         sourceTerminalID: UUID,
+        target: TerminalContinueInCodexTarget,
         operation: @escaping @Sendable () async throws -> TerminalContinueInCodexResult
     ) async throws -> TerminalContinueInCodexResult {
-        if let existing = inFlight[sourceTerminalID] {
+        let key = Key(sourceTerminalID: sourceTerminalID, target: target)
+        if let existing = inFlight[key] {
             return try await existing.value
         }
         let task = Task { try await operation() }
-        inFlight[sourceTerminalID] = task
+        inFlight[key] = task
         do {
             let result = try await task.value
-            inFlight[sourceTerminalID] = nil
+            inFlight[key] = nil
             return result
         } catch {
-            inFlight[sourceTerminalID] = nil
+            inFlight[key] = nil
             throw error
         }
     }
