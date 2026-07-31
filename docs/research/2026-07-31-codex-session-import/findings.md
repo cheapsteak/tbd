@@ -105,6 +105,39 @@ SHA256 to recover the same id; that is redundant for a client reading the notifi
 `session_meta.originator` records the `clientInfo.name` the caller sent at `initialize`, so imports
 are attributable to the tool that made them.
 
+### Conversion keeps intent and caps bulk
+
+Codex does not reproduce Claude's tool structure. Tool activity is transcoded into text inside
+assistant messages, delimited by markers:
+
+```text
+[external_agent_tool_call: WebSearch]
+input: {"query":"…"}
+[/external_agent_tool_call]
+[external_agent_tool_result]
+…result text…
+[/external_agent_tool_result]
+```
+
+There are no native `function_call` / `function_call_output` items in the result, so a resumed agent
+reads tool history as prose rather than as structured turns.
+
+Measured on a 156-line source that carried 20 `tool_use` and 20 `tool_result` blocks:
+
+- all 20 tool calls survive, with tool name and full input JSON
+- 17 result blocks survive, one of them empty — so 16 carry content, and 3 are lost outright
+- results are capped at 4,000 characters each, and truncation is largely silent: 16,703 characters
+  retained from 77,836, with two "truncated" markers and no ellipses
+- conversation prose survives intact
+
+About 79% of tool-result bulk is therefore discarded. What survives is which tools ran, with what
+arguments, in what order, plus the head of each result — the shape of the work rather than its
+output. For a handoff into the same worktree this is a reasonable trade: a truncated file read can
+simply be re-run, whereas lost intent could not be reconstructed.
+
+The conversion is literal enough to carry interface noise. A usage-limit notice rendered in the
+source session was imported as an assistant turn.
+
 ### `import/readHistories` is an audit log
 
 `ExternalAgentConfigImportHistoriesReadResponse` is `{connectors, data}`, where each `data` entry is
@@ -129,10 +162,6 @@ The command accepts `--source <claude-jsonl>`, so it is not restricted to the se
 
 ## Unknowns
 
-- **Fidelity of the conversion.** The imported thread had 107 lines against the source's 156. Some
-  of that gap is expected — Claude JSONL carries `attachment`, `ai-title`, `permission-mode` and
-  similar entries with no Codex equivalent — but whether tool calls and their results survive was
-  not examined. This bears directly on how useful an imported thread is.
 - **Idempotency.** Whether importing the same session twice yields one thread or two, and what
   Codex's `external_agent_session_imports.json` does once the source transcript grows after import.
 - Whether `migrationSource` selects agents other than Claude Code, and what values it accepts. The
