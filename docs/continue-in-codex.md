@@ -20,11 +20,21 @@ creating another one.
 - Codex uses the existing global `~/.codex` authentication and TBD's
   profile-scoped plugin. TBD resolves an absolute Codex executable before it
   creates a tmux window or database row.
-- The generated `~/.codex/tbd.config.toml` enables the TBD plugin and disables
-  the `shadcn` MCP server for TBD sessions. This prevents parallel Codex
-  sessions from starting one resident server each and exhausting startup
-  resources. Claude's `disabledMcpjsonServers` setting does not control Codex
-  and is not a substitute for this profile invariant.
+- The generated `~/.codex/tbd.config.toml` enables the TBD plugin and contains
+  a complete, parser-valid disabled `shadcn` MCP entry:
+
+  ```toml
+  [mcp_servers.shadcn]
+  command = "npx"
+  args = ["shadcn@latest", "mcp"]
+  enabled = false
+  ```
+
+  The command and arguments remain required configuration even when the server
+  is disabled. Disabling it prevents parallel Codex sessions from starting one
+  resident server each and exhausting startup resources. Claude's
+  `disabledMcpjsonServers` setting does not control Codex and is not a
+  substitute for this profile invariant.
 - The initial prompt tells Codex to read the handoff and applicable
   `AGENTS.md`/`CLAUDE.md` files, inspect the live worktree, verify assumptions,
   preserve unrelated changes, and then continue.

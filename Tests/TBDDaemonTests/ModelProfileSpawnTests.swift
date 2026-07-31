@@ -209,6 +209,32 @@ struct ModelProfileSpawnTests {
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
+    @Test("terminal.create spawns the injected absolute Codex executable")
+    func terminalCreateUsesResolvedAbsoluteCodexExecutable() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let executable = "/opt/TBD Codex/bin/codex"
+        router.codexExecutableResolver = { executable }
+        router.codexHomeEnsurer = {
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "tbd-test-codex-home-\(UUID().uuidString)",
+                    isDirectory: true)
+        }
+        let request = try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .codex)
+        )
+
+        let response = await router.handle(request)
+
+        #expect(response.success)
+        #expect(recorder.shellBodies.contains("'/opt/TBD Codex/bin/codex'"))
+        #expect(!recorder.shellBodies.contains("; codex --profile"))
+        #expect(!recorder.shellBodies.contains("; codex --profile-v2"))
+    }
+
     @Test("terminal.recreate prepares Codex home before killing the old window")
     func terminalRecreateCodexHomeFailurePreservesOldWindowAndRow() async throws {
         let (router, db, recorder) = makeFixture()

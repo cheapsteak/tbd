@@ -1051,8 +1051,7 @@ final class AppState: ObservableObject {
     /// integration, and error cleanup without a live daemon.
     lazy var continueInCodexPerformer:
         @MainActor (UUID, Int?, Int?, String?) async throws
-            -> TerminalContinueInCodexResult = {
-                [daemonClient] sourceTerminalID, cols, rows, colorFgBg in
+            -> TerminalContinueInCodexResult = { [daemonClient] sourceTerminalID, cols, rows, colorFgBg in
                 try await daemonClient.continueInCodex(
                     sourceTerminalID: sourceTerminalID,
                     cols: cols,

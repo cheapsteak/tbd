@@ -206,7 +206,11 @@ enum CodexProfileWriter {
 
     static func ensurePluginEnabled(in toml: String) -> String {
         let header = #"[plugins."\#(CodexPlugin.pluginKey)"]"#
-        return ensureEnabledSetting(in: toml, header: header, enabled: true)
+        return ensureSettings(
+            in: toml,
+            header: header,
+            settings: [("enabled", "true")]
+        )
     }
 
     /// TBD Codex sessions can start in many worktrees at once. Disable the
@@ -214,20 +218,22 @@ enum CodexProfileWriter {
     /// do not fan out one resident stdio server each. This is profile-scoped:
     /// it does not alter the user's default Codex configuration.
     static func ensureShadcnDisabled(in toml: String) -> String {
-        ensureEnabledSetting(
+        ensureSettings(
             in: toml,
             header: shadcnServerHeader,
-            enabled: false
+            settings: [
+                ("command", #""npx""#),
+                ("args", #"["shadcn@latest", "mcp"]"#),
+                ("enabled", "false"),
+            ]
         )
     }
 
-    private static func ensureEnabledSetting(
+    private static func ensureSettings(
         in toml: String,
         header: String,
-        enabled: Bool
+        settings: [(key: String, value: String)]
     ) -> String {
-        let enabledLine = "enabled = \(enabled)"
-
         // Normalize line endings to `\n` before splitting. A CRLF-terminated
         // `tbd.config.toml` would otherwise leave a trailing `\r` on every
         // line: `CharacterSet.whitespaces` does NOT include `\r`, so the
@@ -264,11 +270,12 @@ enum CodexProfileWriter {
             if !updated.isEmpty {
                 updated += "\n"
             }
-            updated += "\(header)\n\(enabledLine)\n"
+            let settingLines = settings.map { "\($0.key) = \($0.value)" }
+            updated += ([header] + settingLines).joined(separator: "\n") + "\n"
             return updated
         }
 
-        let nextSectionIndex = lines[(headerIndex + 1)...]
+        var nextSectionIndex = lines[(headerIndex + 1)...]
             .firstIndex { line in
                 // A section header is a line that trims to `[...]` and is not
                 // a key/value assignment — reject lines containing `=` so a
@@ -278,18 +285,36 @@ enum CodexProfileWriter {
                 return trimmed.hasPrefix("[") && trimmed.hasSuffix("]") && !trimmed.contains("=")
             } ?? lines.endIndex
 
-        if let enabledIndex = lines[(headerIndex + 1)..<nextSectionIndex]
-            .firstIndex(where: { line in
-                // Match the exact `enabled` key, not prefixes like
-                // `enabled_features` which would otherwise be clobbered.
-                let key = line.trimmingCharacters(in: .whitespaces)
-                    .prefix { $0 != "=" }
-                    .trimmingCharacters(in: .whitespaces)
-                return key == "enabled"
-            }) {
-            lines[enabledIndex] = enabledLine
-        } else {
-            lines.insert(enabledLine, at: headerIndex + 1)
+        var missingSettings: [(key: String, value: String)] = []
+        for setting in settings {
+            let matchingIndices = lines[(headerIndex + 1)..<nextSectionIndex]
+                .indices
+                .filter { index in
+                    // Match the exact key, not prefixes like
+                    // `enabled_features` which would otherwise be clobbered.
+                    let key = lines[index].trimmingCharacters(in: .whitespaces)
+                        .prefix { $0 != "=" }
+                        .trimmingCharacters(in: .whitespaces)
+                    return key == setting.key
+                }
+
+            guard let firstIndex = matchingIndices.first else {
+                missingSettings.append(setting)
+                continue
+            }
+
+            lines[firstIndex] = "\(setting.key) = \(setting.value)"
+            for duplicateIndex in matchingIndices.dropFirst().reversed() {
+                lines.remove(at: duplicateIndex)
+                nextSectionIndex -= 1
+            }
+        }
+
+        if !missingSettings.isEmpty {
+            lines.insert(
+                contentsOf: missingSettings.map { "\($0.key) = \($0.value)" },
+                at: headerIndex + 1
+            )
         }
 
         return lines.joined(separator: "\n") + (hadTrailingNewline ? "\n" : "")
