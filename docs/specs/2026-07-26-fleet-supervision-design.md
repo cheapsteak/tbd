@@ -648,6 +648,29 @@ This list is the single normative inventory of what a desk can do. Every other
 mention of a verb in this document defers to it. **None of them is gated.** What
 the daemon does around each one is accounting, never permission.
 
+**Ungated speaks to conduct; a short list of actuation preconditions speaks
+to mechanics.** Inside every acting verb call — after the desk decides,
+before any keystroke — the daemon rechecks against current state: the switch
+is on, a shift is active, the target lies inside the calling desk's project,
+the target is not flagged never-touch, not rate-limited, not under a capacity
+hold, and its pane is alive. Every item is a yes/no fact the operator or the
+machine already owns — a flag, a switch, a timestamp — and none involves
+reading the payload or judging the act. This is addressing correctness (§5)
+extended from *where* a desk may act to *whether TBD may act at all right
+now*, and it is what makes the operator's controls real rather than
+advisory: judgment takes minutes, so a work order's facts are already stale
+at act time, and the off switch flipped at 2:03 must beat a drive decided
+from a 2:02 work order and issued at 2:07. A failed precondition refuses the
+act — nothing is typed, the CLI returns an ordinary error naming the
+condition, and the refusal is recorded (§4 step 7, §6), so the morning shows
+near-misses and an operator learns their flags bind. What was removed stays
+removed: no rule matching, no content inspection, no posture judgment. The
+gate asked "may this desk do this *kind* of thing"; preconditions ask only
+"may anything be done *here, now*." The residual race is the milliseconds
+between check and keystroke. Preconditions bind the acting verbs; the record
+verbs (`escalate`, `note`) require only an active shift and correct
+addressing — the record itself never refuses more than that.
+
 - **`drive`** — act on a fleet agent's session (the send path of §4 step 7), in
   one of two payload variants.
   - `--text` delivers a message. The daemon does not read it: **freshness here is
@@ -742,19 +765,26 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    silent — an idle agent whose work may or may not be finished — the desk's
    move is a note or an escalation, never a completion verdict of its own.
 7. **Act through the daemon, never around it.** `tbd supervise drive …`.
-   The daemon performs two steps, and inspects the payload in neither. First, it
-   **delivers** the payload through the adapter — a dispatch that cannot
-   succeed fails here, synchronously, as an ordinary error (§12). Second, it
-   **writes the ledger
-   line itself**, recording the payload verbatim, the active mode, and the state
-   snapshot that justified the act (for `--keys`, that snapshot includes the
-   screen capture the desk read, §2); the line asserts dispatch, and whether the
-   message landed is the re-check's later observation (§12). Nothing here
-   verifies what the message claims — that a `--text` message rests on facts
-   derived live is the desk's discipline, and the verbatim line is what makes a
-   stale premise findable afterward (P0-8, amended 2026-07-30). There is no
-   posture check and no proposal conversion in
-   this path: a desk that calls `drive` has driven (§3).
+   The daemon performs three steps, and inspects the payload in none of them.
+   First, it **appends the action line** — the durable request: the payload
+   verbatim, the active mode, and the state snapshot that justified the act
+   (for `--keys`, that snapshot includes the screen capture the desk read,
+   §2). The line exists before any keystroke, so its ID is already durable
+   when the delivery envelope quotes it (§12), and no crash window can
+   produce a real intervention with no record. Second, it **rechecks the
+   actuation preconditions** (§3) against current state; a failure refuses
+   the act — nothing is typed, the CLI returns an ordinary error naming the
+   condition, and a refusal outcome referencing the action line is written.
+   Third, it **dispatches** through the adapter — a dispatch that cannot
+   succeed fails here, synchronously, as an ordinary error and a
+   transport-failed outcome (§12). The claims form a ladder: the action line
+   asserts the request, the synchronous outcome asserts dispatch or refusal,
+   and whether the message *landed* is the re-check's later observation
+   (§12). Nothing here verifies what the message claims — that a `--text`
+   message rests on facts derived live is the desk's discipline (P0-8), and
+   the verbatim line is what makes a stale premise findable afterward. There
+   is no content check and no proposal conversion in this path: a desk that
+   calls `drive` has driven (§3).
 8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
    memory). The result is recorded as an outcome line referencing the action
    (§6). A new blocked state
@@ -1106,14 +1136,16 @@ attention — it never changes what any verb is allowed to do.
   every other line, and unable to change any other line. The supervisor may
   reference lines and contribute prose; it can never author an action, an
   outcome, or the account.
-- Its structure prevents several false claims: an action nobody performed
-  because only verb handlers write action lines; an outcome nobody observed
-  because outcomes come from the re-check; a delivery nobody received because
-  an action line asserts dispatch only — "landed" is an outcome line's claim,
-  made on a machine observation, and an action with no confirming outcome by
-  its deadline renders as unconfirmed, never as done (§12); and certainty the
-  system did not
-  have because unknowns are anomalies, not values.
+- Its structure prevents several false claims: an action nobody performed,
+  because only verb handlers write action lines — appended before the adapter
+  runs, so a crash can delay an outcome but never hide an act; an outcome
+  nobody observed, because outcomes come from the adapter's synchronous
+  return or the re-check; a delivery nobody received, because the claims
+  ladder from *requested* (the action line) through *dispatched or refused*
+  (the synchronous outcome) to *landed* (the observed outcome, §12) — and an
+  action with no confirming outcome by its deadline renders as unconfirmed,
+  never as done; and certainty the system did not have, because unknowns are
+  anomalies, not values.
 - Quiet ticks write nothing. Sweep liveness is one status field, not forty
   lines an hour.
 - **`account.md`** sits beside the ledger. The daemon regenerates this view
@@ -1142,7 +1174,8 @@ carry a null project, which is the accurate answer and not a gap.
 
 What each kind's payload carries:
 
-- **`action`** — the verb, the target (worktree / terminal / repo), the payload
+- **`action`** — the durable request, appended before dispatch (§4 step 7):
+  the verb, the target (worktree / terminal / repo), the payload
   (message text for `drive --text`, the named keys for `drive --keys`), and the
   state snapshot — with its source and observed-at — that justified it. For
   `drive --keys`, that snapshot includes **the screen capture the desk read when
@@ -1153,9 +1186,12 @@ What each kind's payload carries:
   (a pending question is a fact, and facts are not ledgered), and no separate
   verb marks the answer — reading the snapshot is what distinguishes a reply
   from an unprompted nudge (§2).
-- **`outcome`** — a reference to the action, one of the four §12 results, and
-  the observed-at of that observation. Only this line may claim a message
-  landed; the action line it references claims dispatch alone (§12).
+- **`outcome`** — a reference to the action and a result: synchronous
+  (*dispatched*; *refused*, naming the failed precondition; or
+  *transport-failed*) or observed (one of the four §12 results, with the
+  observed-at of that observation). Only an observed outcome may claim a
+  message landed; the action line it references asserts the request alone
+  (§12).
 - **`proposal`** — everything an `action` carries, plus the supervisor's
   reasoning and the age of the state it reasoned from.
 - **`resolution`** — a reference to the proposal or escalation, the result
@@ -1233,14 +1269,16 @@ account, not a wrong action. The third category is **human-authored process**.
 
   The playbook tiers (§5) are also durable files.
 - **In-memory, deliberately not durable**: active one-minute re-check timers
-  and the sweep's temporary tracking. A daemon restart during a shift loses
-  them. For the sweep that is a one-cycle delay, not a broken promise. For a
-  re-check armed by a send, the lost timer means the acknowledgement
-  observation never runs — handled honestly with no recovery sweep, because
-  delivery status is computed at query time: the outcome line never appears,
-  so the action renders as unconfirmed by construction (§12). Whether anyone
-  resolves it later — the envelope is durable in the transcript, so a late
-  read usually can — is playbook judgment, not compiled repair.
+  and the sweep's temporary tracking. Timers may live in memory *because*
+  everything they encode derives from the durable record — an action line's
+  timestamp fixes its observation deadline — so a daemon restart during a
+  shift costs cadence, never data. For the sweep that is a one-cycle delay.
+  For re-checks, the startup ledger replay (the same replay that rebuilds the
+  proposals view) surfaces actions past their deadline with no outcome, and
+  the daemon performs those observations then: the envelope is durable in the
+  transcript, so a late read resolves what the timer would have (§12). Until
+  it runs, such actions render as unconfirmed by construction — the
+  query-time rule, not a recovery sweep.
 - **Crash rule** (replay finds an approved proposal with no action line):
   never automatically execute an old approval. Report it as an anomaly:
   "approved at 7:58, daemon restarted before acting; approve again if still
@@ -1505,6 +1543,13 @@ enforcement openly, which is the same trade the old system made by accident
   initiated cleanup. Here, the same operator action that ends the shift disposes
   of every desk the night created — a count the ledger knows, so none can be
   missed.
+- **A daemon restart during a shift resumes it, never forks it.** The active
+  shift is derivable from the record alone: the newest shift whose ledger has
+  no closing line. On startup with the switch on, the daemon resumes that
+  shift — same ID, same directory, same desks, which are ordinary sessions
+  and survive the daemon — and runs the overdue-observation scan (§7, §12). A
+  half-finished teardown resumes idempotently from its durable steps. Only
+  when no unclosed shift exists does turning supervision on open a new one.
 - **Each shift starts fresh on purpose.** No resumed supervisor context.
   Continuity lives in artifacts: the playbook, the operator's selections, and
   earlier ledgers. The *system* learns; one session's context does not. If a
@@ -1893,25 +1938,22 @@ tbd supervise decisions revoke <decision-id>
 
 ## 12. Delivery acknowledgement
 
-*Amended 2026-07-30, addressing PR #522's review (its second ask: an action
-line recording a send nobody received is a false claim no desk authored — the
-machinery built to prevent misreporting becomes the source of one). The
-changes: action lines assert dispatch rather than delivery; the transport
-returns honest errors; acknowledgement is a passive sentinel observation with
-a fourth, undetermined result that is never retried; and an action with no
-confirming outcome renders as unconfirmed at query time, which is also the
-entire restart story.*
-
-**An action line asserts dispatch, never delivery.** The daemon writing the
-line itself guarantees exactly one thing: this payload was handed to the
-adapter at this moment. Delivery is a separate observation, recorded later as
-an outcome line referencing the action. The send call cannot confirm
-delivery — one adapter pushes without an acknowledgement, and the other can
-fail if a turn changes at the wrong time — and the ledger must never claim
-more than the daemon observed (§6). The field failure this guards against is
-real: on 2026-07-29 `terminal.send` reported success into a dead pane for
-hours while a desk nudged it, and each of those nudges would have stood in the
-ledger as delivered work.
+**The record's claims form a ladder: requested, dispatched, landed.** The
+action line is appended durably before the adapter runs, so it asserts
+exactly one thing: the daemon accepted this verb and was about to dispatch
+this payload at this moment. The adapter's synchronous return writes the
+second rung as an outcome — *dispatched*; *refused*, a failed precondition
+(§3); or *transport-failed* — and delivery is the third rung, a separate
+observation recorded later by the re-check. Request-first ordering means no
+crash window can produce a real intervention with no record: an act the
+daemon performed is always preceded by its line, and a line whose act never
+completed renders as unconfirmed, loudly, by the query-time rule below. The
+send call cannot confirm delivery — one adapter pushes without an
+acknowledgement, and the other can fail if a turn changes at the wrong
+time — and the ledger must never claim more than the daemon observed (§6).
+The field failure this guards against is real: `terminal.send` once reported
+success into a dead pane for hours while a desk nudged it, and each of those
+nudges would have stood in the ledger as delivered work.
 
 **First, the transport stops lying.** A dispatch that cannot succeed must fail
 synchronously, at the send call, as an ordinary error the caller sees. That
@@ -1979,15 +2021,20 @@ computes delivery status as the join of action and outcome: an action past its
 acknowledgement deadline with no confirming outcome renders as unconfirmed,
 as loudly as an anomaly. This is the fail-closed rule applied to delivery —
 never default to "landed," the way the wake verifier never defaulted to
-DONE — and it makes the ledger honest in both directions: the account may
-claim "dispatched" on the daemon's word, and may claim "landed" only on a
+DONE — and it keeps every rung of the ladder honest: *requested* on the
+daemon's word, *dispatched* on the adapter's return, *landed* only on a
 machine observation. Because the rule lives in the query rather than in an
-appended repair, a mid-shift daemon restart needs no recovery sweep: the
-restart kills the re-check timer, the outcome line never appears, and the
-action renders as unconfirmed by construction (§7). The envelope is durable in
-the transcript, so a late read usually still resolves the question — but
-whether anyone performs one, re-drives, or shrugs is playbook judgment at next
-contact, never compiled repair.
+appended repair, a mid-shift daemon restart cannot corrupt the record: an
+action whose observation never ran renders as unconfirmed by construction
+(§7). The observation itself is recoverable from the record alone — the
+action line's timestamp fixes the deadline, and the envelope is durable in
+the transcript — so at startup the daemon replays the ledger, finds actions
+past their deadline with no outcome, and performs the same observation late,
+writing the outcome the timer would have written (§7). What a restart costs
+is cadence, stated plainly: P1-6's sixty-second window degrades to the
+startup scan or the next sweep tick. What to *do* about a late-confirmed or
+unconfirmed act — re-drive, note, shrug — stays playbook judgment, never
+compiled repair.
 
 ### Delivery adapters: parity for the fleet, a channel for the desks
 
