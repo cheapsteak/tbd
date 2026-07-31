@@ -39,6 +39,7 @@ struct WorktreeConversationCarryoverTests {
 
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id,
+            primaryAgentPreference: .codex,
             carryover: carryover
         )
         guard case .ready = completion else {
@@ -85,6 +86,7 @@ struct WorktreeConversationCarryoverTests {
 
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id,
+            primaryAgentPreference: .codex,
             carryover: carryover
         )
         guard case .preSessionPending(let phase3) = completion else {

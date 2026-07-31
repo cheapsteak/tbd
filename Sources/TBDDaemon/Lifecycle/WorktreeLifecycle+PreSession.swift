@@ -283,6 +283,7 @@ extension WorktreeLifecycle {
         completionAction: PreSessionCompletionAction,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
+        primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil
     ) async {
@@ -353,6 +354,7 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
+                primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover
             )

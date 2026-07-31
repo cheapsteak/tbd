@@ -68,6 +68,9 @@ struct WorktreeProfilePickerView: View {
             if appState.modelProfiles.isEmpty {
                 await appState.loadModelProfiles()
             }
+            // User-gesture-triggered, one-shot fetch. The daemon talks to the
+            // Codex app-server API; no background poller or persisted state.
+            await appState.loadCodexUsage()
         }
     }
 
@@ -108,7 +111,8 @@ struct WorktreeProfilePickerView: View {
                     // worktree pinned to an account that can't run. apiKey /
                     // bedrock rows report selectable and stay actionable.
                     let isSelectable = ProfileUsagePresentation.isSelectable(entry)
-                    let isTheDefault = entry.profile.id == appState.defaultProfileID
+                    let isTheDefault = appState.primaryAgentPreference == .claude
+                        && entry.profile.id == appState.defaultProfileID
                     Group {
                         if entry.profile.kind == .oauth && isSelectable {
                             // Selectable Claude account: always render the
@@ -121,10 +125,10 @@ struct WorktreeProfilePickerView: View {
                                 highlighted: isTheDefault && highlightDefaultProfile,
                                 subtitle: claudeRowSubtitle(for: entry),
                                 onSelectModel: { model in
-                                    pick(profileID: entry.profile.id, model: model)
+                                    pick(profileID: entry.profile.id, model: model, agent: .claude)
                                 }
                             ) {
-                                pick(profileID: entry.profile.id)
+                                pick(profileID: entry.profile.id, agent: .claude)
                             }
                         } else {
                             let line = ProfileUsagePresentation.menuLine(for: entry)
@@ -140,12 +144,24 @@ struct WorktreeProfilePickerView: View {
                                 // case (logged-in OAuth awaiting its first poll).
                                 showsSubtitleSkeleton: subtitle.showsSkeleton
                             ) {
-                                pick(profileID: entry.profile.id)
+                                pick(profileID: entry.profile.id, agent: .claude)
                             }
                         }
                     }
                     .disabled(!isSelectable)
                     .opacity(isSelectable ? 1 : 0.5)
+                }
+
+                Divider()
+                    .padding(.vertical, 2)
+
+                CodexPickerRow(
+                    usage: appState.codexUsage,
+                    isLoading: appState.isLoadingCodexUsage,
+                    highlighted: appState.primaryAgentPreference == .codex
+                        && highlightDefaultProfile
+                ) {
+                    pick(profileID: nil, agent: .codex)
                 }
             }
         }
@@ -182,10 +198,20 @@ struct WorktreeProfilePickerView: View {
 
     /// `model` is an optional per-spawn Claude model override (the row's model
     /// rail); nil keeps the profile's default model.
-    private func pick(profileID: UUID?, model: String? = nil) {
+    private func pick(
+        profileID: UUID?,
+        model: String? = nil,
+        agent: PrimaryAgentPreference
+    ) {
         dismiss()
         onClose()
-        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID, model: model)
+        appState.createWorktree(
+            repoID: repoID,
+            parentWorktreeID: parentWorktreeID,
+            profileID: profileID,
+            model: model,
+            primaryAgentPreference: agent
+        )
     }
 
     /// Whether a profile row should render the two-bar usage meter (instead of
@@ -231,6 +257,139 @@ struct WorktreeProfilePickerView: View {
             }
             return (entry.profile.kindLabel, false)
         }
+    }
+}
+
+/// Codex account row backed by a one-shot app-server snapshot. The row stays
+/// selectable when usage or account metadata is unavailable: selection only
+/// chooses the agent; the CLI remains the authority on whether it can start.
+private struct CodexPickerRow: View {
+    let usage: CodexUsageResult?
+    let isLoading: Bool
+    var highlighted = false
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    private var snapshot: CodexRateLimitSnapshot? {
+        usage?.rateLimits.first(where: { $0.limitId == "codex" })
+            ?? usage?.rateLimits.first
+    }
+
+    private var title: String {
+        if let email = usage?.account?.email, !email.isEmpty {
+            return "Codex — \(email)"
+        }
+        return "Codex"
+    }
+
+    private var subtitle: String {
+        if isLoading && usage == nil { return "Loading usage…" }
+        if let reason = usage?.unavailableReason { return reason }
+        if usage?.account == nil { return "Not logged in" }
+        if snapshot?.primary == nil && snapshot?.secondary == nil {
+            return usage?.account?.planType.map { "\($0.capitalized) plan" } ?? "Usage unavailable"
+        }
+        return ""
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let snapshot, snapshot.primary != nil || snapshot.secondary != nil {
+                    CodexUsageBarsView(snapshot: snapshot)
+                } else {
+                    Text(subtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct CodexUsageBarsView: View {
+    let snapshot: CodexRateLimitSnapshot
+
+    var body: some View {
+        VStack(spacing: 2) {
+            if snapshot.rateLimitReachedType != nil || snapshot.spendControlReached == true {
+                Text("Limit reached")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let window = snapshot.primary {
+                bar(window)
+            }
+            if let window = snapshot.secondary {
+                bar(window)
+            }
+        }
+    }
+
+    private func bar(_ window: CodexRateLimitWindow) -> some View {
+        HStack(spacing: 5) {
+            Text(Self.durationLabel(window.windowDurationMins))
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, alignment: .leading)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2.5)
+                        .fill(Color.primary.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 2.5)
+                        .fill(Self.color(window.usedPercent))
+                        .frame(width: geometry.size.width * min(Double(window.usedPercent) / 100, 1))
+                }
+            }
+            .frame(height: 7)
+            Text("\(window.usedPercent)%")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(Self.color(window.usedPercent))
+                .frame(width: 34, alignment: .trailing)
+            Text(Self.resetLabel(window.resetsAt))
+                .font(.system(size: 9, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 74, alignment: .leading)
+        }
+    }
+
+    private static func durationLabel(_ minutes: Int?) -> String {
+        guard let minutes else { return "lim:" }
+        if minutes % (7 * 24 * 60) == 0 { return "\(minutes / (7 * 24 * 60))w:" }
+        if minutes % (24 * 60) == 0 { return "\(minutes / (24 * 60))d:" }
+        if minutes % 60 == 0 { return "\(minutes / 60)h:" }
+        return "\(minutes)m:"
+    }
+
+    private static func resetLabel(_ timestamp: Int?) -> String {
+        guard let timestamp else { return "" }
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        return "at " + date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private static func color(_ percent: Int) -> Color {
+        if percent >= 90 { return .red }
+        if percent >= 70 { return .orange }
+        return .green
     }
 }
 
