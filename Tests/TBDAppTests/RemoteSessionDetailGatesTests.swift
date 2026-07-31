@@ -112,3 +112,43 @@ struct RemoteSessionDetailGatesTests {
         #expect(RemoteSessionDetailGates.showsSendField(capabilities: [], gone: false) == false)
     }
 }
+
+/// Tier 1: pure state-to-copy mapping with no I/O, clock, or process.
+@Suite("Remote session state presentation")
+struct RemoteSessionStatePresentationTests {
+    @Test func labelsDistinguishRunningTerminalFromUnavailableAgentState() {
+        #expect(RemoteSessionStatePresentation.terminalLabel(.running) == "Terminal: Running")
+        #expect(RemoteSessionStatePresentation.agentLabel(.unknown) == "Agent: State unavailable")
+    }
+
+    @Test func labelsPreserveKnownAgentActivity() {
+        #expect(RemoteSessionStatePresentation.agentLabel(.working) == "Agent: Working")
+        #expect(RemoteSessionStatePresentation.agentLabel(.idle) == "Agent: Idle")
+        #expect(RemoteSessionStatePresentation.agentLabel(.waitingInput) == "Agent: Waiting for input")
+        #expect(RemoteSessionStatePresentation.agentLabel(.exited) == "Agent: Exited")
+    }
+
+    @Test func terminalLabelsCoverEveryProcessState() {
+        #expect(RemoteSessionStatePresentation.terminalLabel(.starting) == "Terminal: Starting")
+        #expect(RemoteSessionStatePresentation.terminalLabel(.exited) == "Terminal: Exited")
+        #expect(RemoteSessionStatePresentation.terminalLabel(.unknown) == "Terminal: State unavailable")
+    }
+
+    @Test func warningAppearsOnlyForPresentTerminalWithUnknownAgentState() {
+        let expected = "Agent activity is unavailable; terminal liveness alone does not confirm agent health."
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .running, agentState: .unknown, gone: false) == expected)
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .running, agentState: .working, gone: false) == nil)
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .running, agentState: .idle, gone: false) == nil)
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .starting, agentState: .unknown, gone: false) == nil)
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .exited, agentState: .unknown, gone: false) == nil)
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .unknown, agentState: .unknown, gone: false) == nil)
+        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
+            terminalState: .running, agentState: .unknown, gone: true) == nil)
+    }
+}

@@ -45,8 +45,8 @@ This is the one shape every verb that returns session data shares:
 
 Session state is two independent axes:
 
-- **`state`** — process liveness only (`starting`, `running`, `exited`). This is the provider's job: is the underlying process/container/instance alive.
-- **`agent_state`** — "does a human need to look at this" (`working`, `waiting_input`, `idle`, `exited`, `unknown`). **Normative rule: `agent_state` MUST be derived from machine interfaces — agent lifecycle hooks, transcript files, process exit codes — and MUST NEVER be inferred by parsing rendered terminal output.** Screen text is a display surface, not a state API: scraping it breaks silently when rendering changes and produces false signals. A provider with no such instrumentation available MUST report `"unknown"` rather than guess; the caller then falls back to showing liveness only.
+- **`state`** — terminal/session liveness only (`starting`, `running`, `exited`). It says whether the underlying process, container, or instance is alive; it says nothing about the agent's activity or health.
+- **`agent_state`** — "does a human need to look at this" (`working`, `waiting_input`, `idle`, `exited`, `unknown`). **Normative rule: `agent_state` MUST be derived from machine interfaces — agent lifecycle hooks, transcript files, process exit codes — and MUST NEVER be inferred by parsing rendered terminal output.** Screen text is a display surface, not a state API: scraping it breaks silently when rendering changes and produces false signals. A provider with no such instrumentation available MUST report `"unknown"` rather than guess. `state: "running"` with `agent_state: "unknown"` means only that the terminal/session is present and no machine-readable agent state is available; it never means healthy, idle, or finished. If machine-readable instrumentation reports that the agent produced final output and is waiting for another instruction, the provider SHOULD report `"idle"`; without that instrumentation it remains `"unknown"`.
 
 Other fields:
 
@@ -166,6 +166,8 @@ Why credentials never travel, by kind:
 - `create_params` — a flat field list, not a JSON Schema, describing the form for `create`. Supported `type` values: `string`, `text`, `bool`, `int`, `enum`. The caller renders this generically (the most complex widget is an enum dropdown) and only does required/type checks client-side — the provider is the validator of record, via the error model below. The field names `repo`, `branch`, `prompt`, and `title` are well-known: a caller may prefill them from ambient context (e.g. a currently selected repository) when present.
 - `profile_kinds` and `credential_ref_hint` are meaningful only when `capabilities` includes `profile`; a provider without that capability SHOULD omit both, and a caller MUST ignore them if present without it. `profile_kinds` lists which `kind` values (from the Profile object above) this provider can actually realize. `credential_ref_hint` is placeholder text — not validation — describing the shape of a `credential_ref` this provider expects; a caller shows it as placeholder text in its credential-reference input.
 
+`describe.capabilities` reports **interface capabilities**: which contract verbs TBD may call. It does not prove that a session has the external **task capabilities** a workload needs. A provider or workflow that claims ownership transfer or completion MUST preflight the concrete external capabilities required by that task and fail visibly before transfer when they are unavailable. Successful `create`, `state: "running"`, or `send` handoff proves only that the corresponding contract or transport step succeeded; it does not prove workload permission. The provider or higher-level workflow owns this preflight because TBD cannot infer vendor-specific permissions from the provider contract.
+
 ## `create`
 
 stdin:
@@ -180,6 +182,8 @@ stdin:
 
 `profile` (optional) is a Profile object (see above) selecting the identity the new session's agent should run as. It is meaningful only when the provider declares the `profile` capability; a provider that doesn't declare it MUST ignore the field — per the ignore-unknown-fields rule in Versioning — and create the session against its own default identity rather than error. An absent `profile` always means the provider's default identity, regardless of capability.
 
+If `create_params` exposes the well-known `prompt` field, the provider owns clearing any agent startup or trust gate before delivering that prompt. Writing prompt bytes while another interactive gate owns the TTY does not count as delivery. Providers SHOULD use agent flags or machine interfaces to clear and verify such gates, and MUST NOT infer readiness by parsing cosmetic TUI output.
+
 Response: a Session object.
 
 `create` MUST return within seconds. If provisioning is slow, return immediately with `state: "starting"` and let `list` (or `events`) carry the session to `running` later.
@@ -191,6 +195,8 @@ The caller may retry a timed-out `create` call using the **same** `idempotency_k
 Returns `{"sessions": [Session, ...]}`.
 
 Providers SHOULD keep exited sessions listable for at least 24 hours (with `state: "exited"`) rather than dropping them from the list immediately. A session disappearing from the list is indistinguishable from transport drift unless exited sessions stick around long enough to be told apart from a genuine loss.
+
+A transport-overload or unreachable failure MUST be returned as a transient error (exit 3), never as a successful empty list. The caller keeps its last successful snapshot and marks the provider stale; an empty successful snapshot instead counts toward the two-absence rule and can incorrectly mark live sessions gone.
 
 ## `stop <id>`
 
@@ -206,7 +212,7 @@ Rendering scrollback to a human is not the thing the machine-interface rule (abo
 
 ## `send <id>`
 
-stdin bytes are delivered verbatim to the session as keystrokes. The caller decides whether to append a trailing newline — the provider does not add one on its own. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
+stdin bytes are delivered verbatim to the session as keystrokes. The provider does not add a terminator. When a caller means the terminal Enter key, it MUST append carriage return (`\r`, byte `0x0D`); line feed (`\n`, byte `0x0A`) is not equivalent in a raw PTY and may fail to submit the line. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
 
 ## `rename <id> <title>` (optional)
 
