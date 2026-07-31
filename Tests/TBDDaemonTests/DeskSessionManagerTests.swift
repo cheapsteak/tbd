@@ -45,6 +45,31 @@ private final class DeadWindows: @unchecked Sendable {
     }
 }
 
+private final class PaneCommands: @unchecked Sendable {
+    private let lock = NSLock()
+    private var commands: [String: String] = [:]
+    private var defaultCommand: String
+
+    init(defaultCommand: String) {
+        self.defaultCommand = defaultCommand
+    }
+
+    func set(_ command: String, for paneID: String) {
+        lock.lock(); defer { lock.unlock() }
+        commands[paneID] = command
+    }
+
+    func setDefault(_ command: String) {
+        lock.lock(); defer { lock.unlock() }
+        defaultCommand = command
+    }
+
+    func command(for paneID: String) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return commands[paneID] ?? defaultCommand
+    }
+}
+
 extension TBDHomeSerialized {
     @Suite("DeskSessionManager — TBD_HOME isolated")
     struct DeskSessionManagerTests {
@@ -770,7 +795,8 @@ extension TBDHomeSerialized {
         /// Caller owns cleanup of `home` and TBD_HOME.
         private func makeDeskFixture(tag: String) throws -> (
             db: TBDDatabase, manager: DeskSessionManager,
-            recorder: DeskTmuxRecorder, dead: DeadWindows, home: URL
+            recorder: DeskTmuxRecorder, dead: DeadWindows,
+            commands: PaneCommands, home: URL
         ) {
             let home = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-desk-\(tag)-\(UUID().uuidString)", isDirectory: true)
@@ -780,6 +806,7 @@ extension TBDHomeSerialized {
             let db = try TBDDatabase(inMemory: true)
             let recorder = DeskTmuxRecorder()
             let dead = DeadWindows()
+            let commands = PaneCommands(defaultCommand: "1.2.3")
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: WorktreeLifecycle(
@@ -788,11 +815,12 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(
                     dryRun: true,
                     dryRunRecorder: { recorder.record($0) },
-                    dryRunWindowIsDead: { dead.isDead($0) }
+                    dryRunWindowIsDead: { dead.isDead($0) },
+                    dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) }
                 ),
                 skillDir: home.appendingPathComponent("skills/nightwatch").path
             )
-            return (db, manager, recorder, dead, home)
+            return (db, manager, recorder, dead, commands, home)
         }
 
         /// The regression: `TerminalStore.list` orders createdAt ASC, so resolving the desk
@@ -909,6 +937,74 @@ extension TBDHomeSerialized {
             #expect(
                 notifications.contains(where: { $0.type == .taskComplete }),
                 "wrap-up should still fire its completion notification")
+        }
+
+        @Test("agent command matching distinguishes Claude, Codex, and a fallen-back shell")
+        func agentCommandMatching() {
+            #expect(DeskSessionManager.agentCommand("1.2.3", matches: .claude))
+            #expect(DeskSessionManager.agentCommand("/usr/local/bin/claude", matches: .claude))
+            #expect(DeskSessionManager.agentCommand("/opt/bin/codex", matches: .codex))
+            #expect(!DeskSessionManager.agentCommand("zsh", matches: .codex))
+            #expect(!DeskSessionManager.agentCommand("codex-helper", matches: .codex))
+            #expect(!DeskSessionManager.agentCommand("codex", matches: .claude))
+        }
+
+        @Test("Watch Desk creates and nudges a Codex terminal when Codex is preferred")
+        func codexDeskCreateAndNudge() async throws {
+            let f = try makeDeskFixture(tag: "codex-create")
+            let codexHome = f.home.appendingPathComponent("codex-home", isDirectory: true)
+            setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+            defer {
+                unsetenv("TBD_TEST_CODEX_HOME")
+                unsetenv("TBD_HOME")
+                try? FileManager.default.removeItem(at: f.home)
+            }
+            try await f.db.config.setPrimaryAgentPreference(.codex)
+            f.commands.setDefault("codex")
+
+            let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
+            let terminals = try await f.db.terminals.list(worktreeID: desk.id)
+            let codex = try #require(terminals.first(where: {
+                $0.kind == .codex && $0.label == TerminalLabel.codex
+            }))
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(Array(f.recorder.pastedPanes.dropFirst(before)) == [codex.tmuxPaneID])
+            #expect(!terminals.contains { $0.kind == .claude })
+        }
+
+        @Test("a live Codex row whose process fell back to zsh is respawned before nudge")
+        func codexShellFallbackRecoversBeforeNudge() async throws {
+            let f = try makeDeskFixture(tag: "codex-retry")
+            let codexHome = f.home.appendingPathComponent("codex-home", isDirectory: true)
+            setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+            defer {
+                unsetenv("TBD_TEST_CODEX_HOME")
+                unsetenv("TBD_HOME")
+                try? FileManager.default.removeItem(at: f.home)
+            }
+            try await f.db.config.setPrimaryAgentPreference(.codex)
+            f.commands.setDefault("codex")
+
+            let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
+            let initial = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.kind == .codex })
+            )
+            f.commands.set("zsh", for: initial.tmuxPaneID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let codexRows = try await f.db.terminals.list(worktreeID: desk.id)
+                .filter { $0.kind == .codex }
+            #expect(codexRows.count == 2, "dead Codex row should be preserved but replaced")
+            let replacement = try #require(codexRows.first(where: { $0.id != initial.id }))
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)) == [replacement.tmuxPaneID],
+                "recovery must nudge the replacement, never the shell-backed stale row"
+            )
         }
     }
 }
