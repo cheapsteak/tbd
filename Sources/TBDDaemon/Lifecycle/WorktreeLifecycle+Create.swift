@@ -479,6 +479,45 @@ extension WorktreeLifecycle {
 
         var lastError: Error? = nil
 
+        // A branch the caller NAMED that already exists locally gets checked
+        // out, not re-created. `git worktree add -b <branch>` is fatal when the
+        // ref exists ("a branch named 'x' already exists"), and every attempt
+        // below would hit it — both base branches, then both again after the
+        // folder-rename retry, which keeps a user-specified branch. Four
+        // failures, one cause.
+        //
+        // This is the ordinary case, not an edge case: spawning a session onto
+        // an existing PR means the branch is already there.
+        //
+        // Gated on `userSpecifiedBranch` deliberately. An auto-generated
+        // `tbd/<name>` that collides means the NAME collided — the right answer
+        // there is a fresh name (the retry below), not silently adopting
+        // whatever branch happens to hold that name.
+        //
+        // A failed existence probe falls through to the old path rather than
+        // failing creation: not knowing is not the same as knowing it's absent.
+        let branchExistsLocally = (try? await git.localBranchExists(repoPath: repoPath, name: branch)) ?? false
+        if userSpecifiedBranch && branchExistsLocally {
+            do {
+                try await git.worktreeAddExisting(
+                    repoPath: repoPath,
+                    worktreePath: worktreePath,
+                    branch: branch
+                )
+                return (name: name, branch: branch, path: worktreePath)
+            } catch {
+                try? FileManager.default.removeItem(atPath: worktreePath)
+                // No rename retry here: the branch is the caller's and is kept
+                // across retries, so a second attempt fails identically. Git's
+                // stderr is the useful part — for the common follow-on failure
+                // it reads "'x' is already used by worktree at <path>", which
+                // names the directory holding it.
+                throw WorktreeLifecycleError.createFailed(
+                    "could not check out existing branch '\(branch)'\(formatErrorForMessage(error))"
+                )
+            }
+        }
+
         for baseBranch in baseBranches {
             do {
                 try await git.worktreeAdd(
