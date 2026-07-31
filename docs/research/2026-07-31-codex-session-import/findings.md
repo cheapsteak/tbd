@@ -1,8 +1,9 @@
 # Importing a Claude session into Codex: the `externalAgentConfig` app-server surface
 
 **Status:** Investigated, not implemented
-**Tested:** 2026-07-31 by driving `codex app-server` over stdio with codex-cli 0.145.0
-**Plugin surface inspected:** `openai/codex-plugin-cc` 1.0.4 (installed) and 1.0.6 (`db52e28`, upstream HEAD)
+**Tested:** 2026-07-31 by driving `codex app-server` over stdio with codex-cli 0.145.0 — `detect` and a
+single-session `import` were both executed against a live server
+**Plugin surface inspected:** `openai/codex-plugin-cc` 1.0.6 (`db52e28`, upstream HEAD)
 
 ## Summary
 
@@ -78,20 +79,31 @@ Session entries are `{path, cwd, title}`. Titles are human-readable summaries of
 observed examples include `"Investigate PR 561 brainstorming skip"` and
 `"Call-level triage actions: flag, log, dismiss"`. A picker can be built from `detect` alone.
 
-### `import` takes a path, and returns an import id — not a thread id
+### `import` returns the created thread id, so no client ledger is needed
 
-`SessionMigration` requires `{cwd, path}` with optional `title`. `ExternalAgentConfigImportResponse`
-is `{importId}`. The `externalAgentConfig/import/completed` notification is
-`{importId, itemTypeResults[]}`, keyed by item *type* rather than by imported item.
+`SessionMigration` requires `{cwd, path}` with optional `title`. The request returns
+`{importId}` — an id for the import *operation*. The thread id arrives in the
+`externalAgentConfig/import/progress` and `.../completed` notifications, whose per-item success
+entries pair the input with the output:
 
-Nothing in that chain returns a resumable thread id. `codex-plugin-cc` recovers one after the fact
-from its own ledger, matching the source file's canonical path and SHA256. Thread resolution is
-therefore client bookkeeping, not a protocol guarantee.
+```jsonc
+{"itemType":"SESSIONS",
+ "cwd":null,
+ "source":"/Users/…/.claude/projects/<slug>/<session-id>.jsonl",
+ "target":"019fb9d4-f45a-7061-8953-d377b660dba3"}
+```
 
-`ExternalAgentConfigImportItemTypeSuccess` does carry an optional `target` alongside `itemType`,
-`cwd` and `source`. Whether `target` names the created thread for a `SESSIONS` import is the single
-open question that would decide whether a caller needs a ledger at all. One `import` call settles
-it; `import` mutates Codex state, so it was not run.
+`target` is a resumable Codex session. The import above produced
+`~/.codex/sessions/2026/07/31/rollout-<ts>-019fb9d4-….jsonl`, 96 KB, whose `session_meta` carries
+`session_id` equal to `target` and the source session's `cwd`. Codex records the import in its own
+`~/.codex/external_agent_session_imports.json`. Round trip was roughly 60 ms.
+
+A caller therefore goes from a Claude transcript path to a resumable Codex thread with no
+bookkeeping of its own. `codex-plugin-cc` maintains a private ledger keyed by source path and
+SHA256 to recover the same id; that is redundant for a client reading the notification.
+
+`session_meta.originator` records the `clientInfo.name` the caller sent at `initialize`, so imports
+are attributable to the tool that made them.
 
 ### `import/readHistories` is an audit log
 
@@ -117,10 +129,12 @@ The command accepts `--source <claude-jsonl>`, so it is not restricted to the se
 
 ## Unknowns
 
-- `import` was never executed. Everything about import results, including whether `target` names the
-  created thread, is unverified.
-- Whether a session imported twice produces one thread or two, and what the path + SHA256 ledger
-  implies once a transcript grows after import.
+- **Fidelity of the conversion.** The imported thread had 107 lines against the source's 156. Some
+  of that gap is expected — Claude JSONL carries `attachment`, `ai-title`, `permission-mode` and
+  similar entries with no Codex equivalent — but whether tool calls and their results survive was
+  not examined. This bears directly on how useful an imported thread is.
+- **Idempotency.** Whether importing the same session twice yields one thread or two, and what
+  Codex's `external_agent_session_imports.json` does once the source transcript grows after import.
 - Whether `migrationSource` selects agents other than Claude Code, and what values it accepts. The
   schema documents only that unrecognized values fall back to a default.
 - Behavior of `/codex:transfer` against an exhausted Claude quota.
@@ -131,8 +145,15 @@ The command accepts `--source <claude-jsonl>`, so it is not restricted to the se
 TBD is well positioned for exactly one part of this, and it is not the part a handoff feature would
 normally focus on. `detect` returns a global, unordered list of every recent Claude session. TBD
 already knows which worktree, which tab, and which session id the user means, so it can collapse
-that list to a single entry without a picker. The transcript problem — fidelity, truncation,
-summarization — does not exist on this path, because TBD never reads the transcript.
+that list to a single entry — and can skip `detect` altogether, constructing the `SessionMigration`
+from the `transcriptPath` it already stores on the terminal row. The transcript problem —
+truncation, excerpting, summarization — does not exist on this path, because TBD never reads the
+transcript.
+
+Because the imported thread already contains the conversation, there is no handoff document to read
+and therefore no initial prompt to send. A Codex terminal resumed on `target` opens with history and
+an empty composer, spending no turn. That is the behavior a generated-summary design has to work to
+approximate.
 
 Two constraints bound any such integration.
 
