@@ -70,6 +70,27 @@ private final class PaneCommands: @unchecked Sendable {
     }
 }
 
+private final class SpawnFailureSwitch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failing = false
+
+    func setFailing(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        failing = value
+    }
+
+    func error() -> Error? {
+        lock.lock(); defer { lock.unlock() }
+        return failing
+            ? TmuxError.commandFailed(
+                command: "new-window",
+                status: 1,
+                output: "simulated desk spawn failure"
+            )
+            : nil
+    }
+}
+
 extension TBDHomeSerialized {
     @Suite("DeskSessionManager — TBD_HOME isolated")
     struct DeskSessionManagerTests {
@@ -796,7 +817,7 @@ extension TBDHomeSerialized {
         private func makeDeskFixture(tag: String) throws -> (
             db: TBDDatabase, manager: DeskSessionManager,
             recorder: DeskTmuxRecorder, dead: DeadWindows,
-            commands: PaneCommands, home: URL
+            commands: PaneCommands, spawnFailures: SpawnFailureSwitch, home: URL
         ) {
             let home = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-desk-\(tag)-\(UUID().uuidString)", isDirectory: true)
@@ -807,10 +828,17 @@ extension TBDHomeSerialized {
             let recorder = DeskTmuxRecorder()
             let dead = DeadWindows()
             let commands = PaneCommands(defaultCommand: "1.2.3")
+            let spawnFailures = SpawnFailureSwitch()
             let manager = DeskSessionManager(
                 db: db,
                 lifecycle: WorktreeLifecycle(
-                    db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+                    db: db,
+                    git: GitManager(),
+                    tmux: TmuxManager(
+                        dryRun: true,
+                        dryRunCreateWindowError: { _ in spawnFailures.error() }
+                    ),
+                    hooks: HookResolver()
                 ),
                 tmux: TmuxManager(
                     dryRun: true,
@@ -820,7 +848,7 @@ extension TBDHomeSerialized {
                 ),
                 skillDir: home.appendingPathComponent("skills/nightwatch").path
             )
-            return (db, manager, recorder, dead, commands, home)
+            return (db, manager, recorder, dead, commands, spawnFailures, home)
         }
 
         /// The regression: `TerminalStore.list` orders createdAt ASC, so resolving the desk
@@ -892,6 +920,7 @@ extension TBDHomeSerialized {
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
             let original = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
             f.dead.markDead(original.tmuxWindowID)
+            f.spawnFailures.setFailing(true)
 
             let before = f.recorder.pastedPanes.count
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
@@ -900,6 +929,7 @@ extension TBDHomeSerialized {
                 "no live terminal means nothing should be pasted anywhere")
 
             // Desk comes back; the next nudge must fire immediately.
+            f.spawnFailures.setFailing(false)
             _ = try await f.db.terminals.create(
                 worktreeID: desk.id, tmuxWindowID: "@revived", tmuxPaneID: "%7",
                 label: TerminalLabel.claudeCode)
