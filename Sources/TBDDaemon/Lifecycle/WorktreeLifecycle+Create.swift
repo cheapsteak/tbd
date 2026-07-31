@@ -43,12 +43,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
         let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -222,7 +222,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -396,6 +396,7 @@ extension WorktreeLifecycle {
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
                         modelOverride: modelOverride,
+                        primaryAgentPreference: primaryAgentPreference,
                         claudeSettingsOverlay: claudeSettingsOverlay,
                         carryover: carryover,
                         preparedCodexLaunch: preparedCodexLaunch
@@ -425,6 +426,7 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
+                primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover,
                 preparedCodexLaunch: preparedCodexLaunch
@@ -497,6 +499,45 @@ extension WorktreeLifecycle {
         let baseBranches = ["origin/\(defaultBranch)", defaultBranch]
 
         var lastError: Error? = nil
+
+        // A branch the caller NAMED that already exists locally gets checked
+        // out, not re-created. `git worktree add -b <branch>` is fatal when the
+        // ref exists ("a branch named 'x' already exists"), and every attempt
+        // below would hit it — both base branches, then both again after the
+        // folder-rename retry, which keeps a user-specified branch. Four
+        // failures, one cause.
+        //
+        // This is the ordinary case, not an edge case: spawning a session onto
+        // an existing PR means the branch is already there.
+        //
+        // Gated on `userSpecifiedBranch` deliberately. An auto-generated
+        // `tbd/<name>` that collides means the NAME collided — the right answer
+        // there is a fresh name (the retry below), not silently adopting
+        // whatever branch happens to hold that name.
+        //
+        // A failed existence probe falls through to the old path rather than
+        // failing creation: not knowing is not the same as knowing it's absent.
+        let branchExistsLocally = (try? await git.localBranchExists(repoPath: repoPath, name: branch)) ?? false
+        if userSpecifiedBranch && branchExistsLocally {
+            do {
+                try await git.worktreeAddExisting(
+                    repoPath: repoPath,
+                    worktreePath: worktreePath,
+                    branch: branch
+                )
+                return (name: name, branch: branch, path: worktreePath)
+            } catch {
+                try? FileManager.default.removeItem(atPath: worktreePath)
+                // No rename retry here: the branch is the caller's and is kept
+                // across retries, so a second attempt fails identically. Git's
+                // stderr is the useful part — for the common follow-on failure
+                // it reads "'x' is already used by worktree at <path>", which
+                // names the directory holding it.
+                throw WorktreeLifecycleError.createFailed(
+                    "could not check out existing branch '\(branch)'\(formatErrorForMessage(error))"
+                )
+            }
+        }
 
         for baseBranch in baseBranches {
             do {
@@ -618,6 +659,7 @@ extension WorktreeLifecycle {
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
+        primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil,
         preparedCodexLaunch: CodexLaunchPreparation? = nil
@@ -631,7 +673,7 @@ extension WorktreeLifecycle {
             ? resolvePrimaryTerminalKind(
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
-                configuredPreference: config.primaryAgentPreference
+                configuredPreference: primaryAgentPreference ?? config.primaryAgentPreference
             )
             : .claude
         let archivedSessions = archivedClaudeSessions ?? []

@@ -160,6 +160,7 @@ public enum RPCMethod {
     public static let modelProfileUpdateBedrock = "modelProfile.updateBedrock"
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
     public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
+    public static let codexUsageFetch = "codex.usage.fetch"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileReorder = "modelProfile.reorder"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
@@ -880,6 +881,9 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// profile default. nil preserves the profile's own model. Optional/
     /// defaulted for backward compatibility with older clients.
     public let model: String?
+    /// Explicit primary-agent override for this creation only. nil preserves
+    /// the configured global preference. Optional for backward compatibility.
+    public let primaryAgentPreference: PrimaryAgentPreference?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
     /// per-session `--settings` overlay for this spawn's Claude agent. General
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
@@ -906,7 +910,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Optional/defaulted for backward compatibility (old daemons ignore the
     /// unknown key; old clients omit it).
     public let autoArchiveOnMerge: Bool?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -916,6 +920,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
         self.model = model
+        self.primaryAgentPreference = primaryAgentPreference
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.prNumber = prNumber
         self.checkoutPRHead = checkoutPRHead

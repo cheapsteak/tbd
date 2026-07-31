@@ -626,6 +626,10 @@ final class AppState: ObservableObject {
     @Published var prStatuses: [UUID: PRStatus] = [:]
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
+    /// Ephemeral one-shot Codex account/usage snapshot loaded when the
+    /// worktree picker opens. It is intentionally neither polled nor persisted.
+    @Published var codexUsage: CodexUsageResult?
+    @Published var isLoadingCodexUsage = false
     @Published var primaryAgentPreference: PrimaryAgentPreference = .defaultValue
     /// Global free-form env overrides (config scope). Loaded from the daemon
     /// alongside `defaultProfileID` via `loadModelProfiles()`.

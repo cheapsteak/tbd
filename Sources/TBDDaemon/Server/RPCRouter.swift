@@ -320,6 +320,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileSetGlobalDefault(request.paramsData)
             case RPCMethod.modelProfileSetPrimaryAgentPreference:
                 return try await handleModelProfileSetPrimaryAgentPreference(request.paramsData)
+            case RPCMethod.codexUsageFetch:
+                return try await handleCodexUsageFetch()
             case RPCMethod.modelProfileSetRepoOverride:
                 return try await handleModelProfileSetRepoOverride(request.paramsData)
             case RPCMethod.modelProfileReorder:

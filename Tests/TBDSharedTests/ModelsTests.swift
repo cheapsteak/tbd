@@ -450,7 +450,8 @@ import Testing
         branch: "feat/my-branch",
         displayName: "My Display Name",
         prompt: "Build the thing",
-        model: "claude-fable-5"
+        model: "claude-fable-5",
+        primaryAgentPreference: .codex
     )
     let data = try JSONEncoder().encode(params)
     let decoded = try JSONDecoder().decode(WorktreeCreateParams.self, from: data)
@@ -460,6 +461,7 @@ import Testing
     #expect(decoded.displayName == "My Display Name")
     #expect(decoded.prompt == "Build the thing")
     #expect(decoded.model == "claude-fable-5")
+    #expect(decoded.primaryAgentPreference == .codex)
 }
 
 @Test func testWorktreeCreateParamsRoundTripWithNilFields() throws {
@@ -473,6 +475,20 @@ import Testing
     #expect(decoded.displayName == nil)
     #expect(decoded.prompt == nil)
     #expect(decoded.model == nil)
+    #expect(decoded.primaryAgentPreference == nil)
+}
+
+@Test func worktreeCreateParamsDecodesWithoutPrimaryAgentOverride() throws {
+    let data = Data(#"{"repoID":"11111111-1111-1111-1111-111111111111"}"#.utf8)
+    let decoded = try JSONDecoder().decode(WorktreeCreateParams.self, from: data)
+    #expect(decoded.primaryAgentPreference == nil)
+}
+
+@Test func codexUsageResultDecodesWithoutOptionalMetadata() throws {
+    let data = Data(#"{"rateLimits":[]}"#.utf8)
+    let decoded = try JSONDecoder().decode(CodexUsageResult.self, from: data)
+    #expect(decoded.account == nil)
+    #expect(decoded.unavailableReason == nil)
 }
 
 @Test func repoDecodesLegacyJSONWithoutNewFields() throws {
