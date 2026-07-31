@@ -561,8 +561,8 @@ are in answers most questions about where a behavior belongs:
 **Enforcement appears nowhere on that list, deliberately.** There is no
 capability wall between a desk and its verbs: no allow rules, no deny rules, no
 proposal conversion, no gate. The operator's controls are **selection** — is
-supervision on, which mode each project runs, which projects are in automation,
-which sessions are never touched — and **visibility**: every act is a ledger
+supervision on, which mode each project runs, which projects are in
+automation — and **visibility**: every act is a ledger
 line the moment it happens, and the account renders it beside you.
 
 This is a bet, and §16 records it as one so a future operator who gets burned
@@ -669,7 +669,7 @@ the daemon does around each one is accounting, never permission.
 to mechanics.** Inside every acting verb call — after the desk decides,
 before any keystroke — the daemon rechecks against current state: the switch
 is on, a shift is active, the target lies inside the calling desk's project,
-the target is not flagged never-touch, not rate-limited, not under a capacity
+the target is not rate-limited, not under a capacity
 hold, and its pane is alive. Every item is a yes/no fact the operator or the
 machine already owns — a flag, a switch, a timestamp — and none involves
 reading the payload or judging the act. This is addressing correctness (§5)
@@ -680,7 +680,7 @@ at act time, and the off switch flipped at 2:03 must beat a drive decided
 from a 2:02 work order and issued at 2:07. A failed precondition refuses the
 act — nothing is typed, the CLI returns an ordinary error naming the
 condition, and the refusal is recorded (§4 step 7, §6), so the morning shows
-near-misses and an operator learns their flags bind. What was removed stays
+near-misses and an operator learns their controls bind. What was removed stays
 removed: no rule matching, no content inspection, no posture judgment. The
 gate asked "may this desk do this *kind* of thing"; preconditions ask only
 "may anything be done *here, now*." The residual race is the milliseconds
@@ -755,8 +755,8 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    [wake program's](2026-07-26-fleet-supervision-wake-program.md). It writes
    no log and wakes nobody.
 2. **Hit.** An agent has been idle for 40 minutes and has uncommitted work.
-   Before doing anything, the daemon checks the mechanical reasons to stop: a
-   never-touch flag, a rate limit, insufficient quota, an intervention already
+   Before doing anything, the daemon checks the mechanical reasons to stop:
+   a rate limit, insufficient quota, an intervention already
    in progress, or a pending re-check timer.
 3. **Corroborate.** The daemon checks the pane's live process once. If it
    disagrees with the hook state, the daemon records `unknown` in a prominent
@@ -1112,21 +1112,18 @@ queue protect the period before confirmation. If teams later need identical
 rules on many machines with no confirmation, the promotion flow is the place
 to add that capability.
 
-**Specific-session designations (P1-3) are database (DB) flags, not policy
-files.** "Don't poke *my* live session" refers to a runtime object that exists
-for hours. A UI or CLI action sets a flag for that terminal or worktree,
-following the `keepWarm` precedent. The sweep checks the flag mechanically.
-Repository files contain rules about *kinds* of things. The DB records operator
-choices about *particular* things.
-
-P1-3's other half — *worktrees whose progress matters most get looked at
-first* — reuses an existing operator gesture the same way: the worktree
+**Worktree priority (P1-3) is an operator gesture on a particular thing, not
+policy.** *Worktrees whose progress matters most get looked at first* reuses
+an existing gesture: the worktree
 **pin**. The sweep orders cases within each project's work order pinned-first
 (the pin state worktrees already carry), then by case age, and that project's
 supervisor works the list top-down. Ordering is within a work order, so it never
 has to rank one project against another. Pinning is already how an operator
 marks what matters, so priority
-costs no new schema and no new concept. Like every fact, ordering only shapes
+costs no new schema and no new concept. Repository files contain rules about
+*kinds* of things; the DB records operator choices about *particular* things,
+and the pin follows that rule the way `keepWarm` does. Like every fact,
+ordering only shapes
 attention — it never changes what any verb is allowed to do.
 
 ## 6. The account (P0-9, P1-7)
@@ -1462,7 +1459,7 @@ database adds nothing.
 
 Which projects the supervisor watches is an operator setting, not a design
 constant, and it is **sweep configuration** — an input-side answer to "which
-projects generate cases," in the same family as the never-touch flags of §5.
+projects generate cases."
 **Membership sits at the project level because the project is the acting unit**:
 a desk works for a project, so "should the daemon be working here" is a question
 about a project, and marking half a declared project out would mean a desk
@@ -2218,6 +2215,15 @@ to inaction at the largest scale.
 
 ## 15. Deliberately not built
 
+- **Per-session never-touch designations** — deferred to its own design pass,
+  not folded into this one. "Don't poke *this* session" is a per-object
+  control surface with its own open questions — which object carries the flag
+  (terminal or worktree), how an operator discovers it exists, whether it
+  expires when they walk away — and answering them as a side effect here
+  would shortchange them. Until it lands, the operator's protections are the
+  pause switch, project membership marks, and the sweep's stuck-or-idle
+  targeting; the actuation preconditions (§3) are the seam the flag binds to
+  when it arrives.
 - **A verdict enum / work-arc schema** — interpretations of work differ by
   repository, team, and person. A compiled classification would recreate the
   old system's defect. Stated as a principle in §2: TBD has no theory of
@@ -2330,7 +2336,7 @@ to inaction at the largest scale.
   [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)
   and §16 for the ambiguity this accepts.
 - **Actuation rails for the wake program** — a first draft of the 2026-07-29
-  amendment kept a compiled choke point (never-touch, capacity holds,
+  amendment kept a compiled choke point (capacity holds,
   in-flight dedup, send-time freshness, a daemon-written ledger line) that
   every wake would pass through. Removed the same day: TBD does not guarantee
   or guardrail a program it does not run and cannot repair. The program's

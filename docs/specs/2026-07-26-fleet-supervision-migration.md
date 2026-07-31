@@ -141,8 +141,8 @@ the target repos' `.nightwatch/policy.json` — into exactly one bucket:
    kind** (design §3), so nothing can land here. Its former content splits two
    ways, and the disposition log records which way each unit went:
    - Anything that reads as *advice* becomes conduct — bucket 2 or 3.
-   - Anything **selection-shaped** — a never-touch flag (P1-3), an
-     automation-membership mark — is not authored content at all. It is an
+   - Anything **selection-shaped** — an automation-membership mark — is not
+     authored content at all. It is an
      operator gesture, applied **by hand** at setup and recorded in the log as
      applied rather than migrated. Selections have no file to carry across.
    The distinction that matters: content moves between files, selections are
@@ -184,11 +184,13 @@ citations are to the baseline doc's §5–§6):
   shipped list, which carried a bare `git` prefix, is too broad to have ever
   been ratified. Nothing from it seeds anything in the new design — there are no
   rules for it to seed (design §3).
-- **`dontTouchTxt`** — Never-list entries are **selection-shaped**: the operator
-  applies each surviving one by hand as a **never-touch flag** on that terminal
-  or worktree (P1-3 per-object DB flags — an operator gesture, not authored
-  policy), and the log records which were applied and which were dropped as
-  stale. Nothing here migrates as content. The frozen pane-ID comment →
+- **`dontTouchTxt`** — Never-list entries carry the same force in the new
+  design that they actually had in the old — conduct the model reads. Each
+  surviving entry becomes playbook prose in the owning project's mode ("never
+  touch X without a human") via bucket 2 or 3, and the log records which were
+  dropped as stale. A mechanical per-session flag is deferred to its own
+  design pass (design §15); if it lands, these entries are its first
+  candidates. The frozen pane-ID comment →
   discard (5).
 - **`NightwatchDeskPrompts`** — Claim-before-apply, escalation batching, the
   200k respawn rule → doctrine (2), where the design has not already compiled
@@ -207,13 +209,13 @@ citations are to the baseline doc's §5–§6):
   left to "promote to binding," bucket 4 being retired, so an entry that reads
   as a standing decision rather than advice takes one of the two paths above:
   written as conduct prose in the project's mode, or applied by hand as a
-  selection (never-touch flag, automation mark).
+  selection (automation mark).
 
 **Step 3 — seed the destinations.** Open the `.agents/supervision.md` PR in
 the target repo; record the operator's selections in `supervision.json`
 (automation-membership marks and default stance, project topology, mode
-choices); and apply the by-hand selections bucket 4 produced — never-touch
-flags on the terminals or worktrees that earned them. There is no learnings
+choices) — the by-hand selections bucket 4 produced land here too. There is
+no learnings
 file to append to — durable prose goes in the advisory PR.
 
 **Exit gate**: the disposition log accounts for every file in the inventory and

@@ -286,8 +286,8 @@ and become a contract that migration and future change must respect.
   `tbd terminal wake`. The story is thereby reclassified **Enabled** (see the classification
   note above): TBD's obligation is that the program's inputs and actuation are public,
   documented, and stable — never to guarantee or guardrail the program's correctness. A
-  first draft of this amendment kept a compiled choke point at actuation (never-touch,
-  capacity holds, dedup, send-time freshness, a daemon-written ledger line); a same-day
+  first draft of this amendment kept a compiled choke point at actuation (capacity
+  holds, dedup, send-time freshness, a daemon-written ledger line); a same-day
   follow-up removed it, because it made TBD the guarantor of a program TBD does not run,
   does not schedule, and — seeded once, never clobbered — cannot repair. The rails are the
   program's to honor, readable from the same public surfaces, and the reference script
@@ -298,14 +298,8 @@ and become a contract that migration and future change must respect.
   and sessions with nothing outstanding are not woken by construction — nothing wakes at
   all unless a program a human authored concludes it should. Full design:
   [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).*
-- **P1-3 [both]** As an operator, I want to designate sessions the supervisor must never
-  touch and worktrees whose progress matters most, so that my own live session is never
-  poked and the important work is looked at first.
-
-  *Amended 2026-07-29: the flag itself stays **Built** — a DB flag the sweep honors
-  mechanically (design §5). Its visibility to external programs is **Enabled**: the flag
-  must appear on the public listing surfaces so a wake program can honor it too, and the
-  reference script skips flagged sessions.*
+- **P1-3 [both]** As an operator, I want worktrees whose progress matters most looked at
+  first, so that the important work gets attention early in every pass.
 - **P1-4 [both]** As a repo maintainer, I want my repo's supervision policy — what counts as
   stuck, what interventions are appropriate, house rules the supervisor must follow —
   authored as an artifact in or beside my repo and resolved through TBD's existing
@@ -551,6 +545,9 @@ expressible in terms of the properties above rather than any one protocol's verb
 - Notifying the operator that something happened, on any channel — in-app, macOS, or reaching
   them off-machine. Addable in isolation once the mechanism exists; assume a way to raise a
   notification is available.
+- Per-session "never touch this session" designations. Deferred to its own design pass with
+  its own brainstorm; the design's actuation preconditions are the seam such a flag binds to
+  when it lands.
 - Which model runs which part of the work, and any cheaper triage tier beneath the supervisor.
   Solved separately.
 - How the app's appearance reflects the posture, and the chrome showing posture and supervisor

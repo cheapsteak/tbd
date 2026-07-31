@@ -66,21 +66,21 @@ and the desk — entirely.**
   up — but no case is ever raised *for the purpose of* waking.
 - **TBD guards nothing here — its obligation is sufficiency, not guardrails.**
   A first draft of this amendment kept a compiled choke point at actuation —
-  never-touch flags, capacity holds, in-flight dedup, send-time freshness, a
+  capacity holds, in-flight dedup, send-time freshness, a
   daemon-written ledger line — through which every wake would pass. It was
   removed the same day, deliberately: it made TBD the guarantor of a program
   TBD does not run, does not schedule, and — seeded once, never clobbered —
   cannot repair. A wake program's correctness is its author's, like any cron
   job's. What TBD owes instead is that everything the program needs is a
   public, documented, stable surface: parked state and `hibernateReason` in
-  the listings; the never-touch flag visible there too (P1-3); the supervision
+  the listings; the supervision
   switch readable (`tbd supervise status --json` or equivalent); per-profile
   usage facts readable (P1-1 — the one surface that does not exist yet); and
   `tbd terminal wake --prompt` with its existing race-safety — an
   already-awake session reports `woken:false` and receives nothing, the one
   property that must hold no matter who calls, and it already does. The
   reference script honors every rail the choke point would have enforced —
-  switch off means exit quietly, never-touch means skip, rate-limited or
+  switch off means exit quietly, rate-limited or
   capacity-exhausted means hold — as authored conduct with a worked example,
   not as law. Send-time freshness (P0-8) is likewise the program's
   discipline: derive facts live, immediately before composing, as the old
