@@ -177,6 +177,26 @@ The existing Codex integration deliberately avoided an isolated `CODEX_HOME` for
 reasons, choosing a profile overlay in the real `~/.codex` instead. Reversing that is a real
 design question, not an implementation detail.
 
+Codex also has a native surface that touches repo skills, and the follow-up must account for it
+rather than reinvent it. `externalAgentConfig/detect` on the app-server returns a repo-scoped
+`SKILLS` item carrying the passed `cwd`, one of ten migration item types alongside `AGENTS_MD`,
+`HOOKS`, `COMMANDS` and `SESSIONS` — see
+[`docs/research/2026-07-31-codex-session-import/findings.md`](../research/2026-07-31-codex-session-import/findings.md).
+It is not a substitute for a per-spawn overlay, and the distinction is the whole design:
+
+- **It migrates, where we need to overlay.** Import writes skills to the home-level
+  `~/.agents/skills` and rewrites the user's Codex configuration. That is one-way, persistent and
+  machine-wide — the same "installed at user level" outcome rejected above, arrived at through a
+  different door. An overlay must be per-spawn and leave no trace outside the session.
+- **It moves far more than skills.** The same call that offers a repo's skills also offers to
+  migrate `CLAUDE.md` to `~/.codex/AGENTS.md`, hooks into `~/.codex/hooks.json`, and MCP servers
+  into `~/.codex/config.toml`. Any TBD use of this surface must be explicit about what it declines.
+- **It is experimental.** `codex app-server` is marked experimental and the client path moved
+  between two adjacent plugin releases. A load-bearing TBD dependency on it needs a fallback.
+
+The useful read is that detect proves Codex already models "this repo has skills" as a first-class
+concept — the gap is that nothing surfaces them to a session without a machine-level migration.
+
 ## Known gaps
 
 - **Human contributors still get no enforcement.** Unchanged from 2026-07-26; this remains an
