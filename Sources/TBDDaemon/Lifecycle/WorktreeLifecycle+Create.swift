@@ -43,12 +43,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
         let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -222,7 +222,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -379,6 +379,7 @@ extension WorktreeLifecycle {
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
                         modelOverride: modelOverride,
+                        primaryAgentPreference: primaryAgentPreference,
                         claudeSettingsOverlay: claudeSettingsOverlay,
                         carryover: carryover
                     )
@@ -407,6 +408,7 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
+                primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover
             )
@@ -599,6 +601,7 @@ extension WorktreeLifecycle {
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
+        primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil
     ) async throws -> [(id: UUID, label: String)] {
@@ -611,7 +614,7 @@ extension WorktreeLifecycle {
             ? resolvePrimaryTerminalKind(
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
-                configuredPreference: config.primaryAgentPreference
+                configuredPreference: primaryAgentPreference ?? config.primaryAgentPreference
             )
             : .claude
         let archivedSessions = archivedClaudeSessions ?? []
