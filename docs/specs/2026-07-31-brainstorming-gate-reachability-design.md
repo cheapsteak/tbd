@@ -21,15 +21,16 @@ permits any reason ("if a trigger fires but a brainstorm is genuinely unnecessar
 description"). But it is precisely the failure the gate exists to prevent: the 2026-07-26 design's
 own Why section condemns design thinking that "lived in a session scratchpad." Six prototypes and a
 parity report are a session scratchpad by another name — none of that material is in this repo, so
-no reviewer of #561 could inspect the decisions it encodes.
+no reviewer of #561 could examine the decisions it encodes.
 
-The concrete cost is visible in the diff. `DeterministicCodexHandoffGenerator` decides that a
-Claude session's context is best represented by the last 64 KB of its JSONL, filtered to `user` and
-`assistant` entries with non-empty text, truncated to 8 KB. Nothing else in TBD parses transcripts
-this way. On a real 2.7 MB session that tail is 2.3% of the file and yields a mid-thought fragment,
-while the JSONL's own typed fields — `ai-title`, `last-prompt`, `file-history-delta`, `pr-link` —
-are discarded. Whether that is the right trade is arguable either way; the problem is that it was
-never written down anywhere it could be argued with.
+The concrete cost is visible in the diff. `DeterministicCodexHandoffGenerator` embeds a theory:
+that what a Claude session was doing is best represented by the last 64 KB of its JSONL, filtered
+to `user` and `assistant` entries with non-empty text, truncated to 8 KB. Nothing else in TBD parses
+transcripts this way. On a real 2.7 MB session that tail is 2.3% of the file and yields a
+mid-thought fragment, while the JSONL's own typed fields — `ai-title`, `last-prompt`,
+`file-history-delta`, `pr-link` — are discarded. Whether that theory is right is arguable either
+way. The problem is that it arrived as code, where the diff shows the filter but not the claim, and
+so was never anywhere it could be argued with.
 
 **Cause 2 — the gate is unreachable from Codex, and #561 was written from Codex.** See
 "Reachability" below. `/tbd-brainstorming` does not exist in a Codex session. The rule instructs
@@ -40,10 +41,12 @@ Codex readers to invoke a skill they cannot invoke.
 Three edits, replacing the `### Blast-radius work starts with a brainstormed spec` section of
 `CLAUDE.md`.
 
-- **State the purpose.** The rule opens with why it exists: decisions about product behaviour and
-  architecture must be inspectable by reviewers separately from the code that implements them. A
-  purpose is something an author can reason *from*; the previous trigger list was something to
-  match against.
+- **State the purpose.** The rule opens with why it exists: decisions must be examinable, and
+  changes to our theory of the system or the product most of all. Code expresses a theory; a diff
+  shows what changed, not why the theory did. A purpose is something an author can reason *from*;
+  the previous trigger list was something to match against. This is also the sharpest test of
+  whether a change is exempt — a bug fix restores the system to its existing theory, while the work
+  that needs a spec is the work that revises it.
 - **Invert the default.** From "required when one of four triggers fires" to "required unless this
   is a bug fix or a minor UI change." Refactors leave the exemption list: "wholesale-replaces a
   load-bearing path" and "this is just a refactor" describe the same diff from two angles, and the
@@ -57,10 +60,10 @@ New text:
 ```markdown
 ### Work starts with a brainstormed spec
 
-Decisions about product behaviour and architecture must be inspectable by reviewers separately
-from the code that implements them. So anything that is not a bug fix or a minor UI change runs
-`/tbd-brainstorming` **before** implementation and commits the spec to
-`docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
+Decisions must be examinable — changes to our theory of the system or the product most of all.
+Code expresses a theory; a diff shows what changed, not why the theory did. So anything that is
+not a bug fix or a minor UI change runs `/tbd-brainstorming` **before** implementation and commits
+the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
 
 **Prior design does not exempt.** Thinking done in prototypes, a report, another repo, or an
 earlier session makes the spec a cheap transcription — not an unnecessary one. Reviewers here
