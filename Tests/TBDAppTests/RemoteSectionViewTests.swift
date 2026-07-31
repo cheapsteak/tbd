@@ -9,8 +9,8 @@ import TBDShared
 ///   with dismissed tombstones excluded.
 /// - `RowStatusIndicator.leading(isPending:hasPRStatus:isRemote:)` — the
 ///   new `.remote` case and its precedence under the existing leading slot.
-/// - `RemoteSessionRowView.caption(state:gone:exitCode:)` — the starting/
-///   exited/gone captions, including the gone-wins-over-exited precedence.
+/// - `RemoteSessionRowView.caption(state:agentState:gone:exitCode:)` — the
+///   starting/exited/gone/unavailable captions and their precedence.
 /// - `AppState.remoteUnreadType(kind:exitCode:)` — the pure kind→
 ///   `NotificationType` mapping feeding `unreadByRemoteSession`.
 /// - `AppState.remoteSectionVisible(providers:)` — section-hidden-when-no-
@@ -254,34 +254,69 @@ struct RemoteSectionViewTests {
         #expect(RowStatusIndicator.leading(isPending: false, hasPRStatus: false) == nil)
     }
 
-    // MARK: - RemoteSessionRowView.caption(state:gone:exitCode:)
+    // MARK: - RemoteSessionRowView.caption(state:agentState:gone:exitCode:)
 
     @Test func caption_startingIsStartingEllipsis() {
-        #expect(RemoteSessionRowView.caption(state: .starting, gone: false, exitCode: nil) == "Starting…")
+        #expect(RemoteSessionRowView.caption(
+            state: .starting, agentState: .unknown, gone: false, exitCode: nil
+        ) == "Starting…")
     }
 
     @Test func caption_runningIsNil() {
-        #expect(RemoteSessionRowView.caption(state: .running, gone: false, exitCode: nil) == nil)
+        #expect(RemoteSessionRowView.caption(
+            state: .running, agentState: .idle, gone: false, exitCode: nil
+        ) == nil)
     }
 
-    @Test func caption_unknownIsNil() {
-        #expect(RemoteSessionRowView.caption(state: .unknown, gone: false, exitCode: nil) == nil)
+    @Test func caption_runningUnknownSurfacesUnavailableAgentState() {
+        #expect(RemoteSessionRowView.caption(
+            state: .running, agentState: .unknown, gone: false, exitCode: nil
+        ) == "agent state unavailable")
+    }
+
+    @Test func caption_runningKnownAgentStatesRemainQuiet() {
+        #expect(RemoteSessionRowView.caption(
+            state: .running, agentState: .working, gone: false, exitCode: nil
+        ) == nil)
+        #expect(RemoteSessionRowView.caption(
+            state: .running, agentState: .idle, gone: false, exitCode: nil
+        ) == nil)
+    }
+
+    @Test func caption_unknownSurfacesUnavailableTerminalState() {
+        #expect(RemoteSessionRowView.caption(
+            state: .unknown, agentState: .unknown, gone: false, exitCode: nil
+        ) == "terminal state unavailable")
     }
 
     @Test func caption_exitedWithKnownCodeIncludesCode() {
-        #expect(RemoteSessionRowView.caption(state: .exited, gone: false, exitCode: 1) == "exited (code 1)")
+        #expect(RemoteSessionRowView.caption(
+            state: .exited, agentState: .exited, gone: false, exitCode: 1
+        ) == "exited (code 1)")
     }
 
     @Test func caption_exitedWithoutKnownCodeOmitsCode() {
-        #expect(RemoteSessionRowView.caption(state: .exited, gone: false, exitCode: nil) == "exited")
+        #expect(RemoteSessionRowView.caption(
+            state: .exited, agentState: .exited, gone: false, exitCode: nil
+        ) == "exited")
     }
 
     @Test func caption_goneWinsOverExitedCode() {
-        #expect(RemoteSessionRowView.caption(state: .exited, gone: true, exitCode: 1) == "no longer reported")
+        #expect(RemoteSessionRowView.caption(
+            state: .exited, agentState: .exited, gone: true, exitCode: 1
+        ) == "no longer reported")
     }
 
     @Test func caption_goneWinsOverStarting() {
-        #expect(RemoteSessionRowView.caption(state: .starting, gone: true, exitCode: nil) == "no longer reported")
+        #expect(RemoteSessionRowView.caption(
+            state: .starting, agentState: .unknown, gone: true, exitCode: nil
+        ) == "no longer reported")
+    }
+
+    @Test func caption_goneWinsOverRunningUnknownAgentState() {
+        #expect(RemoteSessionRowView.caption(
+            state: .running, agentState: .unknown, gone: true, exitCode: nil
+        ) == "no longer reported")
     }
 
     // MARK: - RemoteSessionRowView.caption(staleness:) combining
@@ -292,21 +327,50 @@ struct RemoteSectionViewTests {
         // the only signal a grouped row (no visible provider header nearby)
         // gets that its data might be hours old.
         #expect(
-            RemoteSessionRowView.caption(state: .running, gone: false, exitCode: nil, staleness: "as of 2h ago")
+            RemoteSessionRowView.caption(
+                state: .running, agentState: .idle, gone: false,
+                exitCode: nil, staleness: "as of 2h ago"
+            )
                 == "as of 2h ago"
         )
     }
 
+    @Test func caption_stalenessCombinesWithUnavailableAgentState() {
+        #expect(RemoteSessionRowView.caption(
+            state: .running,
+            agentState: .unknown,
+            gone: false,
+            exitCode: nil,
+            staleness: "as of 2h ago"
+        ) == "agent state unavailable · as of 2h ago")
+    }
+
+    @Test func caption_stalenessCombinesWithUnavailableTerminalState() {
+        #expect(RemoteSessionRowView.caption(
+            state: .unknown,
+            agentState: .unknown,
+            gone: false,
+            exitCode: nil,
+            staleness: "as of 2h ago"
+        ) == "terminal state unavailable · as of 2h ago")
+    }
+
     @Test func caption_stalenessCombinesWithAnExistingCaption() {
         #expect(
-            RemoteSessionRowView.caption(state: .exited, gone: false, exitCode: 1, staleness: "as of 2h ago")
+            RemoteSessionRowView.caption(
+                state: .exited, agentState: .exited, gone: false,
+                exitCode: 1, staleness: "as of 2h ago"
+            )
                 == "exited (code 1) · as of 2h ago"
         )
     }
 
     @Test func caption_stalenessCombinesWithGone() {
         #expect(
-            RemoteSessionRowView.caption(state: .exited, gone: true, exitCode: 1, staleness: "as of 2h ago")
+            RemoteSessionRowView.caption(
+                state: .exited, agentState: .exited, gone: true,
+                exitCode: 1, staleness: "as of 2h ago"
+            )
                 == "no longer reported · as of 2h ago"
         )
     }
@@ -314,8 +378,12 @@ struct RemoteSectionViewTests {
     @Test func caption_nilStalenessLeavesExistingCaptionsUnchanged() {
         // Every pre-existing call site (no `staleness` argument) must render
         // exactly as before this task.
-        #expect(RemoteSessionRowView.caption(state: .running, gone: false, exitCode: nil) == nil)
-        #expect(RemoteSessionRowView.caption(state: .starting, gone: false, exitCode: nil) == "Starting…")
+        #expect(RemoteSessionRowView.caption(
+            state: .running, agentState: .idle, gone: false, exitCode: nil
+        ) == nil)
+        #expect(RemoteSessionRowView.caption(
+            state: .starting, agentState: .unknown, gone: false, exitCode: nil
+        ) == "Starting…")
     }
 
     // MARK: - RemoteSessionRowView.stalenessCaption(health:lastSeen:now:)
