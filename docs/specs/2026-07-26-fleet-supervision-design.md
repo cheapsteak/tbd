@@ -772,7 +772,15 @@ smaller — one project's cases, one playbook, not the fleet's — so token cost
 roughly washes; what rises is the *wake count*. That is the honest price of the
 one-desk-per-policy invariant (§5), and it buys something no amount of careful
 prompt wording can: a desk cannot mistake one project's policy for another's,
-because it never holds another's.
+because it never holds another's. Two bounds complete the accounting. Desk
+count scales with projects-that-have-cases, not with fleet size — so the
+worst night is a correlated failure touching many projects at once, which
+spawns that many desk processes on a host already running the fleet: a real
+memory-and-process cost, and part of why a quiet project costing nothing
+matters. And context load moves in the desks' favor: a single fleet desk
+absorbing every project's cases, playbooks, and transcript reads concentrates
+the whole night in one context window — the shape most likely to hit a
+ceiling mid-shift — where sharding by project spreads it.
 
 **Parked sessions are absent from this loop, by the 2026-07-29 amendment.** An
 earlier version of this section compiled an "outstanding work" fact list here —
@@ -860,6 +868,18 @@ as a security property rather than as tidiness: the blast radius of a confused,
 mis-briefed, or prompt-injected supervisor shrinks from the whole fleet to one
 project. A desk that reads a hostile instruction in some agent's transcript can,
 at worst, act on repos it was already supervising.
+
+Isolation and the trust bet (§3) answer different failures, and neither
+substitutes for the other. Trust covers **conduct** — a well-meaning desk
+following its playbook, which is the expected case and the one §3 declines to
+gate. Isolation covers the two failures conduct cannot reach: **honest
+error** — an obedient model under context pressure applying one repo's
+convention to another, a mistake rather than a transgression, which structure
+prevents by removing the opportunity instead of gating the behavior — and
+**compromise**, where containment bounds what a bad night costs. Trusting a
+model's conduct and declining to hand it the chance to mix policies are the
+same posture, not a contradiction: the drawer is small because the teller is
+trusted with the drawer, not with the vault.
 
 **What stays global.** The project is the unit of judgment and action. It is
 deliberately not the unit of everything:

@@ -104,9 +104,13 @@ and become a contract that migration and future change must respect.
 
 ### P0 — without these the subsystem has no point
 
-- **P0-1 [both]** As an operator, I want one supervising agent watching the whole fleet and
-  intervening on my behalf, so that a stuck or idle agent doesn't sit dead for hours because
-  nobody noticed.
+- **P0-1 [both]** As an operator, I want a single supervision function watching the whole
+  fleet and intervening on my behalf, so that a stuck or idle agent doesn't sit dead for
+  hours because nobody noticed. What must be singular is my experience of it: one switch,
+  one record, one morning report, one place to look. The judgment layer underneath may
+  shard by policy scope (the design's one-desk-per-project invariant) — how many sessions
+  do the judging is the design's choice, provided a quiet fleet costs nothing and the
+  account stays whole.
 - **P0-2 [both]** As an operator, I want a single posture switch — off / human-supervised /
   fully autonomous — persisted in the daemon and settable from the app and the CLI, so that
   I can hand over or take back the fleet with one gesture, and a daemon restart resumes the
