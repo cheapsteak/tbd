@@ -13,6 +13,12 @@ private extension CharacterSet {
 /// When enabled, macOS-native shortcuts (Cmd+Arrow, Cmd/Opt+Delete) are translated
 /// to the escape sequences that shells expect.
 class TBDTerminalView: TerminalView {
+    enum PasteAction: Equatable {
+        case text
+        case codexImage
+        case passthrough
+    }
+
     enum KeyEquivalentAction: Equatable {
         case closeTab
     }
@@ -22,6 +28,9 @@ class TBDTerminalView: TerminalView {
     var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
     var onCloseTab: (() -> Void)?
+    /// Includes the legacy label fallback through `Terminal.isCodexTerminal`.
+    /// Set by `TerminalPanelRepresentable` from the terminal model.
+    var isCodexTerminal = false
 
     /// Global appearance settings (font, color scheme, cursor style). The Combine
     /// subscription set up in `init` reapplies these whenever the user edits
@@ -88,12 +97,44 @@ class TBDTerminalView: TerminalView {
     /// nightly by probe P3 in `scripts/nightly-tmux-probes.sh` (PR #523), a
     /// two-arm probe: 2004 on → wrapped, 2004 off → verbatim.
     override func paste(_ sender: Any) {
-        if let handler = onControlModePaste,
-           let text = NSPasteboard.general.string(forType: .string),
-           handler(Data(text.utf8)) {
-            return
+        let pasteboard = NSPasteboard.general
+        let text = pasteboard.string(forType: .string)
+        switch Self.pasteAction(
+            text: text,
+            hasImage: pasteboard.canReadObject(forClasses: [NSImage.self]),
+            isCodexTerminal: isCodexTerminal
+        ) {
+        case .text:
+            if let text,
+               let handler = onControlModePaste,
+               handler(Data(text.utf8)) {
+                return
+            }
+            super.paste(sender)
+        case .codexImage:
+            // Codex owns clipboard-image decoding. Its TUI binds that action
+            // to Ctrl-V; AppKit consumes Cmd-V before it can reach the PTY, so
+            // forward the equivalent raw control byte for image-only content.
+            send([0x16])
+        case .passthrough:
+            super.paste(sender)
         }
-        super.paste(sender)
+    }
+
+    /// Text always wins when the pasteboard advertises both text and an image,
+    /// preserving ordinary Cmd-V and the existing control-mode paste route.
+    nonisolated static func pasteAction(
+        text: String?,
+        hasImage: Bool,
+        isCodexTerminal: Bool
+    ) -> PasteAction {
+        if text != nil {
+            return .text
+        }
+        if hasImage && isCodexTerminal {
+            return .codexImage
+        }
+        return .passthrough
     }
 
     override func layout() {

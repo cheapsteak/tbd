@@ -226,6 +226,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.remoteURL = remoteURL
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
+        tv.isCodexTerminal = appState.terminals.values
+            .flatMap { $0 }
+            .first(where: { $0.id == terminalID })?
+            .isCodexTerminal == true
         tv.onCloseTab = {
             appState.closeFocusedTab()
         }
@@ -329,6 +333,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TBDTerminalView, context: Context) {
+        nsView.isCodexTerminal = appState.terminals.values
+            .flatMap { $0 }
+            .first(where: { $0.id == terminalID })?
+            .isCodexTerminal == true
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
     }
 
