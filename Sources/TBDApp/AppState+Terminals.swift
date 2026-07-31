@@ -348,6 +348,39 @@ extension AppState {
         }
     }
 
+    /// Continue a Claude terminal in Codex without disturbing the source.
+    /// Repeated requests are safe: this app suppresses overlapping clicks and
+    /// the daemon returns the existing takeover when one already exists. A
+    /// successful result confirms the terminal launch/identity, not that Codex
+    /// has finished starting or processing its initial prompt.
+    func continueInCodex(sourceTerminalID: UUID) async {
+        guard !continueInCodexInFlight.contains(sourceTerminalID) else { return }
+        continueInCodexInFlight.insert(sourceTerminalID)
+        defer { continueInCodexInFlight.remove(sourceTerminalID) }
+
+        do {
+            let size = mainAreaTerminalSize()
+            let result = try await daemonClient.continueInCodex(
+                sourceTerminalID: sourceTerminalID,
+                cols: size.cols,
+                rows: size.rows,
+                colorFgBg: appearance?.currentColorFgBg
+            )
+            let terminal = result.terminal
+            appendCreatedTerminal(terminal)
+
+            if let tabIndex = tabs[terminal.worktreeID]?.firstIndex(where: { tab in
+                (layouts[tab.id] ?? .pane(tab.content)).allTerminalIDs().contains(terminal.id)
+            }) {
+                setActiveTab(worktreeID: terminal.worktreeID, tabIndex: tabIndex)
+            }
+        } catch {
+            logger.error("Continue in Codex failed: \(error.localizedDescription, privacy: .public)")
+            showAlert("Couldn't continue in Codex: \(error.localizedDescription)", isError: true)
+            handleConnectionError(error)
+        }
+    }
+
     /// Toggle pin state for a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async {
         // Optimistic local update

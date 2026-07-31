@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self]
     )
 }
 
@@ -516,6 +516,61 @@ struct TerminalSwapProfile: AsyncParsableCommand {
             }
         }
     }
+}
+
+// MARK: - terminal continue-in-codex
+
+struct TerminalContinueInCodex: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "continue-in-codex",
+        abstract: "Continue a Claude terminal in a new Codex terminal without modifying the source"
+    )
+
+    @Option(name: .long, help: "Source Claude terminal ID (UUID)")
+    var terminal: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        let result: TerminalContinueInCodexResult = try client.call(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(sourceTerminalID: terminalID),
+            resultType: TerminalContinueInCodexResult.self
+        )
+
+        if json {
+            printJSON(result)
+        } else {
+            print(continueInCodexSummary(result))
+        }
+    }
+}
+
+func continueInCodexSummary(_ result: TerminalContinueInCodexResult) -> String {
+    let heading = result.created
+        ? "Codex takeover launched. Codex may still be starting while MCPs initialize."
+        : "Existing Codex takeover found."
+    let capture = result.capture
+    let truncation = capture.transcriptTailTruncated ? " · tail truncated" : ""
+    var lines = [
+        heading,
+        "  Terminal: \(result.terminal.id)",
+        "  Handoff: \(result.handoffPath)",
+        "  Capture: \(capture.transcriptBytesRead) B read"
+            + " · \(capture.transcriptBytesRendered) B rendered"
+            + " · \(capture.handoffBytesOutput) B handoff\(truncation)",
+    ]
+    if !result.warnings.isEmpty {
+        lines.append("  Warnings:")
+        lines += result.warnings.map { "    [\($0.code)] \($0.message)" }
+    }
+    return lines.joined(separator: "\n")
 }
 
 // MARK: - Helpers

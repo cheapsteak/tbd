@@ -1601,6 +1601,26 @@ actor DaemonClient {
         )
     }
 
+    /// Build a private handoff from a Claude terminal and continue it in a new
+    /// (or already-created) Codex terminal without modifying the source.
+    func continueInCodex(
+        sourceTerminalID: UUID,
+        cols: Int? = nil,
+        rows: Int? = nil,
+        colorFgBg: String? = nil
+    ) async throws -> TerminalContinueInCodexResult {
+        try await callAsync(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(
+                sourceTerminalID: sourceTerminalID,
+                cols: cols,
+                rows: rows,
+                colorFgBg: colorFgBg
+            ),
+            resultType: TerminalContinueInCodexResult.self
+        )
+    }
+
     /// List Claude session summaries for a worktree.
     func listSessions(worktreeID: UUID) async throws -> [SessionSummary] {
         return try await callAsync(

@@ -148,6 +148,7 @@ public enum RPCMethod {
     public static let terminalHistoryRevive = "terminalHistory.revive"
     public static let terminalOutput = "terminal.output"
     public static let terminalConversation = "terminal.conversation"
+    public static let terminalContinueInCodex = "terminal.continueInCodex"
     public static let terminalTranscript = "terminal.transcript"
     public static let terminalTranscriptItemFullBody = "terminal.transcriptItemFullBody"
     public static let repoUpdateInstructions = "repo.updateInstructions"
@@ -2037,6 +2038,118 @@ public struct TerminalConversationResult: Codable, Sendable {
     public let sessionID: String?
     public init(messages: [ConversationMessage], sessionID: String? = nil) {
         self.messages = messages; self.sessionID = sessionID
+    }
+}
+
+// MARK: - Continue in Codex
+
+/// Extensible takeover destination contract. Only `.localCodex` is supported
+/// today; the string kind and optional worker identifier leave a stable wire
+/// seam for future remote worker implementations such as Agent Box.
+public struct TerminalContinueInCodexTarget: Codable, Sendable, Equatable {
+    public static let localCodexKind = "local_codex"
+    public static let localCodex = TerminalContinueInCodexTarget(
+        kind: localCodexKind)
+
+    public let kind: String
+    public let workerID: String?
+
+    public init(kind: String, workerID: String? = nil) {
+        self.kind = kind
+        self.workerID = workerID
+    }
+}
+
+public struct TerminalContinueInCodexParams: Codable, Sendable {
+    public let sourceTerminalID: UUID
+    public let cols: Int?
+    public let rows: Int?
+    public let colorFgBg: String?
+    public let target: TerminalContinueInCodexTarget
+
+    public init(
+        sourceTerminalID: UUID,
+        cols: Int? = nil,
+        rows: Int? = nil,
+        colorFgBg: String? = nil,
+        target: TerminalContinueInCodexTarget = .localCodex
+    ) {
+        self.sourceTerminalID = sourceTerminalID
+        self.cols = cols
+        self.rows = rows
+        self.colorFgBg = colorFgBg
+        self.target = target
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sourceTerminalID, cols, rows, colorFgBg, target
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sourceTerminalID = try c.decode(UUID.self, forKey: .sourceTerminalID)
+        cols = try c.decodeIfPresent(Int.self, forKey: .cols)
+        rows = try c.decodeIfPresent(Int.self, forKey: .rows)
+        colorFgBg = try c.decodeIfPresent(String.self, forKey: .colorFgBg)
+        target = try c.decodeIfPresent(
+            TerminalContinueInCodexTarget.self, forKey: .target) ?? .localCodex
+    }
+}
+
+public struct TerminalContinueInCodexWarning: Codable, Sendable, Equatable {
+    public let code: String
+    public let message: String
+
+    public init(code: String, message: String) {
+        self.code = code
+        self.message = message
+    }
+}
+
+public struct TerminalContinueInCodexCaptureMetadata: Codable, Sendable, Equatable {
+    public let transcriptBytesRead: Int
+    public let transcriptBytesRendered: Int
+    public let handoffBytesOutput: Int
+    public let transcriptTailTruncated: Bool
+
+    public init(
+        transcriptBytesRead: Int,
+        transcriptBytesRendered: Int,
+        handoffBytesOutput: Int,
+        transcriptTailTruncated: Bool
+    ) {
+        self.transcriptBytesRead = transcriptBytesRead
+        self.transcriptBytesRendered = transcriptBytesRendered
+        self.handoffBytesOutput = handoffBytesOutput
+        self.transcriptTailTruncated = transcriptTailTruncated
+    }
+}
+
+public struct TerminalContinueInCodexResult: Codable, Sendable {
+    public let terminal: Terminal
+    public let handoffPath: String
+    /// True only when this RPC launched the process/window and persisted the
+    /// terminal row. It does not mean Codex processed the initial prompt or is
+    /// ready; machine-readable session/activity hooks report that later.
+    public let created: Bool
+    public let warnings: [TerminalContinueInCodexWarning]
+    public let capture: TerminalContinueInCodexCaptureMetadata
+    public let target: TerminalContinueInCodexTarget
+
+    public init(
+        terminal: Terminal,
+        handoffPath: String,
+        created: Bool,
+        warnings: [TerminalContinueInCodexWarning],
+        capture: TerminalContinueInCodexCaptureMetadata,
+        target: TerminalContinueInCodexTarget = .localCodex
+    ) {
+        self.terminal = terminal
+        self.handoffPath = handoffPath
+        self.created = created
+        self.warnings = warnings
+        self.capture = capture
+        self.target = target
     }
 }
 

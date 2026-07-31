@@ -240,6 +240,19 @@ public struct GitManager: Sendable {
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Human-readable, script-stable worktree status for deterministic handoffs.
+    public func statusPorcelain(worktreePath: String) async throws -> String {
+        try await run(arguments: ["status", "--short", "--branch"], at: worktreePath)
+    }
+
+    /// A bounded recent-commit summary for deterministic handoffs.
+    public func recentCommits(worktreePath: String, limit: Int) async throws -> String {
+        let boundedLimit = max(1, min(limit, 20))
+        return try await run(
+            arguments: ["log", "-\(boundedLimit)", "--date=short", "--pretty=format:%h %ad %s"],
+            at: worktreePath)
+    }
+
     /// Returns a map of short ref name → tip SHA covering all local branches
     /// and `origin/*` remote-tracking branches, in a single subprocess.
     ///

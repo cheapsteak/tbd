@@ -272,6 +272,115 @@ enum CodexProfileWriter {
     }
 }
 
+enum CodexExecutableResolutionError: LocalizedError, Equatable {
+    case invalidOverride(environmentKey: String, value: String, reason: String)
+    case notFound(searchPath: String, fallbackPath: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidOverride(let environmentKey, let value, let reason):
+            return """
+                Invalid \(environmentKey) override "\(value)": \(reason). Set \
+                \(environmentKey) to the absolute path of an executable Codex \
+                CLI, or unset it, then restart TBD.
+                """
+        case .notFound(let searchPath, let fallbackPath):
+            let renderedSearchPath = searchPath.isEmpty ? "(empty)" : searchPath
+            return """
+                Could not find an executable Codex CLI. Searched PATH \
+                (\(renderedSearchPath)) and \(fallbackPath). Set \
+                \(CodexExecutableResolver.executableOverrideEnvironmentKey) to \
+                an absolute Codex executable path, install or update \
+                ChatGPT.app, or add the Codex CLI to PATH, then restart TBD.
+                """
+        }
+    }
+}
+
+/// Resolves the Codex CLI before TBD creates a tmux window or terminal row.
+///
+/// A configured `TBD_CODEX_EXECUTABLE` absolute path wins, followed by every
+/// PATH entry in order. ChatGPT.app's bundled CLI is the fallback because
+/// GUI-launched daemons often have a minimal PATH that cannot name it even
+/// though the app (and the user's existing global Codex login) is installed.
+/// The returned path is always absolute so the later interactive shell does
+/// not repeat PATH lookup with a different environment.
+enum CodexExecutableResolver {
+    static let executableOverrideEnvironmentKey = "TBD_CODEX_EXECUTABLE"
+    static let chatGPTBundlePath = "/Applications/ChatGPT.app/Contents/Resources/codex"
+
+    static func resolve(
+        configuredOverride: String? = ProcessInfo.processInfo.environment["TBD_CODEX_EXECUTABLE"],
+        searchPath: String = ProcessInfo.processInfo.environment["PATH"] ?? "",
+        currentDirectory: String = FileManager.default.currentDirectoryPath,
+        fallbackPath: String = chatGPTBundlePath,
+        isExecutable: (String) -> Bool = {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }
+    ) throws -> String {
+        let currentDirectoryURL = URL(
+            fileURLWithPath: currentDirectory,
+            isDirectory: true
+        ).standardizedFileURL
+
+        func absolutePath(_ path: String) -> String {
+            if path.hasPrefix("/") {
+                return URL(fileURLWithPath: path).standardizedFileURL.path
+            }
+            return URL(
+                fileURLWithPath: path,
+                relativeTo: currentDirectoryURL
+            ).standardizedFileURL.path
+        }
+
+        var seen = Set<String>()
+        if let configuredOverride, !configuredOverride.isEmpty {
+            guard (configuredOverride as NSString).isAbsolutePath else {
+                throw CodexExecutableResolutionError.invalidOverride(
+                    environmentKey: executableOverrideEnvironmentKey,
+                    value: configuredOverride,
+                    reason: "the path must be absolute"
+                )
+            }
+
+            let absoluteOverride = absolutePath(configuredOverride)
+            guard isExecutable(absoluteOverride) else {
+                throw CodexExecutableResolutionError.invalidOverride(
+                    environmentKey: executableOverrideEnvironmentKey,
+                    value: configuredOverride,
+                    reason: "the path is not executable"
+                )
+            }
+            return absoluteOverride
+        }
+
+        let pathEntries = searchPath.split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        )
+        for entry in pathEntries {
+            let directory = entry.isEmpty ? currentDirectory : String(entry)
+            let candidate = absolutePath(
+                (directory as NSString).appendingPathComponent("codex")
+            )
+            guard seen.insert(candidate).inserted else { continue }
+            if isExecutable(candidate) {
+                return candidate
+            }
+        }
+
+        let absoluteFallback = absolutePath(fallbackPath)
+        if seen.insert(absoluteFallback).inserted, isExecutable(absoluteFallback) {
+            return absoluteFallback
+        }
+
+        throw CodexExecutableResolutionError.notFound(
+            searchPath: searchPath,
+            fallbackPath: absoluteFallback
+        )
+    }
+}
+
 enum CodexSpawnCommandBuilder {
     private static let detectedProfileFlag = detectProfileFlag { arguments in
         commandOutput(arguments: arguments, timeout: 3)
@@ -285,13 +394,33 @@ enum CodexSpawnCommandBuilder {
         build(initialPrompt: initialPrompt, profileFlag: detectedProfileFlag)
     }
 
+    static func command(executablePath: String) -> String {
+        let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
+            commandOutput(arguments: arguments, timeout: 3)
+        }
+        return baseCommand(executablePath: executablePath, profileFlag: profileFlag)
+    }
+
+    static func build(initialPrompt: String?, executablePath: String) -> String {
+        let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
+            commandOutput(arguments: arguments, timeout: 3)
+        }
+        return build(
+            initialPrompt: initialPrompt,
+            executablePath: executablePath,
+            profileFlag: profileFlag
+        )
+    }
+
     static func build(
         initialPrompt: String?,
         codexHelpOutput: String? = nil,
-        codexVersionOutput: String? = nil
+        codexVersionOutput: String? = nil,
+        executablePath: String = "codex"
     ) -> String {
         build(
             initialPrompt: initialPrompt,
+            executablePath: executablePath,
             profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput)
         )
     }
@@ -304,8 +433,25 @@ enum CodexSpawnCommandBuilder {
         return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
     }
 
+    private static func build(
+        initialPrompt: String?,
+        executablePath: String,
+        profileFlag: String
+    ) -> String {
+        let command = baseCommand(executablePath: executablePath, profileFlag: profileFlag)
+        guard let initialPrompt, !initialPrompt.isEmpty else {
+            return command
+        }
+        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+    }
+
     private static func baseCommand(profileFlag: String) -> String {
         return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
+    }
+
+    private static func baseCommand(executablePath: String, profileFlag: String) -> String {
+        let executable = SystemPromptBuilder.shellEscape(executablePath)
+        return "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
     }
 
     static func profileFlag(codexHelpOutput: String?, codexVersionOutput: String?) -> String {
@@ -334,6 +480,21 @@ enum CodexSpawnCommandBuilder {
         return profileFlag(
             codexHelpOutput: helpOutput,
             codexVersionOutput: commandOutput(["codex", "--version"])
+        )
+    }
+
+    static func detectProfileFlag(
+        executablePath: String,
+        commandOutput: ([String]) -> String?
+    ) -> String {
+        let helpOutput = commandOutput([executablePath, "--help"])
+        if let helpOutput, helpOutput.contains("--profile-v2") || helpOutput.contains("--profile") {
+            return profileFlag(codexHelpOutput: helpOutput, codexVersionOutput: nil)
+        }
+
+        return profileFlag(
+            codexHelpOutput: helpOutput,
+            codexVersionOutput: commandOutput([executablePath, "--version"])
         )
     }
 

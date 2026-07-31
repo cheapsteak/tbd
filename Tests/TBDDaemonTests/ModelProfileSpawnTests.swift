@@ -195,7 +195,11 @@ struct ModelProfileSpawnTests {
     /// `ModelProfileResolver` is attached so the Claude branch resolves the
     /// worktree's effective profile (Codex tests ignore it — Codex resolves no
     /// profile).
-    private func makeLifecycleFixture() -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
+    private func makeLifecycleFixture(
+        codexExecutableResolver: @escaping @Sendable () throws -> String = {
+            "/usr/bin/true"
+        }
+    ) -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
         let recorder = TmuxRecorder()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
         let db = try! TBDDatabase(inMemory: true)
@@ -205,7 +209,8 @@ struct ModelProfileSpawnTests {
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             modelProfileResolver: resolver,
-            configDirManager: isolatedConfigDirManager()
+            configDirManager: isolatedConfigDirManager(),
+            codexExecutableResolver: codexExecutableResolver
         )
         return (lifecycle, db, recorder)
     }
@@ -285,6 +290,37 @@ struct ModelProfileSpawnTests {
         #expect(codexCall.contains("DISABLE_AUTO_UPDATE=true"),
                 "codex window must suppress the oh-my-zsh update prompt via -e")
         #expect(!recorder.joinedAll.contains("FOO=bar"))
+    }
+
+    @Test("spawn: missing Codex executable fails before tmux or terminal mutation")
+    func codexResolutionFailurePrecedesSpawnMutation() async throws {
+        let expected = CodexExecutableResolutionError.notFound(
+            searchPath: "/missing",
+            fallbackPath: CodexExecutableResolver.chatGPTBundlePath
+        )
+        let (lifecycle, db, recorder) = makeLifecycleFixture {
+            throw expected
+        }
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+
+        do {
+            _ = try await lifecycle.spawnPrimaryTerminals(
+                worktree: wt,
+                repo: repo,
+                skipClaude: false,
+                preSessionTerminalID: nil
+            )
+            Issue.record("Expected Codex executable resolution to fail")
+        } catch let error as CodexExecutableResolutionError {
+            #expect(error == expected)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     // MARK: - Spawn: Claude free-form env overrides (branch-test rule)

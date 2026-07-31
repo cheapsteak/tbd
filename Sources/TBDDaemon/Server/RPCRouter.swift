@@ -70,6 +70,17 @@ public final class RPCRouter: Sendable {
     /// re-implement gating. Broadcasts through the same `subscriptions`
     /// channel every other mutating handler uses.
     public let panelCoordinator: PanelCoordinator
+    let continueInCodexCoordinator = ContinueInCodexCoordinator()
+    nonisolated(unsafe) var codexHandoffGenerator: any CodexHandoffGenerating =
+        DeterministicCodexHandoffGenerator()
+    /// Test seams for takeover side effects that otherwise touch the user's
+    /// global Codex home or TBD_HOME. Production leaves all three at their
+    /// defaults.
+    nonisolated(unsafe) var continueInCodexHandoffRoot: URL?
+    nonisolated(unsafe) var codexExecutableResolver:
+        @Sendable () throws -> String = { try CodexExecutableResolver.resolve() }
+    nonisolated(unsafe) var continueInCodexHomeEnsurer:
+        @Sendable () throws -> URL = { try CodexHomeManager().ensureProfilePlugin() }
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -283,6 +294,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:
                 return try await handleTerminalConversation(request.paramsData)
+            case RPCMethod.terminalContinueInCodex:
+                return try await handleTerminalContinueInCodex(request.paramsData)
             case RPCMethod.terminalTranscript:
                 return try await handleTerminalTranscript(request.paramsData)
             case RPCMethod.terminalTranscriptItemFullBody:

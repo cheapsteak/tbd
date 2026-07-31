@@ -39,7 +39,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        codexExecutableResolver: { "/usr/bin/true" }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -61,7 +62,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        codexExecutableResolver: { "/usr/bin/true" }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -106,7 +108,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
-        modelProfileResolver: resolver
+        modelProfileResolver: resolver,
+        codexExecutableResolver: { "/usr/bin/true" }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -469,7 +472,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        codexExecutableResolver: { "/usr/bin/true" }
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

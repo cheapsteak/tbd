@@ -85,7 +85,13 @@ struct ScratchCreateRPCTests {
         try await db.config.setPrimaryAgentPreference(.codex)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver(),
+                codexExecutableResolver: { "/usr/bin/true" }
+            ),
             tmux: TmuxManager(dryRun: true), startTime: Date())
 
         let response = await router.handle(

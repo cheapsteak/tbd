@@ -486,6 +486,17 @@ enum SwapProfileMenu {
     }
 }
 
+/// Pure presentation/eligibility model for the Claude tab's takeover action.
+/// Keeping this outside SwiftUI makes the Claude-only gate and plain-language
+/// copy directly testable.
+enum ContinueInCodexMenu {
+    static let title = "Continue in Codex"
+
+    static func isAvailable(for terminal: Terminal?) -> Bool {
+        terminal?.isClaudeResumable == true
+    }
+}
+
 // MARK: - TabParkMenuModel
 
 /// Pure decision behind the tab context menu's per-terminal park affordance:
@@ -871,7 +882,7 @@ private struct TabBarItem: View {
         }
         Divider()
 
-        if isClaudeTerminal {
+        if ContinueInCodexMenu.isAvailable(for: terminal) {
             Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)
 
@@ -885,6 +896,13 @@ private struct TabBarItem: View {
                 swapProfileMenuItems(mode: .fork)
             } label: {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
+            }
+
+            Button {
+                guard let terminalID = terminal?.id else { return }
+                Task { await appState.continueInCodex(sourceTerminalID: terminalID) }
+            } label: {
+                Label(ContinueInCodexMenu.title, systemImage: "arrow.right.circle")
             }
 
             // Park (formerly the Suspend/Resume play/pause button) lives here

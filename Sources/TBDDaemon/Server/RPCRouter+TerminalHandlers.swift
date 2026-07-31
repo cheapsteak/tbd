@@ -94,6 +94,13 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot create a terminal there.")
         }
 
+        // Resolve Codex before creating any tmux state. A GUI-launched daemon
+        // can have a minimal PATH, and a resolution failure must not leave an
+        // orphan window or terminal row behind.
+        let codexExecutable = params.type == .codex
+            ? try codexExecutableResolver()
+            : nil
+
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
@@ -151,6 +158,9 @@ extension RPCRouter {
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
         if params.type == .codex {
+            guard let codexExecutable else {
+                return RPCResponse(error: "Codex executable resolution unexpectedly returned no path.")
+            }
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
@@ -183,7 +193,10 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.build(initialPrompt: params.prompt),
+                shellCommand: CodexSpawnCommandBuilder.build(
+                    initialPrompt: params.prompt,
+                    executablePath: codexExecutable
+                ),
                 env: codexEnv,
                 sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,
@@ -813,6 +826,13 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot recreate the terminal window.")
         }
 
+        // A missing Codex executable is a recoverable configuration error, not
+        // a reason to destroy the user's existing (possibly still inspectable)
+        // tmux window.
+        let codexExecutable = terminal.isCodexTerminal
+            ? try codexExecutableResolver()
+            : nil
+
         // Kill the old window if it still exists (avoids orphans)
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
 
@@ -831,6 +851,9 @@ extension RPCRouter {
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+            guard let codexExecutable else {
+                return RPCResponse(error: "Codex executable resolution unexpectedly returned no path.")
+            }
             // Recreate as codex — preserve identity
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
@@ -863,7 +886,8 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.command,
+                shellCommand: CodexSpawnCommandBuilder.command(
+                    executablePath: codexExecutable),
                 env: codexEnv,
                 sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,

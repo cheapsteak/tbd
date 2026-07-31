@@ -1005,6 +1005,11 @@ final class AppState: ObservableObject {
     /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
     var recreatingTerminalIDs: Set<UUID> = []
 
+    /// Claude terminal IDs with a Continue in Codex takeover currently in
+    /// flight. The daemon also deduplicates requests; this app-side guard keeps
+    /// rapid repeat clicks from making redundant round trips.
+    var continueInCodexInFlight: Set<UUID> = []
+
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false

@@ -259,7 +259,8 @@ struct WorktreeConversationCarryoverTests {
                 baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: claudeHome
             ),
-            preSessionPollInterval: 0.05
+            preSessionPollInterval: 0.05,
+            codexExecutableResolver: { "/usr/bin/true" }
         )
     }
 

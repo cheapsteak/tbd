@@ -71,6 +71,9 @@ public struct WorktreeLifecycle: Sendable {
     /// Reaper grace knobs (kept small in tests to avoid real sleeps).
     public let reaperGraceAttempts: Int
     public let reaperPollInterval: Duration
+    /// Resolves the Codex CLI before lifecycle code creates tmux or DB state.
+    /// Stored as a seam so tests do not require Codex or ChatGPT.app installed.
+    let codexExecutableResolver: @Sendable () throws -> String
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
@@ -120,7 +123,8 @@ public struct WorktreeLifecycle: Sendable {
         preSessionPollInterval: TimeInterval = 0.5,
         processSignaller: ProcessSignaller = ProductionProcessSignaller(),
         reaperGraceAttempts: Int = 30,
-        reaperPollInterval: Duration = .milliseconds(100)
+        reaperPollInterval: Duration = .milliseconds(100),
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil
     ) {
         self.db = db
         self.git = git
@@ -136,6 +140,9 @@ public struct WorktreeLifecycle: Sendable {
         self.processSignaller = processSignaller
         self.reaperGraceAttempts = reaperGraceAttempts
         self.reaperPollInterval = reaperPollInterval
+        self.codexExecutableResolver = codexExecutableResolver ?? {
+            try CodexExecutableResolver.resolve()
+        }
     }
 
     /// Projects root for a revive spawn's resolved profile config dir path,

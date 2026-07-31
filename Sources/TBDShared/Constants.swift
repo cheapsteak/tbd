@@ -65,6 +65,123 @@ public enum TBDConstants {
     }
     public static var reposDir: URL { reposDir(environment: ProcessInfo.processInfo.environment) }
 
+    /// Private, daemon-authored Claude-to-Codex handoffs. Each source terminal
+    /// gets its own directory so retries can durably find the Codex terminal
+    /// created for that exact takeover without conflating unrelated Codex tabs.
+    public static func handoffDir(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        environment: [String: String]
+    ) -> URL {
+        configDir(environment: environment)
+            .appendingPathComponent("handoffs", isDirectory: true)
+            .appendingPathComponent(worktreeID.uuidString, isDirectory: true)
+            .appendingPathComponent(sourceTerminalID.uuidString, isDirectory: true)
+    }
+
+    public static func handoffDir(worktreeID: UUID, sourceTerminalID: UUID) -> URL {
+        handoffDir(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Immutable directory for one handoff attempt, nested below the durable
+    /// source-terminal dedupe directory.
+    public static func handoffDir(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        handoffID: UUID,
+        environment: [String: String]
+    ) -> URL {
+        handoffDir(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            environment: environment)
+            .appendingPathComponent(handoffID.uuidString, isDirectory: true)
+    }
+
+    public static func handoffDir(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        handoffID: UUID
+    ) -> URL {
+        handoffDir(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            handoffID: handoffID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
+    public static func codexHandoffPath(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        handoffID: UUID,
+        environment: [String: String]
+    ) -> String {
+        handoffDir(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            handoffID: handoffID,
+            environment: environment)
+            .appendingPathComponent("CODEX_HANDOFF.md", isDirectory: false)
+            .path
+    }
+
+    public static func codexHandoffPath(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        handoffID: UUID
+    ) -> String {
+        codexHandoffPath(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            handoffID: handoffID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Legacy pre-immutable-layout path helper. New takeovers use the
+    /// handoff-ID overload above.
+    public static func codexHandoffPath(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        environment: [String: String]
+    ) -> String {
+        handoffDir(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            environment: environment)
+            .appendingPathComponent("CODEX_HANDOFF.md", isDirectory: false)
+            .path
+    }
+
+    public static func codexHandoffPath(worktreeID: UUID, sourceTerminalID: UUID) -> String {
+        codexHandoffPath(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
+    public static func codexHandoffManifestPath(
+        worktreeID: UUID,
+        sourceTerminalID: UUID,
+        environment: [String: String]
+    ) -> String {
+        handoffDir(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            environment: environment)
+            .appendingPathComponent("target.json", isDirectory: false)
+            .path
+    }
+
+    public static func codexHandoffManifestPath(worktreeID: UUID, sourceTerminalID: UUID) -> String {
+        codexHandoffManifestPath(
+            worktreeID: worktreeID,
+            sourceTerminalID: sourceTerminalID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Base directory holding all scratch spaces: `~/tbd/scratch`. Honors TBD_HOME.
     public static func scratchDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("scratch")

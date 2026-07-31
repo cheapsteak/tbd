@@ -615,6 +615,14 @@ extension WorktreeLifecycle {
             )
             : .claude
         let archivedSessions = archivedClaudeSessions ?? []
+        // Resolve Codex before `ensureServer` creates tmux state. `new-window`
+        // can succeed even when its child shell cannot find a bare `codex`
+        // command, which previously left behind a terminal row whose pane had
+        // already exited. The absolute path also avoids re-resolving through
+        // the interactive shell's potentially different PATH.
+        let codexExecutablePath = primaryTerminalKind == .codex
+            ? try codexExecutableResolver()
+            : nil
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
         // render into hard-wrapped scrollback that can never be reflowed when
@@ -678,8 +686,14 @@ extension WorktreeLifecycle {
             primaryProfileID = nil
             primaryLabel = TerminalLabel.shell
         case .codex:
+            guard let codexExecutablePath else {
+                preconditionFailure("Codex executable must be resolved before the Codex spawn branch")
+            }
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
-            primaryCommand = CodexSpawnCommandBuilder.build(initialPrompt: initialPrompt)
+            primaryCommand = CodexSpawnCommandBuilder.build(
+                initialPrompt: initialPrompt,
+                executablePath: codexExecutablePath
+            )
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
