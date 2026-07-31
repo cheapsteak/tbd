@@ -582,9 +582,26 @@ CLI, broadcast when it changes, surviving restart like every other daemon
 toggle. That is P0-2's one-gesture handover for the whole fleet, unchanged in
 substance: one gesture, one shift, one ledger, one account, one queue.
 
-**`off` is not a mode.** It is the absence of supervision — no sweep, no desks,
-nothing observing — and it stays compiled. It is the only behavioral fork the
-switch has.
+**`off` is not a mode; it is the pause of TBD's authority to act.** The
+switch governs acting, and only acting: off stops the sweep from cutting
+work orders, and the actuation preconditions (above) refuse the acting verbs
+from that instant — a desk mid-thought when the switch flips can finish
+thinking, and its drive returns an ordinary error instead of touching
+anything. Everything else continues: desks stay alive and idle, the shift
+stays open, and the record keeps filling — enrollment, anomalies, and the
+record verbs (`note`, `escalate`) still land, so a desk interrupted
+mid-judgment can still write down what it was about to do. Watching
+continues; touching stops. Flipping back on resumes the same shift with the
+same desks at full context: the daemon writes a resumed lifecycle line and
+hastens a sweep tick, so work orders are cut from current state, never from
+pre-pause state. Toggling is therefore cheap in both directions — which a
+control must be for an operator to actually reach for it.
+
+**Closing a shift is a separate, explicit operator action** — a record
+boundary, not a posture, and the two compose freely (§9, §10). Nothing
+closes a shift automatically: a shift left paused for a day renders loudly
+as exactly that, because a lingering state degrades to loud display, never
+to autonomous cleanup.
 
 **The switch's writ runs exactly as far as TBD's own processes.** It stops the
 sweep and the desks; it does not reach programs the operator schedules outside
@@ -1122,8 +1139,8 @@ attention — it never changes what any verb is allowed to do.
   **action** records a drive, wake, or pause, including the payload, the state
   snapshot that justified it, and the active mode. A separate
   **outcome** line references the action's ID and records what was observed.
-  **lifecycle** records shift open, shift close, mode changes, and desk
-  recycles (§9). **enrollment** records an agent entering the supervision
+  **lifecycle** records shift open, pause, resume, shift close, mode changes,
+  and desk recycles (§9). **enrollment** records an agent entering the supervision
   perimeter mid-shift; the shift-open line carries the same fields for every
   agent already present, as a roster snapshot. **proposal** and
   **resolution** record proposed actions and their results. **escalation** and
@@ -1204,7 +1221,8 @@ What each kind's payload carries:
   an instruction (§8), never consulted as a permission.
 - **`anomaly`** — the category and the detail.
 - **`note`** — the author, the text, and optional references to other lines.
-- **`lifecycle`** — opening, closing, mode change, or desk recycle; this is
+- **`lifecycle`** — opening, pause, resume, closing, mode change, or desk
+  recycle; this is
   the kind behind every line §9 describes. The opening line's payload includes
   the roster snapshot: one entry per agent already under supervision, with the
   same fields an enrollment line carries.
@@ -1507,13 +1525,22 @@ enforcement openly, which is the same trade the old system made by accident
 
 ## 9. Shift lifecycle (P2-2)
 
-- **A shift is born from the on/off switch, and only from it.** off →
-  attended/autonomous creates a shift ID, creates `~/tbd/shifts/<id>/`, and
-  writes the opening ledger line. It starts **no desks**: at shift open there is
-  nothing yet to supervise, and a desk exists to hold one project's cases. A
-  switch between attended ↔ autonomous during a shift keeps the *same* shift and
-  adds a mode-change ledger line. Every action line already records the mode it
-  ran under. Only switching supervision off ends a shift.
+- **A shift is born from the switch and ends only by explicit close.**
+  Turning supervision on with no shift open creates a shift ID, creates
+  `~/tbd/shifts/<id>/`, and writes the opening ledger line with the roster
+  snapshot (§6). It starts **no desks**: at shift open there is nothing yet
+  to supervise, and a desk exists to hold one project's cases. Turning the
+  switch off does **not** end the shift — it pauses it (§3): a paused
+  lifecycle line, desks alive and idle, the record still open. Turning it
+  back on writes a resumed line and hastens a tick. Work orders do not
+  survive a pause — anything still true reappears in a fresh order derived
+  from current state — and dead-man deadlines (below) suspend while paused
+  and rearm on resume, because an order unanswered during a pause is the
+  system's doing, not a dead desk. Only the explicit close action (§10) ends
+  a shift; issued with the switch still on, it finalizes the record and a
+  fresh shift opens in the same gesture — how an always-on operator gets
+  shift-sized accounts instead of one endless ledger. Every action line
+  records the mode it ran under.
 - **Desks are born lazily, one per project, on that project's first case.**
   A project with a quiet night never gets a desk at all (§4). Each desk is a
   scratch space tracked by ID rather than by its display string, receives the
@@ -1527,7 +1554,8 @@ enforcement openly, which is the same trade the old system made by accident
   case the next night waits in the morning queue rather than being briefed into
   a desk that was never created, which is why the queue and not the desk is the
   durable home for anything needing a human.
-- **Shift end is a teardown with a caller, and it disposes every desk.** The
+- **Shift end is a teardown with a caller — the explicit close action (§3,
+  §10) — and it disposes every desk.** The
   sequence is: stop the sweep → make a time-limited request to each live desk
   for a closing note **and, where the shift produced learning-shaped notes, a
   capture proposal** (spawn a worker to fold them into that project's
@@ -1545,19 +1573,22 @@ enforcement openly, which is the same trade the old system made by accident
   missed.
 - **A daemon restart during a shift resumes it, never forks it.** The active
   shift is derivable from the record alone: the newest shift whose ledger has
-  no closing line. On startup with the switch on, the daemon resumes that
-  shift — same ID, same directory, same desks, which are ordinary sessions
-  and survive the daemon — and runs the overdue-observation scan (§7, §12). A
-  half-finished teardown resumes idempotently from its durable steps. Only
-  when no unclosed shift exists does turning supervision on open a new one.
+  no closing line. On startup the daemon resumes that shift in whatever
+  posture the switch persists — running if on, paused if off — with the same
+  ID, same directory, same desks, which are ordinary sessions and survive the
+  daemon, and runs the overdue-observation scan (§7, §12). A half-finished
+  teardown resumes idempotently from its durable steps. Only when no unclosed
+  shift exists does turning supervision on open a new one.
 - **Each shift starts fresh on purpose.** No resumed supervisor context.
   Continuity lives in artifacts: the playbook, the operator's selections, and
   earlier ledgers. The *system* learns; one session's context does not. If a
   supervisor dies during a shift, the daemon writes an anomaly line, creates a
   replacement for that project in the same shift, and briefs it with its
   project's account so far.
-- **Off is meaningful**: no shift exists, nothing observes the fleet, the last
-  shift's residue is fully on disk. No half-on states.
+- **Closed is meaningful**: after the close, no shift exists, no desk
+  survives, and the shift's residue is fully on disk. Off without close is a
+  pause and renders as one; closed is the clean zero state. There is no
+  in-between the record cannot name.
 
 ### Supervisor context recycling
 
@@ -1856,13 +1887,17 @@ tbd supervise resolve <id> --reject  [--reason "…"]
 tbd supervise resolve <id> --answer  "…" [--scope …]
 ```
 
-**Operator — the switch and the modes.** Turning supervision on opens a shift;
-turning it off closes it (§9). Mode selection is per project and takes effect on
-the next work order (§3).
+**Operator — the switch, the shift, and the modes.** Turning supervision on
+opens a shift if none is open, and resumes the paused one otherwise; turning
+it off pauses acting without closing anything (§3, §9). Closing the shift is
+its own explicit action: it finalizes the account and disposes the desks,
+and with the switch still on a fresh shift opens in the same gesture (§9).
+Mode selection is per project and takes effect on the next work order (§3).
 
 ```
 tbd supervise on
 tbd supervise off
+tbd supervise shift close
 tbd supervise status
 tbd supervise mode <project> <mode-name>
 tbd supervise mode <project>            # show the active mode and the choices
