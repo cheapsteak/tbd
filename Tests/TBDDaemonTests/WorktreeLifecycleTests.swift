@@ -64,7 +64,11 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        codexExecutableResolver: { "/usr/bin/true" },
+        codexHomeEnsurer: {
+            tempDir.appendingPathComponent("codex-home", isDirectory: true)
+        }
     )
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -81,6 +85,59 @@ import Testing
         primaryAgentPreference: .claude
     )
     #expect(try await db.terminals.list(worktreeID: claude.id).contains { $0.kind == .claude })
+}
+
+@Test func testExplicitClaudeOverrideSkipsGlobalCodexPreflight() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    try await db.config.setPrimaryAgentPreference(.codex)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver(),
+        codexExecutableResolver: { throw ExpectedCodexPreflightFailure() }
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    let result = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        primaryAgentPreference: .claude
+    )
+
+    #expect(try await db.terminals.list(worktreeID: result.id).contains { $0.kind == .claude })
+}
+
+@Test func testExplicitCodexOverridePreflightsBeforeGitMutation() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    try await db.config.setPrimaryAgentPreference(.claude)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver(),
+        codexExecutableResolver: { throw ExpectedCodexPreflightFailure() }
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+
+    do {
+        _ = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id,
+            primaryAgentPreference: .codex
+        )
+        Issue.record("Expected Codex preflight to fail")
+    } catch is ExpectedCodexPreflightFailure {
+        // Expected: preflight fails before git creates the worktree directory.
+    }
+
+    #expect(!FileManager.default.fileExists(atPath: pending.path))
+    #expect(try await db.worktrees.get(id: pending.id) == nil)
 }
 
 @Test func testCreateWorktreePersistsPrimaryAgentAsFirstAndActiveTab() async throws {
@@ -1042,6 +1099,8 @@ import Testing
 }
 
 // MARK: - Helpers
+
+private struct ExpectedCodexPreflightFailure: Error {}
 
 /// Thread-safe collector for TmuxManager dryRun recorded args.
 private final class LifecycleRecordedCommands: @unchecked Sendable {

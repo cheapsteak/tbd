@@ -239,7 +239,8 @@ extension WorktreeLifecycle {
                 ? resolvePrimaryTerminalKind(
                     skipClaude: skipClaude,
                     archivedClaudeSessions: nil,
-                    configuredPreference: creationConfig.primaryAgentPreference
+                    configuredPreference:
+                        primaryAgentPreference ?? creationConfig.primaryAgentPreference
                 )
                 : .claude
             // Preflight the full Codex launch before creating a directory,

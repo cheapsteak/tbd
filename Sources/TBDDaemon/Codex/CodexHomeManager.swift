@@ -435,6 +435,39 @@ enum CodexExecutableResolver {
         )
     }
 
+    /// Best-effort lookup for non-launching features such as usage display.
+    ///
+    /// Spawn paths must call the throwing `resolve` API so an invalid override
+    /// or missing CLI reaches the user as an actionable error. Usage probing
+    /// can degrade to an unavailable state, and also checks common absolute
+    /// user/package-manager locations that a launchd PATH may omit.
+    static func resolveIfAvailable(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        isExecutable: (String) -> Bool = {
+            isUsableExecutable(atPath: $0)
+        }
+    ) -> String? {
+        let fallbackDirectories = [
+            "\(homeDirectory)/.local/bin",
+            "\(homeDirectory)/.volta/bin",
+            "\(homeDirectory)/.cargo/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        let augmentedSearchPath = ([environment["PATH"]].compactMap { $0 }
+            + fallbackDirectories).joined(separator: ":")
+
+        return try? resolve(
+            configuredOverride: environment[executableOverrideEnvironmentKey],
+            searchPath: augmentedSearchPath,
+            fallbackPath: chatGPTBundlePath,
+            isExecutable: isExecutable
+        )
+    }
+
     private static func isUsableExecutable(atPath path: String) -> Bool {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(

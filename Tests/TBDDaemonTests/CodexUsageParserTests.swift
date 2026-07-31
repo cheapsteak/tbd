@@ -9,14 +9,14 @@ struct CodexUsageParserTests {
             "/custom/bin/codex",
             "/Users/test/.local/bin/codex",
         ]
-        let fromPath = CodexExecutableResolver.resolve(
+        let fromPath = CodexExecutableResolver.resolveIfAvailable(
             environment: ["PATH": "/custom/bin:/usr/bin"],
             homeDirectory: "/Users/test",
             isExecutable: { available.contains($0) }
         )
         #expect(fromPath == "/custom/bin/codex")
 
-        let fromFallback = CodexExecutableResolver.resolve(
+        let fromFallback = CodexExecutableResolver.resolveIfAvailable(
             environment: ["PATH": "/usr/bin:/bin"],
             homeDirectory: "/Users/test",
             isExecutable: { available.contains($0) }
@@ -25,17 +25,17 @@ struct CodexUsageParserTests {
     }
 
     @Test func resolverCoversVoltaAndHomebrewAndReturnsNilWhenMissing() {
-        #expect(CodexExecutableResolver.resolve(
+        #expect(CodexExecutableResolver.resolveIfAvailable(
             environment: [:],
             homeDirectory: "/Users/test",
             isExecutable: { $0 == "/Users/test/.volta/bin/codex" }
         ) == "/Users/test/.volta/bin/codex")
-        #expect(CodexExecutableResolver.resolve(
+        #expect(CodexExecutableResolver.resolveIfAvailable(
             environment: [:],
             homeDirectory: "/Users/test",
             isExecutable: { $0 == "/opt/homebrew/bin/codex" }
         ) == "/opt/homebrew/bin/codex")
-        #expect(CodexExecutableResolver.resolve(
+        #expect(CodexExecutableResolver.resolveIfAvailable(
             environment: [:],
             homeDirectory: "/Users/test",
             isExecutable: { _ in false }
