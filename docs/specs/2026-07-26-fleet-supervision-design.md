@@ -972,7 +972,21 @@ policies — that is the invariant the project exists to create.
   driving past any prompt that guards credentials, merges, or anything
   irreversible, be able to say why the agent is asking — not just what it
   asks — reading backward in the transcript until the request makes sense, and
-  escalating when it does not.** The verbatim question in the work order
+  escalating when it does not.** Its companion rule makes the discipline
+  uniform: **write every message as if the target will execute it unchecked —
+  never lean on a safety net.** Targets genuinely differ in posture — most
+  fleet spawns run with permissions bypassed, yet a repo's explicit `ask`
+  rules still prompt even there, the mode can change mid-session from the
+  keyboard, and an adopted session may ask about everything — so the same
+  drive is a suggestion behind a checkpoint into one session and the final
+  checkpoint itself into another (PR #522's review measured exactly this
+  pair). The desk never calibrates to that difference: calibrating means
+  predicting what a session will do with a message, and the observation loop
+  (§12) sees everything except the irreversible act that completes before the
+  re-check — which is precisely the class decision depth already covers.
+  Depth follows the content of the act; if an instruction would worry you
+  running with no gate behind it, that worry is the signal, whoever the
+  target is. The verbatim question in the work order
   answers "what is being asked"; nothing compiled can answer "with what
   context," because knowing which distant transcript content bears on a
   decision is interpretation, and interpretation is judgment's job (§2). The
@@ -1891,7 +1905,13 @@ existence, not trusting tmux's exit status. A *wrong* pane produces no error
 by any mechanical measure — pane IDs are reused, and keys sent to a stale
 coordinate land in a different live session (issue #384) — so target identity
 is verified by deliberate comparison before typing. Neither check is a
-guardrail; both are the send path telling the truth about its own result.
+guardrail; both are the send path telling the truth about its own result. A
+third class is known but deliberately unbuilt: text sent while a modal prompt
+is on screen reaches the dialog rather than the composer, keystrokes becoming
+accidental answers. The sentinel already detects the aftermath — a swallowed
+payload never reaches the transcript — and no field failure has yet shown the
+race itself biting; if one does, the fix joins this family (the send path
+refusing when the composer is unreachable) and stays content-blind.
 
 **Receipt is a passive machine observation; the agent cooperates in nothing.**
 Every dispatched payload opens with a one-line envelope carrying the action
@@ -2110,6 +2130,22 @@ to inaction at the largest scale.
   The per-desk transcript-replay store from the same review is a
   judgment-tier read optimization: if it exists, it enters as an advisory
   tool under the outside-first ratchet, never as daemon machinery.
+- **A permission-posture fact in the state model** — PR #522's review measured
+  the real difference: the same `drive --text` is a suggestion behind a
+  checkpoint into a session that still asks, and the last checkpoint itself
+  into one running with permissions bypassed. The design answers with conduct
+  rather than a fact: the playbook's assume-unchecked rule (§5) makes the two
+  targets indistinguishable from the desk's side, so posture never justifies
+  an act — and a fact nothing consumes fails §2's add-nothing test. Reading a
+  target's settings to predict whether a given command would be gated is
+  rejected outright: it re-implements the agent's permission-resolution
+  engine and drifts silently — the compiled window table's mistake in new
+  clothes. If experience produces a morning that genuinely turns on "did
+  anything stand between the nudge and the consequence," the ground truth is
+  the target's transcript, and a compiled fact has a ready machine source:
+  hook payloads carry `permission_mode` on most events TBD already consumes
+  (though not on `Notification`, and not in the statusline JSON). Recorded
+  here so a revisit starts from the source, not the search.
 - ~~**`supervision.json`**~~ — **reversed, and the reversal is the honest
   record.** An earlier draft rejected a small structured policy file on the
   grounds that its content had melted into the standing-rules store. The melt
