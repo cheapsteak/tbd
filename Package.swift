@@ -91,11 +91,16 @@ let package = Package(
             ],
             path: "Sources/TBDCLI"
         ),
+        .systemLibrary(
+            name: "CComrakFFI",
+            path: "Sources/CComrakFFI"
+        ),
         .executableTarget(
             name: "TBDApp",
             dependencies: [
                 "TBDShared",
                 "TBDAppIcon",
+                "CComrakFFI",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "Highlightr", package: "Highlightr"),
                 .product(name: "SwiftUIIntrospect", package: "swiftui-introspect"),
@@ -106,11 +111,20 @@ let package = Package(
                 .product(name: "Markdown", package: "swift-markdown"),
             ],
             path: "Sources/TBDApp",
-            resources: [.copy("Resources/Icons")],
+            resources: [
+                .copy("Resources/Icons"),
+                .copy("Resources/markdown-default.css"),
+                .copy("Resources/markdown-stylesheets.md"),
+            ],
             // Swift 6.2 WMO-debug OOM workaround — see noWMODebugWorkaround
             // above. TBDApp is the larger of the two memory-heavy modules
             // (SwiftUI view bodies + MarkdownUI + SwiftTerm).
-            swiftSettings: noWMODebugWorkaround
+            swiftSettings: noWMODebugWorkaround,
+            linkerSettings: [
+                // The archive is a committed build input at a package-relative path.
+                // Regenerate with scripts/build-rust.sh.
+                .unsafeFlags(["-Lrust/comrak-ffi/lib", "-lcomrak_ffi"])
+            ]
         ),
         .target(
             name: "TestSupport",

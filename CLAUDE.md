@@ -4,6 +4,10 @@ macOS native worktree + terminal manager for multi-agent Claude Code workflows.
 
 Use the `tbd-project` skill for architecture, conventions, and file reference.
 
+## ⚠️ Public repo, multi-tenant product
+
+**This repository is public, and TBD is used by people across different organizations.** Never commit private context — real employer, org, repo, host, account, person, or ticket names, internal URLs, or machine-specific paths (use `acme` / `acme-prod` placeholders). **Whatever a session is working on elsewhere — product features, roadmaps, ticket and task descriptions — is likely confidential to that org and must not leak here**, in docs, specs, tests, fixtures, or commit messages. Never build or document for one repo, one project, or one person's workflow: features, defaults, and docs must generalize.
+
 ## Main Session Agent
 
 The main chat session agent should not write code directly. Delegate all implementation work to suitable subagents (Agent tool). The main session focuses on planning, coordination, and reviewing subagent results.
