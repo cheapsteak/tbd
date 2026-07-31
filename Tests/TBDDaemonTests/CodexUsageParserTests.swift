@@ -79,7 +79,7 @@ struct CodexUsageParserTests {
 
     @Test func fallsBackToBaseRateLimitBucket() throws {
         let data = Data(#"""
-        {"id":3,"result":{"rateLimits":{"primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":123},"rateLimitsByLimitId":null}}
+        {"id":3,"result":{"rateLimits":{"primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":123}},"rateLimitsByLimitId":null}}
         """#.utf8)
         let limits = try CodexUsageParser.rateLimits(from: data)
         #expect(limits.first?.primary?.usedPercent == 42)
