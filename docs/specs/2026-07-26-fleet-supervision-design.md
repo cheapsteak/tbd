@@ -177,10 +177,19 @@ or state calculation.
 **P2 — add nothing unless experience proves it is needed.** Do not add verdict
 enumerations or a schema for the stages of work. A "work arc" differs by
 repository, team, and person. Compiling a fixed set of arcs would recreate the
-old system's worst defect. Policy and the supervisor should read the raw facts
-the app already has. If operator hooks repeatedly implement the same
-calculation in the future, consider moving that specific calculation into the
-app.
+old system's worst defect. The principle behind that refusal deserves stating
+once in full, because it governs both halves of the design: **TBD has no
+theory of work — every project authors one.** What counts as done, stalled, or
+abandoned is a team's convention, not a universal; the squash-merge night
+proved that a true git fact can answer the wrong question when the convention
+(squash merges) lives outside the tool. For parked sessions the authored
+theory is the wake program; for live agents it is the playbook. The desk
+**applies** its project's theory and escalates when that theory is silent — it
+never supplies one of its own, and "is the work done" is never the desk's
+question to answer from first principles (§4). Policy and the supervisor
+should read the raw facts the app already has. If operator hooks repeatedly
+implement the same calculation in the future, consider moving that specific
+calculation into the app.
 
 ### Prompt stalls (P2-3): the machine-interface test
 
@@ -728,7 +737,10 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    watch it think, and type into it.
 6. **Judgment.** The supervisor reads the transcript and writes a specific next
    step. It never sends only "continue" (P0-7). This is the loop's only model
-   reasoning.
+   reasoning, and it runs under the project's authored theory of work (§2): the
+   playbook is what says what done and stuck mean here. Where the playbook is
+   silent — an idle agent whose work may or may not be finished — the desk's
+   move is a note or an escalation, never a completion verdict of its own.
 7. **Act through the daemon, never around it.** `tbd supervise drive …`.
    The daemon performs two steps, and inspects the payload in neither. First, it
    **delivers** the payload through the adapter — a dispatch that cannot
@@ -956,7 +968,26 @@ policies — that is the invariant the project exists to create.
   from the source that tells the truth rather than the one that answers
   fastest** (P0-8; the daemon verifies nothing, §3). The old system carried this
   same sentence and it was the thing that worked; a desk is a full agent session
-  and can run `gh` and `git` itself. The default contains no commands, bot
+  and can run `gh` and `git` itself. A fifth is decision depth: **before
+  driving past any prompt that guards credentials, merges, or anything
+  irreversible, be able to say why the agent is asking — not just what it
+  asks — reading backward in the transcript until the request makes sense, and
+  escalating when it does not.** The verbatim question in the work order
+  answers "what is being asked"; nothing compiled can answer "with what
+  context," because knowing which distant transcript content bears on a
+  decision is interpretation, and interpretation is judgment's job (§2). The
+  receipt is from the field: a session that refused a prompt injection later
+  asked for a production credential — entirely plausible in isolation,
+  impossible to judge correctly without the refusal sitting next to it (PR
+  #522's review). Because those two facts can surface in different cases hours
+  apart, the discipline has a second half: **an anomaly like a refused
+  injection gets a ledgered note the moment it is seen, so the later,
+  plausible-looking request lands next to it** — the desk's shift memory is
+  what connects facts across cases. Deep reads cost real tokens and no
+  discipline makes them free; the economy is §2's recurrence-is-a-signal
+  stance — a repo whose agents keep hitting such prompts fixes its permission
+  config at the source rather than buying the desk a bigger reading budget.
+  The default contains no commands, bot
   names, or organization-specific content.
 - **The shipped default also defines the two baseline modes** (§3), so every
   project has `attended` and `autonomous` available without authoring anything.
@@ -1028,7 +1059,9 @@ attention — it never changes what any verb is allowed to do.
   snapshot that justified it, and the active mode. A separate
   **outcome** line references the action's ID and records what was observed.
   **lifecycle** records shift open, shift close, mode changes, and desk
-  recycles (§9). **proposal** and
+  recycles (§9). **enrollment** records an agent entering the supervision
+  perimeter mid-shift; the shift-open line carries the same fields for every
+  agent already present, as a roster snapshot. **proposal** and
   **resolution** record proposed actions and their results. **escalation** and
   **resolution** record questions and their answers. **decision** records a
   durable answer the operator gave (P1-5, §8). **anomaly** records an unknown state,
@@ -1102,7 +1135,20 @@ What each kind's payload carries:
 - **`anomaly`** — the category and the detail.
 - **`note`** — the author, the text, and optional references to other lines.
 - **`lifecycle`** — opening, closing, mode change, or desk recycle; this is
-  the kind behind every line §9 describes.
+  the kind behind every line §9 describes. The opening line's payload includes
+  the roster snapshot: one entry per agent already under supervision, with the
+  same fields an enrollment line carries.
+- **`enrollment`** — the agent's identity (worktree / terminal), its repo's
+  resolved project, the spawn source, and the transcript path. Mechanical
+  facts only, written by the daemon when a new agent enters a supervised
+  project's perimeter mid-shift; with the shift-open snapshot this makes "what
+  was under watch, and since when" a plain query, and "was supervision even
+  applying to X at 02:20" answerable after the fact. The transcript path is
+  deliberate: its head is the agent's original assignment, so judgment reaches
+  "what is this agent for" in one hop, by reference — TBD stores a pointer and
+  interprets nothing (§2, §15). The perimeter is the fleet table: a session
+  TBD did not spawn is invisible to it, and the account reports that boundary
+  honestly rather than implying coverage it does not have.
 
 Two representative lines, an action and the outcome that later references it:
 
@@ -1346,6 +1392,15 @@ A project that resolves to *out* produces no cases, so no work orders, so no
 desk is ever spawned for it. It still appears in the fact sweep and the account —
 observability is never withheld, and "project X needed attention but is out of
 supervision" is the honest report.
+
+Coverage is also a recorded event, not only a resolved fact. Because
+membership derives — agent → repo → project → mark — a new agent spawned
+mid-shift is under supervision the moment it exists, with no config edit and
+no desk chore; but nothing about that derivation leaves a trace by itself.
+The trace is the ledger's: the shift-open roster snapshot and per-agent
+mid-shift `enrollment` lines (§6) are what let the account answer *what was
+under watch, and since when* — enrollment as a first-class event, arrived at
+by recording the derivation rather than replacing it.
 
 ### Prior art in the current system (and what #509 changed)
 
@@ -2043,7 +2098,18 @@ to inaction at the largest scale.
 
 - **A verdict enum / work-arc schema** — interpretations of work differ by
   repository, team, and person. A compiled classification would recreate the
-  old system's defect.
+  old system's defect. Stated as a principle in §2: TBD has no theory of
+  work — every project authors one.
+- **An intent column in the state model** — the operator ask behind it is real
+  (an escalation should be judged against the goal, not the symptom; PR #522's
+  review proposed intent as a fourth §2 column), but a stored "what this agent
+  is for" would put a theory of work back in the compiled tier under a new
+  name. Intent is authored and carried by the agent's own materials — the
+  transcript's opening assignment above all — and the enrollment line's
+  transcript pointer (§6) gives judgment one-hop access to it, by reference.
+  The per-desk transcript-replay store from the same review is a
+  judgment-tier read optimization: if it exists, it enters as an advisory
+  tool under the outside-first ratchet, never as daemon machinery.
 - ~~**`supervision.json`**~~ — **reversed, and the reversal is the honest
   record.** An earlier draft rejected a small structured policy file on the
   grounds that its content had melted into the standing-rules store. The melt
