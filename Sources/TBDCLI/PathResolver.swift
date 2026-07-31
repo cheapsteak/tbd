@@ -1,6 +1,11 @@
 import Foundation
 import TBDShared
 
+enum RepoResolutionContext {
+    case discoveredPath
+    case explicitRepoOption
+}
+
 /// Resolves the current working directory to a repo/worktree ID
 /// by querying the daemon via the resolve.path RPC.
 struct PathResolver {
@@ -22,23 +27,15 @@ struct PathResolver {
     }
 
     /// Resolve a path to a repo ID, throwing if not found.
-    ///
-    /// The failure message names what was actually resolved. `--repo` takes a
-    /// UUID or a path; a bare repo *name* is neither, so it gets resolved as a
-    /// relative path and fails with a message about path detection — which
-    /// reads like a detection bug and sends people looking for one. Reported
-    /// from the field as "`--repo acme-app` is ambiguous between two registered
-    /// repos of that name"; it isn't ambiguous, because there is no name lookup
-    /// here to be ambiguous about.
-    func resolveRepoID(path: String? = nil) throws -> UUID {
+    func resolveRepoID(
+        path: String? = nil,
+        context: RepoResolutionContext = .discoveredPath
+    ) throws -> UUID {
         let result = try resolve(path: path)
         guard let repoID = result.repoID else {
-            let target = path.map { "'\($0)'" } ?? "the current directory"
-            throw CLIError.invalidArgument("""
-                No registered repository at \(target).
-                --repo takes a repository UUID or a path, not a repo name. \
-                Run `tbd repo list` for the registered repos and their IDs.
-                """)
+            throw CLIError.invalidArgument(
+                repoResolutionFailureMessage(path: path, context: context)
+            )
         }
         return repoID
     }
@@ -64,5 +61,26 @@ struct PathResolver {
             fileURLWithPath: path,
             relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         ).standardized.path
+    }
+}
+
+func repoResolutionFailureMessage(
+    path: String?,
+    context: RepoResolutionContext
+) -> String {
+    let target = path.map { "'\($0)'" } ?? "the current directory"
+    switch context {
+    case .discoveredPath:
+        return """
+            No registered repository at \(target).
+            Register it with `tbd repo add <path>`, or run `tbd repo list` \
+            to see registered repositories.
+            """
+    case .explicitRepoOption:
+        return """
+            No registered repository at \(target).
+            --repo takes a repository UUID or a path, not a repo name. \
+            Run `tbd repo list` for the registered repos and their IDs.
+            """
     }
 }

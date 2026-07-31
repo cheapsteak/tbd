@@ -104,7 +104,7 @@ struct WorktreeCreate: AsyncParsableCommand {
                 repoID = id
             } else {
                 let resolver = PathResolver(client: client)
-                repoID = try resolver.resolveRepoID(path: repo)
+                repoID = try resolver.resolveRepoID(path: repo, context: .explicitRepoOption)
             }
         } else {
             let resolver = PathResolver(client: client)
@@ -229,7 +229,7 @@ struct WorktreeList: AsyncParsableCommand {
                 repoID = id
             } else {
                 let resolver = PathResolver(client: client)
-                repoID = try resolver.resolveRepoID(path: repo)
+                repoID = try resolver.resolveRepoID(path: repo, context: .explicitRepoOption)
             }
         }
 
@@ -307,7 +307,7 @@ struct WorktreeAdopt: AsyncParsableCommand {
                 repoID = id
             } else {
                 let resolver = PathResolver(client: client)
-                repoID = try resolver.resolveRepoID(path: repo)
+                repoID = try resolver.resolveRepoID(path: repo, context: .explicitRepoOption)
             }
         } else {
             // Auto-detect: run `git rev-parse --git-common-dir` from the worktree
