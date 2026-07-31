@@ -41,21 +41,24 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
     }
 }
 
+private let codexTestExecutable = "/opt/tbd-tests/bin/codex"
+
 private func containsCodexProfileLaunch(_ body: String) -> Bool {
-    body.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
-        || body.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
+    let escapedExecutable = SystemPromptBuilder.shellEscape(codexTestExecutable)
+    return body.contains(
+        "unset CODEX_CI CODEX_THREAD_ID; \(escapedExecutable) --profile tbd --dangerously-bypass-approvals-and-sandbox")
+        || body.contains(
+            "unset CODEX_CI CODEX_THREAD_ID; \(escapedExecutable) --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
 }
 
-private let codexTestHomePath: String = {
-    let path = FileManager.default.temporaryDirectory
+private func configureCodexPreflight(on router: RPCRouter) throws -> URL {
+    let codexHome = FileManager.default.temporaryDirectory
         .appendingPathComponent("tbd-codex-home-tests-\(UUID().uuidString)", isDirectory: true)
-        .path
-    setenv("TBD_TEST_CODEX_HOME", path, 1)
-    return path
-}()
-
-private func installCodexTestHomeOverride() {
-    _ = codexTestHomePath
+    try FileManager.default.createDirectory(
+        at: codexHome, withIntermediateDirectories: true)
+    router.codexExecutableResolver = { codexTestExecutable }
+    router.codexHomeEnsurer = { codexHome }
+    return codexHome
 }
 
 /// terminal.create / terminal.recreateWindow refuse to spawn into a missing
@@ -161,9 +164,6 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
 
 @Test("handleTerminalRecreateWindow uses current Codex launch command")
 func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
-    installCodexTestHomeOverride()
-    defer { unsetenv("TBD_TEST_CODEX_HOME") }
-
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
     let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -179,6 +179,8 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
         ),
         tmux: tmux
     )
+    let codexHome = try configureCodexPreflight(on: router)
+    defer { try? FileManager.default.removeItem(at: codexHome) }
 
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-recreate-codex", displayName: "test", defaultBranch: "main"
@@ -514,9 +516,6 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
 
 @Test("handleTerminalCreate uses current Codex launch command")
 func testHandleTerminalCreateCodexLaunchCommand() async throws {
-    installCodexTestHomeOverride()
-    defer { unsetenv("TBD_TEST_CODEX_HOME") }
-
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
     let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -532,6 +531,8 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
         ),
         tmux: tmux
     )
+    let codexHome = try configureCodexPreflight(on: router)
+    defer { try? FileManager.default.removeItem(at: codexHome) }
 
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-create-codex", displayName: "test", defaultBranch: "main"
@@ -579,9 +580,6 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
 
 @Test("handleTerminalCreate passes initial prompt to fresh Codex sessions")
 func testHandleTerminalCreateCodexInitialPrompt() async throws {
-    installCodexTestHomeOverride()
-    defer { unsetenv("TBD_TEST_CODEX_HOME") }
-
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
     let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -597,6 +595,8 @@ func testHandleTerminalCreateCodexInitialPrompt() async throws {
         ),
         tmux: tmux
     )
+    let codexHome = try configureCodexPreflight(on: router)
+    defer { try? FileManager.default.removeItem(at: codexHome) }
 
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-create-codex-prompt", displayName: "test", defaultBranch: "main"

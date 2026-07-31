@@ -203,11 +203,11 @@ struct CodexSpawnCommandBuilderTests {
                 codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
                 codexVersionOutput: "codex-cli 0.134.0"
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
         )
         #expect(
             CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: "codex-cli 0.135.0-alpha.1")
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -222,7 +222,7 @@ struct CodexSpawnCommandBuilderTests {
                 """,
                 codexVersionOutput: nil
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -230,7 +230,7 @@ struct CodexSpawnCommandBuilderTests {
     func olderCodexUsesProfileV2Flag() {
         #expect(
             CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: "codex-cli 0.133.0")
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -238,7 +238,7 @@ struct CodexSpawnCommandBuilderTests {
     func missingVersionFallsBackToProfileFlag() {
         #expect(
             CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: nil)
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -306,7 +306,7 @@ struct CodexSpawnCommandBuilderTests {
                 initialPrompt: "fix the failing test",
                 codexVersionOutput: "codex-cli 0.134.0"
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox 'fix the failing test'"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox 'fix the failing test'"
         )
     }
 

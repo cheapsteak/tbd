@@ -335,8 +335,15 @@ import TBDShared
 
         let headerCount = firstContent.components(separatedBy: #"[plugins."tbd@tbd"]"#).count - 1
         #expect(headerCount == 1, "exactly one [plugins.\"tbd@tbd\"] table after rewrite")
-        #expect(firstContent.contains("enabled = true"))
-        #expect(!firstContent.contains("enabled = false"))
+        let shadcnRange = try #require(
+            firstContent.range(of: CodexProfileWriter.shadcnServerHeader))
+        let pluginSection = String(firstContent[..<shadcnRange.lowerBound])
+        let shadcnSection = String(firstContent[shadcnRange.lowerBound...])
+        #expect(pluginSection.contains("enabled = true"))
+        #expect(!pluginSection.contains("enabled = false"))
+        #expect(shadcnSection.contains(#"command = "npx""#))
+        #expect(shadcnSection.contains(#"args = ["shadcn@latest", "mcp"]"#))
+        #expect(shadcnSection.contains("enabled = false"))
         #expect(!firstContent.contains("\r"), "rewritten profile must use LF endings")
 
         try CodexProfileWriter.ensureProfile(in: codexHome)
