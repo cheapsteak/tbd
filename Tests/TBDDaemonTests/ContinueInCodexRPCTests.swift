@@ -21,6 +21,12 @@ struct ContinueInCodexRPCTests {
             defer { lock.unlock() }
             return storage.map { $0.joined(separator: " ") }.joined(separator: "\n")
         }
+
+        var calls: [[String]] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
     }
 
     private final class DeadWindows: @unchecked Sendable {
@@ -133,12 +139,15 @@ struct ContinueInCodexRPCTests {
         {"type":"user","message":{"content":"finish takeover support"}}
         {"type":"assistant","message":{"content":"daemon handler is next"}}
         """.write(to: transcript, atomically: true, encoding: .utf8)
+        let sourceProfile = try await fixture.db.modelProfiles.create(
+            name: "Source profile", kind: .oauth)
         let source = try await fixture.db.terminals.create(
             worktreeID: fixture.worktree.id,
             tmuxWindowID: "@claude",
             tmuxPaneID: "%claude",
             label: "Claude",
             claudeSessionID: "session-moved",
+            profileID: sourceProfile.id,
             kind: .claude)
         try await fixture.db.terminals.updateSession(
             id: source.id,
@@ -154,6 +163,7 @@ struct ContinueInCodexRPCTests {
         let first = try firstResponse.decodeResult(TerminalContinueInCodexResult.self)
         #expect(first.created)
         #expect(first.terminal.isCodexTerminal)
+        #expect(first.terminal.profileID == nil)
         #expect(first.terminal.worktreeID == source.worktreeID)
         #expect(first.target == .localCodex)
         #expect(first.capture.transcriptBytesRead > 0)
@@ -185,6 +195,22 @@ struct ContinueInCodexRPCTests {
         #expect(fixture.recorder.joined.contains("AGENTS.md"))
         #expect(fixture.recorder.joined.contains("claim-work"))
         #expect(fixture.recorder.joined.contains("Claude-only"))
+
+        // Takeover is one fresh Codex launch with the final prompt already in
+        // the create-window command. It must never create an intermediate
+        // terminal and then use Claude's non-atomic profile-swap/input path.
+        let firstCalls = fixture.recorder.calls
+        let newWindowCalls = firstCalls.filter { $0.contains("new-window") }
+        #expect(newWindowCalls.count == 1)
+        let launchBody = newWindowCalls.first?.last ?? ""
+        #expect(launchBody.contains(first.handoffPath))
+        #expect(
+            launchBody.contains(" --profile tbd ")
+                || launchBody.contains(" --profile-v2 tbd "))
+        #expect(!firstCalls.contains { $0.contains("respawn-window") })
+        #expect(!firstCalls.contains { $0.contains("send-keys") })
+        #expect(!firstCalls.contains { $0.contains("load-buffer") })
+        #expect(!firstCalls.contains { $0.contains("paste-buffer") })
 
         let secondResponse = await fixture.router.handle(request)
         #expect(secondResponse.success)

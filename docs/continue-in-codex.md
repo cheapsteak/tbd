@@ -20,6 +20,12 @@ creating another one.
 - Codex uses the existing global `~/.codex` authentication and TBD's
   profile-scoped plugin. TBD resolves an absolute Codex executable before it
   creates a tmux window or database row.
+- The app and CLI each issue one dedicated `terminal.continueInCodex` RPC. The
+  daemon includes the TBD Codex profile and initial handoff prompt in the
+  command passed to `tmux.createWindow`; clients must not compose takeover from
+  `terminal.create` followed by `terminal.swapProfile` or a post-launch prompt
+  send. Startup trust or hook-review gates can exit or intercept that
+  intermediate session before the intended profile and prompt take effect.
 - The generated `~/.codex/tbd.config.toml` enables the TBD plugin and contains
   a complete, parser-valid disabled `shadcn` MCP entry:
 
@@ -44,6 +50,30 @@ creating another one.
 The RPC target is structured for future adapters, but the MVP accepts only
 `local_codex`. It does not invoke Ollama or another summarization model.
 
+## Creation and profile-swap ordering
+
+Fresh terminal creation is the reliable convergence primitive. A Claude
+`terminal.create` request resolves its target profile and initial prompt before
+creating the tmux window, so callers that know both values should pass
+`overrideProfileID` and `prompt` in that single request. Continue in Codex uses
+the same principle for Codex: its one `new-window` command already contains the
+final Codex profile and handoff prompt. It never creates an intermediate
+terminal or calls the Claude-only `terminal.swapProfile` RPC.
+
+An in-place Claude profile swap is not atomic across TBD's database and tmux.
+The current compatibility contract interrupts the old pane best-effort,
+persists the target profile and session, and then asks tmux to respawn the
+existing window. If that window disappeared after the terminal row was read,
+the database can reflect the new profile even though no live pane remains.
+Reordering those operations would only reverse the inconsistency when the
+database write fails after a successful respawn.
+
+Accordingly, automation must not create a terminal and immediately swap it to
+the intended profile. Use fresh creation with the final profile and prompt.
+Keep `terminal.swapProfile` as an explicit compatibility action for an existing
+Claude session, and treat its returned terminal row as durable state rather
+than proof that the pane is live.
+
 ## Context and bootstrap safety
 
 Claude and Codex do not automatically receive identical skills or injected
@@ -60,6 +90,20 @@ Repository-specific task-routing or “punt” skills belong in that repository'
 integration. They are not part of TBD's generic handoff or terminal adapter.
 
 ## Future adapter invariants
+
+OpenAI's `codex-plugin-cc` [`/codex:transfer`](https://github.com/openai/codex-plugin-cc#codextransfer)
+command currently uses Codex's
+[`externalAgentConfig/import`](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md#detect-and-import-external-agent-config)
+app-server flow to create a persistent, resumable Codex thread from Claude
+JSONL. TBD may support that as an optional future context-import adapter, but
+it is not an MVP dependency. An adapter must feature-detect a compatible Codex
+version, await completion, retain the imported thread ID, and account for
+persistent global `CODEX_HOME` mutations. The plugin wrapper currently accepts
+only canonical JSONLs under `~/.claude/projects`, while TBD profile transcripts
+may live under profile-specific project roots or another stored transcript
+path. The deterministic handoff remains the no-Claude-credits, no-plugin
+fallback and still carries repository status, commits, and TBD context that
+native session import does not.
 
 Remote or hosted adapters must preserve three distinct states:
 
