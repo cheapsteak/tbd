@@ -1,6 +1,6 @@
 ---
 name: tbd-brainstorming
-description: REQUIRED before implementing blast-radius work in TBD — anything adding a subsystem, adding or changing a feature flag or config column, a database migration, or replacing a load-bearing path. Explores intent, constraints, and alternatives with a human, then writes a spec to docs/specs/. Use instead of superpowers:brainstorming in this repo.
+description: REQUIRED in TBD before implementing anything that is not a bug fix or a minor UI change — features, new subsystems, feature flags or config columns, database migrations, replacing a load-bearing path, or any change to how the system or product is meant to work. Explores intent, constraints, and alternatives with a human, then writes a spec to docs/specs/. Use instead of superpowers:brainstorming in this repo.
 ---
 
 <!-- vendored from obra/superpowers v6.1.1 @ 5a0f8953, MIT (c) 2025 Jesse Vincent -->
@@ -21,13 +21,22 @@ Do NOT invoke any implementation skill, write any code, scaffold any project, or
 
 ## When this is REQUIRED in TBD
 
-Run this before implementing work that:
-- adds a new subsystem — a new directory under `Sources/`, or a new actor/service that owns state
-- adds or changes a feature flag or `config` column
-- adds a database migration
-- wholesale-replaces a load-bearing path (rendering, input routing, persistence)
+Decisions must be examinable — changes to our theory of the system or the product most of all. Code
+expresses a theory; a diff shows what changed, not why the theory did.
 
-Not required for bug fixes, small additive UI, or refactors.
+So run this before implementing anything that is not a bug fix or a minor UI change. A bug fix
+restores the system to its existing theory; the work that needs a spec is the work that revises it.
+Work that always qualifies:
+
+- a new subsystem — a new directory under `Sources/`, or a new actor/service that owns state
+- adding or changing a feature flag or `config` column
+- a database migration
+- wholesale-replacing a load-bearing path (rendering, input routing, persistence)
+- a new heuristic, format, or protocol — anything encoding a claim about how something behaves
+
+**Prior design does not exempt.** If the thinking already happened — in prototypes, a report,
+another repo, or an earlier session — the spec is a transcription, not new work, and it is *more*
+necessary rather than less: none of that material is in this repo, so no reviewer can read it.
 
 **A human answers these questions. You may not answer your own.** A spec you both asked and
 answered contains no human judgement while looking like diligence. If no human is available to
