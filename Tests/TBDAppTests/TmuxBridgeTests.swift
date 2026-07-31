@@ -34,5 +34,10 @@ struct TmuxBridgeTests {
         #expect(TmuxBridge.activeWindowQueryArgs(sessionName: sessionName) == [
             "display-message", "-p", "-t", sessionName, "#{window_id}",
         ])
+        #expect(TmuxBridge.viewerAttachCommand(
+            server: "tbd-repo", sessionName: sessionName
+        ) == [
+            "tmux", "-u", "-L", "tbd-repo", "attach", "-t", sessionName,
+        ])
     }
 }

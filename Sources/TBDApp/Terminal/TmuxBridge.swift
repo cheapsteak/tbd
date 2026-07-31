@@ -78,6 +78,16 @@ final class TmuxBridge: @unchecked Sendable {
         ["display-message", "-p", "-t", sessionName, "#{window_id}"]
     }
 
+    /// Command used by the SwiftTerm PTY to attach its viewer client.
+    ///
+    /// `-u` is required even when the app environment normally has a UTF-8
+    /// locale. tmux otherwise may classify this bare PTY client as non-UTF-8
+    /// and substitute Unicode punctuation (notably curly apostrophes) with
+    /// underscores when it redraws the pane.
+    static func viewerAttachCommand(server: String, sessionName: String) -> [String] {
+        ["tmux", "-u", "-L", server, "attach", "-t", sessionName]
+    }
+
     /// Prepare a tmux view session for a specific panel.
     /// Creates an isolated session, links only the requested window into it,
     /// verifies the selected window, and returns the tmux arguments needed for
@@ -148,7 +158,7 @@ final class TmuxBridge: @unchecked Sendable {
         debugLog("PREPARE: panelID=\(panelID.uuidString.prefix(8)) server=\(server) window=\(windowID) session=\(sessionName)")
 
         // Return the tmux command args for SwiftTerm to attach
-        return ["tmux", "-L", server, "attach", "-t", sessionName]
+        return Self.viewerAttachCommand(server: server, sessionName: sessionName)
     }
 
     /// Clean up a view session when a panel is hidden.
