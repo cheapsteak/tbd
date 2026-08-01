@@ -11,6 +11,13 @@ public protocol DeskSessionManaging: Sendable {
     func nudgeDeskSession(worktreeID: UUID, act: Bool) async
     func postShiftWrapUp(worktreeID: UUID) async
     func closeDeskSession() async
+    func releaseJudgeLease(worktreeID: UUID) async
+    func maintainJudgeLease(worktreeID: UUID) async
+}
+
+public extension DeskSessionManaging {
+    func releaseJudgeLease(worktreeID: UUID) async {}
+    func maintainJudgeLease(worktreeID: UUID) async {}
 }
 
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
@@ -83,6 +90,10 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Internal rather than private so tests can assert the transition; it is state
     /// the manager needs regardless.
     private(set) var lastNudgedMode: NightwatchMode?
+
+    /// Deduplicates the fail-closed notification for one conflicting owner
+    /// generation. A new generation is a new incident and notifies again.
+    private var notifiedContentionGeneration: Int64?
 
     // MARK: - Init
 
@@ -234,8 +245,8 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// `TerminalStore.list` orders by `createdAt` ascending, so the previous
     /// `terminals.first(where:)` deterministically returned the OLDEST row —
     /// not a race, a guarantee. Desk terminal rows outlive their
-    /// panes: a session that dies, or is killed out-of-band (the nightwatch judge handoff
-    /// `kill-window`s its predecessor directly, so the daemon never removes the row),
+    /// panes: a session that dies, or was killed out-of-band by an older
+    /// Nightwatch handoff that bypassed TBD's terminal-close path,
     /// leaves its row behind forever. The oldest row is therefore the one *most* likely
     /// to be dead, and every handoff inserted another corpse ahead of the live desk.
     ///
@@ -255,11 +266,11 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// prompt there would execute it as shell input.
     ///
     /// - Returns: The newest matching agent terminal whose tmux window is still alive, or nil.
-    private func liveAgentTerminal(
+    private func liveAgentTerminals(
         worktreeID: UUID,
         server: String,
         kind: TerminalKind
-    ) async throws -> Terminal? {
+    ) async throws -> [Terminal] {
         let candidates = try await db.terminals.list(worktreeID: worktreeID)
             .filter {
                 $0.suspendedAt == nil
@@ -270,6 +281,7 @@ public actor DeskSessionManager: DeskSessionManaging {
             // createdAt, so without it the winner between same-instant rows is arbitrary.
             .sorted { ($0.createdAt, $0.id.uuidString) > ($1.createdAt, $1.id.uuidString) }
 
+        var live: [Terminal] = []
         for terminal in candidates {
             guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
                 logger.notice("""
@@ -290,9 +302,98 @@ public actor DeskSessionManager: DeskSessionManaging {
                     continue
                 }
             }
-            return terminal
+            live.append(terminal)
         }
-        return nil
+        return live
+    }
+
+    private func liveAgentTerminal(
+        worktreeID: UUID,
+        server: String,
+        kind: TerminalKind
+    ) async throws -> Terminal? {
+        try await liveAgentTerminals(
+            worktreeID: worktreeID, server: server, kind: kind).first
+    }
+
+    private func liveJudgeCandidates(worktree: Worktree) async throws -> [Terminal] {
+        let claude = try await liveAgentTerminals(
+            worktreeID: worktree.id, server: worktree.tmuxServer, kind: .claude)
+        let codex = try await liveAgentTerminals(
+            worktreeID: worktree.id, server: worktree.tmuxServer, kind: .codex)
+        return (claude + codex).sorted {
+            ($0.createdAt, $0.id.uuidString) > ($1.createdAt, $1.id.uuidString)
+        }
+    }
+
+    /// Resolve the sole mutable judge. Existing valid ownership wins even when
+    /// observers are present. With no lease, multiple candidates are ambiguous
+    /// and fail closed rather than selecting by recency.
+    private func leasedJudgeTerminal(
+        worktree: Worktree
+    ) async throws -> (Terminal, WatchDeskLease, String)? {
+        var candidates = try await liveJudgeCandidates(worktree: worktree)
+        let now = now()
+
+        if let lease = try await db.watchDeskLeases.status(worktreeID: worktree.id),
+           lease.isValid(at: now) {
+            if let owner = candidates.first(where: { $0.id == lease.terminalID }) {
+                let renewed = try await db.watchDeskLeases.renew(
+                    worktreeID: worktree.id, terminalID: owner.id,
+                    token: lease.token, generation: lease.generation, now: now)
+                let credentialFile = try WatchDeskLeaseCredentialFile.ensure(WatchDeskLeaseCredential(
+                    worktreeID: renewed.worktreeID, terminalID: renewed.terminalID,
+                    token: renewed.token, generation: renewed.generation))
+                notifiedContentionGeneration = nil
+                return (owner, renewed, credentialFile)
+            }
+            logger.warning("Revoking Watch Desk judge lease generation \(lease.generation): owner pane is gone")
+            try await db.watchDeskLeases.revoke(worktreeID: worktree.id)
+            subscriptions?.broadcast(delta: .watchDeskRolesChanged(
+                WorktreeIDDelta(worktreeID: worktree.id)))
+            candidates = try await liveJudgeCandidates(worktree: worktree)
+        }
+
+        guard candidates.count <= 1 else {
+            // Generation 0 denotes pre-lease ambiguity. Once a real lease has
+            // existed, its persisted generation makes subsequent incidents distinct.
+            let generation = try await db.watchDeskLeases.status(worktreeID: worktree.id)?.generation ?? 0
+            if notifiedContentionGeneration != generation {
+                let candidatesList = candidates.map(\.id.uuidString).joined(separator: ", ")
+                let notification = try await db.notifications.create(
+                    worktreeID: worktree.id,
+                    type: .error,
+                    message: "Watch Desk has multiple live judge candidates (\(candidatesList)). Mutable Nightwatch actions are paused. Recover with `tbd nightwatch lease acquire --worktree \(worktree.id.uuidString) --terminal <chosen-terminal-id>`."
+                )
+                subscriptions?.broadcast(delta: .notificationReceived(NotificationDelta(
+                    notificationID: notification.id,
+                    worktreeID: notification.worktreeID,
+                    type: notification.type,
+                    message: notification.message,
+                    terminalID: notification.terminalID,
+                    activate: false
+                )))
+                notifiedContentionGeneration = generation
+            }
+            logger.error("Watch Desk judge contention: \(candidates.count) live agent candidates; no nudge sent")
+            return nil
+        }
+        guard let candidate = candidates.first else { return nil }
+        let lease = try await db.watchDeskLeases.acquire(
+            worktreeID: worktree.id, terminalID: candidate.id, now: now)
+        let credentialFile: String
+        do {
+            credentialFile = try WatchDeskLeaseCredentialFile.ensure(WatchDeskLeaseCredential(
+                worktreeID: lease.worktreeID, terminalID: lease.terminalID,
+                token: lease.token, generation: lease.generation))
+        } catch {
+            try? await db.watchDeskLeases.revoke(worktreeID: worktree.id)
+            throw error
+        }
+        subscriptions?.broadcast(delta: .watchDeskRolesChanged(
+            WorktreeIDDelta(worktreeID: worktree.id)))
+        notifiedContentionGeneration = nil
+        return (candidate, lease, credentialFile)
     }
 
     static func agentCommand(_ command: String, matches kind: TerminalKind) -> Bool {
@@ -340,13 +441,10 @@ public actor DeskSessionManager: DeskSessionManaging {
                 return
             }
 
-            let preferredKind = try await preferredAgentKind()
-            guard let agentTerminal = try await liveAgentTerminal(
-                worktreeID: worktreeID,
-                server: worktree.tmuxServer,
-                kind: preferredKind
+            guard let (agentTerminal, _, _) = try await leasedJudgeTerminal(
+                worktree: worktree
             ) else {
-                logger.warning("No live \(preferredKind.rawValue, privacy: .public) terminal in Watch Desk; skipping wrap-up prompt")
+                logger.warning("No uniquely owned live terminal in Watch Desk; skipping wrap-up prompt")
                 return
             }
 
@@ -409,12 +507,9 @@ public actor DeskSessionManager: DeskSessionManaging {
             }
 
             var preferredKind = try await preferredAgentKind()
-            var agentTerminal = try await liveAgentTerminal(
-                worktreeID: worktreeID,
-                server: worktree.tmuxServer,
-                kind: preferredKind
-            )
-            if agentTerminal == nil {
+            var judge = try await leasedJudgeTerminal(worktree: worktree)
+            if judge == nil,
+               try await liveJudgeCandidates(worktree: worktree).isEmpty {
                 // A terminal row can survive a process/pane exit. Recover in the
                 // nudge path itself so one failed launch does not turn into a
                 // silent all-night outage waiting for a mode toggle or daemon
@@ -426,17 +521,13 @@ public actor DeskSessionManager: DeskSessionManaging {
                     try await spawnDeskTerminal(worktree: worktree, mode: mode)
                     // Re-read in case the preference changed while spawning.
                     preferredKind = try await preferredAgentKind()
-                    agentTerminal = try await liveAgentTerminal(
-                        worktreeID: worktreeID,
-                        server: worktree.tmuxServer,
-                        kind: preferredKind
-                    )
+                    judge = try await leasedJudgeTerminal(worktree: worktree)
                 } catch {
                     logger.warning("Failed to recover Watch Desk terminal before nudge: \(error.localizedDescription, privacy: .public)")
                 }
             }
 
-            guard let agentTerminal else {
+            guard let (agentTerminal, lease, credentialFile) = judge else {
                 // Deliberately does NOT stamp lastNudgeTime: a nudge that never
                 // reached a pane must not start the 10-minute overlap cooldown,
                 // or one dead desk would suppress the next recovery attempt.
@@ -455,7 +546,9 @@ public actor DeskSessionManager: DeskSessionManaging {
             // stale instructions is a bad night; a judge holding a pointer to
             // nothing is a silent one.
             let prompt: String
-            if let instructionsPath = writeJudgeInstructions(deskPath: worktree.path, mode: mode) {
+            if let instructionsPath = writeJudgeInstructions(
+                deskPath: worktree.path, mode: mode, lease: lease,
+                credentialFile: credentialFile) {
                 // A mode flip rewrites the file under a judge that was told to read
                 // it once. Nothing on the judge's side can see that happen, so the
                 // daemon — the only party that knows both the old and new mode —
@@ -540,6 +633,36 @@ public actor DeskSessionManager: DeskSessionManaging {
         deskWorktreeID = nil
     }
 
+    public func releaseJudgeLease(worktreeID: UUID) async {
+        do {
+            guard let lease = try await db.watchDeskLeases.status(worktreeID: worktreeID) else { return }
+            try await db.watchDeskLeases.release(
+                worktreeID: worktreeID, terminalID: lease.terminalID,
+                token: lease.token, generation: lease.generation)
+            WatchDeskLeaseCredentialFile.remove(terminalID: lease.terminalID)
+            notifiedContentionGeneration = nil
+            subscriptions?.broadcast(delta: .watchDeskRolesChanged(
+                WorktreeIDDelta(worktreeID: worktreeID)))
+            logger.info("Released Watch Desk judge lease generation \(lease.generation)")
+        } catch {
+            logger.error("Failed to release Watch Desk judge lease: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Fifteen-minute scheduler heartbeat. It renews/reconciles ownership
+    /// without sending a model prompt, so the lease cannot expire behind the
+    /// ten-minute nudge overlap guard during an otherwise quiet shift.
+    public func maintainJudgeLease(worktreeID: UUID) async {
+        await gateAcquire()
+        defer { gateRelease() }
+        do {
+            guard let worktree = try await db.worktrees.get(id: worktreeID) else { return }
+            _ = try await leasedJudgeTerminal(worktree: worktree)
+        } catch {
+            logger.error("Failed to maintain Watch Desk judge lease: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Private Helpers
 
     /// Write the mode-specific judge instructions into the desk worktree.
@@ -548,10 +671,34 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// `nil` as "fall back to the inline prompt" rather than proceeding with a
     /// pointer to a file that may not exist. Deliberately non-throwing: a desk
     /// that cannot write a file must still get nudged.
-    private func writeJudgeInstructions(deskPath: String, mode: NightwatchMode) -> String? {
+    private func writeJudgeInstructions(
+        deskPath: String, mode: NightwatchMode, lease: WatchDeskLease? = nil,
+        credentialFile: String? = nil
+    ) -> String? {
         let url = URL(fileURLWithPath: deskPath)
             .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
-        let body = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
+        var body = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
+        if let lease, let credentialFile {
+            body += """
+
+
+            ## Exclusive judge lease (mandatory)
+
+            You are the sole mutable judge only while this lease validates:
+            - worktree: `\(lease.worktreeID.uuidString)`
+            - terminal: `\(lease.terminalID.uuidString)`
+            - generation: `\(lease.generation)`
+            - capability file: `\(credentialFile)`
+
+            Immediately before every merge/enqueue, infrastructure apply, archive,
+            wake/nudge, or worker spawn, renew the lease. Renewal also validates
+            the exact terminal, token, generation, and unexpired authority:
+
+            `tbd nightwatch lease renew --credential-file \(credentialFile)`
+
+            If renewal fails, stop mutating. Read-only inspection and reporting remain allowed.
+            """
+        }
         do {
             try body.write(to: url, atomically: true, encoding: .utf8)
             return url.path

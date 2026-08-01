@@ -380,6 +380,18 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
             case RPCMethod.nightwatchSetMode:
                 return try await handleSetNightwatchMode(request.paramsData)
+            case RPCMethod.nightwatchLeaseStatus:
+                return try await handleNightwatchLeaseStatus(request.paramsData)
+            case RPCMethod.nightwatchLeaseAcquire:
+                return try await handleNightwatchLeaseAcquire(request.paramsData)
+            case RPCMethod.nightwatchLeaseValidate:
+                return try await handleNightwatchLeaseValidate(request.paramsData)
+            case RPCMethod.nightwatchLeaseRenew:
+                return try await handleNightwatchLeaseRenew(request.paramsData)
+            case RPCMethod.nightwatchLeaseTransfer:
+                return try await handleNightwatchLeaseTransfer(request.paramsData)
+            case RPCMethod.nightwatchLeaseRelease:
+                return try await handleNightwatchLeaseRelease(request.paramsData)
             case RPCMethod.terminalHibernate:
                 return try await handleTerminalHibernate(request.paramsData)
             case RPCMethod.terminalWake:

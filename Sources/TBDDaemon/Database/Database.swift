@@ -27,6 +27,7 @@ public final class TBDDatabase: Sendable {
     public let terminalHistory: TerminalHistoryStore
     public let panelSurface: PanelSurfaceStore
     public let remoteSessions: RemoteSessionStore
+    public let watchDeskLeases: WatchDeskLeaseStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -66,6 +67,7 @@ public final class TBDDatabase: Sendable {
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: pool)
         self.remoteSessions = RemoteSessionStore(writer: pool)
+        self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -105,6 +107,7 @@ public final class TBDDatabase: Sendable {
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: queue)
         self.remoteSessions = RemoteSessionStore(writer: queue)
+        self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1166,6 +1169,25 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(
                 table: "worktree", column: "foreign_head",
                 type: .boolean, defaults: false)
+        }
+
+        migrator.registerMigration("v68_watch_desk_judge_lease") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "watch_desk_role", type: .text,
+                defaults: DatabaseValue.null)
+            try db.createTableIfNotExists("watch_desk_judge_lease") { t in
+                t.primaryKey("worktree_id", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                // Deliberately not an FK: a dead terminal row may be deleted,
+                // but its generation tombstone must survive so fencing tokens
+                // are never reused for this desk.
+                t.column("terminal_id", .text).notNull()
+                t.column("token", .text).notNull()
+                t.column("generation", .integer).notNull()
+                t.column("acquired_at", .datetime).notNull()
+                t.column("renewed_at", .datetime).notNull()
+                t.column("expires_at", .datetime).notNull()
+            }
         }
 
         return migrator

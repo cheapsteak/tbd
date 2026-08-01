@@ -27,6 +27,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hibernateReason: String?
     var keepWarm: Bool?
     var pendingResumeAt: Date?
+    var watch_desk_role: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -47,6 +48,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.hibernateReason = terminal.hibernateReason?.rawValue
         self.keepWarm = terminal.keepWarm
         self.pendingResumeAt = terminal.pendingResumeAt
+        self.watch_desk_role = terminal.watchDeskRole?.rawValue
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -79,7 +81,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             hibernatedAt: hibernatedAt,
             hibernateReason: hibernateReason.flatMap(HibernateReason.init(rawValue:)),
             keepWarm: keepWarm ?? false,
-            pendingResumeAt: pendingResumeAt
+            pendingResumeAt: pendingResumeAt,
+            watchDeskRole: watch_desk_role.map {
+                WatchDeskRole(rawValue: $0) ?? .readOnlyCoordinator
+            }
         )
     }
 }
@@ -175,6 +180,16 @@ public struct TerminalStore: Sendable {
             try TerminalRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .deleteAll(db)
+        }
+    }
+
+    public func setWatchDeskRole(id: UUID, role: WatchDeskRole?) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.watch_desk_role = role?.rawValue
+            try record.update(db)
         }
     }
 
