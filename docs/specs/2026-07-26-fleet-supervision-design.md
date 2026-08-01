@@ -1119,21 +1119,15 @@ choices. What would-be policy content there is lives in three places instead:
    rides in every work order within that scope, so the desk knows it and stops
    asking (P1-5, §8). One click, and it informs rather than permits. An answer
    worth keeping for good is playbook material, captured by reviewed PR (§8).
-3. **Playbook prose becomes an operator-confirmed decision**: the first time a
-   supervisor encounters a sentence that reads like a hard rule ("never touch
-   an open PR without a human"), it asks once, "make this standing?" A yes
-   records a `decision` the daemon carries to desks in later work orders like
-   any other (§8) — shift-lived, informing rather than permitting; a sentence
-   meant to outlive the shift belongs in the playbook by reviewed PR.
-
 This implements one authority principle: **repos advise; operators bind.** A
 repository file must not control tool behavior on an operator's machine before
 a human approves it. Treating that behavior as normal would be a security
-problem. The tradeoff is explicit: a repository's prose does not become a
-standing answer on an operator's machine without one confirmation there.
-Conservative defaults and the queue protect the period before confirmation. If
-teams later need the same standing answers on many machines with no
-confirmation, the confirmation flow is the place to add that capability.
+problem. And nothing here needs a promotion mechanism: the playbook's prose
+already reaches the desk in every work order, so a rule-like sentence in it
+is already advice at full strength, and a sentence that should carry an
+operator's endorsement gets it the way all standing knowledge does — a
+reviewed change to the playbook, or an escalation answer that becomes a
+shift's decision (item 2).
 
 **Worktree priority (P1-3) is an operator gesture on a particular thing, not
 policy.** *Worktrees whose progress matters most get looked at first* reuses
@@ -1740,7 +1734,7 @@ exist for fleet sessions. The per-agent context fact is available for free
 order may mention a parked session's context load, as input to judgment. And a
 desk never runs its own succession: the primitives to self-replace exist in
 the CLI, and the design's answer is that desk lifecycle — spawn, brief,
-recycle, dispose — belongs to the daemon, full stop. The desk's whole
+recycle, dispose — belongs to the daemon, full stop, by operator decision. The desk's whole
 contribution to its own replacement is writing notes when asked.
 
 ## 10. Operator surfaces (intent, not screens)
