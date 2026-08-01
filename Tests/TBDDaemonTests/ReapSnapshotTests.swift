@@ -11,6 +11,57 @@ private let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
 
 @Suite("ReapSnapshot")
 struct ReapSnapshotTests {
+    @Test func advisoryRuntimeResidueIsSnapshottedWithoutTrustedRegistry() async throws {
+        let (tmp, repo, wt, _) = try await makeRepoWithExternalWorktree(
+            branch: "runtime", folder: "runtimewt"
+        )
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = URL(fileURLWithPath: wt)
+        try Data(".agents/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        try await shell("git add .gitignore && git commit -m ignore-runtime", at: root)
+        try writeRuntimeOverlay(root: root, contents: Data("generated".utf8))
+
+        let git = GitManager()
+        let ref = try #require(try await ReapSnapshot(git: git).snapshotIfNeeded(
+            worktreePath: wt,
+            repoPath: repo.path,
+            headSHA: try await git.headSHA(worktreePath: wt),
+            worktreeName: "runtime",
+            now: fixedNow
+        ))
+
+        let paths = try await runGit(["ls-tree", "-r", "--name-only", ref], at: repo)
+        #expect(paths.contains(".agents/skills/demo/SKILL.md"))
+    }
+
+    @Test func divergentBootstrapRuntimeIsSnapshotted() async throws {
+        let (tmp, repo, wt, _) = try await makeRepoWithExternalWorktree(
+            branch: "divergent", folder: "divergentwt"
+        )
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = URL(fileURLWithPath: wt)
+        try writeRuntimeOverlay(root: root, contents: Data("generated".utf8))
+        try Data(".agents/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        try await shell("git add .gitignore && git commit -m ignore-runtime", at: root)
+        try Data("user-edited".utf8).write(to: root.appendingPathComponent(".agents/skills/demo/SKILL.md"))
+        let indexBefore = try await runGit(["diff", "--cached", "--name-only"], at: root)
+
+        let git = GitManager()
+        let ref = try #require(try await ReapSnapshot(git: git).snapshotIfNeeded(
+            worktreePath: wt,
+            repoPath: repo.path,
+            headSHA: try await git.headSHA(worktreePath: wt),
+            worktreeName: "divergent",
+            now: fixedNow
+        ))
+
+        let paths = try await runGit(["ls-tree", "-r", "--name-only", ref], at: repo)
+        #expect(paths.contains(".agents/skills/demo/SKILL.md"))
+        #expect(paths.contains(ArchiveSafetyClassifier.manifestRelativePath))
+        let indexAfter = try await runGit(["diff", "--cached", "--name-only"], at: root)
+        #expect(indexAfter == indexBefore)
+    }
+
     // MARK: (a) Dirty worktree -> ref exists, ls-tree shows untracked, ignored absent.
 
     @Test func dirtyWorktreeCreatesVerifiedSnapshotRef() async throws {
@@ -185,5 +236,29 @@ struct ReapSnapshotTests {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func writeRuntimeOverlay(root: URL, contents: Data) throws {
+        let artifact = root.appendingPathComponent(".agents/skills/demo/SKILL.md")
+        try FileManager.default.createDirectory(
+            at: artifact.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try contents.write(to: artifact)
+
+        let manifest = root.appendingPathComponent(ArchiveSafetyClassifier.manifestRelativePath)
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let json: [String: Any] = [
+            "schemaVersion": 1,
+            "producer": "agent-bootstrap",
+            "producerVersion": "test-v1",
+            "artifacts": [[
+                "path": ".agents/skills/demo/SKILL.md",
+                "kind": "runtime",
+                "sha256": ArchiveSafetyClassifier.sha256(contents),
+            ]],
+        ]
+        try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: manifest)
     }
 }

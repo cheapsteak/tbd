@@ -41,7 +41,15 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
                 return false
             }
 
-            let (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: worktreeID)
+            let (worktree, repo) = try await lifecycle.beginArchiveWorktree(
+                worktreeID: worktreeID,
+                knownPublished: true
+            )
+            try await lifecycle.completeArchiveWorktree(
+                worktree: worktree,
+                repo: repo,
+                knownPublished: true
+            )
             subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktreeID)))
 
             // Surface it: persist + broadcast a notification (non-activating).
@@ -55,11 +63,6 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
                 type: notification.type, message: notification.message,
                 terminalID: notification.terminalID, activate: false)))
 
-            // Slow phase (hook + git worktree remove) in background, like the archive RPC handler.
-            let lifecycle = self.lifecycle
-            Task.detached {
-                await lifecycle.completeArchiveWorktree(worktree: worktree, repo: repo, force: false)
-            }
             logger.info("auto-archived \(worktreeID, privacy: .public) on PR #\(prNumber, privacy: .public) merge")
             return true
         } catch {

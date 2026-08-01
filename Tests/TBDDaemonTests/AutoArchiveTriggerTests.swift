@@ -35,7 +35,9 @@ actor FiredBox {
 }
 
 @Suite struct AutoArchiveCoordinatorTests {
-    private func makeDeps() throws -> (AutoArchiveOnMergeCoordinator, TBDDatabase) {
+    private func makeDeps(
+        archiveSafetyEvaluator: (@Sendable (String, Bool) async -> ArchiveSafetyReport)? = nil
+    ) throws -> (AutoArchiveOnMergeCoordinator, TBDDatabase) {
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
         let lifecycle = WorktreeLifecycle(
@@ -43,7 +45,11 @@ actor FiredBox {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            subscriptions: subs
+            subscriptions: subs,
+            archiveSafetyEvaluator: archiveSafetyEvaluator ?? { _, _ in
+                ArchiveSafetyReport(findings: [], headIsPublished: true)
+            },
+            worktreeRemover: { _, _ in }
         )
         let coord = AutoArchiveOnMergeCoordinator(db: db, lifecycle: lifecycle, subscriptions: subs)
         return (coord, db)
@@ -106,4 +112,28 @@ actor FiredBox {
         await coord.handleMergedTransition(worktreeID: wt.id, prNumber: 9)
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
     }
+
+    @Test func mergedTransitionSuppliesKnownPublishedToBothChecks() async throws {
+        let recorder = KnownPublishedRecorder()
+        let (coord, db) = try makeDeps(archiveSafetyEvaluator: { _, knownPublished in
+            await recorder.record(knownPublished)
+            return ArchiveSafetyReport(findings: [], headIsPublished: knownPublished)
+        })
+        let repo = try await db.repos.create(
+            path: "/tmp/repo-known-\(UUID().uuidString)",
+            displayName: "repo-known", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/repo-known/w-\(UUID().uuidString)", tmuxServer: "s")
+        try await db.worktrees.setAutoArchiveOnMerge(id: wt.id, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wt.id, prNumber: 42)
+
+        #expect(await recorder.values == [true, true])
+    }
+}
+
+private actor KnownPublishedRecorder {
+    private(set) var values: [Bool] = []
+    func record(_ value: Bool) { values.append(value) }
 }

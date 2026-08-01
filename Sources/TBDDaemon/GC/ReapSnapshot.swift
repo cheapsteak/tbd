@@ -35,17 +35,21 @@ public enum ReapSnapshotError: Error, CustomStringConvertible, Equatable {
 public struct ReapSnapshot: Sendable {
     let git: GitManager
 
-    /// Snapshots `worktreePath` if it's dirty or its HEAD isn't reachable
-    /// from any branch, returning the created ref name — or `nil` when the
-    /// worktree was clean AND `headSHA` was branch-reachable (no snapshot
-    /// needed, safe to reap with nothing to restore).
+    /// Snapshots `worktreePath` if it contains reviewable/unique dirty bytes
+    /// or its HEAD isn't reachable from any branch, returning the created ref
+    /// name. Because GC has no trusted out-of-worktree bootstrap registration
+    /// yet, an in-worktree manifest remains advisory and all dirt is preserved.
     ///
     /// Throws on any git failure. The caller must treat a throw as "keep the
     /// worktree" — this function never returns having deleted anything.
     public func snapshotIfNeeded(
         worktreePath: String, repoPath: String, headSHA: String, worktreeName: String, now: Date
     ) async throws -> String? {
-        let dirty = await git.isDirty(worktreePath: worktreePath)
+        let safety = await ArchiveSafetyClassifier(git: git).classify(
+            worktreePath: worktreePath,
+            knownPublished: true
+        )
+        let dirty = safety.requiresPreservation
         let reachable = await git.isReachableFromAnyBranch(repoPath: repoPath, sha: headSHA)
         if !dirty && reachable {
             return nil
@@ -55,7 +59,11 @@ public struct ReapSnapshot: Sendable {
         let ref = "refs/tbd/snapshots/\(worktreeName)-\(stamp)"
 
         if dirty {
-            let tree = try await git.stageAllAndWriteTree(worktreePath: worktreePath)
+            let forcePaths = try await git.ignoredFilePaths(worktreePath: worktreePath)
+            let tree = try await git.stageAllAndWriteTree(
+                worktreePath: worktreePath,
+                forcePaths: forcePaths
+            )
             let commit = try await git.commitTree(
                 repoPath: repoPath, tree: tree, parent: headSHA,
                 message: "TBD reap snapshot: \(worktreePath) @ \(stamp)"
