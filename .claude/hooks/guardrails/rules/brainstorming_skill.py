@@ -2,10 +2,10 @@
 
 TBD vendors an adapted copy of superpowers' brainstorming skill at
 `.claude/skills/tbd-brainstorming/`. The adaptations are load-bearing: it writes
-specs to `docs/specs/`, carries TBD's blast-radius triggers and the
-"a human answers the questions" rule, and does not hand off to a skill whose own
-file would trip this repo's plans-guard. Running the upstream skill instead
-silently loses all of that.
+specs to `docs/specs/`, carries TBD's "required unless it is a bug fix or a minor
+UI change" scope and the "a human answers the questions" rule, and does not hand
+off to a skill whose own file would trip this repo's plans-guard. Running the
+upstream skill instead silently loses all of that.
 
 Unlike inferring *whether* a brainstorm happened — which no hook can see — this
 is a string comparison, so it is safe to deny rather than merely inform: the
@@ -24,8 +24,9 @@ _REDIRECTED = frozenset({"brainstorming", "superpowers:brainstorming"})
 _MESSAGE = (
     "[brainstorming-skill] Blocked: use TBD's vendored `tbd-brainstorming` skill, "
     "not the upstream one. TBD's copy writes the spec to docs/specs/, carries the "
-    "blast-radius triggers, and enforces that a human — not you — answers the "
-    "brainstorming questions. Fix: invoke the skill `tbd-brainstorming` instead."
+    "rule that a spec is required for anything that is not a bug fix or a minor UI "
+    "change, and enforces that a human — not you — answers the brainstorming "
+    "questions. Fix: invoke the skill `tbd-brainstorming` instead."
 )
 
 
