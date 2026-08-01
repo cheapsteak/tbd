@@ -2074,15 +2074,30 @@ Which adapter a session can be reached by is itself a per-session fact, with
 the same source-and-freshness treatment as any other fact.
 
 **Fleet agents: `terminal.send` (paste + submit), the mechanism that exists
-today.** This is the parity choice. Claude Code's research-preview Channels
-interface was validated as a prototype
+today.** This is the parity choice, and for much of the fleet it is
+permanent: older agent versions and future agent kinds may never offer a
+message channel, so typing is the floor that delivery stands on when nothing
+better exists. Claude Code's research-preview Channels interface was
+validated as a prototype
 (`docs/research/2026-07-26-claude-code-channels/findings.md`, landed on
-`main` separately): it delivers a
-message without touching the composer, but it needs agent-side integration (an
-MCP config and a startup flag with per-session consent), which collides with
-TBD's no-agent-cooperation constraint for sessions the user owns. Fleet
-delivery stays typing; overnight, composers are empty and the draft-safety gap
-is theoretical.
+`main` separately): it delivers a message without touching the composer, but
+it needs agent-side setup and an interactive consent prompt at session
+start, so it cannot be assumed for fleet sessions.
+
+Typing carries one known risk, and this design names it rather than waving
+it off. If a human has typed something into an agent's composer and not yet
+pressed enter, a paste-and-submit delivery sends the human's unsent text
+together with the desk's message, as one submitted message *from the human* —
+words they never sent, into an agent that acts without asking. A message
+channel makes this impossible by construction; typing cannot. Three things
+limit how often it happens: the sweep only messages stuck-or-idle sessions,
+the pause switch stops all delivery while the operator works, and the
+subsystem ships behind a default-off flag. None of the three protects the
+specific session a human is typing in — that protection, a per-session
+never-touch flag, is deferred to its own design pass (§15). The risk is
+stated as real and bounded, not theoretical, because TBD has lived this
+failure class before: automatic hibernation once ate typed input and had to
+be force-disabled by migration.
 
 **Desks alone: channel-first, with a verified fallback.** A desk is TBD's
 own infrastructure — TBD spawns it, owns its configuration, and disposes of

@@ -489,9 +489,17 @@ request-shaped operations: steer input into the active turn, start a turn when t
 idle, and a completion notification to wait on. Steering carries an expected-turn identifier, so
 the request *fails* if the turn changed underneath it.
 
-**What you may rely on.** Delivery targets one specific session and does not disturb a human's
-unsent input. That property is what makes the interrupt-safety concerns excluded above genuinely
-excluded — the mechanism provides it, rather than your design having to earn it.
+**What you may rely on everywhere.** Delivery reaches the one session it was addressed to.
+That holds for every adapter, and the design may lean on it without further thought.
+
+**What you may rely on only where a channel exists: leaving a human's unsent text alone.**
+Both mechanisms above deliver without touching the composer, so where one of them is the
+adapter, a half-typed human draft survives untouched — the mechanism provides that safety,
+and the design does not have to earn it. But not every agent offers such a mechanism. Where
+the adapter is typing into the terminal, that safety does not exist: typed delivery can
+submit a human's unsent draft together with the message — words the human never sent. A
+design that delivers by typing must say so, name this risk plainly, and state what limits
+it; it may not quietly borrow the safety of a channel it is not using.
 
 **What you may not.** That the call itself tells you the message was received. One mechanism
 pushes without acknowledgement; the other is a request that can fail on a turn race; neither
@@ -558,8 +566,8 @@ expressible in terms of the properties above rather than any one protocol's verb
   persists for the shift.
 - Proving destructive operations such as archival are safe.
 - The mechanics of delivering a message into a live agent session. Assume a delivery adapter
-  exists; see "Delivery is assumed" below for the two properties of it you may rely on and the
-  one you may not.
+  exists; see "Delivery is assumed" below for which properties you may rely on, where each
+  holds, and the one you may not.
 
 ## Deliverable
 
