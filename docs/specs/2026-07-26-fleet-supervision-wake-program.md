@@ -1,46 +1,43 @@
 # Fleet supervision — waking parked sessions: the wake program
 
 Status: **normative sub-document of the fleet-supervision design.** Extracted
-2026-07-29 from §4 of
+from §4 of
 [`2026-07-26-fleet-supervision-design.md`](2026-07-26-fleet-supervision-design.md)
 to keep that document readable; it carries the same authority as the section it
-came from, and `design §N` below refers to that document's sections. It records
-the 2026-07-29 amendment that removed the compiled wake gate, motivated by
-PR #522's field review — and the same-day follow-up that removed the compiled
-actuation rails the first draft had kept: TBD's obligation to the wake program
-is sufficient public surfaces, never guardrails. This document also holds the
-dated source note (2026-07-29 field observations) that the 2026-07-30 P0-8
-amendment sent here rather than into the design: with the compiled send-time
-verifier melted, freshness is authored on both sides of the process boundary,
-and which source tells the truth is data that belongs beside the script that
-consults it. The requirements doc carries
-the matching dated amendments (P0-2, P0-8, P1-1, P1-2, P1-3, P1-4, P3-1) and
-the **Built/Enabled** classification the follow-up introduced
+came from, and `design §N` below refers to that document's sections. It
+specifies the project-authored wake program that decides whether a parked
+session should be woken: TBD's obligation to that program is sufficient public
+surfaces, never guardrails, and TBD keeps no compiled wake gate and no
+actuation rails of its own. This document also holds the dated source note
+(2026-07-29 field observations) that belongs beside the script that consults
+it rather than in the design: freshness is authored on both sides of the
+process boundary, and which source tells the truth is data. The requirements
+doc carries the matching stories (P0-2, P0-8, P1-1, P1-2, P1-3, P1-4, P3-1) and
+the **Built/Enabled** classification
 ([`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md)).
 
-## The reversal, and why
+## Why the wake decision lives outside TBD
 
-An earlier version of design §4 compiled the wake decision into the sweep: a
-global "outstanding work" fact list — commits not on the default branch,
-uncommitted changes, an open PR, failing checks — whose any-true verdict made a
-parked session a wake case. **Both the mechanism and its price argument were
-wrong, and the field review of PR #522 (zionts, 2026-07-29) measured how
-wrong.** The commit-identity fact reads true forever for a squash-merged
+Compiling the wake decision into the sweep — a global "outstanding work" fact
+list of commits not on the default branch, uncommitted changes, an open PR,
+failing checks, whose any-true verdict makes a parked session a wake case — is
+wrong in both its mechanism and its price argument, and field measurement shows
+how wrong. The commit-identity fact reads true forever for a squash-merged
 branch — the merge lands as one new commit whose diff matches none of the
-branch's own — so finished work can never clear the gate: 33 of 70 active
+branch's own — so finished work can never clear such a gate: 33 of 70 active
 worktrees on a live fleet (and 24 of 24 on the night that motivated P1-2) were
 merged work the sweep would have woken every cycle, one of them into a resume
 that would have spent 750k tokens re-entering work merged five days earlier.
-The false-wake price was not "a few tokens"; it was systematic, correlated with
-the forge's most common merge style. And the defect was structural, not a bug:
+The false-wake price is not "a few tokens"; it is systematic, correlated with
+the forge's most common merge style. And the defect is structural, not a bug:
 completion is a fact about intent and forge state — squash merges, abandoned
 PRs, parked-on-purpose experiments are all invisible to git — so no compiled
 git-fact list can express it. The old system's wake.py knew this: its verdict
-let a MERGED pull request overrule `git cherry` outright, and the redesign
-dropped that precedence when it dropped the verdict enum.
+let a MERGED pull request overrule `git cherry` outright — a precedence no
+any-true fact list can express.
 
-The repair is not a better fact list. **The wake decision leaves the daemon —
-and the desk — entirely.**
+The answer is not a better fact list. **The wake decision sits outside the
+daemon — and outside the desk — entirely.**
 
 ## The design
 
@@ -65,10 +62,9 @@ and the desk — entirely.**
   judgment — a desk may still conclude from a case that a session should be
   up — but no case is ever raised *for the purpose of* waking.
 - **TBD guards nothing here — its obligation is sufficiency, not guardrails.**
-  A first draft of this amendment kept a compiled choke point at actuation —
-  capacity holds, in-flight dedup, send-time freshness, a
-  daemon-written ledger line — through which every wake would pass. It was
-  removed the same day, deliberately: it made TBD the guarantor of a program
+  There is no compiled choke point at actuation — no capacity holds, in-flight
+  dedup, send-time freshness, or daemon-written ledger line through which every
+  wake must pass. Such a choke point would make TBD the guarantor of a program
   TBD does not run, does not schedule, and — seeded once, never clobbered —
   cannot repair. A wake program's correctness is its author's, like any cron
   job's. What TBD owes instead is that everything the program needs is a
@@ -84,8 +80,7 @@ and the desk — entirely.**
   capacity-exhausted means hold — as authored conduct with a worked example,
   not as law. Send-time freshness (P0-8) is likewise the program's
   discipline: derive facts live, immediately before composing, as the old
-  wake.py always did — and since the P0-8 amendment of 2026-07-30 that is the
-  discipline for desk sends too, the compiled verifier having melted. The
+  wake.py always did — and it is the discipline for desk sends too. The
   daemon verifies nothing for anyone; freshness is authored on both sides of
   the process boundary. Wakes are recorded as the ordinary terminal operations
   they already are; nothing here depends on a shift being open, and nothing
@@ -110,8 +105,7 @@ and the desk — entirely.**
   like the legitimate no-program default. If field use shows that ambiguity
   biting, the pre-planned escape hatch is one file read — the account
   renderer surfacing the heartbeat file's age against its own next-run-by
-  promise at a conventional path — added then, as a dated amendment, not
-  built now.
+  promise at a conventional path — added then, not built now.
 - **The default is silence, and merge means silence.** A project with no wake
   program gets no automated wakes: parked worktrees appear in the account with
   their work facts — a merged PR renders as done-and-archivable, commits with
@@ -132,12 +126,12 @@ comment block in the shipped reference script — not spec law.** They live ther
 precisely so they can be edited, disagreed with, or rot without anyone touching
 a design document: which API tells the truth this week is transient forge
 weather, the same bucket as a repo slug or a machine's fleet snapshot. They are
-written down at all because the 2026-07-30 P0-8 amendment made freshness
-entirely an authored concern (requirements doc), and an authored discipline is
-only as good as the source it consults — a re-derivation that consults a lying
-oracle is worse than none, because it returns confidence.
+written down at all because freshness is entirely an authored concern (P0-8,
+requirements doc), and an authored discipline is only as good as the source it
+consults — a re-derivation that consults a lying oracle is worse than none,
+because it returns confidence.
 
-Measured during PR #522's review (zionts, 2026-07-29):
+Measured in the field, 2026-07-29:
 
 - **Prefer the forge's REST reads over `gh`'s GraphQL for pull-request state.**
   GraphQL was observed serving 17.5-hour-stale state that was internally
@@ -157,8 +151,8 @@ Measured during PR #522's review (zionts, 2026-07-29):
 
 ## The guarantee TBD does make: sufficient, stable surfaces
 
-The requirements doc's **Built/Enabled** classification (added 2026-07-29)
-names the obligation precisely: P1-2 is Enabled — TBD guarantees that a
+The requirements doc's **Built/Enabled** classification names the obligation
+precisely: P1-2 is Enabled — TBD guarantees that a
 program written against its public surfaces *can* implement the story, not
 that TBD implements it. Two consequences with teeth:
 
@@ -177,11 +171,11 @@ that TBD implements it. Two consequences with teeth:
 
 ## What the sweep keeps
 
-What the sweep loses is exactly the part that was never universal. Its live
-half — idle and stuck detection, prompt cases, runaway counters — is
-unchanged, model-free, and still the daemon's. Work facts (design §2) are
-still derived on the daemon's clock; they feed the account and the report
-lines above. They are no longer a wake gate anywhere in compiled TBD.
+What the sweep keeps is exactly the part that is universal. Its live half —
+idle and stuck detection, prompt cases, runaway counters — is model-free and
+the daemon's. Work facts (design §2) are derived on the daemon's clock; they
+feed the account and the report lines above. They are not a wake gate anywhere
+in compiled TBD.
 
 One scope line, so nothing re-inflates here: worktree-local artifacts a wake
 program reads are per-checkout, and **team-wide work-status syncing is out of

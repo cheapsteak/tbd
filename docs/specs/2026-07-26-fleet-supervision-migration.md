@@ -136,10 +136,10 @@ the target repos' `.nightwatch/policy.json` — into exactly one bucket:
    seeds the new TBD-shipped supervisor prompt and playbook template.
 3. **Repo-specific advisory** — prose that belongs to one repo; lands as a PR
    to *that repo's* `.agents/supervision.md`, authored outside TBD's tree.
-4. **Operator-binding** — **retired.** This bucket held rules the daemon would
-   enforce with no model in the loop, and the new design has **no rules of any
-   kind** (design §3), so nothing can land here. Its former content splits two
-   ways, and the disposition log records which way each unit went:
+4. **Operator-binding** — **nothing lands here.** This bucket would hold rules
+   the daemon enforces with no model in the loop, and the new design has **no
+   rules of any kind** (design §3). Content of that shape splits two ways, and
+   the disposition log records which way each unit went:
    - Anything that reads as *advice* becomes conduct — bucket 2 or 3.
    - Anything **selection-shaped** — an automation-membership mark — is not
      authored content at all. It is an
@@ -155,10 +155,9 @@ citations are to the baseline doc's §5–§6):
 - **`skillMd` (playbook)** — Split: escalation etiquette and operating rules →
   doctrine (2); tier tables, sign-off conventions, project slash-commands → repo
   advisory (3); config-file semantics and the opt-in scheduler → superseded (1).
-- **`wakePy` (pre-wake verifier)** — **Doctrine (2), not superseded.** An earlier
-  version of this line sent it to bucket 1, against compiled dispatch-time
-  re-verification; that machinery melted on 2026-07-30 and P0-8 is authored
-  discipline in both halves now. What the script knew — derive the facts live
+- **`wakePy` (pre-wake verifier)** — **Doctrine (2), not superseded.** There is
+  no compiled dispatch-time re-verification for it to be superseded by: P0-8 is
+  authored discipline in both halves. What the script knew — derive the facts live
   immediately before composing, trust a stale MERGED and never a stale OPEN,
   fail closed to "verify first" — seeds the shipped playbook's freshness
   universal (design §5) and the shipped reference wake program
@@ -205,8 +204,8 @@ citations are to the baseline doc's §5–§6):
   the whole dir, because which files the writer owns has changed once already
   and the snapshot is what makes that harmless.
 - **Target repos' `.nightwatch/policy.json`** — `priorities`, `dont_touch`, and
-  the old gate conditions → that repo's advisory playbook (3). There is nothing
-  left to "promote to binding," bucket 4 being retired, so an entry that reads
+  the old gate conditions → that repo's advisory playbook (3). Nothing can be
+  "promoted to binding" — nothing binds — so an entry that reads
   as a standing decision rather than advice takes one of the two paths above:
   written as conduct prose in the project's mode, or applied by hand as a
   selection (automation mark).
@@ -221,7 +220,7 @@ file to append to — durable prose goes in the advisory PR.
 **Exit gate**: the disposition log accounts for every file in the inventory and
 records, for each selection-shaped unit, whether the operator applied it or
 dropped it; the advisory PR exists; and `supervision.json` parses. There is no
-rules file to validate and no binding entries to confirm — bucket 4 is retired
+rules file to validate and no binding entries to confirm — nothing binds
 (above).
 
 ## 4. Build slices
@@ -250,8 +249,7 @@ only — no slice needs a later one:
   ledger, and closes on its own; no slice needs a later one. Shift close gains
   its dispose-every-desk step in slice 4, when there are desks to dispose.
 - **Slice 3 — verbs, `supervision.json`, queue** (design §3, §5, §8, §10).
-  Much of what this slice once carried has evaporated with the verb gate; what
-  remains is smaller and simpler.
+  Nothing here is gated (design §3), which keeps the slice small and simple.
   - **The verbs as RPC, none of them gated**: `drive`, `wake`, `pause`,
     `escalate`, `note`. `drive` takes exactly one payload flag per call,
     `--text` or `--keys` (design §3); there is no `answer` verb, no separate
@@ -259,11 +257,11 @@ only — no slice needs a later one:
     `--text` work is delivery-adapter behavior landing with the adapter in
     slice 4 (design §2). Around each verb the daemon does two things and no
     more: the daemon-written action line carrying the payload verbatim, the
-    active mode, and the state snapshot, and the one-minute re-check. An earlier
-    version of this slice carried a third — send-time re-verification of a
-    `--text` payload's claims — which melted on 2026-07-30: freshness is the
-    desk's discipline and the daemon reads no message content (design §3, P0-8
-    amendment). **Do not build a posture check, a rule lookup, a proposal
+    active mode, and the state snapshot, and the one-minute re-check. There is
+    no third thing — in particular no send-time re-verification of a `--text`
+    payload's claims: freshness is the desk's discipline and the daemon reads no
+    message content (design §3, P0-8). **Do not build a posture check, a rule
+    lookup, a proposal
     conversion, or a content check** — there are none (design §3), and the
     ledger has **nine** kinds.
   - **The `supervision.json` loader**: project topology (declared multi-repo
@@ -381,7 +379,7 @@ only — no slice needs a later one:
     live pane produces no error by any mechanical measure, so identity must be
     a deliberate comparison before typing.
 
-  Design §12 (amended 2026-07-30) now pins the semantics this slice builds on:
+  Design §12 pins the semantics this slice builds on:
   action lines assert dispatch, never delivery; receipt is a passive sentinel
   observation (`<tbd-dispatch id="…"/>` in the target's transcript) recorded
   as one of four outcome results, with retry permitted only from positive
@@ -418,7 +416,7 @@ covered by every other shift by default. A night in which two projects both had
 cases is the cheapest evidence that per-project desks, project addressing, and
 the shared queue actually hold.
 
-Because modes no longer change daemon behavior (design §3), an `autonomous`
+Because modes do not change daemon behavior (design §3), an `autonomous`
 soak shift is evidence about *conduct* — did the desk act where the prose told
 it to act — not about a code path. Read those shifts' accounts for judgment
 quality, which is the thing the trust bet rests on and the only thing that can
@@ -430,9 +428,9 @@ The parity gate is the requirements doc's ID list, checked against evidence
 from real shifts, not against code review:
 
 - **Required green**: every P0 (P0-1 … P0-10) and every P1 (P1-1 … P1-7), with
-  one amendment. **P0-3 is evidenced against its descoped form**: the
-  requirements doc carries a dated amendment recording that mode enforcement was
-  removed with the verb gate, so what must be green is that a mode's conduct is
+  one exception. **P0-3 is evidenced against its descoped form**: the
+  requirements doc records that TBD builds no mode enforcement and no verb
+  gate, so what must be green is that a mode's conduct is
   delivered in every work order, that every action line records the mode it ran
   under, and that the account shows an act within seconds of it happening — not
   that any act was prevented. P1-5 is likewise evidenced as *instruction
