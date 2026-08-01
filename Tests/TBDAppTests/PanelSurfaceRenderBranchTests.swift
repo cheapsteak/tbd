@@ -63,20 +63,58 @@ struct PanelSurfaceRenderBranchTests {
             revision: revision)
     }
 
-    /// Fire `gesture` and return the envelope the chokepoint handed to
-    /// `panel.apply`. Deterministic — the stub resumes the continuation, so
-    /// nothing here polls or yields on a hope.
-    private static func capture(
+    /// Every envelope the chokepoint handed to `panel.apply` during a gesture,
+    /// in arrival order.
+    @MainActor
+    private final class EnvelopeCollector {
+        private(set) var envelopes: [PanelOperationEnvelope] = []
+        func record(_ envelope: PanelOperationEnvelope) { envelopes.append(envelope) }
+    }
+
+    /// Fire `gesture` and return every envelope it produced.
+    ///
+    /// Collecting, rather than resuming a `CheckedContinuation` from the stub:
+    /// several tests here assert that a gesture produces *no* envelope, and a
+    /// regression that made one fire would resume the continuation twice —
+    /// `SWIFT TASK CONTINUATION MISUSE`, which kills the test process instead
+    /// of failing the test. As an array the same regression is one extra
+    /// element and a readable diff.
+    private static func collect(
         _ state: AppState, committing tab: WorkspaceTabSurface,
         _ gesture: @MainActor () -> Void
-    ) async -> PanelOperationEnvelope {
-        await withCheckedContinuation(isolation: MainActor.shared) { continuation in
-            state.panelApplyTrigger = { envelope in
-                continuation.resume(returning: envelope)
-                return PanelApplyResult(tab: tab, replayed: false)
-            }
-            gesture()
+    ) async -> [PanelOperationEnvelope] {
+        let collector = EnvelopeCollector()
+        state.panelApplyTrigger = { envelope in
+            collector.record(envelope)
+            return PanelApplyResult(tab: tab, replayed: false)
         }
+        gesture()
+        await drainMainActor()
+        return collector.envelopes
+    }
+
+    /// Let the `Task {}` bodies the action set spawns run to completion.
+    ///
+    /// The gestures are synchronous closures that enqueue a MainActor task
+    /// each, so handing the main actor back repeatedly is all the
+    /// synchronization needed. No clock and no sleep is involved, and —
+    /// unlike an "absence proved by ordering" assertion — nothing here
+    /// depends on two sequentially created tasks running in creation order.
+    private static func drainMainActor() async {
+        for _ in 0..<64 { await Task.yield() }
+    }
+
+    /// The one envelope a gesture was supposed to produce. Fails cleanly,
+    /// naming everything that actually arrived, rather than indexing off the
+    /// end of an empty array.
+    private static func single(
+        _ envelopes: [PanelOperationEnvelope],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws -> PanelOperationEnvelope {
+        try #require(
+            envelopes.count == 1 ? envelopes.first : nil,
+            "expected exactly one envelope, observed \(envelopes.map(\.operation))",
+            sourceLocation: sourceLocation)
     }
 
     // MARK: - Leaf content mapping (spec §Components — content only)
@@ -207,8 +245,8 @@ struct PanelSurfaceRenderBranchTests {
     // MARK: - Daemon-backed PaneActions → PanelOperation
 
     @Test("openBeside becomes a .beside open anchored on the leaf's own panel")
-    func openBesideMapsToBeside() async {
-        await Self.makeState(flagEnabled: true) { state in
+    func openBesideMapsToBeside() async throws {
+        try await Self.makeState(flagEnabled: true) { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let panelID = UUID()
@@ -219,9 +257,9 @@ struct PanelSurfaceRenderBranchTests {
             let actions = PaneActions.daemonManaged(
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .panel(panelID))
 
-            let envelope = await Self.capture(state, committing: surface) {
+            let envelope = try Self.single(await Self.collect(state, committing: surface) {
                 actions.openBeside(panelID, .horizontal, .codeViewer(id: UUID(), path: "/tmp/x.swift"))
-            }
+            })
 
             #expect(envelope.origin == .appUser)
             #expect(envelope.baseRevision == 1)
@@ -232,8 +270,8 @@ struct PanelSurfaceRenderBranchTests {
     }
 
     @Test("a vertical openBeside off the primary anchor lands below the primary")
-    func openBesideVerticalFromPrimary() async {
-        await Self.makeState(flagEnabled: true) { state in
+    func openBesideVerticalFromPrimary() async throws {
+        try await Self.makeState(flagEnabled: true) { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let terminalID = UUID()
@@ -244,9 +282,9 @@ struct PanelSurfaceRenderBranchTests {
             let actions = PaneActions.daemonManaged(
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .primary)
 
-            let envelope = await Self.capture(state, committing: surface) {
+            let envelope = try Self.single(await Self.collect(state, committing: surface) {
                 actions.openBeside(terminalID, .vertical, .webview(id: UUID(), url: Self.fileURL))
-            }
+            })
 
             #expect(envelope.operation == .open(
                 content: .web(Self.fileURL),
@@ -267,21 +305,23 @@ struct PanelSurfaceRenderBranchTests {
             let actions = PaneActions.daemonManaged(
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .panel(panelID))
 
-            // Absence is proved by ordering, not by waiting: the dropped
-            // gesture fires first and the next envelope to arrive must be the
-            // known-good one.
-            let envelope = await Self.capture(state, committing: surface) {
+            // The dropped gesture contributes nothing to the collected
+            // sequence. The known-good close alongside it is a positive
+            // control: it proves the drain is long enough to have seen an
+            // envelope, so the empty half is absence and not impatience.
+            let envelopes = await Self.collect(state, committing: surface) {
                 actions.openBeside(panelID, .horizontal, .terminal(terminalID: UUID()))
                 actions.close(.webview(id: panelID, url: Self.fileURL))
             }
 
-            #expect(envelope.operation == .close(panelID: panelID))
+            #expect(envelopes.map(\.operation) == [.close(panelID: panelID)],
+                    "terminal content has no viewer-panel form and must be dropped app-side")
         }
     }
 
     @Test("routeFile becomes an .automatic file open — the reducer's reuse-then-split contract")
-    func routeFileMapsToAutomaticOpen() async {
-        await Self.makeState(flagEnabled: true) { state in
+    func routeFileMapsToAutomaticOpen() async throws {
+        try await Self.makeState(flagEnabled: true) { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let terminalID = UUID()
@@ -292,9 +332,9 @@ struct PanelSurfaceRenderBranchTests {
             let actions = PaneActions.daemonManaged(
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .primary)
 
-            let envelope = await Self.capture(state, committing: surface) {
+            let envelope = try Self.single(await Self.collect(state, committing: surface) {
                 actions.routeFile(terminalID, "/tmp/clicked.swift")
-            }
+            })
 
             #expect(envelope.operation == .open(
                 content: .file(FileReference(path: "/tmp/clicked.swift")), placement: .automatic))
@@ -302,13 +342,13 @@ struct PanelSurfaceRenderBranchTests {
     }
 
     @Test("toggleTranscript opens when closed and closes the open transcript panel")
-    func toggleTranscriptBothDirections() async {
+    func toggleTranscriptBothDirections() async throws {
         let worktreeID = UUID()
         let tabID = UUID()
         let terminalID = UUID()
         let panelID = UUID()
 
-        await Self.makeState(flagEnabled: true) { state in
+        try await Self.makeState(flagEnabled: true) { state in
             let closed = Self.surface(
                 tabID: tabID, worktreeID: worktreeID, terminalID: terminalID,
                 panelID: panelID, splitID: UUID(), panelContent: .web(Self.fileURL))
@@ -317,14 +357,14 @@ struct PanelSurfaceRenderBranchTests {
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .primary)
             #expect(actions.isTranscriptOpen(terminalID) == false)
 
-            let envelope = await Self.capture(state, committing: closed) {
+            let envelope = try Self.single(await Self.collect(state, committing: closed) {
                 actions.toggleTranscript(terminalID, terminalID)
-            }
+            })
             #expect(envelope.operation == .open(
                 content: .transcript(terminalID: terminalID), placement: .automatic))
         }
 
-        await Self.makeState(flagEnabled: true) { state in
+        try await Self.makeState(flagEnabled: true) { state in
             let open = Self.surface(
                 tabID: tabID, worktreeID: worktreeID, terminalID: terminalID,
                 panelID: panelID, splitID: UUID(),
@@ -336,20 +376,20 @@ struct PanelSurfaceRenderBranchTests {
             #expect(actions.isTranscriptOpen(UUID()) == false,
                     "another terminal's transcript must not read as open")
 
-            let envelope = await Self.capture(state, committing: open) {
+            let envelope = try Self.single(await Self.collect(state, committing: open) {
                 actions.toggleTranscript(terminalID, terminalID)
-            }
+            })
             #expect(envelope.operation == .close(panelID: panelID))
         }
     }
 
     @Test("each history step maps to its PanelHistoryAction")
-    func historyStepsMap() async {
+    func historyStepsMap() async throws {
         let expected: [(PaneActions.HistoryStep, PanelHistoryAction)] = [
             (.back, .back), (.forward, .forward), (.to(index: 3), .jump(index: 3)),
         ]
         for (step, action) in expected {
-            await Self.makeState(flagEnabled: true) { state in
+            try await Self.makeState(flagEnabled: true) { state in
                 let worktreeID = UUID()
                 let tabID = UUID()
                 let panelID = UUID()
@@ -361,17 +401,17 @@ struct PanelSurfaceRenderBranchTests {
                 let actions = PaneActions.daemonManaged(
                     appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .panel(panelID))
 
-                let envelope = await Self.capture(state, committing: surface) {
+                let envelope = try Self.single(await Self.collect(state, committing: surface) {
                     actions.historyStep(panelID, step)
-                }
+                })
                 #expect(envelope.operation == .history(panelID: panelID, action: action))
             }
         }
     }
 
     @Test("resize maps the divider's CGFloat ratios onto the split")
-    func resizeMaps() async {
-        await Self.makeState(flagEnabled: true) { state in
+    func resizeMaps() async throws {
+        try await Self.makeState(flagEnabled: true) { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let splitID = UUID()
@@ -382,9 +422,9 @@ struct PanelSurfaceRenderBranchTests {
             let actions = PaneActions.daemonManaged(
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .primary)
 
-            let envelope = await Self.capture(state, committing: surface) {
+            let envelope = try Self.single(await Self.collect(state, committing: surface) {
                 actions.resize(splitID, [0.4, 0.6])
-            }
+            })
 
             #expect(envelope.operation == .resize(splitID: splitID, ratios: [0.4, 0.6]))
         }
@@ -405,23 +445,62 @@ struct PanelSurfaceRenderBranchTests {
 
             // `.primary` is unremovable and history-less by type in the shared
             // reducer; both gestures must be dropped app-side rather than sent
-            // and rejected. Absence proved by ordering (see above).
-            let envelope = await Self.capture(state, committing: surface) {
+            // and rejected. The trailing routeFile is a positive control (see
+            // `openBesideDropsTerminalContent`).
+            let envelopes = await Self.collect(state, committing: surface) {
                 actions.close(.terminal(terminalID: terminalID))
                 actions.historyStep(terminalID, .back)
                 actions.routeFile(terminalID, "/tmp/marker.swift")
             }
 
-            #expect(envelope.operation == .open(
-                content: .file(FileReference(path: "/tmp/marker.swift")), placement: .automatic))
+            #expect(envelopes.map(\.operation) == [.open(
+                content: .file(FileReference(path: "/tmp/marker.swift")), placement: .automatic)],
+                "close and history on the primary anchor must contribute no envelope")
+        }
+    }
+
+    // MARK: - canClose
+
+    @Test("the daemon path can close a viewer panel but not the primary anchor")
+    func canCloseTracksTheAnchor() async {
+        await Self.makeState(flagEnabled: true) { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let panelID = UUID()
+
+            let onPanel = PaneActions.daemonManaged(
+                appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .panel(panelID))
+            #expect(onPanel.canClose(), "a viewer panel has a PanelID to close")
+
+            let onPrimary = PaneActions.daemonManaged(
+                appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .primary)
+            // The leaf disables its × on this branch. Without the query the
+            // button renders live and swallows the click, because `close`
+            // has no PanelID to name.
+            #expect(onPrimary.canClose() == false,
+                    "the primary anchor is unremovable — its close button must be disabled")
+        }
+    }
+
+    @Test("the legacy path can always close a leaf")
+    func legacyCanCloseAlways() async {
+        await Self.makeState(flagEnabled: false) { state in
+            var tree = LayoutNode.pane(.terminal(terminalID: UUID()))
+            let binding = Binding(get: { tree }, set: { tree = $0 })
+            let actions = PaneActions.legacy(
+                layout: binding, appState: state, worktreeID: UUID())
+
+            // Including the last pane in a tab, where `close` falls back to
+            // removing the whole tab rather than doing nothing.
+            #expect(actions.canClose())
         }
     }
 
     // MARK: - Close is not delete
 
     @Test("closing a note panel removes the panel only — the note survives")
-    func closingANoteDoesNotDeleteIt() async {
-        await Self.makeState(flagEnabled: true) { state in
+    func closingANoteDoesNotDeleteIt() async throws {
+        try await Self.makeState(flagEnabled: true) { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let panelID = UUID()
@@ -441,9 +520,9 @@ struct PanelSurfaceRenderBranchTests {
 
             let actions = PaneActions.daemonManaged(
                 appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .panel(panelID))
-            let envelope = await Self.capture(state, committing: surface) {
+            let envelope = try Self.single(await Self.collect(state, committing: surface) {
                 actions.close(.note(noteID: noteID))
-            }
+            })
 
             // The panel goes; nothing else does. Close ≠ delete is the
             // intended new semantics (spec §Non-goals) — the delete

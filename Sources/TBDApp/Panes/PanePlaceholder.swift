@@ -131,6 +131,10 @@ struct PanePlaceholder: View {
 
             toolbarActions
 
+            // Kept in the layout and disabled rather than omitted when the
+            // leaf cannot be closed (the daemon path's primary anchor): the
+            // header keeps the same shape on both rendering paths, and a
+            // greyed × reads as "not closable" instead of swallowing clicks.
             Button(action: closePane) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -138,6 +142,7 @@ struct PanePlaceholder: View {
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.borderless)
+            .disabled(!actions.canClose())
             .help("Close pane")
         }
         .padding(.horizontal, 8)

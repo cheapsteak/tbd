@@ -62,6 +62,17 @@ struct PaneActions {
     /// history palette. `content` is the pane's current content, used to seed
     /// a single-entry history for a slot that has never navigated.
     var history: @MainActor (_ paneID: UUID, _ content: PaneContent) -> PaneHistory
+
+    /// Whether `close` on this leaf would actually do anything — the leaf
+    /// disables its × button when it would not.
+    ///
+    /// The two paths disagree, and the disagreement has to be *visible*: the
+    /// legacy tree can always close a leaf (the last one takes its tab with
+    /// it), while the daemon path's primary anchor has no `PanelID` and is
+    /// unremovable by type in the shared reducer. Without this query the ×
+    /// still renders on a primary anchor and swallows the click — no state
+    /// change, no RPC, no diagnostic.
+    var canClose: @MainActor () -> Bool
 }
 
 // MARK: - Legacy action set
@@ -166,6 +177,12 @@ extension PaneActions {
                 // but it always has its current content, so fall back to a
                 // single-entry history seeded with it rather than an empty one.
                 appState.paneHistories[paneID] ?? PaneHistory.seeded(with: content)
+            },
+            canClose: {
+                // Always: `close` above removes the pane from the tree, and
+                // for the last pane in a tab it removes the tab. There is no
+                // leaf here whose × does nothing.
+                true
             }
         )
     }

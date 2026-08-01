@@ -195,6 +195,84 @@ struct PanelSurfaceMirrorTests {
         }
     }
 
+    // MARK: - Revision monotonicity
+
+    @Test("flag ON: a delta carrying an older revision of a tab is dropped")
+    func staleDeltaIsDropped() async {
+        await Self.makeState(flagEnabled: true) { state, _ in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            state.panelSurfaces[worktreeID] = PanelGetResult(
+                tabs: [Self.tab(id: tabID, worktreeID: worktreeID, revision: 9, label: "current")],
+                activeTabID: tabID)
+
+            state.handleDelta(.panelSurfaceChanged(Self.delta(
+                worktreeID: worktreeID,
+                tabs: [Self.tab(id: tabID, worktreeID: worktreeID, revision: 8, label: "stale")])))
+
+            #expect(state.panelSurfaces[worktreeID]?.tabs.first?.label == "current",
+                    "revisions are monotonic per tab; a lower one is a late arrival")
+            #expect(state.panelSurfaces[worktreeID]?.tabs.first?.revision == 9)
+        }
+    }
+
+    @Test("flag ON: removedTabIDs removes a tab whatever revision the mirror holds")
+    func removalIgnoresRevisions() async {
+        await Self.makeState(flagEnabled: true) { state, _ in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            state.panelSurfaces[worktreeID] = PanelGetResult(
+                tabs: [Self.tab(id: tabID, worktreeID: worktreeID, revision: 40)],
+                activeTabID: tabID)
+
+            state.handleDelta(.panelSurfaceChanged(Self.delta(
+                worktreeID: worktreeID, removed: [tabID])))
+
+            #expect(state.panelSurfaces[worktreeID]?.tabs.isEmpty == true,
+                    "the revision guard applies to content, never to removal")
+        }
+    }
+
+    @Test("a panel.get that resolved behind a newer delta cannot revert that tab")
+    func staleGetDoesNotRevertANewerTab() async {
+        await Self.makeState(flagEnabled: true) { state, _ in
+            let worktreeID = UUID()
+            let racedID = UUID()
+            let untouchedID = UUID()
+            let goneID = UUID()
+            state.panelSurfaces[worktreeID] = PanelGetResult(
+                tabs: [
+                    // A delta committed rev 11 while the get was in flight.
+                    Self.tab(id: racedID, worktreeID: worktreeID, revision: 11, label: "newer"),
+                    Self.tab(id: untouchedID, worktreeID: worktreeID, revision: 2),
+                    // Closed in the daemon; the get is authoritative about it
+                    // being gone even though the mirror still holds it.
+                    Self.tab(id: goneID, worktreeID: worktreeID, revision: 5),
+                ],
+                activeTabID: racedID)
+            state.panelGetFetcher = { _ in
+                PanelGetResult(
+                    tabs: [
+                        Self.tab(id: racedID, worktreeID: worktreeID, revision: 10, label: "older"),
+                        Self.tab(id: untouchedID, worktreeID: worktreeID, revision: 4, label: "fresh"),
+                    ],
+                    activeTabID: untouchedID)
+            }
+
+            await state.loadPanelSurface(worktreeID: worktreeID)
+
+            let tabs = state.panelSurfaces[worktreeID]?.tabs ?? []
+            #expect(tabs.count == 2, "a tab absent from the fetch is removed, not kept")
+            #expect(tabs.first { $0.id == racedID }?.label == "newer",
+                    "the in-flight get is a snapshot from before the delta")
+            #expect(tabs.first { $0.id == untouchedID }?.revision == 4,
+                    "a tab the fetch advances is still adopted")
+            #expect(tabs.allSatisfy { $0.id != goneID })
+            #expect(state.panelSurfaces[worktreeID]?.activeTabID == untouchedID,
+                    "selection follows the fetch, which defines the tab set")
+        }
+    }
+
     // MARK: - Loading
 
     @Test("loadPanelSurface populates the mirror when the flag is on and is inert when off")
@@ -297,6 +375,30 @@ struct PanelSurfaceMirrorTests {
                     "a sibling tab is untouched by an apply")
             #expect(state.panelSurfaces[worktreeID]?.activeTabID == tabID,
                     "an apply does not move the active tab")
+        }
+    }
+
+    @Test("an apply response older than the mirror does not revert it")
+    func staleApplyResponseIsDropped() async {
+        await Self.makeState(flagEnabled: true) { state, _ in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            state.panelSurfaces[worktreeID] = PanelGetResult(
+                tabs: [Self.tab(id: tabID, worktreeID: worktreeID, revision: 30)],
+                activeTabID: tabID)
+            state.panelApplyTrigger = { _ in
+                // A delta for a later operation landed while this apply was
+                // in flight, so its response is already behind the mirror.
+                PanelApplyResult(
+                    tab: Self.tab(id: tabID, worktreeID: worktreeID, revision: 29, label: "stale"),
+                    replayed: false)
+            }
+
+            await state.applyPanelOperation(
+                worktreeID: worktreeID, tabID: tabID, operation: .close(panelID: UUID()))
+
+            #expect(state.panelSurfaces[worktreeID]?.tabs.first?.revision == 30)
+            #expect(state.panelSurfaces[worktreeID]?.tabs.first?.label == nil)
         }
     }
 

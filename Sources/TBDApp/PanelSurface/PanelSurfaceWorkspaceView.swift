@@ -397,6 +397,14 @@ extension PaneActions {
                 // see. Surfacing real history needs `panel.get` to return it
                 // (a daemon change, deliberately out of this phase).
                 PaneHistory.seeded(with: content)
+            },
+            canClose: {
+                // Only a viewer panel can be closed. The primary anchor has
+                // no `PanelID` — there is nothing to name in a `.close`
+                // operation, and the reducer would reject one anyway — so its
+                // × renders disabled rather than looking live and doing
+                // nothing.
+                ownPanelID != nil
             }
         )
     }
