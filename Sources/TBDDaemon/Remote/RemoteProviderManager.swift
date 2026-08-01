@@ -47,6 +47,16 @@ public actor RemoteProviderManager {
     self.runner = runner
     self.registryURL = registryURL
     self.clock = clock
+    // RPC becomes available before `start()` runs, so seed the registry
+    // synchronously. The first status or mutation-gate read can then recover
+    // persisted freshness instead of briefly treating an existing mirror as
+    // current while the initial provider poll is pending.
+    if let configs = try? RemoteProviderRegistry.load(from: registryURL) {
+      for config in configs {
+        providers[config.name] = config
+        health[config.name] = (.ok, nil, nil)
+      }
+    }
   }
 
   /// Full boot path: load the registry, describe every provider, then
@@ -80,6 +90,7 @@ public actor RemoteProviderManager {
     for config in configs {
       guard !Task.isCancelled else { return }
       registerIfNeeded(config)
+      await recoverLastSuccessfulSnapshotAtIfNeeded(provider: config.name, markStale: true)
       await describeProvider(config)
     }
     subscriptions.broadcast(delta: .remoteSessionsChanged)
@@ -358,8 +369,11 @@ public actor RemoteProviderManager {
     if health[config.name] == nil { health[config.name] = (.ok, nil, nil) }
   }
 
-  func providerStatuses() -> [RemoteProviderStatus] {
-    providers.values.sorted { $0.name < $1.name }.map { config in
+  func providerStatuses() async -> [RemoteProviderStatus] {
+    for name in providers.keys {
+      await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
+    }
+    return providers.values.sorted { $0.name < $1.name }.map { config in
       let h = health[config.name] ?? (.ok, nil, nil)
       return RemoteProviderStatus(
         config: config, describe: describes[config.name],
@@ -379,7 +393,8 @@ public actor RemoteProviderManager {
   /// during an inventory outage; create/stop/send/rename do not have a
   /// trustworthy current-state basis once a previously-good snapshot is
   /// stale.
-  func hasStaleSnapshot(provider name: String) -> Bool {
+  func hasStaleSnapshot(provider name: String) async -> Bool {
+    await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
     guard lastSuccessfulSnapshotAt[name] != nil else { return false }
     return health[name]?.state != .ok
   }
@@ -486,11 +501,23 @@ public actor RemoteProviderManager {
     recordFailure(provider: provider, class: failureClass, result: result)
   }
 
-  private func recoverLastSuccessfulSnapshotAtIfNeeded(provider: String) async {
+  private func recoverLastSuccessfulSnapshotAtIfNeeded(
+    provider: String,
+    markStale: Bool = false
+  ) async {
     guard lastSuccessfulSnapshotAt[provider] == nil else { return }
-        if let recovered = try? await db.remoteSessions.lastSuccessfulSnapshotAt(provider: provider) {
-            lastSuccessfulSnapshotAt[provider] = recovered
-        }
+    if let recovered = try? await db.remoteSessions.lastSuccessfulSnapshotAt(provider: provider) {
+      lastSuccessfulSnapshotAt[provider] = recovered
+      if markStale, health[provider]?.state == .ok {
+        setHealth(
+          provider: provider,
+          to: (
+            .stale,
+            "Provider inventory has not refreshed since daemon restart.",
+            nil
+          ))
+      }
+    }
   }
 
   /// The provider may return the entire truncated inventory inside its

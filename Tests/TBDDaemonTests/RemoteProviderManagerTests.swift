@@ -627,6 +627,26 @@ struct RemoteProviderManagerTests {
     #expect(status?.hasStaleSnapshot == true)
   }
 
+  @Test func restartHydratesAndGatesBeforeTheInitialProviderPoll() async throws {
+    let lastGood = Date(timeIntervalSince1970: 1_700_000_123)
+    _ = try await db.remoteSessions.applySnapshot(
+      provider: "fake",
+      sessions: [RemoteSessionPayload(id: "a", state: .running)],
+      now: lastGood)
+    let invoker = FakeProviderInvoker(script: [])
+    let m = manager(invoker)
+
+    // Do not call start() or pollOnce(). RPC is deliberately available
+    // before either can finish during daemon boot.
+    let status = await m.providerStatuses().first
+
+    #expect(status?.health == .stale)
+    #expect(status?.lastSuccessfulSnapshotAt == lastGood)
+    #expect(status?.hasStaleSnapshot == true)
+    #expect(await m.hasStaleSnapshot(provider: "fake"))
+    #expect(invoker.callsSnapshot().isEmpty)
+  }
+
   @Test func eventUpsertCannotMasqueradeAsFullSnapshotAfterRestart() async throws {
     let eventTime = Date(timeIntervalSince1970: 1_800_000_000)
     _ = try await db.remoteSessions.upsertOne(

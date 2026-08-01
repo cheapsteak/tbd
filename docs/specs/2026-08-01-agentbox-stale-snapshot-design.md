@@ -17,8 +17,8 @@ The timestamp is separate from per-session `lastSeen`, because the independent
 events stream can update rows without proving that the full inventory works.
 After a later full-list failure, persisted active
 rows are projected as unknown and the provider status includes the last
-successful snapshot time. A daemon restart recovers that time from the newest
-persisted `lastSeen` value before publishing degraded health.
+successful snapshot time. A daemon restart recovers that time from the dedicated
+persisted `tbd_meta` snapshot timestamp before publishing degraded health.
 
 While a previously successful inventory is stale, TBD keeps read-only and
 recovery actions available: Attach, Log, Copy, and Pin. It blocks Create, Stop,
