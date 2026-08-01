@@ -353,6 +353,12 @@ struct ContentView: View {
 /// never reassigned: the same "stable identity, reactive interior" shape
 /// `WorktreePager`/`RemoteAttachPager` already use for their own tab items.
 struct DetailSectionHostPager: NSViewControllerRepresentable {
+    enum RemoteHostContent: Equatable {
+        case provider(String)
+        case session(RemoteSessionSelection)
+        case none
+    }
+
     @Binding var showFilePanel: Bool
     @Binding var filePanelWidth: Double
 
@@ -396,7 +402,9 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
         }
 
         let showingRemote = Self.showsRemoteTab(
-            isConnected: appState.isConnected, selectedRemoteSession: appState.selectedRemoteSession
+            isConnected: appState.isConnected,
+            selectedRemoteSession: appState.selectedRemoteSession,
+            selectedRemoteProvider: appState.selectedRemoteProvider
         )
         let targetID = showingRemote ? Self.remoteTabID : Self.otherTabID
         if let idx = vc.tabViewItems.firstIndex(where: { $0.identifier as? String == targetID }),
@@ -412,8 +420,23 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
     /// disconnected, regardless of whatever remote session was selected
     /// before the daemon dropped. Pure and `nonisolated` so it's directly
     /// unit-testable without an `NSTabViewController`.
-    nonisolated static func showsRemoteTab(isConnected: Bool, selectedRemoteSession: RemoteSessionSelection?) -> Bool {
-        isConnected && selectedRemoteSession != nil
+    nonisolated static func showsRemoteTab(
+        isConnected: Bool,
+        selectedRemoteSession: RemoteSessionSelection?,
+        selectedRemoteProvider: String? = nil
+    ) -> Bool {
+        isConnected && (selectedRemoteSession != nil || selectedRemoteProvider != nil)
+    }
+
+    /// Chooses what the persistent remote host renders. An explicit provider
+    /// selection must beat the recently-attached session fallback.
+    nonisolated static func remoteHostContent(
+        selectedRemoteProvider: String?,
+        remoteSessionHostSelection: RemoteSessionSelection?
+    ) -> RemoteHostContent {
+        if let selectedRemoteProvider { return .provider(selectedRemoteProvider) }
+        if let remoteSessionHostSelection { return .session(remoteSessionHostSelection) }
+        return .none
     }
 }
 
@@ -429,9 +452,17 @@ private struct RemoteSessionHostSlot: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        if let selection = appState.remoteSessionHostSelection {
+        switch DetailSectionHostPager.remoteHostContent(
+            selectedRemoteProvider: appState.selectedRemoteProvider,
+            remoteSessionHostSelection: appState.remoteSessionHostSelection
+        ) {
+        case .provider(let providerName):
+            if let provider = appState.remoteProviders.first(where: { $0.config.name == providerName }) {
+                RemoteProviderDeskView(provider: provider)
+            }
+        case .session(let selection):
             RemoteSessionDetailView(selection: selection)
-        } else {
+        case .none:
             EmptyView()
         }
     }

@@ -1,0 +1,95 @@
+import Foundation
+import Testing
+import TBDShared
+@testable import TBDApp
+
+@Suite("Provider Desk summary")
+struct RemoteProviderDeskSummaryTests {
+    private let provider = "acme-cloud"
+
+    @Test("terminal and agent states are counted independently")
+    func countsIndependentStateAxes() {
+        let now = Date(timeIntervalSince1970: 2_000)
+        let sessions = [
+            session(id: "working", terminal: .running, agent: .working, seen: now),
+            session(id: "waiting", terminal: .running, agent: .waitingInput, seen: now.addingTimeInterval(-1)),
+            session(id: "finished", terminal: .exited, agent: .exited, seen: now.addingTimeInterval(-2)),
+            session(id: "unknown", terminal: .starting, agent: .unknown, seen: now.addingTimeInterval(-3)),
+        ]
+
+        let summary = RemoteProviderDeskSummary(provider: provider, sessions: sessions)
+
+        #expect(summary.terminal.starting == 1)
+        #expect(summary.terminal.running == 2)
+        #expect(summary.terminal.exited == 1)
+        #expect(summary.terminal.gone == 0)
+        #expect(summary.agent.working == 1)
+        #expect(summary.agent.waitingInput == 1)
+        #expect(summary.agent.exited == 1)
+        #expect(summary.agent.unknown == 1)
+    }
+
+    @Test("gone overrides the payload terminal state")
+    func goneOverridesTerminalPayload() {
+        let mirror = session(id: "gone", terminal: .running, agent: .unknown, gone: true)
+
+        let summary = RemoteProviderDeskSummary(provider: provider, sessions: [mirror])
+
+        #expect(summary.terminal.running == 0)
+        #expect(summary.terminal.gone == 1)
+        #expect(summary.agent.unknown == 1)
+    }
+
+    @Test("only visible sessions from the selected provider contribute")
+    func filtersProviderAndDismissedRows() {
+        let visible = session(id: "visible", terminal: .running, agent: .idle)
+        let dismissed = session(id: "dismissed", terminal: .exited, agent: .exited, dismissed: true)
+        let other = session(id: "other", provider: "other-cloud", terminal: .running, agent: .working)
+
+        let summary = RemoteProviderDeskSummary(provider: provider, sessions: [dismissed, other, visible])
+
+        #expect(summary.sessions.map(\.payload.id) == ["visible"])
+        #expect(summary.total == 1)
+    }
+
+    @Test("freshness is the latest visible mirror update")
+    func derivesLatestMirrorUpdate() {
+        let older = Date(timeIntervalSince1970: 1_000)
+        let newer = Date(timeIntervalSince1970: 2_000)
+        let hidden = Date(timeIntervalSince1970: 3_000)
+
+        let summary = RemoteProviderDeskSummary(provider: provider, sessions: [
+            session(id: "older", terminal: .running, agent: .idle, seen: older),
+            session(id: "newer", terminal: .running, agent: .working, seen: newer),
+            session(id: "hidden", terminal: .running, agent: .working, dismissed: true, seen: hidden),
+        ])
+
+        #expect(summary.latestMirrorUpdate == newer)
+        #expect(summary.sessions.map(\.payload.id) == ["newer", "older"])
+    }
+
+    private func session(
+        id: String,
+        provider: String? = nil,
+        terminal: RemoteProcessState,
+        agent: RemoteAgentState,
+        gone: Bool = false,
+        dismissed: Bool = false,
+        seen: Date = Date(timeIntervalSince1970: 1_000)
+    ) -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: provider ?? self.provider,
+            payload: RemoteSessionPayload(
+                id: id,
+                title: id.capitalized,
+                createdAt: "2026-08-01T12:00:00Z",
+                state: terminal,
+                agentState: agent,
+                meta: ["repo": "acme/api", "branch": "feature/\(id)"]
+            ),
+            gone: gone,
+            dismissed: dismissed,
+            lastSeen: seen
+        )
+    }
+}

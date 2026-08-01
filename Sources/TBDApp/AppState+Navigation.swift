@@ -235,6 +235,7 @@ extension AppState {
             if let leavingRepoID { clearRevivingArchived(repoID: leavingRepoID) }
             selectedRepoID = nil
             selectedScratchSection = false
+            selectedRemoteProvider = nil
             selectedRemoteSession = nil
             selectedWorktreeIDs = Set(ids)
             selectionOrder = ids // must come after; didSet above rebuilds from unordered Set
@@ -245,6 +246,7 @@ extension AppState {
             selectedWorktreeIDs = []
             selectedRepoID = id
             selectedScratchSection = false
+            selectedRemoteProvider = nil
             selectedRemoteSession = nil
             Task { await refreshArchivedWorktrees(repoID: id) }
             Task { await refreshReapRecords(repoID: id) }
@@ -306,6 +308,18 @@ extension AppState {
         recordNavigation(.remoteSession(selection))
     }
 
+    /// Select a provider header without attaching to a session. The desk is a
+    /// read-only projection of data already mirrored in AppState.
+    func selectRemoteProvider(_ provider: String) {
+        highlightedArchivedWorktreeID = nil
+        selectedWorktreeIDs = []
+        selectedRepoID = nil
+        selectedScratchSection = false
+        selectedRemoteSession = nil
+        remoteSessionRequestedTab = nil
+        selectedRemoteProvider = provider
+    }
+
     /// Shared state transition for landing on a remote-session selection —
     /// used by both a plain click/context-menu action (`selectRemoteSession`,
     /// which additionally records a navigation entry) and back/forward
@@ -339,6 +353,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = nil
         selectedScratchSection = false
+        selectedRemoteProvider = nil
         selectedRemoteSession = selection
         remoteSessionRequestedTab = tab
         unreadByRemoteSession[selection] = nil

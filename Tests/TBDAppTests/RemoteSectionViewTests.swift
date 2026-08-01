@@ -197,16 +197,14 @@ struct RemoteSectionViewTests {
         #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
     }
 
-    /// The case this feature exists to fix: every one of the provider's
-    /// sessions matched a repo, so there's nothing left to list here — but a
-    /// healthy provider with nothing to say renders no header at all.
-    @Test func shouldShowHeader_falseWhenHealthyAndFullyMatched() {
+    /// A fully matched provider remains the stable entry point to its desk.
+    @Test func shouldShowHeader_trueWhenHealthyAndFullyMatched() {
         let repoID = UUID()
         let sessions = [
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
                               gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID),
         ]
-        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: [repoID]))
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: [repoID]))
     }
 
     /// The health-visibility guarantee: even with every session matched, an
@@ -226,8 +224,8 @@ struct RemoteSectionViewTests {
         #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .error), sessions: [], knownRepoIDs: []))
     }
 
-    @Test func shouldShowHeader_falseWhenHealthyWithNoSessionsAtAll() {
-        #expect(!RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: [], knownRepoIDs: []))
+    @Test func shouldShowHeader_trueWhenHealthyWithNoSessionsAtAll() {
+        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: [], knownRepoIDs: []))
     }
 
     // MARK: - RowStatusIndicator.leading — `.remote` case + precedence

@@ -186,6 +186,7 @@ final class AppState: ObservableObject {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 selectedScratchSection = false
+                selectedRemoteProvider = nil
                 selectedRemoteSession = nil
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
@@ -240,6 +241,11 @@ final class AppState: ObservableObject {
     /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`
     /// integration for v1 (documented scope cut — see `selectScratchSection()`).
     @Published var selectedScratchSection: Bool = false
+    /// Selected provider header, showing its read-only Provider Desk. This is
+    /// mutually exclusive with worktree, repo, scratch, and remote-session
+    /// selection, but intentionally stays out of back/forward history for the
+    /// first desk slice.
+    @Published var selectedRemoteProvider: String?
     /// Selected — set when a `RemoteSectionView` session row is clicked, shows
     /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
     /// `selectedScratchSection` but keyed by the provider/session composite id
