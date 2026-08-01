@@ -62,9 +62,11 @@ Normal and automatic archive run an initial classifier before changing state. Th
 - no unique unpublished work exists; and
 - `HEAD` is reachable from at least one remote-tracking branch.
 
+This makes archive RPCs and merge-triggered archive synchronous through the hook, final verification, and removal. A caller may therefore wait for the archive hook's timeout budget (currently up to 60 seconds) plus Git removal latency. That deliberate UX cost is the price of returning success only after physical absence and of preventing a detached task from invalidating the final safety check.
+
 An exact runtime overlay therefore does not block a merged, pushed branch. One changed byte, an extra untracked file, a generated output, or an unpublished commit blocks before any mutation.
 
-The existing explicit `--force` action remains the human escape hatch. It bypasses content and publication eligibility, as its CLI contract already promises, but it does not make automatic archive permissive. RPC callers must pass the force bit into the preflight; the current handler drops it during phase one and must be corrected.
+The existing explicit `--force` action remains the human escape hatch. It bypasses content and publication eligibility, as its CLI contract already promises, but it does not make automatic archive permissive. RPC callers pass the force bit through both phases; merge-triggered archive never infers publication from the merge event and performs both current-HEAD checks normally.
 
 Archive rechecks the target by worktree ID and path immediately before classification. The classifier never deletes or rewrites artifacts. Only the existing archive phase removes an eligible worktree.
 

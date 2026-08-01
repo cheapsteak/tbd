@@ -62,7 +62,7 @@ struct ReapSnapshotTests {
         #expect(indexAfter == indexBefore)
     }
 
-    // MARK: (a) Dirty worktree -> ref exists, ls-tree shows untracked, ignored absent.
+    // MARK: (a) Dirty worktree -> ref preserves untracked and ignored bytes.
 
     @Test func dirtyWorktreeCreatesVerifiedSnapshotRef() async throws {
         let (tmp, repo, wt, _) = try await makeRepoWithExternalWorktree(branch: "dirty", folder: "dirtywt")
@@ -86,7 +86,7 @@ struct ReapSnapshotTests {
 
         let lsTree = try await runGit(["ls-tree", "-r", "--name-only", resolvedRef], at: repo)
         #expect(lsTree.contains("untracked.txt"))
-        #expect(!lsTree.contains("ignored.txt"))
+        #expect(lsTree.contains("ignored.txt"))
     }
 
     // MARK: (b) Clean + branch-reachable -> nil, no ref.

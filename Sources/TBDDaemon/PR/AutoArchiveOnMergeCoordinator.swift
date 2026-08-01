@@ -41,14 +41,13 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
                 return false
             }
 
-            let (worktree, repo) = try await lifecycle.beginArchiveWorktree(
-                worktreeID: worktreeID,
-                knownPublished: true
-            )
+            // A merge event proves the PR merged, not that this worktree's
+            // current HEAD has no later local commits. Both archive checks
+            // must reverify the current HEAD against remote-tracking refs.
+            let (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: worktreeID)
             try await lifecycle.completeArchiveWorktree(
                 worktree: worktree,
-                repo: repo,
-                knownPublished: true
+                repo: repo
             )
             subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktreeID)))
 

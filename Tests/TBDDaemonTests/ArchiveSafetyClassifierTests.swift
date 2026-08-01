@@ -354,7 +354,7 @@ struct ArchiveSafetyClassifierTests {
     let pathsAndContents = [
       (".agents/skills/example/SKILL.md", "skill"),
       (".codex/hooks.json", "{\"hooks\":{}}"),
-      (".Codex/hooks/pre.sh", "#!/bin/sh\n"),
+      (".codex/hooks/pre.sh", "#!/bin/sh\n"),
       ("hooks/pre.sh", "#!/bin/sh\n"),
       ("AGENTS.md", "generated instructions"),
     ]
