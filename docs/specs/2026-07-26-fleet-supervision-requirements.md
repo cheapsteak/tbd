@@ -100,8 +100,9 @@ A fact it cannot obtain that way is a failed conformance check and a concrete, s
 request; that is the mechanism by which TBD's surface grows, pulled by a real consumer
 rather than pushed by speculation. The corollary is a cost accepted here rather than
 discovered later: the surfaces an Enabled story depends on — listing output shapes,
-`hibernateReason` values, wake semantics, exit codes, the supervision readout and
-report schemas — stop being incidental CLI output
+`hibernateReason` values, wake semantics, exit codes, and the supervision sweep
+surfaces (the readout and ledger-query schemas, the brief pipe's semantics and
+exit codes) — stop being incidental CLI output
 and become a contract that migration and future change must respect.
 
 ### P0 — without these the subsystem has no point
@@ -142,7 +143,8 @@ and become a contract that migration and future change must respect.
   follow conduct instructions and are already resistant to prompt injection, and TBD declines
   to build a second anti-injection layer on top of them. What replaces enforcement is
   instruction plus visibility: a mode is authored conduct prose telling the desk what to act
-  on, propose, and escalate; the daemon delivers that conduct in every work order, records
+  on, propose, and escalate; the daemon installs that conduct as the desk's standing layer
+  at spawn and names the active mode on every briefing it delivers, records
   which mode was active on every action line, and writes each action to the ledger the
   instant it happens, with the account rendering it beside the operator. So the label's
   promise is honest rather than enforced — "attended" instructs and shows you, it does not
@@ -207,7 +209,7 @@ and become a contract that migration and future change must respect.
   spec.
 
   *What is **Built** is narrow, and is stated here exactly. Fresh work facts carrying
-  source and observed-at in every work order (design §2). Public surfaces a desk or a
+  source and observed-at on the readout (design §2). Public surfaces a desk or a
   program can re-derive from — a desk is a full agent session and can run `gh` and `git`
   itself. The ledger recording every dispatched message verbatim (design §6), so a stale
   premise is visible in the account the moment it ships: visibility, not prevention. And
@@ -325,6 +327,22 @@ and become a contract that migration and future change must respect.
   state and work facts, which feed the account.*
 - **P1-5 [both]** As an operator, I want decisions I have already made remembered durably
   for the rest of the shift, so that I am never re-asked a question I answered an hour ago.
+
+  *This story is **Enabled**, not Built. Never-re-ask is authored discipline. The
+  project's playbook names where its questions go — a channel, an issue, a file the
+  operator already reads; the desk asks there; the operator answers there; and the
+  project's sweep program reads the answers and carries them into future briefings, with
+  its own files as the durable memory of what has been asked and answered. TBD's half of
+  the loop is the ledger query (`tbd supervise ledger`): the program can see every
+  briefing TBD delivered and every act that followed, so "already raised, not yet acted
+  on" is a cheap lookup. The shipped reference sweep program demonstrates the discipline
+  end to end and is its conformance artifact. The honest cost, stated plainly: TBD's
+  compiled record proves every act — payload, timestamp, outcome — but not approvals.
+  Whether an answer preceded an act lives in the project's own artifacts; an act that
+  should have had one behind it is not mechanically flaggable as missing it, and evidence
+  not captured at the time cannot be reconstructed later. The compiled escalation queue
+  that would have made answers forgery-proof is a rejected alternative — with its revisit
+  conditions — in design §8.*
 - **P1-6 [A]** As an operator, I want the supervisor to re-check an agent shortly after
   intervening (on the order of a minute, not the next full cycle), so that an agent that
   advanced to a confirmation prompt doesn't hang there for fifteen minutes.
@@ -348,6 +366,20 @@ and become a contract that migration and future change must respect.
   mid-shift daemon restart resumes overdue observations from the record rather than
   carrying recovery state; what to do about a stale unconfirmed action is playbook
   judgment, not compiled repair.
+
+  *This story splits along the Built/Enabled line. The acting half is **Built**, exactly
+  as the ladder above states: the daemon writes every action line itself, so a false act
+  claim cannot enter the record. The consent half — operator answers arriving with
+  machine-attested authorship, so an approval can never be desk self-report — is
+  **Enabled**, and the honest cost is stated openly: the compiled record attests acts
+  only (payload, timestamp, outcome), and consent is not a line kind in it. Answers live
+  on the project's playbook-named question route; a desk's transcription of one ("the
+  operator said yes in chat") is exactly self-report, and the design accepts that rather
+  than building the machinery that would attest it — the compiled escalation queue and
+  the approval-stamp verb are rejected alternatives in design §8, each with the failure
+  signature that would justify revisiting. What can never happen is a false claim about
+  what was *done*; what the record cannot prove is that a human agreed beforehand, and an
+  act that should have had approval is not mechanically flaggable.*
 
 ### P2 — maturity
 

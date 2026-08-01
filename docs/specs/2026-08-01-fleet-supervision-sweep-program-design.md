@@ -5,13 +5,16 @@ the [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md),
 with the same authority as the design sections it details; `design §N` below
 refers to
 [`2026-07-26-fleet-supervision-design.md`](2026-07-26-fleet-supervision-design.md).
-It specifies two things that arrive from one placement argument: how live-agent
-**cases are detected** — a project-authored sweep program submitting proposals
-to a compiled intake, held to a compiled liveness contract — and how
-**briefings land on a desk** — standing conduct installed at spawn, work
-orders rendered through a project-authored hook. The requirements doc carries
-the Built/Enabled classification and the outside-first ratchet this document
-applies
+It specifies two things that arrive from one placement argument: the **sweep
+program** — one project-authored program owning live-agent case detection, its
+own case memory, and the composition of the briefings that reach a desk — and
+the compiled machinery that program runs against: three public surfaces (the
+readout, the brief pipe, the ledger query), the delivery path with its
+standing-conduct mechanics, and the liveness contract that makes a dead
+program detectable. Compiled TBD's remit here is exactly five things: facts
+out, briefings delivered, verbs executed, record kept, liveness attested. The
+requirements doc carries the Built/Enabled classification and the
+outside-first ratchet this document applies
 ([`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md)).
 
 ## 1. What TBD does not decide: theory of work, theory of attention
@@ -30,34 +33,43 @@ Both theories are authored in the same artifact. The **sweep program** holds a
 project's theory of attention (its triggers) and its theory of work for the
 live half of the fleet (what the facts mean once it looks) — the exact
 counterpart of the wake program, which holds both theories for the parked
-half. Compiled TBD keeps what remains when both theories are subtracted: how
+half. It also holds the project's case memory (§7) and the briefings' own
+voice: the text a desk reads is the program's prose. Compiled TBD keeps what
+remains when the theories, the memory, and the voice are all subtracted: how
 to look (the fact snapshot), how to act (the verbs), what happened (the
 record), and whether anyone is actually looking (the liveness contract, §6).
 
 A rule of thumb runs through every artifact in this document, stated once:
 **representation follows consumer.** Content read by judgment is prose (the
-playbook). Content read by lookup is structured data (`supervision.json`, the
-snapshot, proposals). Content that decides is code (the sweep program, the
-renderer). Schemas exist only where a parser is the reader — and the
-corollary is a hard rule: **TBD never parses the playbook.** Compiled code
-resolves its path, hashes its bytes, and installs and delivers it verbatim;
-its only structure-aware reader is a model. Structure a machine needs —
-the declared mode names — lives in `supervision.json` (design §8), never in
-the prose.
+playbook, the briefing). Content read by lookup is structured data
+(`supervision.json`, the readout, the ledger query's output). Content that
+decides is code (the sweep program). Schemas exist only where a parser is the
+reader — the readout and the ledger query carry them because a program parses
+their output; the brief pipe carries none because its only reader is a desk.
+The corollary is a hard rule: **TBD never parses the playbook — and never
+parses the briefing.** Compiled code resolves paths, hashes bytes, and
+delivers text verbatim; the only structure-aware reader of either is a model.
+Structure a machine needs — the declared mode names — lives in
+`supervision.json` (design §8), never in the prose.
 
 ## 2. The placement split
 
-Authored, per project — the judgment-facing pipeline:
+Authored, per project — one program plus one playbook:
 
 - **When to look** — the sweep program's triggers (§4).
-- **What the facts mean** — the sweep program's case-cutting logic, including
-  every threshold number (§7).
-- **How the briefing reads** — the work-order renderer (§9).
+- **What the facts mean** — the program's case-cutting logic, including every
+  threshold number (§7).
+- **What has already been raised** — the program's case memory: which
+  situations it has briefed, which operator answers it has read, kept in its
+  own files, with the ledger query as TBD's half of the loop (§3, §7).
+- **How the briefing reads** — the briefing is the program's prose start to
+  finish. How a briefing lands is voice and emphasis, which is conduct's
+  territory, and the program is where the project authors it.
 - **What conduct governs** — the playbook, standing in the desk's session
   layer (§8).
 - **What to do** — the desk's judgment, under that conduct (design §4).
 
-Compiled, always — the integrity-facing pipeline:
+Compiled, always — the integrity-facing remit:
 
 - **The fact snapshot** — state with source and observed-at, work facts,
   runaway counters (design §2, §13). Fact: a wrong answer poisons everything
@@ -71,22 +83,30 @@ Compiled, always — the integrity-facing pipeline:
   (`docs/research/2026-07-31-askuserquestion-dismissal/findings.md`). It
   bypasses the sweep program entirely. A project that wants routine prompts
   handled without a desk fixes them at the source (design §2, prong 1).
-- **Work-order assembly, the not-to-act floor, delivery, the ledger** — §3,
-  §9, design §4–§6, §12.
+- **The pipe, delivery, and the record** — pacing at the brief pipe, the
+  compiled header, delivery through the agent-kind adapter, the ledger and
+  its query (§3, design §4–§6, §12).
+- **The mechanical reasons not to act** — an intervention already in flight
+  for the target, a pending act re-check, a rate-limited target — checked
+  inside the acting verbs, at the moment of the act, where the target is
+  explicit in the call (design §3). They protect the record's integrity
+  (never double-treat before the first treatment is assessed) and the wake
+  count (design §5's honestly priced resource). The same facts appear in the
+  readout, so a program can reason with them and decline to brief; the checks
+  hold at the act regardless of whether it did.
 - **Every liveness contract** — desk dead-man's switch (design §9), act
-  re-check (design §12), sweep watchdog (§6), renderer fallback (§9).
+  re-check (design §12), sweep watchdog (§6).
 
-**The work order, decomposed by author**, is the worked example of this split.
-Sorted by who writes each piece: the playbook and mode conduct are the
-project's file; the evidence string is the project's sweep program (§3); the
-decisions in scope are the operator's words; a question payload is the agent's
-words, verbatim. TBD authors none of the prose a desk reads. The only text
-TBD generates is fact rendering — "idle 47 min, observed via hook at 02:13" —
-and even that presentation passes through the project's renderer (§9). What
-stays compiled is the **envelope**: the guarantee that the assembled structure
-contains the decisions in scope (design §8, the never-re-ask promise), the
-active mode selection, the verbatim question, and the transcript path, and
-that the record shows both what was assembled and what was delivered.
+**The briefing, decomposed by author**, is the worked example of this split.
+The playbook and mode conduct are the project's file; the briefing's prose is
+the sweep program's voice; a question payload is the agent's words, verbatim
+(the prompt fast path, design §2). The compiled **header** is the only text
+TBD adds — the active mode's name and any pending conduct delta (§8) — TBD
+prepending its own information, never demanding structure from the program.
+What stays compiled is the guarantee around the text, not the text: each
+delivery is recorded with the delivered text's hash and the conduct hash it
+stood on, the header's contents are TBD's own facts, and the record shows
+exactly what each desk received (§3, design §6).
 
 The old system is the cautionary precedent for collapsing this split. Its
 recurring desk briefing was a prompt template compiled into the binary
@@ -94,110 +114,122 @@ recurring desk briefing was a prompt template compiled into the binary
 `Sources/TBDShared/NightwatchDeskPrompts.swift:91`; `docs/nightwatch.md` §5),
 mixing mechanism, policy, and a section literally titled "Field learnings —
 apply these rules" — conduct learned on real shifts that could only be taught
-by editing Swift and rebuilding. Every sentence of that content now has an
-authored home; only the envelope remains compiled.
+by editing Swift and rebuilding. Every sentence of that content has an
+authored home; only the header and the record remain compiled.
 
-## 3. The intake
+## 3. The three public surfaces
 
-The sweep program reaches TBD through one public surface: an **evaluation
-report** submitted to the daemon. Every evaluation ends in a report, findings
-or none; proposals are a report's content, not a separate message kind.
+The sweep program runs against exactly three public surfaces, and the shipped
+reference program is the conformance artifact for all three (§7): a fact it
+cannot obtain from them is a failed conformance check and a concrete, scoped
+API request — the mechanism by which TBD's surface grows, pulled by a real
+consumer.
 
 ```
-tbd supervise report --project <name>     # report JSON on stdin
+tbd supervise readout --project <name>               # JSON on stdout, schema-versioned
+tbd supervise brief   --project <name>               # briefing text on stdin
+tbd supervise ledger  --project <name> --since <t>   # JSON on stdout, schema-versioned
 ```
 
-A report:
+**The readout** is the fact surface. An instrument readout: read-only, the
+current values printed for whoever is consuming them, implying no action. It
+prints the project's live-agent facts — session state with source and
+observed-at, work facts, runaway counters, worktree pin state, and the
+per-target not-to-act facts (an intervention in flight, a pending re-check, a
+rate limit) — plus the supervision machinery's own state: whether supervision
+is on, whether a shift is open, and the project's active mode. A program can
+therefore see for itself when a submission would be refused (§4). There is no
+open-cases section: what has already been briefed is the program's own memory
+(§7), not TBD's. An operator or any other script may read the readout freely
+at any time.
 
-```jsonc
-{ "version": 1,
-  "proposals": [
-    { "agent": "<sessionID>",
-      "condition": "idle-with-uncommitted-work",
-      "evidence": "idle 47m; 2 files uncommitted; PR #522 reviewed 20m ago" }
-  ] }
-```
-
-- **`condition` is a free string** — the project's own vocabulary. An enum
-  here would rebuild the old system's rules vocabulary (the `clearance`
-  table's verdict kinds, shipped with zero production readers —
-  `docs/nightwatch.md` §1) one layer down.
-- **`evidence` is authored per-case prose** that rides into the work order —
-  the sweep program's voice in the desk's briefing.
-- **A report with no proposals is still a report** — the attested "looked,
-  found nothing." It is not a courtesy: it is what makes a quiet fleet
-  distinguishable from a dead sensor (§6).
-
-The daemon processes every submission the same way, synchronously:
+**The brief pipe** takes a composed briefing as text on stdin. There is no
+schema — representation follows consumer (§1): the briefing's only reader is
+a desk, a model reading prose, so no parser exists for a schema to serve. The
+daemon takes the text as given; it never parses, edits, or ranks it. What it
+does, synchronously:
 
 1. **Timestamp and attribute.** Every submission updates the project's
-   liveness record — last contact, evaluation count. A submission *carrying
-   proposals* is additionally ledgered with who submitted, when, and what,
-   before anything else happens: the intake is actuation-adjacent (a
-   proposal can wake a desk, which spends real tokens), so provenance on
-   proposals is not optional. A report with no proposals writes no ledger
-   line — the design's noise rule holds (design §6: quiet contact is one
-   status field, not forty lines an hour); its durable trace is the
-   shift-close line's coverage summary (§6).
-2. **Apply the not-to-act floor.** Compiled checks against TBD's own records
-   drop proposals that must not become cases *now*: an intervention already
-   in flight for that agent, a pending act re-check, a rate-limited target
-   that cannot execute anything. These are ledger bookkeeping, not theory —
-   they protect the record's integrity (never double-treat before the first
-   treatment is assessed) and the wake count (design §5's honestly priced
-   resource). The same facts appear in the snapshot, so a script can reason
-   with them; the floor holds regardless of whether it did. Skipping the
-   floor is never unsafe — verb-time preconditions still refuse at the act
-   (design §3) — it is the economy layer, and it is not the script's to
-   waive. The command's synchronous response tells the program each
-   proposal's disposition — accepted, or dropped with the mechanical
-   reason — so a drop is visible to its submitter without a recurring
-   ledger line for every evaluation an intervention stays in flight.
-3. **Compose and deliver.** Surviving proposals become cases, grouped into
-   one work order per project, rendered (§9), and delivered exactly as the
-   design specifies (design §4 steps 3–5): spawn the desk lazily, deliver
-   through the agent-kind adapter, write the ledger request-first.
+   liveness record — last contact, evaluation count (§6).
+2. **Pace.** One identity-blind check: the per-project briefing rate limit
+   (§10) — at most one briefing delivered per project per interval, enforced
+   on timestamps alone. A submission inside the window is refused with a
+   machine-readable result; the refusal still counts as contact. This is the
+   whole of the pipe's not-to-act checking, because pacing is the one check
+   that needs no identity. The per-target reasons not to act live inside the
+   acting verbs' preconditions (design §3), where the target is explicit in
+   the call (`--terminal <id>`) — the same check-at-the-act pattern that
+   makes the off switch bind.
+3. **Refuse while paused.** With supervision off or no shift open, the pipe
+   refuses with a distinct machine-readable paused result — a pinned exit
+   code (§10) — so a program can tell "not now" from "broken." Refusals
+   while paused do not feed the watchdog (§6), and nothing is delivered.
+4. **Deliver.** A surviving briefing goes to the project's desk: the daemon
+   prepends the compiled **header** — the active mode's name and any pending
+   conduct delta (§8) — spawns the desk lazily if the project has none this
+   shift, delivers through the agent-kind adapter, and writes the ledger's
+   delivery line request-first, carrying the delivered text's hash and the
+   conduct hash (design §4 steps 3–5, §6, §12). Delivery arms the desk
+   dead-man's deadline: a briefing delivered at T with no ledger line from
+   that desk by the deadline is the switch's trigger (design §9).
 
-The readout the sweep program reads is the other half of the contract:
+**An empty submission is still a submission.** A `brief` call with nothing on
+stdin is the attested "looked, found nothing": it updates the liveness
+record, delivers nothing, and writes no ledger line — the design's noise rule
+holds (design §6: quiet contact is one status field, not forty lines an
+hour); its durable trace is the shift-close line's coverage summary (§6). It
+is not a courtesy: it is what makes a quiet fleet distinguishable from a dead
+sensor. Pacing applies only to delivered briefings, never to quiet contact.
 
-```
-tbd supervise readout --project <name>    # JSON on stdout, schema-versioned
-```
+The pipe takes **pure text and nothing else**, bounded in size (§10). A
+structured evaluation report
+and the thinner variant — a small agent-list manifest riding beside the
+text — are both rejected alternatives (§11): every piece of structure demanded
+from the program becomes vocabulary TBD must version, and the compiled
+consumers such structure would feed are checks this design deliberately
+places elsewhere.
 
-An instrument readout: read-only, the current values printed for whoever is
-consuming them, implying no action. It prints the project's live-agent
-facts — session state with source and observed-at, work facts, runaway
-counters, and the not-to-act facts. The sweep program reads the readout at
-the start of each evaluation and submits its report at the end; an operator
-or any other script may read it freely at any time. Both
-schemas are documented public surfaces under the requirements doc's Enabled
-rules: a fact the reference script cannot obtain from them is a failed
-conformance check and a concrete, scoped API request.
+**The ledger query** closes the loop. It prints TBD's own record for the
+project since a timestamp: actions with their outcomes, briefing deliveries,
+anomalies. It is how the program sees what TBD did since its last
+evaluation — which briefings were delivered, whether the desk acted, what
+came of the acts — and how it reads back anything it noted pointers to. It is
+TBD's half of the program's case memory (§7): the program's files say what it
+has raised; the ledger says what the machinery did about it. Read-only,
+schema-versioned, free to call.
 
 ## 4. Triggers and the default tick
 
-Triggers are entirely the project's. Cron, launchd, a webhook receiver
-listening for forge events, a manual run while debugging a script — all
-equivalent at the intake, which neither knows nor asks what prompted a
-submission.
+Triggers are the project's. Cron, launchd, a webhook receiver listening for
+forge events, a manual run while debugging — all equivalent at the pipe,
+which neither knows nor asks what prompted a submission.
 
 TBD ships scheduling as a **default, not a monopoly** — the same shape as a
-component's default props. The daemon runs the seeded reference script (§7)
+component's default props. The daemon runs the shipped reference program (§7)
 on a timer, per project, until the project overrides:
 
-- **Keep the tick, edit the script** — the common case. Tuning a threshold is
-  editing a constant; the schedule is untouched.
-- **Go external, bring your own triggers** — `"schedule": "external"` in the
-  project's `supervision.json` entry. The project now owns its theory of
-  attention outright, and declares a contact window in exchange (§6).
+- **Keep the tick, keep the shipped program** — the zero-setup case, and the
+  common one. The shipped program improves with releases and the project
+  authors nothing.
+- **Keep the tick, bring your own program** — `"sweep": { "script": "<path>" }`
+  in the project's `supervision.json` entry points the tick at the project's
+  own program (§7). Anything **time-shaped** — custom logic, custom
+  thresholds, custom cadence — takes this route: TBD's schedule plus a custom
+  script, with an `interval` value overriding the cadence when the default
+  tick is too fast or too slow.
+- **Go external** — `"schedule": "external"` stands TBD's scheduler down. It
+  exists for exactly one shape: an **event-driven resident process** — a
+  webhook receiver, a forge-event listener — whose triggers TBD cannot see.
+  It is not for custom logic or custom cadence; those are the `script` and
+  `interval` overrides above. The project then owns its theory of attention
+  outright, and declares a contact window in exchange (§6).
 - **Keep the tick alongside your own triggers** — legitimate and cheap: the
   tick becomes a reporting floor under an event-driven program.
 
 The selection is the `sweep` object inside the project's entry in
 `~/tbd/supervision/supervision.json` (design §8), on the default-props
-chain: no object means TBD's schedule at the default interval; an interval
-value overrides the cadence; `"external"` stands TBD's scheduler down, and
-the object then declares the contact window §6 requires:
+chain: no object means TBD's schedule, at the default interval, running the
+shipped program.
 
 ```jsonc
 // ~/tbd/supervision/supervision.json
@@ -206,18 +238,35 @@ the object then declares the contact window §6 requires:
     "acme-platform": {
       "repos": ["<repoID-a>", "<repoID-b>"],
       "mode": "autonomous",
+      "sweep": { "script": "~/tbd/supervision/projects/acme-platform/sweep.py",
+                 "interval": "10m" }
+    },
+    "acme-hooks": {
+      "repos": ["<repoID-c>"],
       "sweep": { "schedule": "external", "contactWindow": "30m" }
     }
   }
 }
 ```
 
-When the daemon itself runs the script, failure detection is direct — a
-crash, timeout, or unparseable output is observed as an exit condition and
-recorded (§6). When the project owns the triggers, failure detection is the
-watchdog's, by silence. Either way the seeded default means "flip the switch
-and supervision works": no project starts with a scheduling chore, and the
+When the daemon itself runs the program, failure detection is direct — a
+crash or timeout is observed as an exit condition and recorded (§6). When the
+project owns the triggers, failure detection is the watchdog's, by silence.
+Either way the shipped default means "flip the switch and supervision
+works": no project starts with a scheduling chore, and the
 never-installed-schedule failure class does not exist for the default path.
+
+**Paused and off.** The switch's writ runs exactly as far as TBD's own
+processes (design §3). While supervision is off or paused, the default tick
+launches no new runs; a run already in flight finishes inside its timeout
+bound (§10) and its submission is refused at the pipe with the paused result
+(§3). External programs are **never signaled or killed** — TBD stops only
+what TBD starts. Toward everything it does not run, TBD refuses at the
+boundary and advertises state: the readout carries the supervision and shift
+state (§3), so a courteous program can decline to run at all, and a program
+that submits anyway gets the machine-readable refusal. Refusals while paused
+do not feed the watchdog, whose contact window is armed only while
+supervision is on *and* a shift is open (§6).
 
 ## 5. Liveness contracts: which durations are whose
 
@@ -232,12 +281,12 @@ duties land on opposite sides of the compiled/authored line:
 - **Durations about the supervision machinery are compiled contracts.** Each
   measures silence against an expectation *the system itself created*, and
   none involves judgment:
-  - a **work order** delivered at T with no ledger line by the deadline — the
-    desk dead-man's switch (design §9);
+  - a **briefing** delivered at T with no ledger line from that desk by the
+    deadline — the desk dead-man's switch (design §9);
   - an **act** performed at T, verified about a minute later — the re-check
     (design §12);
-  - a **declared contact window** with no intake submission inside it — the
-    sweep watchdog (§6).
+  - a **declared contact window** with no submission inside it — the sweep
+    watchdog (§6).
 
 The compiled clocks never point outward at the fleet. Every one of them
 points at the supervision system itself. The fleet's idleness is judgment;
@@ -248,52 +297,56 @@ would lie by omission.
 
 The rule that makes detection possible: **"nothing going on" is never
 expressed as silence.** A healthy sweep program that finds nothing still
-submits its report — one with no proposals (§3). That single obligation — the
-reference script honors it out of the box — makes three states cleanly
-distinguishable at the intake:
+submits — an empty submission, the attested quiet contact (§3). The shipped
+program honors that obligation out of the box, and it makes three states
+cleanly distinguishable at the pipe:
 
-- **Reports with proposals** — the program ran and found work.
-- **Reports with no proposals, arriving within the window** — the program ran
-  and the fleet is genuinely quiet. Quiet contact updates the liveness
-  record, never the ledger (noise rule, §3); the shift-close line carries the
-  coverage summary, so the account can still say "checked 14 times, nothing
-  found": an *attested* calm night, durably.
+- **Briefings arriving** — the program ran and found work.
+- **Empty submissions arriving within the window** — the program ran and the
+  fleet is genuinely quiet. Quiet contact updates the liveness record, never
+  the ledger (noise rule, §3); the shift-close line carries the coverage
+  summary, so the account can still say "checked 14 times, nothing found":
+  an *attested* calm night, durably.
 - **No contact past the declared window** — nobody looked. Dead cron, crashed
   script, uninstalled schedule — the daemon cannot tell which and does not
   need to: it responds by tier (below). Silence means exactly one thing.
 
 **What the watchdog does, by tier — and what it never does.** The
 last-contact age is a plain displayed fact wherever supervision status
-appears: an operator glancing at the app sees "last sweep report 4 min ago,"
-no alarm involved. The watchdog proper begins where display ends, because a
-status surface nobody is watching protects nobody overnight — that is the
-subsystem's founding premise. A missed window writes an **anomaly line into
-the ledger**, so the coverage gap is part of the durable account whether or
-not anyone was looking; persistent silence (§10) raises an **operator
-escalation through the existing escalation path** — no new channel, one more
-source writing into the one the design already has. The desk is deliberately
-never prompted: a broken sensor is an operator's problem, not a judgment
-call, and a desk told "your own sweep is dead" could do nothing but relay
-the message. Nor is this new timer machinery — the daemon already runs
-compiled cadences (the fact maintenance, §14's status write); the watchdog
-is one more deadline on the clock TBD already holds. It complements §14
-rather than duplicating it: §14's out-of-band watchdog asks whether the
-*daemon* is alive; this one asks whether anyone is *feeding* it.
+appears: an operator glancing at the app sees "last sweep contact 4 min
+ago," no alarm involved. The watchdog proper begins where display ends,
+because a status surface nobody is watching protects nobody overnight — that
+is the subsystem's founding premise. A missed window writes an **anomaly
+line into the ledger**, so the coverage gap is part of the durable account
+whether or not anyone was looking; persistent silence (§10) raises an
+**operator notification** through the notification channel the requirements
+doc assumes exists (designing it is out of scope there), and the anomaly
+lines stand in the record either way as the loudest thing in the account.
+The desk is deliberately never prompted: a broken sensor is an operator's
+problem, not a judgment call, and a desk told "your own sweep is dead" could
+do nothing but relay the message. Nor is this new timer machinery — the
+daemon already runs compiled cadences (the fact maintenance, design §14's
+status write); the watchdog is one more deadline on the clock TBD already
+holds. It complements design §14 rather than duplicating it: that
+out-of-band watchdog asks
+whether the *daemon* is alive; this one asks whether anyone is *feeding* it.
 
 **The contact window** is the declared expectation silence is measured
-against. While the default tick runs, the window defaults to a multiple of
-the tick interval (§10) and the operator declares nothing. A project on an
-external schedule declares its own window in `supervision.json`. A project
-that declines even that — a purely event-driven program with no periodic
-report has no honest cadence to declare — gets the degraded account in so
-many words:
-its coverage renders as **unknown**, in the morning account and on the status
-surfaces. Every position is available; the one eliminated is the accidental
-version, where the account implies watchfulness nobody was providing. The
-old system ran the accidental version for five nights: a component reported
-missing at every tick had never been installed at all, and judge sessions
-escalated restarts for software that was never built (design §9). The
-watchdog exists so that failure shape cannot recur quietly.
+against. It is armed only while supervision is on and a shift is open (§4):
+a pause disarms it, because silence the system itself requested is not a
+coverage gap. While the default tick runs, the window defaults to a multiple
+of the tick interval (§10) and the operator declares nothing. A project on
+an external schedule declares its own window in `supervision.json`. A
+project that declines even that — a purely event-driven program with no
+periodic submission has no honest cadence to declare — gets the degraded
+account in so many words: its coverage renders as **unknown**, in the
+morning account and on the status surfaces. Every position is available; the
+one eliminated is the accidental version, where the account implies
+watchfulness nobody was providing. The old system ran the accidental version
+for five nights: a component reported missing at every tick had never been
+installed at all, and judge sessions raised restart questions for software
+that was never built (design §9). The watchdog exists so that failure shape
+cannot recur quietly.
 
 **Why the watchdog's clock is TBD's.** Any user-land watchdog is itself a
 process that can die unnoticed; adding layers moves the silent-death point
@@ -310,79 +363,103 @@ Daemon liveness itself belongs to the layer that already owns it (launchd,
 and an operator's eyes on a visibly broken app). Projects may stack further
 watchdogs above TBD's; the compiled one is the floor, not the ceiling.
 
-## 7. The reference sweep script
+## 7. The reference sweep program
 
-Seeded per project when the project first comes under supervision — once,
-never clobbered, the wake program's seeding discipline exactly. The seeded
-copy is real, editable logic, not an example: the default tick runs it, so
-every project has working supervision from the first shift with nothing
-authored.
+The reference program ships **inside TBD's install, tool-owned**: the default
+tick runs the shipped copy directly, so every project has working supervision
+from the first shift with nothing authored, nothing configured, and nothing
+written into project files — and the program improves with releases, because
+the tool still owns it. A project takes ownership only when it wants to:
+
+- **The override is a pointer**: `"sweep": { "script": "<path>" }` in the
+  project's `supervision.json` entry (§4) points the tick at the project's
+  own program.
+- **The "Customize sweep…" gesture makes that concrete** — the exact analog
+  of the playbook's "Customize playbook…" gesture (design §5): it copies the
+  *currently shipped* program to
+  `~/tbd/supervision/projects/<name>/sweep.py` and writes the pointer,
+  exactly once. The tool never touches the copy again; after the gesture,
+  the file is the project's, and divergence from the shipped copy is
+  deliberate. Until the gesture, release improvements arrive for free.
+
+What the program is, wherever it runs from:
 
 - **It carries the threshold numbers as named constants** — the
   idle-intervention threshold, the runaway turn and no-progress windows
-  (§10). Tuning is editing a constant in a file the project owns. There is
-  no per-repo threshold configuration surface in TBD and none deferred:
-  numbers live in the script, which also preserves the design's one-column
-  property (design §7) permanently — a number never becomes a config column.
-- **It is the conformance artifact** for the readout and report contracts,
-  alongside the reference wake script for its surfaces: it may use only
-  documented public surfaces (`tbd supervise readout`, `tbd supervise
-  report`). A fact it cannot obtain that way is a failed conformance check
-  and a scoped API request — the mechanism by which TBD's surface grows,
-  pulled by a real consumer.
-- **It reports on every evaluation**, findings or none, satisfying §6's
-  report obligation.
-- Its case-cutting defaults are deliberately modest — the design's compiled
-  sweep semantics, relocated: idle past the threshold with uncommitted work
-  proposes a case; runaway counters past their windows propose a case; facts
-  it cannot interpret propose nothing. Sophistication is the project's to
-  add; the seed is a floor, not a ceiling.
+  (§10). Tuning is taking the customize copy and editing a constant in a
+  file the project then owns. There is no per-repo threshold configuration
+  surface in TBD and none deferred: numbers live in the program, which also
+  preserves the design's one-column property (design §7) permanently — a
+  number never becomes a config column.
+- **It is the conformance artifact** for all three public surfaces (§3),
+  alongside the reference wake script for its own: it may use only
+  `tbd supervise readout`, `tbd supervise brief`, and
+  `tbd supervise ledger`. A fact it cannot obtain that way is a failed
+  conformance check and a scoped API request — the mechanism by which TBD's
+  surface grows, pulled by a real consumer.
+- **It submits on every evaluation**, findings or none — an empty submission
+  when quiet — satisfying §6's contact obligation.
+- **It demonstrates case memory as authored discipline.** Its own files
+  record what it has briefed; before briefing an agent's situation it
+  consults the ledger query for TBD-side activity since — a situation it
+  already briefed, with the ledger showing the desk has not yet acted, is
+  skipped rather than re-briefed, and an operator answer it has read is
+  carried into the briefings it composes rather than re-asked. Open-case
+  dedup and never-re-ask (P1-5) are this discipline, demonstrated by the
+  shipped program rather than compiled into the daemon (§11, design §8).
+- Its case-cutting defaults are deliberately modest: idle past the threshold
+  with uncommitted work briefs a case; runaway counters past their windows
+  brief a case; the worktree pin state orders the briefing pinned-first,
+  then by case age (design §5, P1-3); facts it cannot interpret brief
+  nothing. Sophistication is the project's to add; the shipped copy is a
+  floor, not a ceiling.
 
 ## 8. Standing conduct: how the playbook reaches the desk
 
 The playbook — every mode description included — is installed as a
 standing instruction layer when the desk session is spawned, through the
-agent-kind adapter. Each work order then carries the **active mode's name**
-— a name from `supervision.json`'s declared list (design §8), never text
-extracted from the file. The desk holds the project's whole conduct for the
-life of its session; the order tells it which posture is selected right now.
+agent-kind adapter. Each delivered briefing then carries the **active mode's
+name** in its compiled header (§3) — a name from `supervision.json`'s
+declared list (design §8), never text extracted from the file. The desk
+holds the project's whole conduct for the life of its session; the header
+tells it which posture is selected right now.
 
 What this buys, in order of importance:
 
 - **Compaction cannot eat the conduct.** A long shift summarizes old turns;
   a playbook embedded in an early message can be compacted into mush by
-  work order fifteen. Standing layers are re-included by construction —
+  briefing fifteen. Standing layers are re-included by construction —
   verified for both shipped desk kinds (dated note, §13). Since deliberate
   recycling is an optimization and auto-compaction bears desk survival
   (design §9), conduct must live where compaction cannot reach it.
-- **A mode switch is zero-delta.** The next order names a different mode
-  whose description the desk already holds — mode selection takes effect on
-  the next order (design §3) with no conduct re-delivery and no desk
-  restart. The daemon extracts nothing and delivers no conduct; it delivers
-  the selection.
+- **A mode switch is zero-delta.** The next briefing's header names a
+  different mode whose description the desk already holds — mode selection
+  takes effect on the next briefing (design §3) with no conduct re-delivery
+  and no desk restart. The daemon extracts nothing and delivers no conduct;
+  it delivers the selection.
 - **Standing weight.** Conduct in the session's instruction layer reads as
   *who you are*; conduct in message one of forty reads as something someone
   said earlier.
-- **One copy per session**, prompt-cached, instead of one per order — on a
-  busy night, tens of thousands of tokens of duplication removed from the
+- **One copy per session**, prompt-cached, instead of one per briefing — on
+  a busy night, tens of thousands of tokens of duplication removed from the
   context window that the mid-shift ceiling already threatens.
 
 **Mid-shift playbook edits** are the one thing a spawn-time layer cannot
 carry, and the file cannot be re-read into a live session by either shipped
-agent kind (dated note, §13) — so the delta travels in the next work order:
-the changed text, marked as superseding the standing conduct. The daemon
-tracks, per desk session, the hash of the conduct that session stands on;
-orders carry deltas only while the hashes differ. Re-baselining does not
-wait for a full replacement: both shipped agent kinds support a **conduct
-reload** — relaunch the desk's session process *resuming the same
-conversation*, with the refreshed playbook as its standing layer (dated
-note, §13) — so the daemon schedules exactly that at the desk's next idle
-moment, and nothing of the shift's context is lost. Where an adapter lacks
-resume, deltas simply ride until the next recycle. Either way a replacement
-or reloaded desk spawns with the current playbook, which is also why a
-replacement desk needs no special briefing path. The ledger records the conduct hash per order either way, so
-"what conduct governed this act" is answerable per action against a
-versioned file.
+agent kind (dated note, §13) — so the delta travels in the compiled header
+of the next delivered briefing: the changed text, marked as superseding the
+standing conduct. The daemon tracks, per desk session, the hash of the
+conduct that session stands on; headers carry deltas only while the hashes
+differ. Re-baselining does not wait for a full replacement: both shipped
+agent kinds support a **conduct reload** — relaunch the desk's session
+process *resuming the same conversation*, with the refreshed playbook as its
+standing layer (dated note, §13) — so the daemon schedules exactly that at
+the desk's next idle moment, and nothing of the shift's context is lost.
+Where an adapter lacks resume, deltas simply ride until the next recycle.
+Either way a replacement or reloaded desk spawns with the current playbook,
+which is also why a replacement desk needs no special briefing path. The
+ledger records the conduct hash per delivery either way, so "what conduct
+governed this act" is answerable per action against a versioned file.
 
 **Installation is an adapter capability**, like the context apparatus
 (design §9). The Claude adapter delivers the playbook as a named layer in
@@ -391,45 +468,31 @@ the `SystemPromptBuilder` stack TBD already applies at spawn
 mechanism as the existing `TBD_PROMPT_CONTEXT` layer; the Codex adapter
 passes it as `developerInstructions` at thread start (dated note, §13). An
 agent kind with no such mechanism falls back to embedding the playbook in
-the first work order of each desk session, and nothing else changes.
+the first briefing of each desk session, and nothing else changes.
 
-## 9. The work-order renderer
+## 9. The delivered briefing
 
-Between compiled assembly and delivery sits one authored transform: a
-per-project hook that turns the assembled work order into the text that
-lands on the desk. The shape is Claude Code's statusline exactly — a program
-receiving structured JSON on stdin whose stdout becomes the surface:
-
-- **No hook present** — the built-in renderer formats the order. The default
-  path has zero setup and is the common case.
-- **Hook present** — the daemon passes the assembled work order (same schema
-  family as §3, versioned) on stdin; stdout, bounded (§10), is the delivered
-  briefing.
-- **Hook crashes, times out, or emits nothing** — the built-in renderer
-  formats the order and the daemon writes a loud anomaly line. Delivery is
-  never held hostage to a broken formatter; the failure default is stock
-  behavior plus a visible record, the same honesty pattern as §6. The
-  timeout rides the injected-clock seam like every compiled delay.
-
-The split this creates is the load-bearing part. **Assembly** — which facts,
-which decisions, which payloads are in the structure — is compiled: the
-envelope's guaranteed contents are how "your decisions ride in every order"
-stays a promise. **Rendering** — how that structure reads — is authored,
-because how a briefing lands is voice and emphasis, which is conduct's
-territory, not the tool's. The residual risk is a project's renderer
-dropping content the envelope guaranteed, and the design's trust model
-already has a name for it: an authored program's correctness is its
-author's, like any cron job's. TBD's obligations are that the full structure
-reaches the renderer and that the ledger records both the assembled
-structure and the delivered text's hash — so a desk that re-asked an
-answered question is *diagnosable* (the record shows whether the renderer
-dropped the decision or the desk ignored it), which is strictly more than an
-all-compiled pipeline could say about a desk that ignores its briefing.
-
-With the renderer in place, the delivery story states as one rule: **the
-envelope embeds what is new, installs what is standing, and points at what
-is durable** — case data and deltas in the order, conduct in the session
+What lands on a desk is the program's text under a short compiled header,
+and the whole delivery story states as one rule: **the briefing embeds what
+is new, the session layer holds what is standing, and the ledger points at
+what is durable** — case prose in the briefing, conduct in the session
 layer, transcripts and playbooks by path with hashes in the ledger.
+
+- **The header is TBD's only text**, and it carries only TBD's own facts:
+  the active mode's name and any pending conduct delta (§8). TBD adds its
+  own information; it never demands structure from the program, and it
+  never edits the program's text (§3).
+- **Every delivery is recorded** with the delivered text's hash and the
+  conduct hash the desk stands on (§3, design §6). "What did this desk
+  actually receive, and under what conduct" is answerable per briefing —
+  which is what makes a desk that ignores its briefing *diagnosable*: the
+  record shows exactly what the briefing carried, so a re-asked question or
+  a missed case traces to the program's text or the desk's judgment, never
+  to an unrecorded transform in between.
+- **Delivery is never held hostage.** The header is compiled and cannot
+  fail apart from the daemon itself; there is no authored formatter in the
+  delivery path to crash, time out, or drop content (§11, the renderer-hook
+  rejection).
 
 ## 10. Defaults
 
@@ -438,18 +501,20 @@ layer, transcripts and playbooks by path with hashes in the ledger.
 | Default tick interval | 5 min | §4 |
 | Contact window, TBD schedule | 3 × tick interval | §6 |
 | Contact window, external schedule | declared, or coverage unknown | §6 |
-| Watchdog escalation | 3 consecutive missed windows | §6 |
-| Sweep script timeout (daemon-run tick) | 60 s | §4 |
-| Renderer timeout | 10 s | §9 |
-| Renderer output bound | 256 KiB | §9 |
-| Report size bound | 1 MiB | §3 |
-| Idle-intervention threshold | 40 min | §7 (reference script constant) |
-| Runaway: turns in window | 30 turns | §7 (reference script constant) |
-| Runaway: no-progress window | 90 min | §7 (reference script constant) |
+| Watchdog notification | 3 consecutive missed windows | §6 |
+| Sweep program timeout (daemon-run tick) | 60 s | §4 |
+| Per-project briefing rate limit | 1 briefing / 2 min | §3 |
+| Briefing size bound (`brief` stdin) | 256 KiB | §3 |
+| Paused-refusal exit code (`brief`) | 75 | §3 |
+| Idle-intervention threshold | 40 min | §7 (shipped program constant) |
+| Runaway: turns in window | 30 turns | §7 (shipped program constant) |
+| Runaway: no-progress window | 90 min | §7 (shipped program constant) |
 
 The first eight are compiled constants; the last three ship as named
-constants in the seeded reference script and are listed here as its
-documented defaults, not as TBD's.
+constants in the reference sweep program and are listed here as its
+documented defaults, not as TBD's. The paused exit code follows sysexits'
+`EX_TEMPFAIL` (75): "not now, retry later," which is exactly what the
+refusal means.
 
 ## 11. Rejected alternatives
 
@@ -461,13 +526,16 @@ documented defaults, not as TBD's.
   It would also compile a theory of attention: a tick as the only trigger
   forces duration-thinking on event-shaped projects.
 - **A daemon-invoked decision script** — the daemon keeps the tick and pipes
-  facts to an authored script on stdin, stdout returning cases. Attractive
-  because liveness attestation comes free ("I called and nobody answered"),
-  but it buys attestation by owning the trigger, which compiles the theory
-  of attention anyway. The intake-plus-watchdog shape buys the same
-  attestation directly and leaves triggers authored. The daemon-run default
-  tick (§4) preserves this shape's out-of-box convenience without its
-  monopoly.
+  facts to an authored script on stdin, stdout returning cases through a
+  private contract. Attractive because liveness attestation comes free ("I
+  called and nobody answered"), but it buys attestation by making the
+  daemon's invocation the only trigger and its stdin/stdout the only
+  interface, which compiles the theory of attention anyway. The
+  pipe-plus-watchdog shape buys the same attestation directly and leaves
+  triggers authored. The daemon-run default tick (§4) preserves this shape's
+  out-of-box convenience without its monopoly: the program the tick runs
+  speaks the same three public surfaces any externally triggered program
+  would.
 - **A fully external sweep with no liveness contract** — maximum symmetry
   with the wake program: TBD exposes surfaces and neither runs nor monitors
   anything. Rejected on failure asymmetry: a dead wake program leaves parked
@@ -476,60 +544,124 @@ documented defaults, not as TBD's.
   indistinguishable from calm. The parked half accepts that ambiguity
   deliberately; the live half measured its cost at five days once and does
   not accept it again (§6).
-- **A compiled baseline with an authored overlay** — the specced sweep stays
+- **A compiled baseline with an authored overlay** — a compiled sweep stays
   and a script may add or suppress cases. Fails toward stock behavior
   instead of silence, which is its one virtue, but creates two concurrent
   decision layers to reason about, and delivers tuning as *suppressing the
-  output of logic the project cannot edit* — backwards. The seeded reference
-  script provides stock-behavior-by-default without a second layer.
+  output of logic the project cannot edit* — backwards. The shipped
+  reference program provides stock-behavior-by-default without a second
+  layer, and the customize gesture makes every line of it editable (§7).
 - **Routing prompt cases through the sweep program** — uniformity at the
   cost of putting script latency and script bugs on the one path where the
   agent is provably blocked and the hook event is the only live signal.
   There is no authored detection logic in a reported fact, so the descope's
   motivation does not apply. Script-level prompt handling can migrate in
   later on field evidence, as any capability can.
-- **A single fleet-global sweep script** — one script seeing all projects.
-  The project is the policy unit everywhere else (desk, playbook, wake
-  program, mode); a global script would reimplement project membership
-  dispatch inside user code and let one project's syntax error silence every
-  project's cases. Per-project scripts make an edit's blast radius the
-  project that edited.
-- **A schema for `condition`** — an enum of case kinds. Rules-vocabulary
-  thinking; see the intake (§3) and the `clearance` precedent.
-- **Re-delivering the playbook in every work order** — robust and simple,
+- **A single fleet-global sweep evaluation** — one run seeing all projects
+  at once. The project is the policy unit everywhere else (desk, playbook,
+  wake program, mode); a global run would reimplement project-membership
+  dispatch inside user code and let one project's error silence every
+  project's briefings. The tick invokes the program once per project, and a
+  custom program is selected per project (§4, §7), so an edit's blast
+  radius is the project that edited.
+- **A structured evaluation report at the pipe** — per-agent proposals with
+  condition and evidence fields, submitted as JSON to a compiled intake that
+  assembles them into deliveries. Rejected by representation-follows-consumer
+  (§1): no parser ever reads a proposal — the only downstream reader is the
+  desk, which reads prose — so the schema would exist solely for TBD to
+  disassemble and reassemble text on its way to a model, putting TBD in the
+  composition business the placement split assigns to the project. A
+  condition vocabulary also rebuilds the old system's rules vocabulary (the
+  `clearance` table's verdict kinds, shipped with zero production readers —
+  `docs/nightwatch.md` §1) one layer down.
+- **An agent-list manifest on the pipe** — briefing text plus a minimal
+  structured list of the agents it concerns, so the daemon could dedup or
+  track per-agent state. Rejected as the report schema's thin end: any
+  structure demanded from the program becomes vocabulary TBD must version
+  and the program must satisfy, and the compiled consumers a manifest would
+  feed — per-agent cooldowns, open-case tracking — are checks this design
+  deliberately places elsewhere: at the verbs, where the target is already
+  explicit, and in the program's own memory (§7). The pipe takes pure text
+  because its reader is a desk.
+- **A separate renderer hook** — a per-project program between compiled
+  assembly and delivery, receiving an assembled order structure on stdin,
+  its stdout becoming the delivered text. Rejected as the two-author
+  artifact: it splits one briefing between a compiled assembler guaranteeing
+  structure and an authored formatter free to drop it, forcing a schema into
+  existence solely to bridge the two halves of what is naturally one
+  authored act — and every guarantee about the assembled contents has to be
+  re-litigated against what the formatter kept. With the program composing
+  the briefing outright, the split collapses: voice, emphasis, and content
+  have one author, and TBD's only text is the compiled header — its own
+  information, prepended, never structure demanded (§2, §3).
+- **Compiled open-case tracking at the pipe** — the daemon remembering which
+  situations have been briefed and dropping repeats. Rejected because dedup
+  requires identity, identity requires structure (the manifest above), and
+  "the same situation" is a judgment no daemon can make from text. The
+  program owns its case memory in its own files, with the ledger query
+  supplying TBD's half of the loop — what was delivered, what was acted on,
+  what came of it — and the shipped program demonstrates the discipline
+  (§7). The identity-blind rate limit is the compiled floor: pacing needs
+  no identity, only timestamps (§3).
+- **A compiled escalation queue** — see design §8 for the full argument. One
+  guaranteed inbox plus forgery-proof consent is a real property, and it is
+  still rejected: it freezes question routing into the daemon and builds a
+  question data model — the hardest kind of surface to change. Starting
+  outside is the reversible direction.
+- **An approval-stamp verb** — see design §8. Forgery-proof consent for
+  irreversible acts at the cost of one verb, rejected for now as machinery
+  with no consumer; revisit on field evidence.
+- **Re-delivering the playbook in every briefing** — robust and simple,
   and what the old system's nudge loop did with its whole compiled briefing,
   but it funds the desk's most likely failure (the mid-shift context
   ceiling) with pure duplication, and re-delivery is the anomaly against the
-  design's own transcript-by-path rule. The standing layer plus deltas (§8)
-  keeps every property re-delivery had — mode switches on the next order,
-  replacement desks briefed on arrival — without the copies.
+  design's own transcript-by-path rule. The standing layer plus header
+  deltas (§8) keeps every property re-delivery had — mode switches on the
+  next briefing, replacement desks briefed on arrival — without the copies.
 
 ## 12. Testing
 
-- **Intake round-trip** — the reference script's report against a synthetic
-  readout becomes a work order; a report with no proposals updates the
-  liveness record, writes no ledger line, produces no work order, and is
-  counted in the shift-close coverage summary.
-- **Floor** — a proposal duplicating an in-flight intervention or targeting
-  a rate-limited agent is dropped, its disposition returned in the report
-  command's response, and the submission still counts as contact.
+- **Brief round-trip** — briefing text submitted against an open shift is
+  delivered verbatim under the compiled header; the delivery line carries
+  the delivered text's hash and the conduct hash; delivery arms the desk
+  dead-man's deadline.
+- **Quiet contact** — an empty submission updates the liveness record,
+  delivers nothing, writes no ledger line, and is counted in the shift-close
+  coverage summary.
+- **Pacing** — a second briefing for the same project inside the rate-limit
+  window is refused with the machine-readable result and still counts as
+  contact; a briefing for a different project inside the same window is
+  delivered (the limit is per project and blind to everything else); an
+  empty submission is never paced.
+- **Paused** — with supervision off or no shift open, `brief` exits with the
+  pinned paused code, delivers nothing, and does not feed the watchdog; the
+  default tick launches no runs while paused; a run in flight at the flip
+  finishes within its timeout bound and its submission is refused; no
+  external process is signaled. Both branches of the switch behave (per the
+  flag-branch rule).
+- **Verb preconditions** — a `drive` targeting a terminal with an
+  intervention in flight, a pending re-check, or a rate limit is refused at
+  the act with an ordinary error naming the condition, and the refusal is
+  recorded (design §3, §4).
+- **Ledger query** — returns exactly the project's actions, outcomes,
+  deliveries, and anomalies since the timestamp; other projects' lines never
+  appear.
 - **Watchdog** — a missed window writes the anomaly line; the configured
-  consecutive count escalates; contact resets the count; a project with
-  `schedule: external` and no declared window renders coverage unknown, and
-  both branches of the schedule setting behave (per the flag-branch rule).
-- **Dead-vs-quiet** — a quiet-report night and a no-contact night produce
+  consecutive count raises the operator notification; contact resets the
+  count; the window is disarmed while supervision is paused or no shift is
+  open; a project with `schedule: external` and no declared window renders
+  coverage unknown, and both branches of the schedule setting behave.
+- **Dead-vs-quiet** — a quiet-contact night and a no-contact night produce
   distinguishable accounts.
-- **Seeding** — first supervision touch seeds script and playbook; a second
-  touch never overwrites either.
+- **Selection** — with nothing configured the tick runs the shipped program;
+  a `sweep.script` pointer runs the project's file; the customize gesture
+  copies the currently shipped program, writes the pointer, and refuses to
+  overwrite an existing copy; playbook seeding is unchanged by any of it.
 - **Standing layer** — spawn installs the full playbook via the adapter; a
-  mode switch changes only the name carried in the next order; a playbook
-  edit produces a superseding delta in the next order; a conduct reload
-  resumes the same session with the refreshed layer and clears the delta;
-  the no-mechanism agent kind falls back to first-order embed.
-- **Renderer** — hook output is delivered verbatim within bounds; crash,
-  timeout, and empty output each fall back to the built-in renderer plus an
-  anomaly line; ledger carries assembled structure and delivered hash in
-  all cases.
+  mode switch changes only the name in the next delivery's header; a
+  playbook edit produces a superseding delta in the next header; a conduct
+  reload resumes the same session with the refreshed layer and clears the
+  delta; the no-mechanism agent kind falls back to first-briefing embed.
 
 ## 13. Dated source note: standing-instruction mechanics per agent kind
 
@@ -562,7 +694,7 @@ discipline). Verified 2026-08-01.
   root-down, 32 KiB combined budget) but arrives as a user-role message.
   Caveats: the app-server is flagged experimental; `AGENTS.md` is cached per
   session and **not re-read on file edits** — which is why mid-shift
-  playbook edits travel as work-order deltas (§8) rather than file writes;
-  the former `experimental_instructions_file` key is renamed
+  playbook edits travel as briefing-header deltas (§8) rather than file
+  writes; the former `experimental_instructions_file` key is renamed
   `model_instructions_file` and *replaces* base instructions — not the
   mechanism to use here.
