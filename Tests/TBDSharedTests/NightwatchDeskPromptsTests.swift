@@ -260,6 +260,19 @@ struct NightwatchDeskPromptsTests {
             #expect(!tick.contains("DAEMON_LOG"))
         }
 
+        @Test("tick and judge include Codex without scraping the Codex TUI")
+        func codexFleetRoutingUsesHookState() {
+            let tick = NightwatchSkillContent.tickPy
+            #expect(tick.contains("t.kind IN ('claude','codex')"))
+            #expect(tick.contains("def codex_state(activity)"))
+            #expect(tick.contains("state, note = codex_state(activity)"))
+            #expect(tick.contains("if kind == \"codex\""))
+            #expect(tick.contains("COALESCE(t.activityState,'unknown')"))
+
+            let judge = NightwatchSkillContent.judgePy
+            #expect(judge.contains("t.kind IN ('claude','codex')"))
+        }
+
         @Test("handoff.py is shipped and exposes the three relay verbs")
         func handoffShipped() {
             #expect(NightwatchSkillContent.scripts.contains { $0.name == "handoff.py" })

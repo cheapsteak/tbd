@@ -775,22 +775,40 @@ def daemon_health():
     return {"ok": True, "absent": True, "age_s": None,
             "reason": "not-checked (this skill ships no daemon; a machine-local one may exist)"}
 
+def codex_state(activity):
+    """Classify Codex from TBD's hook-backed machine state, never its TUI."""
+    return {
+        "working": ("WORKING", "Codex hook state: working"),
+        "waiting_for_user": ("DECISION", "Codex is waiting for user input"),
+        "idle": ("IDLE", "Codex hook state: idle"),
+        "unknown": ("IDLE", "Codex activity is not known yet"),
+    }.get(activity or "unknown", ("IDLE", f"Codex hook state: {activity}"))
+
 def fleet():
     rows = sh(["sqlite3","-separator","\t",DB,
-      "SELECT t.tmuxPaneID, w.displayName, w.tmuxServer, t.id, w.repoID "
-      "FROM worktree w JOIN terminal t ON t.worktreeID=w.id AND t.kind='claude' AND t.suspendedAt IS NULL "
+      "SELECT t.tmuxPaneID, w.displayName, w.tmuxServer, t.id, w.repoID, t.kind, "
+      "COALESCE(t.activityState,'unknown') "
+      "FROM worktree w JOIN terminal t ON t.worktreeID=w.id "
+      "AND t.kind IN ('claude','codex') AND t.suspendedAt IS NULL AND t.hibernatedAt IS NULL "
       "WHERE w.status='active' ORDER BY w.tmuxServer, w.displayName;"])
     out = []
     for l in rows.splitlines():
         p = l.split("\t")
-        if len(p) < 5: continue
-        pane, name, srv, tid, rid = p
-        # -e keeps the escapes: dimness is the only thing distinguishing a ghost
-        # suggestion from typed input, and it's gone by the time tmux strips ANSI.
-        cap_raw = sh(["tmux","-L",srv,"capture-pane","-p","-e","-t",pane])
-        cap = ANSI_RE.sub("", cap_raw)
-        state, note = classify(cap, cap_raw)
-        ctx_pct, is_1m, burn = burn_risk(cap)
+        if len(p) < 7: continue
+        pane, name, srv, tid, rid, kind, activity = p
+        if kind == "codex":
+            # Codex installs TBD hooks that publish activityState. Its rendered
+            # terminal is not Claude's UI and must not be interpreted with the
+            # grandfathered Claude-only screen classifier.
+            state, note = codex_state(activity)
+            ctx_pct, is_1m, burn = None, False, False
+        else:
+            # -e keeps the escapes: dimness is the only thing distinguishing a ghost
+            # suggestion from typed input, and it's gone by the time tmux strips ANSI.
+            cap_raw = sh(["tmux","-L",srv,"capture-pane","-p","-e","-t",pane])
+            cap = ANSI_RE.sub("", cap_raw)
+            state, note = classify(cap, cap_raw)
+            ctx_pct, is_1m, burn = burn_risk(cap)
         hook = POLICIES.get(rid, {})
         pol = hook.get("policy", {})
         # priorities/dont-touch are the UNION of global config + the repo's own hook
@@ -799,7 +817,8 @@ def fleet():
         protect = (any(d in pane or d.lower() in name.lower() for d in DONT_TOUCH)
                    or any(d.lower() in name.lower() for d in pol.get("dont_touch", [])))
         out.append({"pane": pane, "name": name, "server": srv, "tid": tid,
-                    "state": state, "note": note, "priority": prio, "protected": protect,
+                    "kind": kind, "state": state, "note": note,
+                    "priority": prio, "protected": protect,
                     "repo": hook.get("name"), "gate": pol.get("gate", {}).get("ready_when"),
                     "advance_skill": pol.get("advance_skill"), "deploy_skill": pol.get("deploy_skill"),
                     "ctx_pct": ctx_pct, "is_1m": is_1m, "burn_risk": burn})
@@ -882,7 +901,14 @@ def selftest():
     check("working outranks composer", classify(working, working)[0], "WORKING")
     check("empty pane", classify("", ""), ("EMPTY", ""))
 
-    print(f"selftest: {n}/{n} composer ghost-guard scenarios passed")
+    check("codex working comes from hook state",
+          codex_state("working"), ("WORKING", "Codex hook state: working"))
+    check("codex waiting is judgment, not scraped composer input",
+          codex_state("waiting_for_user"), ("DECISION", "Codex is waiting for user input"))
+    check("codex unknown fails quiet",
+          codex_state("unknown"), ("IDLE", "Codex activity is not known yet"))
+
+    print(f"selftest: {n}/{n} agent-state scenarios passed")
 
 
 def main():
@@ -1403,7 +1429,8 @@ def main():
     by_branch = {}
     for l in sh(["sqlite3","-separator","\t",DB,
                  "SELECT w.branch,t.tmuxPaneID,t.id,r.displayName FROM worktree w "
-                 "JOIN terminal t ON t.worktreeID=w.id AND t.kind='claude' AND t.suspendedAt IS NULL "
+                 "JOIN terminal t ON t.worktreeID=w.id "
+                 "AND t.kind IN ('claude','codex') AND t.suspendedAt IS NULL AND t.hibernatedAt IS NULL "
                  "JOIN repo r ON w.repoID=r.id WHERE w.status='active';"]).splitlines():
         p = l.split("\t")
         if len(p) >= 4: by_branch[p[0]] = {"pane": p[1], "tid": p[2], "repo": p[3]}
