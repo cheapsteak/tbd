@@ -55,6 +55,19 @@ public struct BranchRef: Sendable, Equatable {
     }
 }
 
+/// One tracked, untracked, or ignored path from a worktree scan. Rename
+/// detection is disabled by the caller, so every entry names exactly one path
+/// and can be checked independently against a provenance manifest.
+public struct GitWorktreeStatusEntry: Sendable, Equatable {
+    public let status: String
+    public let path: String
+
+    public init(status: String, path: String) {
+        self.status = status
+        self.path = path
+    }
+}
+
 /// Error thrown when a git command fails.
 public struct GitError: Error, CustomStringConvertible {
     public let command: String
@@ -237,6 +250,113 @@ public struct GitManager: Sendable {
     /// Returns `true` if there are uncommitted changes (staged or unstaged).
     public func hasUncommittedChanges(repoPath: String) async throws -> Bool {
         let output = try await run(arguments: ["status", "--porcelain"], at: repoPath)
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Returns every tracked, untracked, and ignored file without git's quoted
+    /// path encoding. Any malformed record throws so destructive callers fail
+    /// toward keeping the worktree.
+    public func worktreeStatusEntries(worktreePath: String) async throws -> [GitWorktreeStatusEntry] {
+        let data = try await runData(
+            arguments: [
+                "-c", "status.renames=false", "status", "--porcelain=v1", "-z",
+                "--untracked-files=all",
+            ],
+            at: worktreePath
+        )
+        guard let output = String(data: data, encoding: .utf8) else {
+            throw GitError(
+                command: "git status --porcelain=v1 -z --untracked-files=all",
+                exitCode: -1,
+                stderr: "status output was not valid UTF-8"
+            )
+        }
+
+        var entries = try output.split(separator: "\0", omittingEmptySubsequences: true).map { record in
+            guard record.utf8.count >= 4 else {
+                throw GitError(
+                    command: "git status --porcelain=v1 -z --untracked-files=all",
+                    exitCode: -1,
+                    stderr: "malformed porcelain record"
+                )
+            }
+            let statusEnd = record.index(record.startIndex, offsetBy: 2)
+            guard record[statusEnd] == " " else {
+                throw GitError(
+                    command: "git status --porcelain=v1 -z --untracked-files=all",
+                    exitCode: -1,
+                    stderr: "malformed porcelain separator"
+                )
+            }
+            let path = String(record[record.index(after: statusEnd)...])
+            guard !path.isEmpty else {
+                throw GitError(
+                    command: "git status --porcelain=v1 -z --untracked-files=all",
+                    exitCode: -1,
+                    stderr: "porcelain record had an empty path"
+                )
+            }
+            return GitWorktreeStatusEntry(status: String(record[..<statusEnd]), path: path)
+        }
+
+        // `git status` deliberately omits ignored files. Enumerate them as
+        // files (not collapsed directories), because force-removing a
+        // worktree deletes ignored content too.
+        entries.append(contentsOf: try await ignoredFilePaths(worktreePath: worktreePath).map {
+            GitWorktreeStatusEntry(status: "!!", path: $0)
+        })
+        return entries
+    }
+
+    /// Returns ignored files individually. Snapshot callers use the same list
+    /// to force-add bytes that ordinary `git add -A` deliberately omits.
+    public func ignoredFilePaths(worktreePath: String) async throws -> [String] {
+        let ignoredData = try await runData(
+            arguments: ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+            at: worktreePath
+        )
+        guard let ignoredOutput = String(data: ignoredData, encoding: .utf8) else {
+            throw GitError(
+                command: "git ls-files --others --ignored --exclude-standard -z",
+                exitCode: -1,
+                stderr: "ignored-file output was not valid UTF-8"
+            )
+        }
+        return try ignoredOutput.split(
+            separator: "\0", omittingEmptySubsequences: true
+        ).map { path in
+            guard !path.isEmpty else {
+                throw GitError(
+                    command: "git ls-files --others --ignored --exclude-standard -z",
+                    exitCode: -1,
+                    stderr: "ignored-file record had an empty path"
+                )
+            }
+            return String(path)
+        }
+    }
+
+    /// Reads the committed bytes for `HEAD:path`. Used to prove the base half
+    /// of an exact tracked bootstrap mutation.
+    public func headFileContents(worktreePath: String, path: String) async throws -> Data {
+        try await runData(arguments: ["show", "HEAD:\(path)"], at: worktreePath)
+    }
+
+    /// Reads the index bytes for `:path`. Archive provenance requires these
+    /// to equal HEAD so a staged user edit cannot masquerade as bootstrap.
+    public func indexFileContents(worktreePath: String, path: String) async throws -> Data {
+        try await runData(arguments: ["show", ":\(path)"], at: worktreePath)
+    }
+
+    /// Returns true when HEAD is present on any remote-tracking branch. A git
+    /// failure returns false so archive eligibility fails toward preservation.
+    public func isHeadReachableFromAnyRemote(worktreePath: String) async -> Bool {
+        guard let output = try? await run(
+            arguments: ["branch", "-r", "--contains", "HEAD", "--format=%(refname)"],
+            at: worktreePath
+        ) else {
+            return false
+        }
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -582,9 +702,28 @@ public struct GitManager: Sendable {
     /// using a scratch `GIT_INDEX_FILE` — the worktree is orphaned and about
     /// to be deleted by the GC sweep, so there's no working state left to
     /// preserve.
-    public func stageAllAndWriteTree(worktreePath: String) async throws -> String {
-        _ = try await run(arguments: ["add", "-A"], at: worktreePath)
-        let output = try await run(arguments: ["write-tree"], at: worktreePath)
+    public func stageAllAndWriteTree(
+        worktreePath: String,
+        forcePaths: [String] = []
+    ) async throws -> String {
+        let scratchIndex = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-reap-index-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: scratchIndex) }
+        var environment = ProcessInfo.processInfo.environment
+        environment["GIT_INDEX_FILE"] = scratchIndex
+
+        _ = try await run(arguments: ["read-tree", "HEAD"], at: worktreePath, environment: environment)
+        _ = try await run(arguments: ["add", "-A"], at: worktreePath, environment: environment)
+        if !forcePaths.isEmpty {
+            _ = try await run(
+                arguments: ["add", "-f", "--"] + forcePaths,
+                at: worktreePath,
+                environment: environment
+            )
+        }
+        let output = try await run(
+            arguments: ["write-tree"], at: worktreePath, environment: environment
+        )
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -667,7 +806,21 @@ public struct GitManager: Sendable {
     /// not fire on CI). Production callers never pass `executable`.
     private func run(arguments: [String], at directory: String,
                      timeout: Duration? = nil,
-                     executable: String = "/usr/bin/git") async throws -> String {
+                     executable: String = "/usr/bin/git",
+                     environment: [String: String]? = nil) async throws -> String {
+        let data = try await runData(
+            arguments: arguments, at: directory, timeout: timeout, executable: executable,
+            environment: environment
+        )
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// Data-returning form for archive provenance, where replacing non-UTF-8
+    /// file bytes would make a digest comparison unsound.
+    private func runData(arguments: [String], at directory: String,
+                         timeout: Duration? = nil,
+                         executable: String = "/usr/bin/git",
+                         environment: [String: String]? = nil) async throws -> Data {
         let resolvedTimeout = timeout ?? subprocessTimeout
         let commandDescription = "git " + arguments.joined(separator: " ")
         // All the mechanism (starvation-proof watchdog thread, authoritative
@@ -680,6 +833,7 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
+            environment: environment,
             timeout: resolvedTimeout,
             clock: clock
         ) {
@@ -687,12 +841,11 @@ public struct GitManager: Sendable {
             logger.warning("git subprocess timed out after \(resolvedTimeout, privacy: .public): \(commandDescription, privacy: .public)")
             throw GitTimeoutError(command: commandDescription, timeout: resolvedTimeout)
         case let .completed(status, stdoutData, stderrData):
-            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             if status != 0 {
                 throw GitError(command: commandDescription, exitCode: status, stderr: stderr)
             }
-            return stdout
+            return stdoutData
         }
     }
 

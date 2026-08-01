@@ -12,6 +12,8 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
     case worktreeAlreadyActive(UUID)
     case createFailed(String)
     case invalidOperation(String)
+    case archiveUnsafe(String)
+    case archiveRemovalFailed(String)
     case worktreePathAlreadyExists(String)
     case worktreeAlreadyRegistered(String)
     /// The archived worktree's branch no longer exists and we have no captured
@@ -32,6 +34,10 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
             return "Failed to create worktree: \(reason)"
         case .invalidOperation(let detail):
             return detail
+        case .archiveUnsafe(let detail):
+            return "Archive blocked: \(detail)"
+        case .archiveRemovalFailed(let detail):
+            return "Archive removal failed: \(detail)"
         case .worktreePathAlreadyExists(let path):
             return "Cannot revive worktree: a file or directory already exists at \(path). Remove or move it and try again."
         case .worktreeAlreadyRegistered(let path):
@@ -71,6 +77,12 @@ public struct WorktreeLifecycle: Sendable {
     /// Reaper grace knobs (kept small in tests to avoid real sleeps).
     public let reaperGraceAttempts: Int
     public let reaperPollInterval: Duration
+    /// Test seam for archive preflight. Production callers leave this nil and
+    /// always use `ArchiveSafetyClassifier` against the live worktree.
+    let archiveSafetyEvaluator:
+        (@Sendable (_ worktreePath: String, _ knownPublished: Bool) async -> ArchiveSafetyReport)?
+    /// Test seam only. Production leaves this nil and uses GitManager.
+    let worktreeRemover: (@Sendable (_ repoPath: String, _ worktreePath: String) async throws -> Void)?
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
@@ -122,6 +134,38 @@ public struct WorktreeLifecycle: Sendable {
         reaperGraceAttempts: Int = 30,
         reaperPollInterval: Duration = .milliseconds(100)
     ) {
+        self.init(
+            db: db, git: git, tmux: tmux, hooks: hooks,
+            subscriptions: subscriptions, modelProfileResolver: modelProfileResolver,
+            pendingQuestions: pendingQuestions, configDirManager: configDirManager,
+            preSessionTimeout: preSessionTimeout, preSessionPollInterval: preSessionPollInterval,
+            processSignaller: processSignaller, reaperGraceAttempts: reaperGraceAttempts,
+            reaperPollInterval: reaperPollInterval,
+            archiveSafetyEvaluator: nil, worktreeRemover: nil
+        )
+    }
+
+    /// Internal-only initializer for deterministic lifecycle tests. The
+    /// production/public initializer cannot inject an archive bypass.
+    init(
+        db: TBDDatabase,
+        git: GitManager,
+        tmux: TmuxManager,
+        hooks: HookResolver,
+        subscriptions: StateSubscriptionManager? = nil,
+        modelProfileResolver: ModelProfileResolver? = nil,
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
+        preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
+        preSessionPollInterval: TimeInterval = 0.5,
+        processSignaller: ProcessSignaller = ProductionProcessSignaller(),
+        reaperGraceAttempts: Int = 30,
+        reaperPollInterval: Duration = .milliseconds(100),
+        archiveSafetyEvaluator:
+            (@Sendable (_ worktreePath: String, _ knownPublished: Bool) async -> ArchiveSafetyReport)?,
+        worktreeRemover:
+            (@Sendable (_ repoPath: String, _ worktreePath: String) async throws -> Void)?
+    ) {
         self.db = db
         self.git = git
         self.tmux = tmux
@@ -136,6 +180,8 @@ public struct WorktreeLifecycle: Sendable {
         self.processSignaller = processSignaller
         self.reaperGraceAttempts = reaperGraceAttempts
         self.reaperPollInterval = reaperPollInterval
+        self.archiveSafetyEvaluator = archiveSafetyEvaluator
+        self.worktreeRemover = worktreeRemover
     }
 
     /// Projects root for a revive spawn's resolved profile config dir path,

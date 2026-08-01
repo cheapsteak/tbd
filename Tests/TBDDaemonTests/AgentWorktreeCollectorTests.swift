@@ -350,6 +350,35 @@ struct AgentWorktreeCollectorTests {
         #expect(FileManager.default.fileExists(atPath: c.path))
     }
 
+    @Test func reapRechecksLivenessAfterSnapshot() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try await makeAgentWorktree(repo: repo, name: "agent-t1")
+        let collector = makeCollector()
+        let c = try #require(await collector.candidates(repoPath: repo.path).first)
+        let provider = PostSnapshotLiveCWDs(path: c.path)
+
+        let record = await collector.reap(c, freshLiveCWDs: { await provider.next() })
+
+        #expect(record == nil)
+        #expect(FileManager.default.fileExists(atPath: c.path))
+        #expect(await provider.callCount == 2)
+    }
+
+    @Test func reapRechecksStatusAfterSnapshot() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try await makeAgentWorktree(repo: repo, name: "agent-t1")
+        let collector = makeCollector()
+        let c = try #require(await collector.candidates(repoPath: repo.path).first)
+        let provider = PostSnapshotMutation(worktreePath: c.path)
+
+        let record = await collector.reap(c, freshLiveCWDs: { await provider.next() })
+
+        #expect(record == nil)
+        #expect(FileManager.default.fileExists(atPath: c.path + "/arrived-after-snapshot.txt"))
+    }
+
     // MARK: - Symlinked parent path robustness
 
     @Test func symlinkedPathsStillMatch() async throws {
@@ -375,5 +404,35 @@ struct AgentWorktreeCollectorTests {
         // entry built from that same canonical path must still keep it.
         let decision = await collector.decide(c, liveCWDs: [c.path], graceSeconds: 0)
         #expect(decision == .keep(reason: "live-cwd"))
+    }
+}
+
+private actor PostSnapshotLiveCWDs {
+    let path: String
+    private(set) var callCount = 0
+
+    init(path: String) { self.path = path }
+
+    func next() -> [String]? {
+        callCount += 1
+        return callCount == 1 ? [] : [path]
+    }
+}
+
+private actor PostSnapshotMutation {
+    let worktreePath: String
+    var callCount = 0
+
+    init(worktreePath: String) { self.worktreePath = worktreePath }
+
+    func next() -> [String]? {
+        callCount += 1
+        if callCount == 2 {
+            FileManager.default.createFile(
+                atPath: worktreePath + "/arrived-after-snapshot.txt",
+                contents: Data("unique".utf8)
+            )
+        }
+        return []
     }
 }
