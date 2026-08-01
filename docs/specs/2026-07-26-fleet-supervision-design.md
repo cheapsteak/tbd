@@ -400,8 +400,9 @@ sequence turns out to have been wrong, the record shows exactly what was on the
 screen and exactly what was sent, which is the same accountability the
 three-condition test buys for the automatic path, obtained a different way.
 Sends are named-key and paced, following the rate-limit actuator's precedent.
-In attended mode the proposal shows the operator the keys *and* the screen they
-aim at, so approving is not an act of faith.
+In attended mode the desk suggests such a send instead of making it — an entry
+in the project's proposals doc (§6) showing the keys *and* the screen they aim
+at, so saying yes is not an act of faith.
 
 **This needs no verb of its own — it is `drive --text` (§3).** Answering a
 question is mechanically the send path this design already has: clear the way,
@@ -423,14 +424,15 @@ refusing. Dismissal follows the knowledge, not the intent.
 
 The second is **the "this is a response" quality, which the case carries and the
 verb does not need to.** The action line's state snapshot *is* the pending
-question (§6), so the record already says what was being answered, verbatim. The
-attended-mode proposal shows the operator that same question alongside the
+question (§6), so the record already says what was being answered, verbatim. An
+attended-mode escalation carries that same question alongside the
 supervisor's proposed reply, for the same reason. Account views label these lines
 as answers by reading the snapshot. A separate verb would have added a word to
 the vocabulary and nothing to the record.
 
-What the operator experiences is unchanged. In attended mode the proposal *is the
-relayed question* — the agent's questions and options verbatim, plus the proposed
+What the operator experiences is unchanged. In attended mode the escalation *is
+the relayed question* — the agent's questions and options verbatim, plus the
+proposed
 response and its reasoning — and the operator approves it or answers differently
 themselves. The queue entry is the dialog, delivered at last to the human it was
 always addressed to. Under a bolder mode the desk simply acts, and the daemon
@@ -963,7 +965,8 @@ deliberately not the unit of everything:
   leave one on. Mode *selection* is per project — that is conduct, not
   lifecycle.
 - **One shift, one `ledger.jsonl`, one `account.md`, one morning queue.**
-  Escalations and proposals from every desk land in the same needs-you batch.
+  Escalations from every desk land in the same needs-you batch, and each
+  project's proposals doc (§6) is linked beside it.
   The ledger envelope gains a project tag (§6), so every line says which desk
   acted and the account can *group* by project without being *split* by it.
 
@@ -1099,7 +1102,8 @@ policies — that is the invariant the project exists to create.
   names, or organization-specific content.
 - **The shipped default also defines the two baseline modes** (§3), so every
   project has `attended` and `autonomous` available without authoring anything.
-  `attended` says: act on the unambiguous, propose anything consequential,
+  `attended` says: act on the unambiguous, write anything consequential into
+  the proposals doc (§6) instead of doing it,
   escalate anything you would want a human to see tonight. `autonomous` says:
   act on your judgment, escalate what genuinely needs a decision, and batch the
   rest for morning. Both are prose, and a project that wants different conduct
@@ -1121,7 +1125,8 @@ for consequential verbs, never-act lists, and thresholds. That content now
 lives in the operator's `supervision.json` and in mode prose (§8):
 
 1. **Compiled conservative defaults** cover a brand-new repo safely.
-2. **Operator answers become durable decisions**: resolving a proposal offers
+2. **Operator answers become durable decisions**: resolving an escalation
+   offers
    "and everything like this" — for the shift or for good — and the answer then
    rides in every work order within that scope, so the desk knows it and stops
    asking (P1-5, §8). One click, and it informs rather than permits.
@@ -1166,8 +1171,7 @@ attention — it never changes what any verb is allowed to do.
   **lifecycle** records shift open, pause, resume, shift close, mode changes,
   and desk recycles (§9). **enrollment** records an agent entering the supervision
   perimeter mid-shift; the shift-open line carries the same fields for every
-  agent already present, as a roster snapshot. **proposal** and
-  **resolution** record proposed actions and their results. **escalation** and
+  agent already present, as a roster snapshot. **escalation** and
   **resolution** record questions and their answers. **decision** records a
   durable answer the operator gave (P1-5, §8). **anomaly** records an unknown state,
   a failed fetch, or a dark supervisor. Deliberate inaction is recorded as
@@ -1196,10 +1200,33 @@ attention — it never changes what any verb is allowed to do.
   Markdown cannot be the source because parsing prose back out of a display
   format would repeat the screen-scraping mistake in a file.
 - **End-of-shift and morning views are queries** over the shift's time window.
-  The views are done (actions + outcomes), open (unresolved proposals and
-  escalations), needs-you (the escalation batch), went-wrong (anomalies), and
+  The views are done (actions + outcomes), open (unresolved
+  escalations), needs-you (the escalation batch, with each project's
+  proposals doc linked beside it), went-wrong (anomalies), and
   now-binding (decisions). A closing supervisor narrative is a final note *on
   top of* the generated report. It adds context but does not author the record.
+
+**Proposals are prose, not records.** A proposal is the desk's judgment — "I
+think we should do X, and here is why" — not a claim about something that
+happened, so it does not belong to the ledger's machinery: the ledger exists
+to guard facts against false claims, and a suggestion cannot be a false
+claim. When a desk holds back on something consequential (attended mode's
+signature move), it writes the suggestion into **that project's proposals
+doc** — a markdown file at `~/tbd/shifts/<shift-id>/proposals/<project>.md`,
+beside the ledger it relates to, surviving shift close like everything else
+in the shift directory. **How the doc is composed is the project's choice.**
+The shipped default playbook describes a sane default entry — what act, on
+which target, the exact message or keys, the reasoning, and, for anything
+screen-informed, the capture it rests on — and a project that wants its
+proposals grouped by risk, written as checklists, or in its own house style
+says so in its playbook. TBD compiles only the boring parts: the file's
+location, and the app showing it with its path. So the record still points at
+everything, filing a proposal comes with a one-line `note` — "proposal filed:
+rebase strategy for acme-web, see the doc" — which is how the morning account
+knows the doc is worth opening. Acting on a proposal is a human act in the
+world: the operator does the thing, or tells the desk to — in its tab, or as
+an escalation answer that becomes an instruction in the next work order.
+There is no approve button, and nothing executes a proposal mechanically.
 
 ### Ledger line shape
 
@@ -1233,9 +1260,7 @@ What each kind's payload carries:
   observed-at of that observation). Only an observed outcome may claim a
   message landed; the action line it references asserts the request alone
   (§12).
-- **`proposal`** — everything an `action` carries, plus the supervisor's
-  reasoning and the age of the state it reasoned from.
-- **`resolution`** — a reference to the proposal or escalation, the result
+- **`resolution`** — a reference to the escalation, the result
   (approved / rejected / answered / expired), the scope choice if one was made,
   and the operator's optional explanation.
 - **`escalation`** — the exact item, the exact proposed command, and the
@@ -1287,11 +1312,12 @@ account, not a wrong action. The third category is **human-authored process**.
   here; they are per-project operator choices in `supervision.json` (§8), which
   keeps this column a single fleet-wide gesture (P0-2).
 - **Shift directory** (`~/tbd/shifts/<shift-id>/`): `ledger.jsonl` +
-  `account.md`. The proposal queue is **not a separate data store**. It is an
-  in-memory view of the ledger: created proposals minus resolved proposals.
-  The daemon rebuilds it at startup by replaying the file. It checks expiry
-  when the operator approves a proposal by asking, "Is this proposal still
-  current?" No background process writes expiry. This removes the only race
+  `account.md` + `proposals/<project>.md`, the desk-authored prose of §6. The
+  escalation queue is **not a separate data store**. It is an
+  in-memory view of the ledger: created escalations minus resolved ones.
+  The daemon rebuilds it at startup by replaying the file. Staleness is
+  checked at the moment of resolving — "is this still current?" — never by a
+  background process writing expiry. This removes the only race
   between multiple writers and therefore the need for a table. Shift-scoped
   decisions are ledger events viewed in the same way. They end with the shift,
   and the shift directory contains everything needed for debugging or sharing.
@@ -1316,16 +1342,11 @@ account, not a wrong action. The third category is **human-authored process**.
   timestamp fixes its observation deadline — so a daemon restart during a
   shift costs cadence, never data. For the sweep that is a one-cycle delay.
   For re-checks, the startup ledger replay (the same replay that rebuilds the
-  proposals view) surfaces actions past their deadline with no outcome, and
+  escalation queue) surfaces actions past their deadline with no outcome, and
   the daemon performs those observations then: the envelope is durable in the
   transcript, so a late read resolves what the timer would have (§12). Until
   it runs, such actions render as unconfirmed by construction — the
   query-time rule, not a recovery sweep.
-- **Crash rule** (replay finds an approved proposal with no action line):
-  never automatically execute an old approval. Report it as an anomaly:
-  "approved at 7:58, daemon restarted before acting; approve again if still
-  wanted." This applies the rule that uncertainty must lead to inaction to the
-  supervision machinery itself.
 
 Net property: **supervision adds one column to TBD's database** — the on/off
 switch. Everything else it knows is in files a human can open: two under
@@ -1357,8 +1378,8 @@ again at 3 a.m., 4 a.m., and 5 a.m. With the gate gone the requirement remains
 and its mechanism gets simpler — because nothing needed permission in the first
 place. What the operator wanted was for the desk to *know the answer*.
 
-So `resolve --scope` survives with a smaller and clearer meaning. Answering a
-proposal or an escalation with `--scope this-shift` or `--scope always` writes a
+So `resolve --scope` survives with a smaller and clearer meaning. Answering an
+escalation with `--scope this-shift` or `--scope always` writes a
 `decision`, and decisions are **carried in every subsequent work order while
 they are active**. The desk reads "the operator has already said: archive merged
 scratch worktrees without asking" and does not ask. It is not *stopped* from
@@ -1413,11 +1434,12 @@ the hard part.
 
 **Across shifts, a learning is repo advisory content, and that has a home and a
 change process already: the playbook, changed by a reviewed commit.** So at shift
-end, if learning-shaped notes exist, the desk's flush step (§9) **proposes
+end, if learning-shaped notes exist, the desk's flush step (§9) **suggests
 spawning a capture worker** — an ordinary worker worktree, briefed to fold the
-shift's learnings into that project's `.agents/supervision.md` and open a PR. It
-arrives as a **proposal** in the same queue as everything else, survives shift end
-like every other unresolved item (§9), and is resolved in the morning batch
+shift's learnings into that project's `.agents/supervision.md` and open a PR.
+The suggestion is an entry in the project's proposals doc (§6); it survives
+shift end as a file on disk like the rest of the shift directory, and the
+operator acts on it in the morning
 alongside the rest. Supervision uses the machinery it supervises — a worktree, an
 agent, a PR, a review — rather than inventing a private channel for its own
 memory.
@@ -1582,13 +1604,14 @@ enforcement openly, which is the same trade the old system made by accident
   §10) — and it disposes every desk.** The
   sequence is: stop the sweep → make a time-limited request to each live desk
   for a closing note **and, where the shift produced learning-shaped notes, a
-  capture proposal** (spawn a worker to fold them into that project's
+  capture suggestion in the proposals doc** (spawn a worker to fold them into
+  that project's
   `.agents/supervision.md` as a PR — §8) → render the final `account.md` →
   write the closing ledger line → dispose of each desk by ending its session and
-  deleting its scratch worktree. The capture proposal outlives the desk that
-  raised it: it is an ordinary unresolved queue item, and unresolved items
-  already survive shift end, so the operator approves or drops it in the morning
-  batch like everything else. Notes add context but are not required; a dead
+  deleting its scratch worktree. The capture suggestion outlives the desk that
+  raised it: the proposals doc is a file in the shift directory, so the
+  operator acts on it or drops it in the morning
+  like everything else. Notes add context but are not required; a dead
   supervisor cannot
   block closing, and neither can three of them. All durable data already lives
   outside the desks. Desks accumulated in the old system because nothing
@@ -1750,10 +1773,12 @@ watches, with nothing watching it.
 Principle: **you take action where you already read the relevant information.**
 
 - **The account panel is also the inbox — one inbox, all projects.** The "needs
-  you" section of the live `account.md` *is* the queue, and proposals and
-  escalations from every desk land in it together, each labeled with its project
-  (§6). Each proposal shows the target, exact message, supervisor reasoning, and
-  age of its state. Approve and reject controls appear beside it. Resolving also
+  you" section of the live `account.md` *is* the queue: escalations from every
+  desk land in it together, each labeled with its project, and each project's
+  proposals doc is linked beside them (§6). Each escalation shows the exact
+  item, exact command, recommendation, and an answer box, with approve and
+  reject controls for a one-click yes or no on the recommendation. Resolving
+  also
   offers a **scope, which is purely temporal**: this once / this shift / always.
   There is no "always for this project" or "always for this repo" — a decision is
   an instruction about *the question that was asked*, and that question already
@@ -1763,8 +1788,7 @@ Principle: **you take action where you already read the relevant information.**
   definitions and automation membership are managed in the Fleet Supervision
   settings tab below. A rejection can include an
   optional one-line explanation, which reaches that project's supervisor in its
-  next work order. Each escalation shows the exact item, exact command,
-  recommendation, and an answer box. Every one of these is also a CLI command —
+  next work order. Every one of these is also a CLI command —
   `tbd supervise queue` to read it, `tbd supervise resolve` to act on it (below).
   Nothing exists only as a button.
 
@@ -1782,21 +1806,19 @@ Principle: **you take action where you already read the relevant information.**
   ```
 
   Its counterpart `queue` stays a plain noun and takes filters rather than
-  sprouting sibling commands: `--type proposal|escalation`, `--project <name>`,
+  sprouting sibling commands: `--project <name>`
   and `--resolved` / `--all`. The default is unresolved items — the queue
   *proper*, since the projection is created-minus-resolved (§7). `--resolved` is
   therefore sugar over the ledger's resolution history rather than a second
   view of the queue: a resolved item has *left* the queue, and what comes back
   is the same data the account's done view renders.
 
-  Three things this buys. The **scope choice attaches once**, to the command that
-  creates every resolution, instead of being bolted onto two of three sibling
-  commands and forgotten on the third. **Future outcomes are arguments, not new
+  Two things this buys. The **scope choice attaches once**, to the command that
+  creates every resolution, instead of being bolted onto some sibling
+  commands and forgotten on others. And **future outcomes are arguments, not
+  new
   commands** — a `--dismiss-unanswered` for escalations the operator declines to
-  answer costs a flag, not a surface. And **per-type validity becomes flag
-  validation**, which can teach: aiming `--answer` at a proposal fails with
-  "that's a proposal — `--approve` or `--reject` it," rather than the operator
-  discovering an entire command does not apply to the item in front of them. The
+  answer costs a flag, not a surface. The
   panel keeps its labeled **Approve**, **Reject**, and **Answer** buttons — the
   operator should never have to think in flags — and all three invoke this one
   RPC.
@@ -1904,8 +1926,7 @@ tbd supervise note     --text "…" [--ref <line-id>]
 **Operator — the queue.**
 
 ```
-tbd supervise queue   [--resolved|--all] [--type proposal|escalation] [--project
-<name>]
+tbd supervise queue   [--resolved|--all] [--project <name>]
 tbd supervise resolve <id> --approve [--scope this-once|this-shift|always]
 tbd supervise resolve <id> --reject  [--reason "…"]
 tbd supervise resolve <id> --answer  "…" [--scope …]
@@ -2257,6 +2278,16 @@ to inaction at the largest scale.
 
 ## 15. Deliberately not built
 
+- **A structured proposal pipeline** — a `proposal` ledger kind, approve and
+  reject machinery, and an execution path for approvals. Not built, because a
+  proposal is judgment, not a fact: the ledger exists to stop false claims
+  about what *happened*, and a suggestion cannot be a false claim. Proposals
+  are desk-authored prose in a per-project markdown doc (§6), composed to the
+  project's own conventions — which is also the shape that worked in
+  practice: the predecessor system's for-the-human file was its best-liked
+  surface. Deleting the pipeline also deletes its hardest question — who
+  executes an approval hours later, after the desks are gone — because acting
+  on a suggestion is a human act in the world, not a state transition.
 - **Per-session never-touch designations** — deferred to its own design pass,
   not folded into this one. "Don't poke *this* session" is a per-object
   control surface with its own open questions — which object carries the flag

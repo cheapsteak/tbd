@@ -285,13 +285,12 @@ only — no slice needs a later one:
     a selection naming a section the playbook does not define is an operator
     error to report at set time, and at work-order time falls back to
     `attended` with an anomaly line rather than silently running unconducted.
-  - **The queue**: the proposal/escalation projection over the ledger, plus one
-    operator command — `tbd supervise queue [--resolved|--all] [--type …]
+  - **The queue**: the escalation projection over the ledger, plus one
+    operator command — `tbd supervise queue [--resolved|--all]
     [--project …]` to read and `tbd supervise resolve <id>
     --approve|--reject|--answer` to act (design §10). All three flags construct
-    the same `resolution` kind differing only in `result`, so build one RPC with
-    flag validation that teaches ("that's a proposal — `--approve` or `--reject`
-    it") rather than three near-identical commands. `--scope` attaches to
+    the same `resolution` kind differing only in `result`, so build one RPC
+    rather than three near-identical commands. `--scope` attaches to
     `resolve` itself, and its values are **temporal only** —
     `this-once|this-shift|always`, with no per-project or per-repo variant
     (design §10). A scoped resolution writes a `decision` line, and
@@ -397,8 +396,9 @@ only — no slice needs a later one:
   are), the per-project **modes** section (active mode plus the choices its
   playbook defines; no selection shows `attended` as the default rather than a
   choice), and the per-project membership section — plus the account panel as
-  inbox, showing every desk's proposals and escalations in
-  one project-labeled queue. CLI parity for every control — and the whole
+  inbox, showing every desk's escalations in
+  one project-labeled queue with each project's proposals doc linked beside
+  it (design §6). CLI parity for every control — and the whole
   `tbd supervise` surface is pinned as a normative list in design §10, so this
   slice's exit check is that every command in that list exists with that name
   and shape, and that nothing outside it shipped — in particular no `rules`
