@@ -323,12 +323,12 @@ and P1-5's work-order delivery are seams later slices fill:
   nothing.
 - **Slice 2 — the switch, the shift, the ledger** (design §3, §6, §7, §9). The
   `supervision_enabled` config column — a **boolean**, not the old tri-state
-  posture (migration + record type + Codable model, one commit, per the house
-  migration rule), settable from both the app and the CLI and broadcast on
-  change through the shared configuration object, so every surface sees the
-  same value immediately (design §3, §7) — the compiled interlock with
-  `nightwatch_mode`, the shift
-  directory with `ledger.jsonl` and the `account.md` renderer that regenerates
+  `nightwatch_mode` (migration + record type + Codable model, one commit, per
+  the house migration rule), settable from both the app and the CLI and
+  broadcast on change through the shared configuration object, so every
+  surface sees the same value immediately (design §3, §7) — the compiled
+  interlock with `nightwatch_mode`, the shift directory with `ledger.jsonl`
+  and the `account.md` renderer that regenerates
   after every append, and the shift lifecycle. The ledger envelope
   (`id`, `ts`, `shift`, `mode`, `project`, `kind`) is complete from the first
   line: `mode` carries `attended` until slice 3 ships selections, and lines the
@@ -371,7 +371,7 @@ and P1-5's work-order delivery are seams later slices fill:
     one status field, not forty lines an hour.
   - **A restart resumes the shift from the record, never forks it** (design §7,
     §9). The active shift is derivable from the ledger alone: the newest shift
-    with no closing line. On startup the daemon resumes it in whatever posture
+    with no closing line. On startup the daemon resumes it in whatever state
     the switch persists — running if on, paused if off — with the same ID and
     directory, and rebuilds the escalation-queue projection by replaying the
     file. A half-finished teardown resumes idempotently from its durable steps.
@@ -852,7 +852,7 @@ an incident to produce them, because each is cheap to stage and expensive to
 discover broken: **a mid-shift pause and resume** (off, then on — the acting
 verbs refuse while the record verbs still land, work orders do not survive the
 pause, and dead-man deadlines suspend), **a mid-shift daemon restart** (the
-same shift resumes in the persisted posture, and overdue observations are
+same shift resumes in the persisted switch state, and overdue observations are
 performed from the record), and **an explicit `shift close` while the switch
 is still on** (the record finalizes and a fresh shift opens in the same
 gesture).
@@ -878,9 +878,9 @@ from real shifts, not against code review:
     one account grouped by project, and a quiet project that cost nothing
     because no desk was ever spawned for it.
   - **P0-2 is evidenced as on/off plus per-project mode selection**, with no
-    third posture anywhere: one column, one gesture, one shift, resuming across
-    a restart in the posture the switch persists. Off pauses; it never
-    closes.
+    third switch position anywhere: one column, one gesture, one shift,
+    resuming across a restart in the state the switch persists. Off pauses;
+    it never closes.
   - **P0-3 is evidenced against its descoped form**: the requirements doc
     records that TBD builds no mode enforcement and no verb gate, so what must
     be green is that a mode's conduct is delivered in every work order, that
