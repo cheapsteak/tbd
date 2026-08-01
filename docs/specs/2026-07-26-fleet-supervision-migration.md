@@ -292,17 +292,14 @@ only — no slice needs a later one:
     the same `resolution` kind differing only in `result`, so build one RPC
     rather than three near-identical commands. `--scope` attaches to
     `resolve` itself, and its values are **temporal only** —
-    `this-once|this-shift|always`, with no per-project or per-repo variant
+    `this-once|this-shift`, with no per-project or per-repo variant
     (design §10). A scoped resolution writes a `decision` line, and
-    **work-order composition must carry active decisions** (design §8) — that
-    delivery, not any gate, is what satisfies P1-5. **`--scope always` must also
-    append to `~/tbd/supervision/decisions.jsonl`** (design §7, §8): the shift
-    ledger cannot carry a decision past its own shift, so without that file P1-5
-    fails at the second shift and the parity gate cannot be evidenced. Work-order
-    composition merges the current shift's `this-shift` decisions with every
-    unretracted line in that file. Retraction is an append
-    (`tbd supervise decisions revoke <id>`), never an edit, and
-    `tbd supervise decisions list` shows what is in force. `resolve` is
+    **work-order composition must carry the shift's active decisions**
+    (design §8) — that
+    delivery, not any gate, is what satisfies P1-5. There is no durable
+    decision store: an answer worth keeping past a shift reaches the
+    project's playbook by reviewed PR through the capture flow
+    (design §8). `resolve` is
     operator-only and must not be reachable from a desk, which keeps resolutions
     off the self-report path (design §10).
 - **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake

@@ -1127,9 +1127,10 @@ lives in the operator's `supervision.json` and in mode prose (§8):
 1. **Compiled conservative defaults** cover a brand-new repo safely.
 2. **Operator answers become durable decisions**: resolving an escalation
    offers
-   "and everything like this" — for the shift or for good — and the answer then
+   "and everything like this" for the rest of the shift — and the answer then
    rides in every work order within that scope, so the desk knows it and stops
-   asking (P1-5, §8). One click, and it informs rather than permits.
+   asking (P1-5, §8). One click, and it informs rather than permits. An answer
+   worth keeping for good is playbook material, captured by reviewed PR (§8).
 3. **Playbook prose promotes by one confirmation**: the first time the
    supervisor encounters a sentence that sounds like a hard rule ("never touch
    an open PR without a human"), it asks once, "make this standing?" A yes
@@ -1265,8 +1266,9 @@ What each kind's payload carries:
   and the operator's optional explanation.
 - **`escalation`** — the exact item, the exact proposed command, and the
   recommendation.
-- **`decision`** — the answer the operator gave, its lifetime (shift or
-  always), its scope, and its origin. Delivered to desks in later work orders as
+- **`decision`** — the answer the operator gave, its scope, and its origin.
+  Shift-lived, like every ledger line. Delivered to desks in later work
+  orders as
   an instruction (§8), never consulted as a permission.
 - **`anomaly`** — the category and the detail.
 - **`note`** — the author, the text, and optional references to other lines.
@@ -1328,14 +1330,8 @@ account, not a wrong action. The third category is **human-authored process**.
     reloads it after a change and holds it in memory for lookups. Every change
     appends a ledger line, so the current selections and the history of how they
     came about live in the appropriate places.
-  - `~/tbd/supervision/decisions.jsonl` — **append-only**, holding the
-    `always`-scoped decisions that must outlive a shift (§8), plus retraction
-    lines. This is the only supervision state that is durable *and* accumulates:
-    it exists because P1-5 promises an answer is never re-asked, and a shift
-    ledger cannot keep that promise past its own shift. Read at work-order
-    composition, never consulted as a permission.
-
-  The playbook tiers (§5) are also durable files.
+  The playbook tiers (§5) are also durable files — and the playbook is where
+  knowledge that must outlive a shift lives, changed by reviewed PR (§8).
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the sweep's temporary tracking. Timers may live in memory *because*
   everything they encode derives from the durable record — an action line's
@@ -1379,45 +1375,35 @@ and its mechanism gets simpler — because nothing needed permission in the firs
 place. What the operator wanted was for the desk to *know the answer*.
 
 So `resolve --scope` survives with a smaller and clearer meaning. Answering an
-escalation with `--scope this-shift` or `--scope always` writes a
+escalation with `--scope this-shift` writes a
 `decision`, and decisions are **carried in every subsequent work order while
 they are active**. The desk reads "the operator has already said: archive merged
 scratch worktrees without asking" and does not ask. It is not *stopped* from
 asking. It is informed, which is what actually prevents the repeat.
 
-**Where a decision lives depends on how long it is meant to last**, and this
-matters because shift ledgers end with their shift while P1-5 is a promise that
-outlives one night:
+**A decision lives in the shift's ledger, and only there.** The `decision`
+line is projected into work orders for the rest of the shift and is gone when
+the shift closes — which is what P1-5 asks for, and all it asks for: the
+3 a.m. answer is not re-asked at 4 a.m. or 5 a.m. At work-order composition
+the daemon reads the current ledger's active decisions and includes them as
+instructions. That projection *is* the delivery mechanism for P1-5; nothing
+consults them as permissions, because nothing needs permission.
 
-- **`this-shift`** — the `decision` line in that shift's `ledger.jsonl`, and
-  nothing else. It is projected into work orders for the rest of the shift and
-  is gone when the shift closes, which is exactly what was asked for.
-- **`always`** — the `resolve` handler writes the `resolution` event to the
-  shift ledger *as it does for every resolution*, and additionally appends the
-  decision to **`~/tbd/supervision/decisions.jsonl`**, an append-only durable
-  instruction log beside `supervision.json`. That file is what carries an answer
-  from shift 1 to shift 50. Without it there is no mechanism at all for a
-  durable decision, since the ledger is per shift and `supervision.json` holds
-  only topology and selection.
-
-At work-order composition the daemon merges two sources — the active
-`this-shift` decisions from the current ledger and every unretracted line in
-`decisions.jsonl` — and includes them as instructions. That merge *is* the
-delivery mechanism for P1-5; nothing consults them as permissions, because
-nothing needs permission.
-
-**Retraction is an append, not an edit.** An operator who no longer wants a
-standing answer appends a retraction line naming the decision's id —
-`tbd supervise decisions revoke <id>`, or by hand, since the file is
-operator-owned exactly like `supervision.json` (§7). Append-only keeps the
-history of what was decided and undecided intact, and it keeps the file's
-writer story identical to the ledger's: one writer, no rewriting of the past.
-`tbd supervise decisions list` shows what is currently in force.
+**Knowledge that should outlive the shift has exactly one home: the project's
+playbook, changed by a reviewed PR.** That path already exists — the capture
+flow (above) folds a shift's learnings into `.agents/supervision.md` — and a
+decision the operator finds themselves giving night after night is precisely
+a learning worth capturing; the shipped playbook says so, telling desks that
+an answer received two shifts running belongs in the capture suggestion.
+There is no separate durable decision store, because permanent instructions
+kept in a side file are policy nobody reviews — the playbook is where a
+project's standing answers live, in the open, with a change history.
 
 This is still a real reduction, not a relabeling. The old shape needed the same
 answer in two places — a rule the gate consulted and a fact the desk knew — and
-the two could drift. Now there is one fact in one shape, written once and
-delivered.
+the two could drift. Now a shift's answers are ledger facts delivered as
+instructions, and a project's standing answers are reviewed policy — each in
+one place.
 
 ### How a shift's experience reaches the playbook (P2-1)
 
@@ -1657,6 +1643,19 @@ preferred whenever it can run — a fresh desk with a clean briefing reasons
 better and costs less per turn than a compacted one — but nothing breaks if
 it never fires.
 
+**The context machinery is a capability, not a dependency — a desk must work
+without it.** Both of its inputs are specific to the agent kind running the
+desk: the fullness number reads a Claude transcript's usage records, and the
+window size rides a Claude statusline tee (§2). A desk driven by an agent
+that exposes neither — a Codex-driven desk, today — runs with no thresholds,
+no flush nudges, and no fullness-triggered recycle, and nothing above breaks,
+because survival never rested on this machinery. The layers that must hold
+for every desk kind read the record, not the session's internals: the
+dead-man's switch watches work orders and ledger lines, and replacement
+briefs from the shift record, so both hold unchanged. Such a desk simply runs
+until the shift closes or the dead-man's switch replaces it, and the account
+shows its context as unknown rather than guessed.
+
 Thresholds are **fractions of the session's effective window**, never absolute
 token counts. The denominator comes from the statusline tee (§2); absolute
 numbers would be wrong on the next model, and the effective window is a
@@ -1779,7 +1778,9 @@ Principle: **you take action where you already read the relevant information.**
   item, exact command, recommendation, and an answer box, with approve and
   reject controls for a one-click yes or no on the recommendation. Resolving
   also
-  offers a **scope, which is purely temporal**: this once / this shift / always.
+  offers a **scope, which is purely temporal**: this once / this shift. An
+  answer worth keeping past the shift is playbook material, and the capture
+  flow is how it gets there (§8).
   There is no "always for this project" or "always for this repo" — a decision is
   an instruction about *the question that was asked*, and that question already
   carries its own subject, so a spatial dimension would only restate it. (The
@@ -1800,7 +1801,7 @@ Principle: **you take action where you already read the relevant information.**
   already made familiar:
 
   ```
-  tbd supervise resolve <id> --approve [--scope this-once|this-shift|always]
+  tbd supervise resolve <id> --approve [--scope this-once|this-shift]
   tbd supervise resolve <id> --reject  [--reason "…"]
   tbd supervise resolve <id> --answer  "text" [--scope …]
   ```
@@ -1833,11 +1834,11 @@ Principle: **you take action where you already read the relevant information.**
   *from the queue* — the panel's Answer button, or `tbd supervise resolve <id>
   --answer "…"` — is a gesture that reaches the daemon, and the daemon then:
   appends the `resolution` ledger line; drops the item from the queue
-  projection; turns any scope choice into a `decision` and, if it is
-  lifetime-always, a durable decision later work orders carry; delivers the answer to
-  the owning desk in its next work order; and stops the next shift's briefing
-  from raising it again. Typing the same words into a desk's tab does none of
-  those five things. Three reasons this is a real distinction and not
+  projection; turns any scope choice into a `decision` that later work orders
+  carry; and delivers the answer to
+  the owning desk in its next work order. Typing the same words into a desk's
+  tab does none of
+  those four things. Three reasons this is a real distinction and not
   bookkeeping: desk context is disposable *by design* (it recycles mid-shift and
   starts fresh every shift, §9), so a chat-only answer evaporates on a schedule
   the operator cannot see; the desk may not exist when the answer is given at
@@ -1927,7 +1928,7 @@ tbd supervise note     --text "…" [--ref <line-id>]
 
 ```
 tbd supervise queue   [--resolved|--all] [--project <name>]
-tbd supervise resolve <id> --approve [--scope this-once|this-shift|always]
+tbd supervise resolve <id> --approve [--scope this-once|this-shift]
 tbd supervise resolve <id> --reject  [--reason "…"]
 tbd supervise resolve <id> --answer  "…" [--scope …]
 ```
@@ -1963,14 +1964,6 @@ tbd supervise project move   <repo> --to <project|singleton>
 tbd supervise automation default in|out
 tbd supervise automation set <project> in|out|follow-default
 tbd supervise automation list
-```
-
-**Operator — durable decisions** (§8). Only `always`-scoped decisions appear
-here; `this-shift` ones live and die in their shift's ledger.
-
-```
-tbd supervise decisions list
-tbd supervise decisions revoke <decision-id>
 ```
 
 **Deliberately absent**, each with its argument elsewhere in this document:
