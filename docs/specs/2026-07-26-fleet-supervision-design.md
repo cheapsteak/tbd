@@ -100,15 +100,19 @@ interface (CLI) → remote procedure call (RPC) pipeline provides working, idle,
 and awaiting-input events at no added per-event cost. `scheduled_resumes` plus
 classification of the end of the transcript identifies rate limits.
 `hibernatedAt`/`hibernateReason` identifies parked agents. tmux pane and process
-liveness identifies gone agents. This design adds two things:
+liveness identifies gone agents.
 
-1. **Verify before acting, not before displaying.** Hook events are
-   accurate enough for the user interface (UI). Before using a state to justify
-   any verb, however, the daemon checks the pane's live process once.
-   This requires one tmux subprocess. If the event and live process disagree,
-   the result is loudly reported as `unknown`. The daemon never silently picks
-   one input.
-2. **Install Claude Code's `Notification` hook event** so "awaiting input"
+There is no advance corroboration step between those sources and acting,
+because no advance check can help: a process alive when a case is cut can be
+dead — or a different session in a reused pane — by the time a desk acts
+minutes later. Staleness is caught where it bites instead: the send path
+verifies, synchronously at the moment of the act, that the target pane is
+alive and is the session it claims to be, and fails as an ordinary recorded
+error when it is not (§12). Activity states ride hook events with their
+observed-at; existence rides the liveness detector; the transport tells the
+truth at act time. This design adds one thing:
+
+1. **Install Claude Code's `Notification` hook event** so "awaiting input"
    carries a structured reason. The event fires when a permission prompt is
    shown, and its payload carries the "needs your permission" message. It is not
    `PreToolUse`, which fires before *every* tool call and is where an
@@ -515,7 +519,7 @@ nothing in advance and grants nothing at all; it delivers one act that a
 judgment chose and the record can be audited against.
 
 None of this makes stalls cheap to ignore, and nothing above slows detection.
-The one-minute re-check (P1-6, §4 step 8, §12) still notices a stalled agent
+The one-minute re-check (P1-6, §4 step 7, §12) still notices a stalled agent
 within a minute of an intervention, and the sweep still raises awaiting-input
 as a case. Prevention plus fast escalation is how "a trivial prompt doesn't
 cost a night" is actually met — the night is lost to a prompt nobody *sees*,
@@ -669,8 +673,10 @@ the daemon does around each one is accounting, never permission.
 to mechanics.** Inside every acting verb call — after the desk decides,
 before any keystroke — the daemon rechecks against current state: the switch
 is on, a shift is active, the target lies inside the calling desk's project,
-the target is not rate-limited, not under a capacity
-hold, and its pane is alive. Every item is a yes/no fact the operator or the
+and the target is not rate-limited and not under a capacity hold. Target
+liveness and identity are deliberately absent from this list: they are the
+transport's own synchronous checks, made milliseconds later in the same verb
+call, and one check with one owner beats the same check in two places (§12). Every item is a yes/no fact the operator or the
 machine already owns — a flag, a switch, a timestamp — and none involves
 reading the payload or judging the act. This is addressing correctness (§5)
 extended from *where* a desk may act to *whether TBD may act at all right
@@ -679,7 +685,7 @@ advisory: judgment takes minutes, so a work order's facts are already stale
 at act time, and the off switch flipped at 2:03 must beat a drive decided
 from a 2:02 work order and issued at 2:07. A failed precondition refuses the
 act — nothing is typed, the CLI returns an ordinary error naming the
-condition, and the refusal is recorded (§4 step 7, §6), so the morning shows
+condition, and the refusal is recorded (§4 step 6, §6), so the morning shows
 near-misses and an operator learns their controls bind. What was removed stays
 removed: no rule matching, no content inspection, no posture judgment. The
 gate asked "may this desk do this *kind* of thing"; preconditions ask only
@@ -688,7 +694,7 @@ between check and keystroke. Preconditions bind the acting verbs; the record
 verbs (`escalate`, `note`) require only an active shift and correct
 addressing — the record itself never refuses more than that.
 
-- **`drive`** — act on a fleet agent's session (the send path of §4 step 7), in
+- **`drive`** — act on a fleet agent's session (the send path of §4 step 6), in
   one of two payload variants.
   - `--text` delivers a message. The daemon does not read it: **freshness here is
     conduct, not machinery** — the shipped playbook's universal says to derive the
@@ -758,10 +764,7 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    Before doing anything, the daemon checks the mechanical reasons to stop:
    a rate limit, insufficient quota, an intervention already
    in progress, or a pending re-check timer.
-3. **Corroborate.** The daemon checks the pane's live process once. If it
-   disagrees with the hook state, the daemon records `unknown` in a prominent
-   ledger line and stops. It must not guess.
-4. **Work order.** The daemon prepares a case file. It includes the agent's
+3. **Work order.** The daemon prepares a case file. It includes the agent's
    identity, session state and its age, work facts, the project's resolved
    playbook **with its active mode's conduct** (§3), **any decisions in scope**
    — answers the operator already gave, so the desk knows them and does not
@@ -769,19 +772,19 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    (§5): if one tick finds several cases in the same project, they travel as one
    work order and wake that project's desk once. Cases in different projects
    never share a work order.
-5. **Wake.** The daemon delivers the order through the adapter for that kind of
+4. **Wake.** The daemon delivers the order through the adapter for that kind of
    agent, just as it would for any other session. If the project has no desk yet
    this shift, the daemon spawns one first — desks are lazy, so a project that
    stays quiet all night is never created. Each supervisor is an ordinary,
    visible session in its own worktree (P0-4). An operator can open its tab,
    watch it think, and type into it.
-6. **Judgment.** The supervisor reads the transcript and writes a specific next
+5. **Judgment.** The supervisor reads the transcript and writes a specific next
    step. It never sends only "continue" (P0-7). This is the loop's only model
    reasoning, and it runs under the project's authored theory of work (§2): the
    playbook is what says what done and stuck mean here. Where the playbook is
    silent — an idle agent whose work may or may not be finished — the desk's
    move is a note or an escalation, never a completion verdict of its own.
-7. **Act through the daemon, never around it.** `tbd supervise drive …`.
+6. **Act through the daemon, never around it.** `tbd supervise drive …`.
    The daemon performs three steps, and inspects the payload in none of them.
    First, it **appends the action line** — the durable request: the payload
    verbatim, the active mode, and the state snapshot that justified the act
@@ -802,11 +805,11 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    the verbatim line is what makes a stale premise findable afterward. There
    is no content check and no proposal conversion in this path: a desk that
    calls `drive` has driven (§3).
-8. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
+7. **Short follow-up.** The act arms a one-minute re-check (daemon timer, in
    memory). The result is recorded as an outcome line referencing the action
    (§6). A new blocked state
    becomes a new case within one minute instead of fifteen (P1-6).
-9. **Everything else costs nothing.** The other agents: zero tokens, zero sends.
+8. **Everything else costs nothing.** The other agents: zero tokens, zero sends.
    The other projects: no desk spawned, nothing woken.
 
 **What per-project desks cost (P0-6, restated honestly).** The sweep is
@@ -1188,7 +1191,7 @@ carry a null project, which is the accurate answer and not a gap.
 
 What each kind's payload carries:
 
-- **`action`** — the durable request, appended before dispatch (§4 step 7):
+- **`action`** — the durable request, appended before dispatch (§4 step 6):
   the verb, the target (worktree / terminal / repo), the payload
   (message text for `drive --text`, the named keys for `drive --keys`), and the
   state snapshot — with its source and observed-at — that justified it. For
@@ -1238,7 +1241,7 @@ What each kind's payload carries:
 Two representative lines, an action and the outcome that later references it:
 
 ```json
-{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook+pane-verify","observedAt":"2026-07-27T02:40:58Z"}}
+{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook","observedAt":"2026-07-27T02:40:58Z"}}
 {"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
 ```
 
@@ -2196,7 +2199,7 @@ to hunt for the value that governs a behavior:
 | Number | Default | Where it acts |
 | --- | --- | --- |
 | Idle-intervention threshold | 40 min | §4 step 2 |
-| Post-intervention re-check | 60 s | §4 step 8, §12 |
+| Post-intervention re-check | 60 s | §4 step 7, §12 |
 | Delivery retries before anomaly | 2 sends | §12 |
 | Supervisor recycle preference | 50% of the effective window, per desk | §9 |
 | Flush nudges | 50% / 60% / 70% fullness | §9 |
@@ -2337,6 +2340,20 @@ to inaction at the largest scale.
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
+- **An advance liveness corroboration step** — an earlier shape of the sweep
+  checked the target pane's live process before creating a case, calling
+  disagreement `unknown`. Removed as redundant: a check made when a case is
+  cut can be stale by the time a desk acts minutes later, so it protected
+  nothing the act-time checks don't — the transport verifies pane liveness
+  and session identity synchronously at the send, and the state model's
+  liveness detector already reports gone agents. What the advance check
+  actually bought was avoiding a rare phantom case: a session that dies
+  silently can wake a desk whose send then fails as a recorded transport
+  error. That cost — one desk wake, a few thousand tokens, a self-announcing
+  ending — is accepted. A process check also never could arbitrate among
+  live states (working, idle, awaiting input all look identical from
+  outside), so "corroboration" overclaimed; activity distinctions ride hook
+  events and their observed-at, full stop.
 - **Deferring delivery acknowledgement until more failures are observed** —
   rejected. The send path's synchronous checks catch only the failures the
   daemon can enumerate at send time: a dead pane, a wrong pane. The field
