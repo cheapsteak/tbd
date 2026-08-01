@@ -1420,8 +1420,20 @@ final class AppState: ObservableObject {
         { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
     /// How the shadow-compare diagnostic (spec C §11.3) fetches the daemon's
     /// imported surface — injectable for the same reason as `panelImportTrigger`.
+    /// Also the mirror's load/refetch seam (`loadPanelSurface`); deliberately
+    /// one seam, not two, so a test that stubs `panel.get` stubs it everywhere.
     lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
         { [daemonClient] worktreeID in try await daemonClient.panelGet(worktreeID: worktreeID) }
+    /// How `applyPanelOperation` fires its RPC — injectable for the same
+    /// reason as `panelImportTrigger`, so chokepoint tests can record the
+    /// envelope (and force the rejection branch) without a real daemon.
+    lazy var panelApplyTrigger: @MainActor (PanelOperationEnvelope) async throws -> PanelApplyResult =
+        { [daemonClient] envelope in try await daemonClient.panelApply(envelope) }
+    /// In-memory mirror of the daemon-owned panel surface, keyed by worktree
+    /// ID. Deliberately NOT persisted — the daemon is the store; this is a
+    /// cache rebuilt from `panel.get` and kept current by
+    /// `.panelSurfaceChanged` deltas. See `AppState+PanelSurface.swift`.
+    @Published var panelSurfaces: [UUID: PanelGetResult] = [:]
     /// Guards the one-shot legacy panel import to at most once per launch.
     /// Deliberately NOT persisted — the daemon's create-if-absent import guard
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
@@ -2090,6 +2102,11 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.refreshRemote() }
         case .remoteSessionAttention(let d):
             handleRemoteSessionAttentionDelta(d)
+        case .panelSurfaceChanged(let d):
+            // Guarded inside: the daemon broadcasts these during the
+            // store-only soak (daemon_panel_surface_enabled on, render flag
+            // off), and nothing may mutate app state on that path.
+            applyPanelSurfaceDelta(d)
         default:
             break
         }
@@ -3438,6 +3455,30 @@ final class AppState: ObservableObject {
     /// touched the toggle, matching the `@AppStorage` default.
     static func transcriptFeatureEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enableTranscriptKey) as? Bool ?? enableTranscriptDefault
+    }
+
+    /// UserDefaults key for the phase-3b render switch: when on, the app
+    /// renders its workspace from the daemon-owned panel surface and routes
+    /// its own gestures through `panel.apply` instead of mutating the legacy
+    /// `LayoutNode` tree. Same shape as `enableTranscriptKey` (app-only
+    /// presentation toggle, `UserDefaults` rather than a daemon `config`
+    /// column).
+    static let enableDaemonManagedPanelsKey = "enableDaemonManagedPanels"
+
+    /// The one default for `enableDaemonManagedPanelsKey`. **Default OFF** —
+    /// 3b ships behind a soak flag; graduation is a later phase. Every read
+    /// site must spell the default with this constant, never a bare literal
+    /// (see `enableTranscriptDefault` for why a disagreeing default is
+    /// invisible).
+    static let enableDaemonManagedPanelsDefault = false
+
+    /// Read of the daemon-managed-panels render switch for non-View callers
+    /// (the View layer uses `@AppStorage`). This is only the *user* half of
+    /// the switch — the effective one is `daemonManagedPanelsActive`, which
+    /// also requires the daemon to report `panelSurfaceEnabled`.
+    static func daemonManagedPanelsEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enableDaemonManagedPanelsKey) as? Bool
+            ?? enableDaemonManagedPanelsDefault
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
