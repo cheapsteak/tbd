@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -113,11 +114,11 @@ actor FiredBox {
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
     }
 
-    @Test func mergedTransitionSuppliesKnownPublishedToBothChecks() async throws {
+    @Test func mergedTransitionDoesNotWaivePublicationChecks() async throws {
         let recorder = KnownPublishedRecorder()
         let (coord, db) = try makeDeps(archiveSafetyEvaluator: { _, knownPublished in
             await recorder.record(knownPublished)
-            return ArchiveSafetyReport(findings: [], headIsPublished: knownPublished)
+            return ArchiveSafetyReport(findings: [], headIsPublished: true)
         })
         let repo = try await db.repos.create(
             path: "/tmp/repo-known-\(UUID().uuidString)",
@@ -129,7 +130,47 @@ actor FiredBox {
 
         await coord.handleMergedTransition(worktreeID: wt.id, prNumber: 42)
 
-        #expect(await recorder.values == [true, true])
+        #expect(await recorder.values == [false, false])
+    }
+
+    @Test func mergedTransitionBlocksPostMergeUnpushedCommit() async throws {
+        let (temp, repoPath) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let remote = temp.appendingPathComponent("remote.git")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try await shell("git init --bare -b main", at: remote)
+        try await shell(
+            "git remote add origin '\(remote.path)' && git push -u origin main",
+            at: repoPath)
+        let worktreePath = temp.appendingPathComponent("feature")
+        try await shell(
+            "git worktree add -b feature '\(worktreePath.path)' main",
+            at: repoPath)
+        try await shell("git push -u origin feature", at: worktreePath)
+        try await shell(
+            "echo local-only > local.txt && git add local.txt && git commit -m local-only",
+            at: worktreePath)
+
+        let db = try TBDDatabase(inMemory: true)
+        let subscriptions = StateSubscriptionManager()
+        let repo = try await db.repos.create(
+            path: repoPath.path, displayName: "published", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "feature", branch: "feature",
+            path: worktreePath.path, tmuxServer: "s")
+        try await db.worktrees.setAutoArchiveOnMerge(id: worktree.id, value: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(), subscriptions: subscriptions)
+        let coordinator = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subscriptions)
+
+        let archived = await coordinator.handleMergedTransition(
+            worktreeID: worktree.id, prNumber: 42)
+
+        #expect(!archived)
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+        #expect(FileManager.default.fileExists(atPath: worktreePath.path + "/local.txt"))
     }
 }
 

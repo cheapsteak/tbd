@@ -125,6 +125,20 @@ extension WorktreeLifecycle {
             }
         }
 
+        // Preserve an in-worktree branch rename before the directory goes
+        // away. This is metadata repair, not archived-final publication.
+        let resolvedWorktreePath = URL(fileURLWithPath: worktree.path)
+            .resolvingSymlinksInPath().path
+        if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path),
+           let gitWorktree = gitWorktrees.first(where: {
+               URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path
+                   == resolvedWorktreePath
+           }),
+           !gitWorktree.branch.isEmpty,
+           gitWorktree.branch != worktree.branch {
+            try await db.worktrees.updateBranch(id: worktree.id, branch: gitWorktree.branch)
+        }
+
         let terminals = try await db.terminals.list(worktreeID: worktree.id)
         let sessionIDs = terminals.sorted(by: { $0.createdAt < $1.createdAt })
             .filter(\.isClaudeResumable).compactMap(\.claudeSessionID)
