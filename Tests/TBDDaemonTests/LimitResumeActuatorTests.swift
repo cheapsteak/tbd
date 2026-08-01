@@ -89,11 +89,13 @@ struct FakeInspector: PaneProcessInspecting {
 
     private func makeActuator(
         inspector: FakeInspector = FakeInspector(claudePID: 4242),
-        transcript: Data? = Data("{}\n".utf8)
+        transcript: Data? = Data("{}\n".utf8),
+        transcriptMtime: Date? = nil
     ) -> LimitResumeActuator {
         LimitResumeActuator(
             db: db, tmux: tmux, inspector: inspector,
             readTranscript: { _ in transcript },
+            transcriptModifiedAt: { _ in transcriptMtime },
             waiter: { _ in })   // no real sleeping in unit tests
     }
 
@@ -182,7 +184,8 @@ struct FakeInspector: PaneProcessInspecting {
         }
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
-            readTranscript: growing, waiter: { _ in })
+            readTranscript: growing,
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in })
         let outcome = await actuator.actuate(row)
         #expect(outcome == .sent)
     }
@@ -222,7 +225,8 @@ struct FakeInspector: PaneProcessInspecting {
         }
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
-            readTranscript: flipping, waiter: { _ in })
+            readTranscript: flipping,
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in })
         let outcome = await actuator.actuate(row)
         #expect(outcome == .userAlreadyContinued)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -248,6 +252,7 @@ struct FakeInspector: PaneProcessInspecting {
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in Data("{}\n".utf8) },
+            transcriptModifiedAt: { _ in nil },
             waiter: flippingWaiter)
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
@@ -331,6 +336,7 @@ struct FakeInspector: PaneProcessInspecting {
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in Data("{}\n".utf8) },
+            transcriptModifiedAt: { _ in nil },
             waiter: cancellingWaiter)
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
@@ -339,6 +345,100 @@ struct FakeInspector: PaneProcessInspecting {
         // The row stays cancelled — not resurrected by a stray write.
         let stored = try await db.scheduledResumes.get(id: row.id)
         #expect(stored?.status == .cancelled)
+    }
+
+    // MARK: - Early-cancel probe (`userAlreadyContinued`)
+
+    @Test func earlyProbeTrueWhenTranscriptHasRecordNewerThanDetection() async throws {
+        // Same predicate as fire-time step 2: createdAt is 1h ago, the
+        // record is timestamped 2099.
+        let line = #"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"#
+        let actuator = makeActuator(
+            transcript: Data((line + "\n").utf8),
+            transcriptMtime: row.createdAt.addingTimeInterval(1))
+        let continued = await actuator.userAlreadyContinued(row)
+        #expect(continued)
+        #expect(tmux.sends.isEmpty)   // read-only probe: never touches tmux
+    }
+
+    @Test func earlyProbeFalseWhenTranscriptHasNoNewerRecord() async throws {
+        let actuator = makeActuator(
+            transcript: Data("{}\n".utf8),
+            transcriptMtime: row.createdAt.addingTimeInterval(1))
+        let continued = await actuator.userAlreadyContinued(row)
+        #expect(continued == false)
+    }
+
+    @Test func earlyProbeFalseWhenTerminalIsGone() async throws {
+        let orphan = ScheduledResume(
+            terminalID: UUID(), worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: row.resetsAt, fireAt: row.fireAt,
+            limitType: "session", rawMessage: "m")
+        let continued = await makeActuator().userAlreadyContinued(orphan)
+        #expect(continued == false)   // cancelling for THAT is fire time's job
+    }
+
+    // MARK: - mtime pre-filter
+
+    /// The probe runs every `earlyCheckInterval` per pending row and a long
+    /// session's JSONL is tens of MB, so an mtime at or before the detection
+    /// instant must skip the whole-file read entirely. The injected content
+    /// WOULD trip the predicate, so `false` can only come from a skipped read.
+    @Test func earlyProbeSkipsReadWhenTranscriptUnmodifiedSinceDetection() async throws {
+        let reads = OSAllocatedUnfairLock(initialState: 0)
+        let newerRecord = Data(
+            (#"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"# + "\n").utf8)
+        let staleMtime = row.createdAt.addingTimeInterval(-1)
+        let actuator = LimitResumeActuator(
+            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            readTranscript: { _ in
+                reads.withLock { $0 += 1 }
+                return newerRecord
+            },
+            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in })
+        let continued = await actuator.userAlreadyContinued(row)
+        #expect(continued == false)
+        #expect(reads.withLock { $0 } == 0)
+    }
+
+    @Test func earlyProbeReadsWhenTranscriptModifiedAfterDetection() async throws {
+        let reads = OSAllocatedUnfairLock(initialState: 0)
+        let newerRecord = Data(
+            (#"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"# + "\n").utf8)
+        let freshMtime = row.createdAt.addingTimeInterval(1)
+        let actuator = LimitResumeActuator(
+            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            readTranscript: { _ in
+                reads.withLock { $0 += 1 }
+                return newerRecord
+            },
+            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in })
+        let continued = await actuator.userAlreadyContinued(row)
+        #expect(continued)
+        #expect(reads.withLock { $0 } == 1)
+    }
+
+    /// An unreadable mtime is NOT "unmodified" — fall through to the read
+    /// rather than silently answering false forever.
+    @Test func earlyProbeReadsWhenMtimeUnavailable() async throws {
+        let line = #"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"#
+        let actuator = makeActuator(
+            transcript: Data((line + "\n").utf8), transcriptMtime: nil)
+        let continued = await actuator.userAlreadyContinued(row)
+        #expect(continued)
+    }
+
+    /// Fire-time eligibility must NEVER be mtime-gated: its transcript read
+    /// doubles as `verifyResumed`'s pre-send growth baseline, and skipping it
+    /// would leave `preSize == 0` so any later read looks like growth.
+    @Test func fireTimeEligibilityIsNotMtimeGated() async throws {
+        let line = #"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"#
+        let outcome = await makeActuator(
+            transcript: Data((line + "\n").utf8),
+            transcriptMtime: row.createdAt.addingTimeInterval(-1)   // would skip the early read
+        ).actuate(row)
+        #expect(outcome == .userAlreadyContinued)
+        #expect(tmux.sends.isEmpty)
     }
 
     // MARK: - Thrown send retries instead of instant .failed

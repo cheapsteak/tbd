@@ -4,6 +4,10 @@ macOS native worktree + terminal manager for multi-agent Claude Code workflows.
 
 Use the `tbd-project` skill for architecture, conventions, and file reference.
 
+## ⚠️ Public repo, multi-tenant product
+
+**This repository is public, and TBD is used by people across different organizations.** Never commit private context — real employer, org, repo, host, account, person, or ticket names, internal URLs, or machine-specific paths (use `acme` / `acme-prod` placeholders). **Whatever a session is working on elsewhere — product features, roadmaps, ticket and task descriptions — is likely confidential to that org and must not leak here**, in docs, specs, tests, fixtures, or commit messages. Never build or document for one repo, one project, or one person's workflow: features, defaults, and docs must generalize.
+
 ## Nightwatch is being replaced — feature freeze
 
 The fleet-supervision subsystem ("Nightwatch"/"Daywatch") is being redesigned
@@ -44,13 +48,15 @@ Mechanics: daemon-side behavior gates on a `config` column added by migration (f
 
 Cautionary precedent: `auto_hibernate_enabled` shipped default-ON in `v39_session_hibernation` and had to be force-disabled in `v50` once the eat-typed-input risk was understood. Because `ADD COLUMN ... DEFAULT` backfills existing rows, flipping a default later needs a forcing `UPDATE` migration (a Swift-side default change alone is a no-op for existing installs) — and after the force-off, a user's deliberate opt-in is indistinguishable from the backfilled value, so it got reset too. Shipping default-OFF first avoids all of this. Good precedents: `control_mode_enabled`, `hibernate_input_veto_enabled` (v51).
 
-### Blast-radius work starts with a brainstormed spec
+### Work starts with a brainstormed spec
 
-Work that trips the triggers above — a new subsystem, adding or changing a feature flag or `config` column, a database migration, a wholesale replacement of a load-bearing path — runs `/tbd-brainstorming` **before** implementation and commits the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
+Decisions must be examinable — changes to our theory of the system or the product most of all. Code expresses a theory; a diff shows what changed, not why the theory did. So anything that is not a bug fix or a minor UI change runs `/tbd-brainstorming` **before** implementation and commits the spec to `docs/specs/<date>-<topic>-design.md`. If it needs a flag, it needs a spec.
 
-**A human answers the brainstorming questions.** An agent may not answer its own. If no human is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
+**Prior design does not exempt.** Thinking done in prototypes, a report, another repo, or an earlier session makes the spec a cheap transcription — not an unnecessary one. Reviewers here cannot read that material, so those decisions are the ones that most need writing down.
 
-Not required for bug fixes, small additive UI, or refactors. If a trigger fires but a brainstorm is genuinely unnecessary, say so in the PR description. This is convention, not a gate — no linter can see whether thinking happened. Use `/tbd-brainstorming`, not `superpowers:brainstorming`; a guardrail redirects the wrong one.
+**A human answers the brainstorming questions.** An agent may not answer its own. If none is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
+
+Bug fixes and minor UI changes need no spec — a bug fix restores the system to its existing theory, while the work that needs a spec is the work that revises it. If a larger change genuinely needs none, say so in the PR description. This is convention, not a gate — no linter can see whether thinking happened. In Claude Code use `/tbd-brainstorming`, not `superpowers:brainstorming`; a guardrail redirects the wrong one. Codex has no slash command for it — read `.claude/skills/tbd-brainstorming/SKILL.md` and follow it directly.
 
 ### Restart must use the worktree's own script
 Always run `scripts/restart.sh` (relative, from the worktree cwd), never an absolute path to the main project's copy. Using `/Users/chang/projects/tbd/scripts/restart.sh` builds and starts binaries from the main branch, leaving old worktree processes running and causing "Unknown method" RPC errors. After any restart, verify with:

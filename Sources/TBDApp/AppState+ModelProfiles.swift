@@ -304,6 +304,19 @@ extension AppState {
         }
     }
 
+    /// Persist the worktree auto-trust switch, then re-fetch capabilities so
+    /// the Settings toggle reflects the daemon's persisted state. Applies to
+    /// the next Claude spawn or wake; never un-trusts an already-seeded path.
+    func setAutoTrustWorktrees(_ enabled: Bool) async {
+        do {
+            try await autoTrustWorktreesSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set worktree auto-trust: \(error, privacy: .public)")
+            showAlert("Failed to set worktree auto-trust: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a per-repo model profile override.
     func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async {
         do {

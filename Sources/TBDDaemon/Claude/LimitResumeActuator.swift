@@ -68,6 +68,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
     private let tmux: any ResumeSendingTmux
     private let inspector: any PaneProcessInspecting
     private let readTranscript: @Sendable (String) -> Data?
+    /// Transcript mtime, kept separate from `readTranscript` so the
+    /// early-cancel pre-filter is testable without touching the filesystem.
+    private let transcriptModifiedAt: @Sendable (String) -> Date?
     /// Injectable sleep so unit tests run instantly.
     private let waiter: @Sendable (Duration) async -> Void
 
@@ -76,13 +79,56 @@ public struct LimitResumeActuator: LimitResumeActuating {
         tmux: any ResumeSendingTmux,
         inspector: any PaneProcessInspecting,
         readTranscript: @escaping @Sendable (String) -> Data?,
+        transcriptModifiedAt: @escaping @Sendable (String) -> Date?,
         waiter: @escaping @Sendable (Duration) async -> Void
     ) {
         self.db = db
         self.tmux = tmux
         self.inspector = inspector
         self.readTranscript = readTranscript
+        self.transcriptModifiedAt = transcriptModifiedAt
         self.waiter = waiter
+    }
+
+    /// Early-cancel probe (see `LimitResumeActuating.userAlreadyContinued`).
+    /// Read-only: no tmux calls, no writes, and — thanks to the mtime
+    /// pre-filter in `transcriptContinuation` — usually no file read either.
+    /// A terminal that has vanished answers `false`; cancelling for THAT
+    /// reason is fire time's job (`.terminalGone`), not this probe's.
+    public func userAlreadyContinued(_ resume: ScheduledResume) async -> Bool {
+        guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil) else {
+            return false
+        }
+        return transcriptContinuation(
+            path: terminal.transcriptPath, since: resume.createdAt, mtimeGated: true
+        ).alreadyContinued
+    }
+
+    /// The single copy of the "already continued" predicate: does the
+    /// transcript hold a record newer than the limit-detection instant?
+    /// Returns the bytes it read alongside the verdict (nil when the read
+    /// was skipped or failed).
+    ///
+    /// `mtimeGated` selects the caller's cost profile:
+    /// - `false` — fire-time eligibility (step 2). ALWAYS reads, because
+    ///   those bytes double as the pre-send growth baseline for
+    ///   `verifyResumed`; skipping would leave `preSize == 0` and make any
+    ///   later read look like growth.
+    /// - `true` — the scheduler's early pass, which runs every
+    ///   `earlyCheckInterval` per pending row. Skips the whole-file read
+    ///   entirely when the file's mtime is at or before `cutoff`: nothing
+    ///   can have been appended since, and a long session's JSONL runs to
+    ///   tens of MB. An absent/unreadable mtime is NOT read as
+    ///   "unmodified" — it falls through to the read.
+    private func transcriptContinuation(
+        path: String?, since cutoff: Date, mtimeGated: Bool
+    ) -> (alreadyContinued: Bool, data: Data?) {
+        guard let path, !path.isEmpty else { return (false, nil) }
+        if mtimeGated, let mtime = transcriptModifiedAt(path), mtime <= cutoff {
+            return (false, nil)
+        }
+        guard let data = readTranscript(path) else { return (false, nil) }
+        return (RateLimitDetection.hasRecord(newerThan: cutoff, in: data), data)
     }
 
     public func actuate(_ resume: ScheduledResume) async -> ResumeActuationOutcome {
@@ -207,18 +253,18 @@ public struct LimitResumeActuator: LimitResumeActuating {
         }
 
         // 2. User already continued? Any transcript record newer than the
-        //    detection instant means yes — send nothing. Keep this read
-        //    around as the pre-send baseline for growth verification — a
-        //    fresh read later would race ahead of the baseline on a
-        //    fast-growing transcript and make growth undetectable.
-        var preSendTranscriptData: Data?
-        if let path = terminal.transcriptPath, !path.isEmpty {
-            preSendTranscriptData = readTranscript(path)
-            if let data = preSendTranscriptData,
-               RateLimitDetection.hasRecord(newerThan: resume.createdAt, in: data) {
-                return .notEligible(.userAlreadyContinued)
-            }
+        //    detection instant means yes — send nothing. Same predicate the
+        //    scheduler's early pass runs (`transcriptContinuation`), but
+        //    ungated: keep this read around as the pre-send baseline for
+        //    growth verification — a fresh read later would race ahead of
+        //    the baseline on a fast-growing transcript and make growth
+        //    undetectable.
+        let continuation = transcriptContinuation(
+            path: terminal.transcriptPath, since: resume.createdAt, mtimeGated: false)
+        if continuation.alreadyContinued {
+            return .notEligible(.userAlreadyContinued)
         }
+        let preSendTranscriptData = continuation.data
 
         // 3. Claude must be the pane's FOREGROUND process (+ flag). Never
         //    type into a bare shell.

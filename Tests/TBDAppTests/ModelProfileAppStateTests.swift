@@ -150,6 +150,37 @@ import TBDShared
             "a transient refresh failure after a successful set must not snap the toggle off")
 }
 
+// Same pair for worktree auto-trust. Note the OFF direction is the interesting
+// one here: this flag ships ON, so the toggle's job is persisting an opt-out.
+@MainActor
+@Test func appState_setAutoTrustWorktreesRefreshesCapabilitiesOnSuccess() async {
+    let state = AppState()
+    state.autoTrustWorktreesSetter = { _ in }  // set RPC succeeds
+    state.daemonCapabilitiesFetcher = {
+        DaemonCapabilitiesResult(controlModeEnabled: false, autoTrustWorktrees: false)
+    }
+    #expect(state.daemonCapabilities == nil)
+
+    await state.setAutoTrustWorktrees(false)
+
+    #expect(state.daemonCapabilities?.autoTrustWorktrees == false,
+            "a successful toggle must re-fetch the daemon's persisted state")
+}
+
+@MainActor
+@Test func appState_setAutoTrustWorktreesKeepsLastKnownCapabilitiesOnRefreshFailure() async {
+    let state = AppState()
+    state.autoTrustWorktreesSetter = { _ in }  // set RPC succeeds...
+    state.daemonCapabilitiesFetcher = { nil }  // ...but the re-fetch transiently fails
+    state.daemonCapabilities = DaemonCapabilitiesResult(
+        controlModeEnabled: false, autoTrustWorktrees: false)
+
+    await state.setAutoTrustWorktrees(false)
+
+    #expect(state.daemonCapabilities?.autoTrustWorktrees == false,
+            "a transient refresh failure after a successful set must not snap the toggle back on")
+}
+
 @MainActor
 @Test func appState_dismissedProxyWarningsStartsEmptyAndAcceptsInsertions() {
     // The banner dismissal logic in TerminalPanelView writes to this set so a

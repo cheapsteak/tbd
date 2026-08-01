@@ -189,7 +189,34 @@ public struct WorktreeDelta: Codable, Sendable {
 /// Delta payload for worktree archive (just the ID).
 public struct WorktreeIDDelta: Codable, Sendable {
     public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+    /// True only when the daemon archived this row because its *creation*
+    /// genuinely failed. Deliberate archives — CLI `tbd worktree archive`, the
+    /// GUI menu, auto-archive-on-merge — leave it false.
+    ///
+    /// Clients must not infer creation failure from `status == .creating` at
+    /// delta time: a `.creating` row can be archived deliberately (the CLI has
+    /// no status guard, unlike the app's `archiveShortcutRoute`), and that
+    /// legitimate cancel is indistinguishable from a git failure by status
+    /// alone. Only the daemon knows which happened, so it says so here.
+    public let creationFailed: Bool
+
+    public init(worktreeID: UUID, creationFailed: Bool = false) {
+        self.worktreeID = worktreeID
+        self.creationFailed = creationFailed
+    }
+
+    // Explicit decoding: a synthesized `init(from:)` ignores property defaults
+    // and would throw `keyNotFound` against an older daemon that never sends
+    // this key. Absent means "not a creation failure".
+    private enum CodingKeys: String, CodingKey {
+        case worktreeID, creationFailed
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
+        self.creationFailed = try c.decodeIfPresent(Bool.self, forKey: .creationFailed) ?? false
+    }
 }
 
 /// Delta payload for worktree rename.

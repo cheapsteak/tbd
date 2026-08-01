@@ -219,9 +219,14 @@ struct SingleWorktreeView: View {
                 //   continue at ..." text would be misleading because nothing
                 //   is running to receive it.
                 switch HibernatedBannerModel.banner(for: activeTabTerminal) {
-                case .scheduledResume(let resumeAt)?:
+                case .scheduledResume(let resumeAt, let terminalID)?:
                     Divider()
-                    ScheduledResumeBanner(resumeAt: resumeAt)
+                    ScheduledResumeBanner(resumeAt: resumeAt) {
+                        // Same path as the tab context menu's "Cancel
+                        // Scheduled Resume" (TabBar), which stays as the
+                        // secondary affordance.
+                        Task { await appState.cancelScheduledResume(terminalID: terminalID) }
+                    }
                 case .hibernatedOverlay?, nil:
                     EmptyView()
                 }
@@ -337,8 +342,23 @@ enum HibernatedBannerModel {
         /// `parkedNoticeMessage` wiring in PanePlaceholder), carrying this
         /// reason-phrased message.
         case hibernatedOverlay(message: String)
-        /// Terminal has a scheduled auto-resume → the "⏳ resumes ..." footer.
-        case scheduledResume(Date)
+        /// Terminal has a scheduled auto-resume → the "⏳ resumes ..." footer,
+        /// which carries an inline Cancel button acting on `cancelTerminalID`
+        /// (the same `AppState.cancelScheduledResume` the tab context menu
+        /// calls).
+        case scheduledResume(at: Date, cancelTerminalID: UUID)
+
+        /// The terminal an inline Cancel button acts on, or nil for banner
+        /// states that expose no cancel affordance. Only the scheduled-resume
+        /// footer has something to cancel: a parked terminal gets no footer at
+        /// all, and its `pendingResumeAt` (if a stale mirror still carries one)
+        /// is already cancelled daemon-side by parking.
+        var cancelTerminalID: UUID? {
+            switch self {
+            case .scheduledResume(_, let terminalID): return terminalID
+            case .hibernatedOverlay: return nil
+            }
+        }
     }
 
     /// nil = neither footer nor overlay strip. Precedence: a parked terminal
@@ -353,7 +373,7 @@ enum HibernatedBannerModel {
             return .hibernatedOverlay(message: message(for: terminal.hibernateReason))
         }
         if let resumeAt = terminal.pendingResumeAt {
-            return .scheduledResume(resumeAt)
+            return .scheduledResume(at: resumeAt, cancelTerminalID: terminal.id)
         }
         return nil
     }
@@ -382,8 +402,17 @@ enum HibernatedBannerModel {
 /// "continue" at `resumeAt`). Replaces the wide per-tab label text that used
 /// to inflate tab width; background tabs still signal via a bare "⏳" glyph
 /// in the tab label.
+///
+/// Carries an inline "Cancel" so dropping a queued auto-resume doesn't require
+/// finding the tab context menu. The menu item stays as the secondary
+/// affordance; both call `AppState.cancelScheduledResume`.
+///
+/// The button sits immediately after the message (Spacer *after* it) rather
+/// than at the trailing window edge: on a wide window a far-right control is
+/// visually divorced from the sentence it acts on.
 private struct ScheduledResumeBanner: View {
     let resumeAt: Date
+    let onCancel: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -391,12 +420,44 @@ private struct ScheduledResumeBanner: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.orange)
                 .lineLimit(1)
+            ScheduledResumeCancelButton(action: onCancel)
             Spacer()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.15))
+    }
+}
+
+/// Hand-rolled chrome rather than `.buttonStyle(.bordered)`: a `.small`
+/// bordered button is ~20pt tall and would inflate this 21pt bar by a third.
+/// Follows `ModelRailButton` (WorktreeProfilePickerView) — plain button, tight
+/// rounded-rect — but stays outline-only (no fill) so it reads as a light
+/// control against the banner's own orange wash; hover strengthens the
+/// stroke instead of introducing a background. Palette kept to `.orange` so
+/// no new accent color enters the bar.
+private struct ScheduledResumeCancelButton: View {
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("Cancel")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 1)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.orange.opacity(isHovered ? 0.85 : 0.55), lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Cancel the scheduled auto-resume")
     }
 }
 

@@ -465,6 +465,34 @@ struct RemoteProviderManagerTests {
         #expect(rows.isEmpty)
     }
 
+    /// Tier 1: in-memory GRDB and a scripted provider only.
+    @Test func structuredTransientPollPreservesTheLastSuccessfulSnapshot() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
+            ProviderResult(
+                exitCode: 3,
+                stdout: Data(
+                    #"{"error": {"code": "unreachable", "message": "provider transport overloaded", "retryable": true}}"#
+                        .utf8),
+                stderr: ""),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+
+        await m.pollOnce(provider: provider)
+        await m.pollOnce(provider: provider)
+
+        let rows = try await db.remoteSessions.list()
+        #expect(rows.map(\.sessionID) == ["a"])
+        #expect(rows.first?.decodedPayload?.state == .running)
+        #expect(rows.first?.gone == false)
+
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .stale)
+        #expect(status?.errorMessage == "provider transport overloaded")
+        #expect(invoker.calls == [["list"], ["list"]])
+    }
+
     @Test func invokeByNameRoutesToConfiguredProvider() async throws {
         // Only exercises verb routing, so it calls loadRegistryAndDescribe()
         // (registry + describe, no poll loop) rather than start() — no

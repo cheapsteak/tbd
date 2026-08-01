@@ -100,6 +100,10 @@ import Testing
 
         let stored = try #require(try await db.worktrees.get(id: wt.id))
         #expect(stored.prNumber == 7)
+        // The contents came from refs/pull/7/head, which a fork may have
+        // authored — the row must say so, or every later spawn/wake/revive
+        // would pre-accept Claude's folder-trust dialog for it.
+        #expect(stored.foreignHead == true)
     }
 
     @Test func createFromPRDoesNotClobberExistingLocalBranch() async throws {
@@ -168,5 +172,10 @@ import Testing
 
         let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
         #expect(listed.contains { $0.branch == "feature-x" && $0.path.hasSuffix("/feature-x") })
+
+        // ...and because the contents are an ordinary same-repo branch, the row
+        // is NOT foreign-head, so folder-trust seeding still applies to it.
+        let stored = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(stored.foreignHead == false)
     }
 }

@@ -205,12 +205,12 @@ extension AppState {
         // so a concurrent invocation can't overwrite the .done state with
         // an "already active" error.
         guard revivingArchived[worktreeID] == nil else { return }
-        // Find the snapshot in archivedWorktrees so we can keep the row visible
-        // after the daemon reconciles the worktree out of the archived list.
-        guard let snapshot = archivedWorktrees.values
-            .flatMap({ $0 })
-            .first(where: { $0.id == worktreeID })
-        else {
+        // Find the snapshot so we can keep the row visible after the daemon
+        // reconciles the worktree out of the archived list. Must consult BOTH
+        // row sources (loaded pages ∪ search results) — see
+        // `AppState.mergeArchivedSnapshots`; against the loaded pages alone
+        // this silently no-ops for any row the user reached via search.
+        guard let snapshot = archivedSnapshot(id: worktreeID) else {
             logger.warning("reviveWithSession: no archived snapshot for \(worktreeID, privacy: .public)")
             return
         }
@@ -238,6 +238,26 @@ extension AppState {
             revivingArchived.removeValue(forKey: worktreeID)
             logger.error("reviveWithSession failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
             showAlert("Couldn't revive worktree: \(error.localizedDescription)", isError: true)
+            handleConnectionError(error)
+        }
+    }
+
+    /// Create a new worktree branch from an archived conversation and resume
+    /// the selected session there. The archived worktree remains untouched.
+    func reviveConversationOnFreshBranch(worktreeID: UUID, sessionId: String) async {
+        do {
+            let size = mainAreaTerminalSize()
+            let result = try await freshConversationReviver(worktreeID, sessionId, size.cols, size.rows)
+            if findWorktree(id: result.worktree.id) == nil {
+                await refreshWorktrees()
+            }
+            navigateToActiveWorktree(result.worktree.id)
+            if let warning = result.warning {
+                showAlert(warning, isError: false)
+            }
+        } catch {
+            logger.error("reviveConversationOnFreshBranch failed: \(error, privacy: .public)")
+            showAlert("Couldn't revive conversation on a fresh branch: \(error.localizedDescription)", isError: true)
             handleConnectionError(error)
         }
     }

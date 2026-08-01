@@ -13,6 +13,75 @@ enum RemoteSessionDetailTab: String, CaseIterable, Equatable, Hashable {
     case log = "Log"
 }
 
+/// Pure copy decisions for the two independent remote-session state axes.
+/// Shared by the detail header and sidebar so neither can present terminal
+/// liveness as evidence of agent activity.
+enum RemoteSessionStatePresentation {
+    static func terminalLabel(_ state: RemoteProcessState) -> String {
+        switch state {
+        case .starting: return "Terminal: Starting"
+        case .running: return "Terminal: Running"
+        case .exited: return "Terminal: Exited"
+        case .unknown: return "Terminal: State unavailable"
+        }
+    }
+
+    static func agentLabel(_ state: RemoteAgentState) -> String {
+        switch state {
+        case .working: return "Agent: Working"
+        case .waitingInput: return "Agent: Waiting for input"
+        case .idle: return "Agent: Idle"
+        case .exited: return "Agent: Exited"
+        case .unknown: return "Agent: State unavailable"
+        }
+    }
+
+    static func activityUnavailableWarning(
+        terminalState: RemoteProcessState, agentState: RemoteAgentState, gone: Bool
+    ) -> String? {
+        guard !gone, terminalState == .running, agentState == .unknown else { return nil }
+        return "Agent activity is unavailable; terminal liveness alone does not confirm agent health."
+    }
+
+    static func sidebarCaption(
+        terminalState: RemoteProcessState,
+        agentState: RemoteAgentState,
+        gone: Bool,
+        exitCode: Int?,
+        staleness: String? = nil
+    ) -> String? {
+        let base: String? = {
+            if gone { return "no longer reported" }
+            switch terminalState {
+            case .starting:
+                return "Starting…"
+            case .exited:
+                if let exitCode { return "exited (code \(exitCode))" }
+                return "exited"
+            case .running:
+                return agentState == .unknown ? "agent state unavailable" : nil
+            case .unknown:
+                return "terminal state unavailable"
+            }
+        }()
+        switch (base, staleness) {
+        case (nil, nil): return nil
+        case (let base?, nil): return base
+        case (nil, let staleness?): return staleness
+        case (let base?, let staleness?): return "\(base) · \(staleness)"
+        }
+    }
+}
+
+/// Constructs the raw terminal input for the send field. A terminal's Enter
+/// key is carriage return, not line feed; the provider receives these bytes
+/// verbatim.
+enum RemoteSessionSendPayload {
+    static func submitting(_ text: String) -> String {
+        text + "\r"
+    }
+}
+
 /// Detail pane shown when a remote-session sidebar row is selected
 /// (`AppState.selectedRemoteSession`), hosted (via `RemoteSessionHostSlot`)
 /// inside `DetailSectionHostPager`'s `.remote` tab — mounted continuously
@@ -235,8 +304,11 @@ struct RemoteSessionDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let session {
-                    chip(session.payload.state.rawValue.capitalized, tint: .secondary)
-                    chip(agentStateLabel(session.payload.agentState), tint: agentStateTint(session.payload.agentState))
+                    chip(RemoteSessionStatePresentation.terminalLabel(session.payload.state), tint: .secondary)
+                    chip(
+                        RemoteSessionStatePresentation.agentLabel(session.payload.agentState),
+                        tint: agentStateTint(session.payload.agentState)
+                    )
                 }
             }
 
@@ -248,6 +320,17 @@ struct RemoteSessionDetailView: View {
                 Label("Session not found in the current mirror", systemImage: "questionmark.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if let session,
+               let warning = RemoteSessionStatePresentation.activityUnavailableWarning(
+                   terminalState: session.payload.state,
+                   agentState: session.payload.agentState,
+                   gone: session.gone
+               ) {
+                Label(warning, systemImage: "questionmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
 
             if let reason = session?.payload.agentStateReason, !reason.isEmpty {
@@ -291,10 +374,6 @@ struct RemoteSessionDetailView: View {
             }
         }
         .padding(.top, 2)
-    }
-
-    private func agentStateLabel(_ state: RemoteAgentState) -> String {
-        state.rawValue.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     private func agentStateTint(_ state: RemoteAgentState) -> Color {
@@ -480,7 +559,7 @@ struct RemoteSessionDetailView: View {
 
     private func performSend() {
         guard !sendText.isEmpty else { return }
-        let text = sendText + "\n"
+        let text = RemoteSessionSendPayload.submitting(sendText)
         sendText = ""
         isSending = true
         Task {

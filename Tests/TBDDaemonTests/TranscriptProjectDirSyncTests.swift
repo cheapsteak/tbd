@@ -221,6 +221,75 @@ struct TranscriptProjectDirSyncTests {
         #expect(contents(try #require(located)) == "fresh copy")
     }
 
+    /// The profile-bound resume case: a model profile's config dir mirrors the
+    /// host store by symlinking its `projects` slot
+    /// (`~/tbd/profiles/<id>/claude/projects -> ~/.claude/projects`).
+    /// `FileManager.contentsOfDirectory(at:)` lists a symlinked directory URL
+    /// as EMPTY, so this scan used to find nothing and every profile-bound
+    /// resume silently started a fresh conversation.
+    @Test func locateSessionTranscriptFindsSessionThroughSymlinkedProjectsRoot() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let hostRoot = dir.appendingPathComponent("host-projects", isDirectory: true)
+        try write("archived transcript", to: hostRoot.appendingPathComponent("-old-slug/sess-1.jsonl"))
+        let profileRoot = dir.appendingPathComponent("profile/projects", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: profileRoot.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: profileRoot, withDestinationURL: hostRoot)
+
+        let located = TranscriptProjectDirSync.locateSessionTranscript(
+            sessionID: "sess-1", projectsRoot: profileRoot)
+
+        #expect(contents(try #require(located)) == "archived transcript")
+    }
+
+    /// Same defect, one layer up: the by-ID scan through a symlinked root has
+    /// to end with the transcript mirrored into the derived project dir, which
+    /// is itself addressed *through* the symlink.
+    @Test func ensureSessionResumableMirrorsThroughSymlinkedProjectsRoot() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let hostRoot = dir.appendingPathComponent("host-projects", isDirectory: true)
+        try write("archived transcript", to: hostRoot.appendingPathComponent("-old-slug/sess-1.jsonl"))
+        let profileRoot = dir.appendingPathComponent("profile/projects", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: profileRoot.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: profileRoot, withDestinationURL: hostRoot)
+        let worktreePath = dir.appendingPathComponent("wt-new-location").path
+
+        TranscriptProjectDirSync.ensureSessionResumable(
+            sessionID: "sess-1", worktreePath: worktreePath,
+            projectsRoot: profileRoot, storedTranscriptPath: nil)
+
+        let derived = TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: worktreePath, projectsRoot: profileRoot)
+        #expect(contents(derived.appendingPathComponent("sess-1.jsonl")) == "archived transcript")
+        // The mirror landed in the host store the symlink points at, not in a
+        // shadow directory beside it.
+        let hostDerived = TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: worktreePath, projectsRoot: hostRoot)
+        #expect(contents(hostDerived.appendingPathComponent("sess-1.jsonl")) == "archived transcript")
+    }
+
+    /// `syncDirectoryContents` shares the blindness: a symlinked `sourceDir`
+    /// (e.g. a `subagents/` slot mirrored elsewhere) listed as empty and the
+    /// whole subtree was silently skipped.
+    @Test func syncDirectoryContentsFollowsSymlinkedSourceDirectory() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let realDir = dir.appendingPathComponent("real", isDirectory: true)
+        try write("agent", to: realDir.appendingPathComponent("agent-a.jsonl"))
+        try write("nested", to: realDir.appendingPathComponent("deeper/agent-b.jsonl"))
+        let linkedSource = dir.appendingPathComponent("linked-src", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: linkedSource, withDestinationURL: realDir)
+        let destDir = dir.appendingPathComponent("dst", isDirectory: true)
+
+        TranscriptProjectDirSync.syncDirectoryContents(from: linkedSource, to: destDir)
+
+        #expect(contents(destDir.appendingPathComponent("agent-a.jsonl")) == "agent")
+        #expect(contents(destDir.appendingPathComponent("deeper/agent-b.jsonl")) == "nested")
+    }
+
     @Test func locateSessionTranscriptReturnsNilWhenSessionAbsent() throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
