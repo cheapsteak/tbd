@@ -58,30 +58,39 @@ Three cutover strategies were weighed:
 
 ### Why "daemon-owned" does not mean "laggy"
 
-The pure reducer already lives in `TBDShared` (`PanelSurfaceReducer.swift`), so
-the app runs the *same* reducer the daemon runs, locally, on the main thread.
-A user gesture never waits on the round-trip:
+No gesture in the app is continuous with respect to the layout tree. The
+divider's `DragGesture.onChanged` moves a local overlay only; `onEnded` commits,
+and `SplitContainer.commitRatios()` is the sole writer into the tree
+(`SplitLayoutView.swift:135-137`). Every other operation — open, close,
+navigate, history — is a discrete click. So there is no per-frame path that
+could accumulate round-trip cost.
 
-1. Gesture → run `PanelSurfaceReducer` against the local mirror → render
-   immediately (as instant as today's `@Binding` mutation).
-2. Fire `apply(origin: .appUser)` in the background.
-3. The daemon runs the same reducer, commits, broadcasts `panelSurfaceChanged`.
-4. The app reconciles: the delta almost always matches what the app already
-   computed (same reducer, same input) → no-op.
+The flow for a user gesture is therefore a single round-trip:
 
-Async only appears where it is imperceptible: the agent path (nobody waits on a
-CLI command) and the background commit of a user gesture (masked by the
-optimistic render). The daemon is also a local unix-socket process — the
-round-trip is sub-millisecond regardless.
+1. Gesture → `panel.apply(origin: .appUser)`.
+2. The daemon reduces, commits, and returns the authoritative
+   `PanelApplyResult.tab` in the response.
+3. The app upserts that tab into the mirror → render.
+4. The broadcast `panelSurfaceChanged` that follows carries the same tab at the
+   same revision, so it lands as a no-op.
+
+The daemon is a local unix-socket process, so this is a sub-millisecond hop plus
+one SQLite commit — far under a frame, and it buys a single source of truth with
+no reconciliation machinery.
+
+The pure reducer in `TBDShared` (`PanelSurfaceReducer.swift`) makes an
+optimistic local layer available if soak measurement ever shows a perceptible
+gap: the app can run the same reducer the daemon runs, render immediately, and
+let the response confirm. That is strictly additive in front of the same
+chokepoint and changes no other component, so it is deliberately not built now.
 
 ### Conflicts
 
-Divergence between the optimistic local result and the daemon's broadcast
-happens only on genuine concurrency — an agent applied to the same tab between
-the app's `baseRevision` and its commit. Single-user, rare. Resolution is
-last-writer-wins: snap the mirror to daemon truth from the delta. If the app's
-own `apply` is rejected for a stale `baseRevision`, refetch via `panel.get` and
-re-render. No CRDT, no operational transform.
+The app sends the mirror's current `revision` as `baseRevision`. A stale value
+means an agent applied to the same tab in between — single-user, rare. The
+daemon rejects the operation; the app refetches via `panel.get` and re-renders,
+so the UI snaps to daemon truth and the user retries. Last-writer-wins. No CRDT,
+no operational transform.
 
 ## Ownership and operations
 
@@ -125,8 +134,16 @@ Deferred operations: `move`.
 - Renders a `WorkspaceTabSurface`: the `.primary` anchor plus the recursive
   viewer-panel split tree, from the mirror.
 - Emits gestures (open/close/navigate/history/resize) to the `AppState`
-  chokepoint. Ports the existing divider's drag behavior (native-resize rework
-  is #9).
+  chokepoint. Reuses the existing `SplitDivider` (native-resize rework is #9).
+- Reuses the existing leaf view (`PanePlaceholder` — toolbar, pane label, history
+  controls, content rendering) rather than duplicating it, by way of a mutation
+  seam: the leaf calls an injected action set, which the legacy path fills with
+  today's local tree mutations and this path fills with `panel.apply` calls. The
+  leaf is fed by a `PanelContent → PaneContent` mapping, total because
+  `PanelContent` is a strict subset (no terminal case). This is content-only —
+  the mapping is never used to rebuild a `LayoutNode` tree, which is what makes
+  it different from the rejected adapter bridge: the tree renderer and the source
+  of truth stay separate per path, and no `@Binding` races the daemon.
 
 ### Workspace root — the switch
 
