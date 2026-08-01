@@ -321,13 +321,23 @@ but on machinery already in the tree:
 2. **Content.** That same pre-hook carries the full structured payload — the
    questions, their options, headers, the multi-select flag, and the
    `tool_use_id` — into the daemon's in-memory pending-question store. It is
-   the *only* machine source of that content while the dialog is live: TBD's
-   pending-question work in May established empirically that the transcript
-   JSONL does not contain the `tool_use` record mid-dialog, which is exactly
-   why the hook bridge was built. Verbatim, structured, before render.
+   the *only* machine source of that content while the dialog is live:
+   measured directly, the transcript holds no record of the question while
+   the picker is open — the `tool_use` line is buffered and flushes only with
+   the resolution, nine seconds of file silence spanning one measured dialog
+   (`docs/research/2026-07-31-askuserquestion-dismissal/findings.md`) — which
+   is exactly why the hook bridge exists. Verbatim, structured, before
+   render.
 3. **Outcome.** Once the dialog resolves, the `tool_result` lands in the
-   transcript in a stable shape TBD already parses. What was answered is a
-   machine fact afterward, not an inference.
+   transcript in a stable shape TBD already parses, within roughly 200 ms of
+   the resolving keystroke (measured, findings doc above). Dismissal
+   included: an Escape writes a generic rejection `tool_result`
+   (`is_error`, "User rejected tool use") joined to the question by
+   `tool_use_id`. And — measured rather than assumed — **Escape fires no
+   hook event at all**: no `PostToolUse`, no `PostToolUseFailure`, nothing.
+   The transcript record is the *only* machine signal that a dialog was
+   dismissed. What happened to a question is a machine fact afterward, not
+   an inference.
 
 No other member of the zoo has even one of the three. That is why this is
 written as a test and not as a list: the list would have to be maintained
@@ -348,9 +358,18 @@ sequence is one shape for every question:
 1. **Dismiss with Escape.** Escape closes the picker and can never select — the
    same property the rate-limit actuator already relies on, where a blind Enter
    could have confirmed a paid plan upgrade and Escape could not.
-2. **Wait for the dialog's resolution signal** — the `PostToolUse` hook
-   clearing the pending entry. A machine signal, never a timer. Nothing is
-   typed into a session that may still have a modal on screen.
+2. **Wait for the dialog's resolution to appear in the transcript.** Escape
+   produces no hook event — measured, not assumed (findings doc above) — so
+   no hook can be the signal. What Escape produces is transcript records:
+   the buffered `tool_use` and the rejection `tool_result` flush together
+   within roughly 200 ms of the keystroke, joined to the question by
+   `tool_use_id`. That record is the resolution signal — the same tail read
+   the daemon already performs, and the same signal that clears the
+   pending-question store. A timer never *confirms* anything, but the wait
+   is bounded: if the resolution has not appeared within the bound, the flow
+   stops, sends nothing, and writes an anomaly — the undetermined shape
+   (§12). Nothing is typed into a session that may still have a modal on
+   screen.
 3. **Deliver the response as ordinary composer text** through the standard
    delivery adapter, with §12's acknowledgement path verifying it landed: the
    ledger marker appears in the transcript, or the send is retried once and
@@ -459,8 +478,13 @@ becomes one is exactly the judgment the desk is there to make.
 
 **Store hygiene, and what a restart costs.** The pending store's time-to-live
 is a garbage-collection backstop for stranded entries, not a dialog's clock. It
-must never expire a still-live dialog during a shift: resolution comes from the
-`PostToolUse` clear, not from elapsed time. The store staying memory-only is
+must never expire a still-live dialog during a shift: resolution comes from
+the transcript's `tool_result` record, not from elapsed time — and measured
+behavior says that record arrives on every resolution path: answer, Escape,
+even a tool denied by a hook (findings doc, §2 above). No hook event closes a
+dismissed dialog, so any store keyed on hook events alone would strand an
+entry on the single most common user gesture; the transcript record is the
+closing signal, and the GC covers only what measurement has not. The store staying memory-only is
 fine under §7's restart rule. A mid-shift daemon restart degrades honestly —
 the awaiting-input state persists, so the case still knows a question is
 pending, but its content is gone, and the case reports that loudly rather than
