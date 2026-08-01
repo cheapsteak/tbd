@@ -70,6 +70,34 @@ public final class RPCRouter: Sendable {
     /// re-implement gating. Broadcasts through the same `subscriptions`
     /// channel every other mutating handler uses.
     public let panelCoordinator: PanelCoordinator
+    /// Native Claude-to-Codex import seams. Production uses the installed
+    /// Codex app-server; tests replace these before invoking the handler.
+    nonisolated(unsafe) var codexExecutableResolver: @Sendable () throws -> String = {
+        try CodexExecutableResolver.resolve()
+    }
+    nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL = {
+        try CodexHomeManager().ensureProfilePlugin()
+    }
+    nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
+        CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in
+            CodexSpawnCommandBuilder.commandOutput(arguments: arguments, timeout: 3)
+        }
+    }
+    nonisolated(unsafe) var codexSessionImport: @Sendable (
+        _ executablePath: String,
+        _ codexHome: URL,
+        _ transcriptPath: String,
+        _ cwd: String,
+        _ title: String?
+    ) async throws -> String = { executablePath, codexHome, transcriptPath, cwd, title in
+        try await CodexSessionImporter(
+            executablePath: executablePath,
+            codexHome: codexHome
+        ).importSession(
+            transcriptPath: transcriptPath,
+            cwd: cwd,
+            title: title)
+    }
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -205,6 +233,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeForget(request.paramsData)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData)
+            case RPCMethod.terminalContinueInCodex:
+                return try await handleTerminalContinueInCodex(request.paramsData)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:

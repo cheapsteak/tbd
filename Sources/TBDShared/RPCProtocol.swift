@@ -112,6 +112,7 @@ public enum RPCMethod {
     public static let worktreeMove = "worktree.move"
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
+    public static let terminalContinueInCodex = "terminal.continueInCodex"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
     public static let terminalFocus = "terminal.focus"
@@ -1367,6 +1368,24 @@ public struct TerminalCreateParams: Codable, Sendable {
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
+    }
+}
+
+public struct TerminalContinueInCodexParams: Codable, Sendable {
+    public let terminalID: UUID
+
+    public init(terminalID: UUID) {
+        self.terminalID = terminalID
+    }
+}
+
+public struct TerminalContinueInCodexResult: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let threadID: String
+
+    public init(terminalID: UUID, threadID: String) {
+        self.terminalID = terminalID
+        self.threadID = threadID
     }
 }
 

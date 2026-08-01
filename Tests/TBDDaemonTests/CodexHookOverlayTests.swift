@@ -118,6 +118,10 @@ import TBDShared
         )
         #expect(profile.contains(#"[plugins."tbd@tbd"]"#))
         #expect(profile.contains("enabled = true"))
+        #expect(profile.contains(CodexProfileWriter.shadcnServerHeader))
+        #expect(profile.contains(#"command = "npx""#))
+        #expect(profile.contains(#"args = ["shadcn@latest", "mcp"]"#))
+        #expect(profile.contains("enabled = false"))
     }
 
     @Test func ensurePluginEnabledPreservesProfileAndEnablesExistingSection() {
@@ -169,6 +173,35 @@ import TBDShared
         }
     }
 
+    @Test func ensureShadcnDisabledPreservesProfileAndIsIdempotent() {
+        let input = """
+        model = "gpt-5.1"
+
+        [mcp_servers.shadcn]
+        enabled = true
+        command = "wrong-command"
+        args = ["wrong-argument"]
+        enabled = true
+
+        [tools]
+        web_search = true
+        """
+
+        let first = CodexProfileWriter.ensureShadcnDisabled(in: input)
+        let second = CodexProfileWriter.ensureShadcnDisabled(in: first)
+
+        #expect(first.contains(#"model = "gpt-5.1""#))
+        #expect(first.contains(#"command = "npx""#))
+        #expect(first.contains(#"args = ["shadcn@latest", "mcp"]"#))
+        #expect(first.contains("[tools]"))
+        #expect(first.contains("enabled = false"))
+        #expect(!first.contains("wrong-command"))
+        #expect(!first.contains("wrong-argument"))
+        #expect(!first.contains("enabled = true"))
+        #expect(first.components(separatedBy: "enabled = false").count == 2)
+        #expect(second == first, "shadcn profile override must be idempotent")
+    }
+
     @Test func ensureProfileIsIdempotentAndDoesNotRewrite() throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-profile-idem-\(UUID().uuidString)", isDirectory: true)
@@ -185,8 +218,53 @@ import TBDShared
         let secondModified = try FileManager.default
             .attributesOfItem(atPath: path.path)[.modificationDate] as? Date
 
+        #expect(firstContent.contains(CodexProfileWriter.shadcnServerHeader))
+        #expect(firstContent.contains(#"command = "npx""#))
+        #expect(firstContent.contains(#"args = ["shadcn@latest", "mcp"]"#))
+        #expect(firstContent.contains("enabled = false"))
         #expect(firstContent == secondContent, "profile content must be byte-identical after second run")
         #expect(firstModified == secondModified, "second ensureProfile run must not rewrite the file")
+    }
+
+    @Test func generatedProfileParsesWithInstalledCodexAndOmitsDisabledShadcn() throws {
+        guard let executable = try? CodexExecutableResolver.resolve() else {
+            return
+        }
+        #expect(executable.hasPrefix("/"))
+
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tbd-codex-profile-parse-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        _ = try CodexHomeManager(codexHome: codexHome).ensureProfilePlugin()
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        let profileFlag = CodexSpawnCommandBuilder.detectProfileFlag(
+            executablePath: executable
+        ) { arguments in
+            CodexSpawnCommandBuilder.commandOutput(
+                arguments: arguments,
+                timeout: 3)
+        }
+        process.arguments = [profileFlag, CodexPlugin.profileName, "mcp", "list"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_HOME"] = codexHome.path
+        process.environment = environment
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(
+            decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        #expect(process.terminationStatus == 0, "Codex rejected the generated profile: \(output)")
+        #expect(!output.localizedCaseInsensitiveContains("shadcn"))
     }
 
     @Test func ensurePluginEnabledPreservesEnabledPrefixedKeys() {
@@ -257,8 +335,15 @@ import TBDShared
 
         let headerCount = firstContent.components(separatedBy: #"[plugins."tbd@tbd"]"#).count - 1
         #expect(headerCount == 1, "exactly one [plugins.\"tbd@tbd\"] table after rewrite")
-        #expect(firstContent.contains("enabled = true"))
-        #expect(!firstContent.contains("enabled = false"))
+        let shadcnRange = try #require(
+            firstContent.range(of: CodexProfileWriter.shadcnServerHeader))
+        let pluginSection = String(firstContent[..<shadcnRange.lowerBound])
+        let shadcnSection = String(firstContent[shadcnRange.lowerBound...])
+        #expect(pluginSection.contains("enabled = true"))
+        #expect(!pluginSection.contains("enabled = false"))
+        #expect(shadcnSection.contains(#"command = "npx""#))
+        #expect(shadcnSection.contains(#"args = ["shadcn@latest", "mcp"]"#))
+        #expect(shadcnSection.contains("enabled = false"))
         #expect(!firstContent.contains("\r"), "rewritten profile must use LF endings")
 
         try CodexProfileWriter.ensureProfile(in: codexHome)
