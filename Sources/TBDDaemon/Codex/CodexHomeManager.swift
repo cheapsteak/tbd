@@ -180,7 +180,6 @@ enum CodexPluginWriter {
 
 enum CodexProfileWriter {
     static let profileFileName = "\(CodexPlugin.profileName).config.toml"
-    static let shadcnServerHeader = "[mcp_servers.shadcn]"
 
     static func profilePath(in codexHome: URL) -> URL {
         codexHome.appendingPathComponent(profileFileName, isDirectory: false)
@@ -189,9 +188,7 @@ enum CodexProfileWriter {
     static func ensureProfile(in codexHome: URL) throws {
         let path = profilePath(in: codexHome)
         let current = (try? String(contentsOf: path, encoding: .utf8)) ?? ""
-        let updated = ensureShadcnDisabled(
-            in: ensurePluginEnabled(in: current)
-        )
+        let updated = ensurePluginEnabled(in: current)
 
         guard updated != current else {
             return
@@ -210,22 +207,6 @@ enum CodexProfileWriter {
             in: toml,
             header: header,
             settings: [("enabled", "true")]
-        )
-    }
-
-    /// TBD Codex sessions can start in many worktrees at once. Disable the
-    /// project-discovered shadcn MCP server in TBD's profile so those sessions
-    /// do not fan out one resident stdio server each. This is profile-scoped:
-    /// it does not alter the user's default Codex configuration.
-    static func ensureShadcnDisabled(in toml: String) -> String {
-        ensureSettings(
-            in: toml,
-            header: shadcnServerHeader,
-            settings: [
-                ("command", #""npx""#),
-                ("args", #"["shadcn@latest", "mcp"]"#),
-                ("enabled", "false"),
-            ]
         )
     }
 

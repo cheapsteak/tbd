@@ -72,12 +72,8 @@ public final class RPCRouter: Sendable {
     public let panelCoordinator: PanelCoordinator
     /// Native Claude-to-Codex import seams. Production uses the installed
     /// Codex app-server; tests replace these before invoking the handler.
-    nonisolated(unsafe) var codexExecutableResolver: @Sendable () throws -> String = {
-        try CodexExecutableResolver.resolve()
-    }
-    nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL = {
-        try CodexHomeManager().ensureProfilePlugin()
-    }
+    nonisolated(unsafe) var codexExecutableResolver: @Sendable () throws -> String
+    nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
     nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
         CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in
             CodexSpawnCommandBuilder.commandOutput(arguments: arguments, timeout: 3)
@@ -133,7 +129,9 @@ public final class RPCRouter: Sendable {
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
-        remoteManager: RemoteProviderManager? = nil
+        remoteManager: RemoteProviderManager? = nil,
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -162,6 +160,16 @@ public final class RPCRouter: Sendable {
         self.panelCoordinator = PanelCoordinator(
             db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
         self.remoteManager = remoteManager
+        self.codexExecutableResolver = codexExecutableResolver ?? {
+            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
+            return try CodexExecutableResolver.resolve()
+        }
+        self.codexHomeEnsurer = codexHomeEnsurer ?? {
+            if tmux.dryRun {
+                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
+            }
+            return try CodexHomeManager().ensureProfilePlugin()
+        }
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.

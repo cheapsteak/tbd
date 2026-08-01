@@ -145,10 +145,14 @@ public struct WorktreeLifecycle: Sendable {
         self.reaperGraceAttempts = reaperGraceAttempts
         self.reaperPollInterval = reaperPollInterval
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            try CodexExecutableResolver.resolve()
+            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
+            return try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            try CodexHomeManager().ensureProfilePlugin()
+            if tmux.dryRun {
+                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
+            }
+            return try CodexHomeManager().ensureProfilePlugin()
         }
     }
 
