@@ -40,6 +40,7 @@ enum TranscriptSignposts {
         case .systemReminder: return "systemReminder"
         case .skillBody: return "skillBody"
         case .toolCall(_, let name, _, _, _, _): return "tool:\(name)"
+        case .activityGroupSummary: return "activityGroup"
         case .subagentSummary: return "subagentSummary"
         }
     }
@@ -68,6 +69,8 @@ enum TranscriptSignposts {
             return text.count
         case .toolCall(_, _, let inputJSON, _, let result, _):
             return inputJSON.count + (result?.text.count ?? 0)
+        case .activityGroupSummary(let summary):
+            return summary.itemCount
         case .subagentSummary:
             return 0
         }

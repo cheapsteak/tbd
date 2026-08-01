@@ -68,6 +68,11 @@ struct ActivityRowPresentation: Equatable {
     /// merely repeats a fully-visible short title is noise.
     let titleTooltip: String?
     let style: RowStyle
+    /// Optional trailing disclosure accessory. Ordinary activity rows keep the
+    /// hover-only scope glyph; group summaries show a persistent chevron.
+    let accessorySystemName: String?
+    let accessoryAlwaysVisible: Bool
+    let accessibilityLabel: String?
 
     init(
         iconSystemName: String,
@@ -78,7 +83,10 @@ struct ActivityRowPresentation: Equatable {
         openTargetID: String?,
         titleTruncation: NSLineBreakMode = .byTruncatingTail,
         titleTooltip: String? = nil,
-        style: RowStyle = .chrome
+        style: RowStyle = .chrome,
+        accessorySystemName: String? = nil,
+        accessoryAlwaysVisible: Bool = false,
+        accessibilityLabel: String? = nil
     ) {
         self.iconSystemName = iconSystemName
         self.titleSegments = titleSegments
@@ -89,6 +97,9 @@ struct ActivityRowPresentation: Equatable {
         self.titleTruncation = titleTruncation
         self.titleTooltip = titleTooltip
         self.style = style
+        self.accessorySystemName = accessorySystemName
+        self.accessoryAlwaysVisible = accessoryAlwaysVisible
+        self.accessibilityLabel = accessibilityLabel
     }
 }
 
@@ -114,9 +125,49 @@ enum ActivityRowFormatter {
             return toolCall(
                 id: id, name: name, inputJSON: inputJSON,
                 inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
+        case let .activityGroupSummary(summary):
+            return activityGroup(summary)
         case let .subagentSummary(_, count, agentType):
             return subagentSummary(count: count, agentType: agentType)
         }
+    }
+
+    private static func activityGroup(_ summary: ActivityGroupSummary) -> ActivityRowPresentation {
+        var segments = [
+            ActivityRowSegment(text: "Worked", style: .primary),
+            ActivityRowSegment(
+                text: "· \(summary.itemCount) \(summary.itemCount == 1 ? "action" : "actions")",
+                style: .secondary
+            )
+        ]
+        if !summary.labels.isEmpty {
+            segments.append(ActivityRowSegment(
+                text: "· \(summary.labels.joined(separator: " · "))",
+                style: .tertiary
+            ))
+        }
+        var badges: [ActivityRowBadge] = []
+        if summary.requiresResponse {
+            badges.append(ActivityRowBadge(text: "needs response", kind: .error))
+        } else if summary.errorCount > 0 {
+            badges.append(ActivityRowBadge(text: summary.statusLabel.lowercased(), kind: .error))
+        } else if summary.pendingCount > 0 {
+            badges.append(ActivityRowBadge(text: "active", kind: .neutral))
+        } else {
+            badges.append(ActivityRowBadge(text: "complete", kind: .neutral))
+        }
+        return ActivityRowPresentation(
+            iconSystemName: "point.3.connected.trianglepath.dotted",
+            titleSegments: segments,
+            timestamp: nil,
+            isError: summary.errorCount > 0 || summary.requiresResponse,
+            badges: badges,
+            openTargetID: summary.id,
+            accessorySystemName: summary.isExpanded ? "chevron.down" : "chevron.right",
+            accessoryAlwaysVisible: true,
+            accessibilityLabel: "\(summary.isExpanded ? "Collapse" : "Expand") "
+                + "\(summary.itemCount) actions, \(summary.statusLabel)"
+        )
     }
 
     // MARK: - Tool call dispatch (mirrors TranscriptRow.toolCard)

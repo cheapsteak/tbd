@@ -24,9 +24,9 @@ enum TranscriptBubbleGeometry {
     /// gutter into the far inset (12 + 64 = 76) so they read as a right-anchored
     /// chat bubble. Assistant messages drop the gutter entirely (12 + 12 = 24) and
     /// span the full column width.
-    static func outerHorizontal(for role: Role) -> CGFloat {
+    static func outerHorizontal(for role: Role, columnWidth: CGFloat) -> CGFloat {
         switch role {
-        case .user: return 76
+        case .user: return columnWidth < 680 ? 24 : 76
         case .assistant: return 24
         }
     }
@@ -63,7 +63,7 @@ enum TranscriptBubbleGeometry {
     /// assistant bubble drops the gutter and spans the full column. Measure and
     /// render pass the SAME role, so heights can't drift.
     static func bodyWidth(columnWidth: CGFloat, role: Role) -> CGFloat {
-        max(columnWidth - outerHorizontal(for: role) - bodyHorizontal(for: role), 1)
+        max(columnWidth - outerHorizontal(for: role, columnWidth: columnWidth) - bodyHorizontal(for: role), 1)
     }
 
     /// Total row height: summed block heights + inter-block spacing + fixed chrome
@@ -144,7 +144,7 @@ enum TranscriptBubbleGeometry {
     static func backgroundColor(for role: Role) -> NSColor {
         switch role {
         case .user: return NSColor.controlAccentColor.withAlphaComponent(0.15)
-        case .assistant: return NSColor.controlBackgroundColor
+        case .assistant: return .clear
         }
     }
 }
@@ -327,6 +327,7 @@ final class TranscriptBubbleTextView: NSTextView {}
 @MainActor
 final class TranscriptBubbleCellView: NSTableCellView {
     private let backgroundBox = RoundedBoxView()
+    private let signalSpine = RoundedBoxView()
     private let header = NSTextField(labelWithString: "")
     /// Vertical stack of block subviews inside the bubble.
     private let blockStack = NSStackView()
@@ -362,6 +363,10 @@ final class TranscriptBubbleCellView: NSTableCellView {
         backgroundBox.cornerRadius = TranscriptBubbleGeometry.cornerRadius
         backgroundBox.translatesAutoresizingMaskIntoConstraints = false
 
+        signalSpine.cornerRadius = 1
+        signalSpine.fillColor = NSColor.secondaryLabelColor.withAlphaComponent(0.28)
+        signalSpine.translatesAutoresizingMaskIntoConstraints = false
+
         header.font = TranscriptBubbleGeometry.headerFont
         header.textColor = .tertiaryLabelColor
         header.backgroundColor = .clear
@@ -380,6 +385,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
         // so the stack's text views are topmost and take the mouse for selection
         // while the bubble paints behind them.
         addSubview(backgroundBox)
+        addSubview(signalSpine)
         addSubview(header)
         addSubview(blockStack, positioned: .above, relativeTo: backgroundBox)
 
@@ -399,6 +405,10 @@ final class TranscriptBubbleCellView: NSTableCellView {
         NSLayoutConstraint.activate([
             widthConstraint,
             heightConstraint,
+            signalSpine.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            signalSpine.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
+            signalSpine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -g.outerVertical),
+            signalSpine.widthAnchor.constraint(equalToConstant: 2),
             header.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
             backgroundBox.topAnchor.constraint(
                 equalTo: header.bottomAnchor, constant: g.headerBodyGap),
@@ -440,6 +450,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
 
         header.stringValue = headerText
         backgroundBox.fillColor = g.backgroundColor(for: role)
+        signalSpine.isHidden = role == .user
 
         rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
 
