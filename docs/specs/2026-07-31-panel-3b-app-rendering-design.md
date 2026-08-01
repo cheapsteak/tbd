@@ -190,6 +190,16 @@ config column; app-only behavior may gate on `UserDefaults`).
 
 ## Open follow-ups (not in 3b)
 
+- **Per-panel history on the wire — required before graduation.**
+  `PanelGetResult` carries tabs only, and `WorkspaceTabSurface` has no histories;
+  the daemon keeps `PanelHistory` in its own store. So on the daemon path the app
+  cannot know a panel's back/forward state, and the history chevrons render
+  disabled even after the daemon has recorded navigations. The `.history`
+  operation itself is wired and correct — only the affordance is dark. Reading
+  `paneHistories` as a stand-in would be wrong, not merely incomplete: the legacy
+  import reuses legacy pane IDs as panel IDs for viewers, so the same key returns
+  plausible but stale legacy state. The fix is to return per-panel history from
+  `panel.get` / `PanelApplyResult`, which is a daemon + `TBDShared` change.
 - Note deletion affordance (#7) — required before graduation, since close no
   longer deletes.
 - Native resize indicator / unified divider (#9).
