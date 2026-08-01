@@ -38,6 +38,17 @@ places. Each place has its own test:
   supervisor. A threshold or state calculation placed in the prompt is a fact
   disguised as judgment.
 
+The three tests share one tie-breaker: **compile only what user-land cannot do
+well, because compiled behavior is the hardest kind to change.** A compiled
+path changes by rebuild and release — and, once flagged, by migration — while
+an authored artifact changes by editing a file. So a behavior that passes no
+compiled test decisively belongs outside, where a project can iterate on it
+freely, and it migrates inward only on field evidence (the requirements doc's
+Built/Enabled ratchet). The wake decision for parked sessions sits outside the
+daemon on this rule. Any future descope, and any proposal to compile something
+new in, argues from the same rule — the motivation for wanting change differs
+case by case; the placement philosophy does not.
+
 The requirements brief names six specific items and asks where each one landed.
 The applications appear throughout this document; this list collects them for
 a quick audit:
@@ -66,17 +77,24 @@ a quick audit:
   classification), never guardrails on a program it does not run. The sweep
   supervises live agents only.
 
-**This placement means the daemon, not the supervisor, drives the loop.** A
-compiled sweep follows the same pattern as the existing hibernation sweep: a
-cheap polling tick and a pure decision function. It calculates state, applies
-the mechanical reasons not to act, and wakes a supervisor only when it has a
-work order for that supervisor's project (§5). Waking a supervisor is the result
-of a check, never the way the check is performed (P0-6). A supervisor
-never polls or sweeps, and it never writes state or history directly. The
-sweep itself stays single and fleet-wide however many projects exist. The
-daemon never makes a judgment.
-Information and commands flow in one direction: daemon → work order →
-supervisor → verb → daemon.
+**The daemon, not the supervisor, drives the loop.** On a timer, the daemon
+sweeps the whole fleet in its own process: it computes each live agent's
+state, then applies the mechanical reasons not to act — a rate limit, an
+intervention already in flight, a pending re-check. If an agent still needs
+judgment after that, the daemon writes the case into a work order and delivers
+it to the supervisor of that agent's project, spawning the supervisor first if
+the project has none this shift (§5). Delivering a work order is the only
+thing that ever starts a supervisor's turn (P0-6): a supervisor never polls or
+sweeps on its own, and never writes state or history directly. The daemon, for
+its part, never makes a judgment — it measures, decides whether to hand off,
+and records. Information and commands flow in one direction: daemon → work
+order → supervisor → verb → daemon. Parked sessions never enter this loop:
+whether to wake one is the wake program's decision (above), never the sweep's.
+
+This is the same shape as the existing hibernation sweep: a cheap polling tick
+feeding a pure decision function, no model anywhere in the tick. However many
+projects exist, the sweep stays single and fleet-wide — only the work orders
+fan out.
 
 ## 2. State model (P0-5, decomposed)
 

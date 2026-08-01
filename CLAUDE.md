@@ -30,6 +30,10 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Run `swift test` if you changed daemon or shared code.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
+### Compile only what user-land cannot do well
+
+Compiled behavior is the hardest kind to change: it ships by rebuild and release, and a flagged default needs a forcing migration to flip later. User-land surfaces — CLI output, hooks, seeded reference scripts, files under `~/tbd/repos/<repoID>/` — change by editing a file. So when deciding where new behavior lives, default to exposing the facts and actuations that make it possible outside the daemon, and compile the behavior itself only when user-land cannot do it well (per-event cost across a whole fleet, liveness attestation, integrity of the record). Capability migrates inward only on field evidence, one piece at a time — the Built/Enabled ratchet in `docs/specs/2026-07-26-fleet-supervision-requirements.md`. Motivations for wanting a change differ case by case; the placement rule does not.
+
 ### Large or risky new behavior ships behind a default-off flag
 
 New features that act autonomously or can destroy state land gated behind a flag that defaults to OFF, soak, and only then graduate (flip the default, eventually delete the flag). Required when the feature:
