@@ -236,6 +236,13 @@ and become a contract that migration and future change must respect.
   small, specific batches — exact item, exact proposed command, a recommendation — so that
   the morning's decision queue is answerable in minutes, not an interrogation.
 
+  *This story is **Enabled**, not Built, and "queue" names the operator's experience, not a
+  structure TBD holds. Questions travel by the project's playbook-named route (design §8);
+  the batching discipline — exact item, exact command, a recommendation, at most a few per
+  ask — is playbook conduct, carried by the shipped playbook. TBD's guarantees underneath
+  are the acts record and delivery; the answerable-in-minutes morning is authored, and an
+  operator who wants one place to look points every project's route at the same place.*
+
 ### P1 — the difference between working and trustworthy
 
 - **P1-1 [A]** As an operator, I want the supervisor capacity-aware: when several agents are
@@ -291,6 +298,11 @@ and become a contract that migration and future change must respect.
   [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).
 - **P1-3 [both]** As an operator, I want worktrees whose progress matters most looked at
   first, so that the important work gets attention early in every pass.
+
+  *This story is **Enabled**, not Built. Pin state rides the readout with every other
+  fact; ordering within a briefing is the sweep program's composition, and the shipped
+  reference program briefs pinned worktrees first. TBD supplies the fact; the priority it
+  encodes is the program's to honor.*
 - **P1-4 [both]** As a repo maintainer, I want my repo's supervision policy — what counts as
   stuck, what interventions are appropriate, house rules the supervisor must follow —
   authored as an artifact in or beside my repo and resolved through TBD's existing
