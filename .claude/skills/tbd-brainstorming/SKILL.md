@@ -1,6 +1,6 @@
 ---
 name: tbd-brainstorming
-description: REQUIRED in TBD before implementing anything that is not a bug fix or a minor UI change — features, new subsystems, feature flags or config columns, database migrations, replacing a load-bearing path, or any change to how the system or product is meant to work. Explores intent, constraints, and alternatives with a human, then writes a spec to docs/specs/. Use instead of superpowers:brainstorming in this repo.
+description: REQUIRED in TBD before implementing anything that is not a bug fix or a minor UI change — features, new subsystems, feature flags or config columns, database migrations, or replacing a load-bearing path. Explores intent, constraints, and alternatives with a human, then writes a spec to docs/specs/. Use instead of superpowers:brainstorming in this repo.
 ---
 
 <!-- vendored from obra/superpowers v6.1.1 @ 5a0f8953, MIT (c) 2025 Jesse Vincent -->
