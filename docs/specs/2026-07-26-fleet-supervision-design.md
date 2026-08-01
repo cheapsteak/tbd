@@ -167,7 +167,8 @@ renders it as current truth. That cache was measured lying, showing "Ready to
 merge" for pull requests merged days earlier, so anything
 that must be *right* about forge state derives it live rather than reading the
 cache. This is the design's own source-and-observed-at rule applied to TBD's
-own store, and it is the whole of what compiled TBD owes P0-8 (§15). None of
+own store, and it is the one new obligation P0-8 places on compiled TBD
+(§15). None of
 the three needs new terms or state calculation.
 
 **P2 — add nothing unless experience proves it is needed.** Do not add verdict
@@ -2000,7 +2001,10 @@ acknowledgement, and the other can fail if a turn changes at the wrong
 time — and the ledger must never claim more than the daemon observed (§6).
 The field failure this guards against is real: `terminal.send` once reported
 success into a dead pane for hours while a desk nudged it, and each of those
-nudges would have stood in the ledger as delivered work.
+nudges would have stood in the ledger as delivered work. Waiting for more
+failures before building the observation would wait forever: the class is
+silent by definition, and that incident itself only surfaced because someone
+eventually noticed the absence of any effect.
 
 **First, the transport stops lying.** A dispatch that cannot succeed must fail
 synchronously, at the send call, as an ordinary error the caller sees. That

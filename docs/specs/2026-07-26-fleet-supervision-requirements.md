@@ -202,7 +202,7 @@ and become a contract that migration and future change must respect.
   oracles, and a re-verification that consults a lying oracle is worse than none, because it
   returns confidence. Which API tells the truth this week is data, not design — it lives as
   a dated source note in the reference wake script, where it can rot without touching a
-  spec.*
+  spec.
 
   *What is **Built** is narrow, and is stated here exactly. Fresh work facts carrying
   source and observed-at in every work order (design §2). Public surfaces a desk or a
@@ -284,7 +284,7 @@ and become a contract that migration and future change must respect.
   still cheap and derived outside the session, waking is still the conclusion of a check,
   and sessions with nothing outstanding are not woken by construction — nothing wakes at
   all unless a program a human authored concludes it should. Full design:
-  [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).*
+  [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).
 - **P1-3 [both]** As an operator, I want worktrees whose progress matters most looked at
   first, so that the important work gets attention early in every pass.
 - **P1-4 [both]** As a repo maintainer, I want my repo's supervision policy — what counts as

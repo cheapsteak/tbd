@@ -213,7 +213,8 @@ citations are to the baseline doc's §5–§6):
 **Step 3 — seed the destinations.** Open the `.agents/supervision.md` PR in
 the target repo; record the operator's selections in `supervision.json`
 (automation-membership marks and default stance, project topology, mode
-choices) — the by-hand selections bucket 4 produced land here too. There is
+choices) — selection-shaped units from bucket 4's triage are applied here and
+recorded in the disposition log as applied. There is
 no learnings
 file to append to — durable prose goes in the advisory PR.
 
