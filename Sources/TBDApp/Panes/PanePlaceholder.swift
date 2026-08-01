@@ -48,9 +48,12 @@ struct PanePlaceholder: View {
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
     let tabID: UUID?
-    /// Read-only view of the surrounding tree (the transcript button's
-    /// open-state check). All structural mutation goes through `actions`.
-    @Binding var layout: LayoutNode
+    /// Everything this leaf knows about the tree around it — both the
+    /// structural mutations it can request and the two queries it needs
+    /// (transcript-open state, slot history). Deliberately the leaf's ONLY
+    /// window onto the surrounding workspace, so the same view renders on
+    /// top of the legacy `LayoutNode` tree and the daemon-owned panel
+    /// surface without knowing which it is sitting on.
     let actions: PaneActions
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
@@ -204,7 +207,7 @@ struct PanePlaceholder: View {
         switch content {
         case .terminal(let terminalID):
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
-                let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
+                let transcriptOpen = actions.isTranscriptOpen(terminalID)
                 Button(action: { actions.toggleTranscript(content.paneID, terminalID) }) {
                     HStack(spacing: 2) {
                         Image(systemName: transcriptOpen ? "text.bubble.fill" : "text.bubble")
@@ -252,11 +255,11 @@ struct PanePlaceholder: View {
     @ViewBuilder
     private var historyNavigation: some View {
         // A pane that hasn't navigated yet has no recorded history — but it
-        // always has its current content, so fall back to a single-entry
-        // history seeded with it rather than an empty one. Otherwise the
-        // search button would wrongly read as "nothing to show" for the
-        // common case of a freshly opened viewer slot.
-        let history = appState.paneHistories[content.paneID] ?? PaneHistory.seeded(with: content)
+        // always has its current content, so the action set falls back to a
+        // single-entry history seeded with it rather than an empty one.
+        // Otherwise the search button would wrongly read as "nothing to
+        // show" for the common case of a freshly opened viewer slot.
+        let history = actions.history(content.paneID, content)
 
         historySearchButton(history: history)
 
@@ -569,10 +572,6 @@ struct PanePlaceholder: View {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             didCopyURL = false
         }
-    }
-
-    private func isTranscriptOpen(terminalID: UUID) -> Bool {
-        layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) != nil
     }
 }
 

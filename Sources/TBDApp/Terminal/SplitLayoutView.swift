@@ -7,7 +7,6 @@ struct SplitLayoutView: View {
     let node: LayoutNode
     let worktree: LocalWorktree
     let tabID: UUID?
-    @Binding var layout: LayoutNode
     let actions: PaneActions
 
     var body: some View {
@@ -17,7 +16,6 @@ struct SplitLayoutView: View {
                 content: content,
                 worktree: worktree,
                 tabID: tabID,
-                layout: $layout,
                 actions: actions
             )
         case .split(let id, let direction, let children, let ratios):
@@ -28,7 +26,6 @@ struct SplitLayoutView: View {
                 ratios: ratios,
                 worktree: worktree,
                 tabID: tabID,
-                layout: $layout,
                 actions: actions
             )
         }
@@ -46,7 +43,6 @@ struct SplitContainer: View {
     let ratios: [CGFloat]
     let worktree: LocalWorktree
     let tabID: UUID?
-    @Binding var layout: LayoutNode
     let actions: PaneActions
 
     /// Local mutable copy of ratios used during drag operations.
@@ -92,7 +88,6 @@ struct SplitContainer: View {
                         node: child,
                         worktree: worktree,
                         tabID: tabID,
-                        layout: $layout,
                         actions: actions
                     )
                     .frame(width: activeRatios[index] * availableSpace)
@@ -116,7 +111,6 @@ struct SplitContainer: View {
                         node: child,
                         worktree: worktree,
                         tabID: tabID,
-                        layout: $layout,
                         actions: actions
                     )
                     .frame(height: activeRatios[index] * availableSpace)

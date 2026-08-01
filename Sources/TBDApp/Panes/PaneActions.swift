@@ -45,6 +45,23 @@ struct PaneActions {
 
     /// Commit new child ratios for the split identified by `splitID`.
     var resize: @MainActor (_ splitID: UUID, _ ratios: [CGFloat]) -> Void
+
+    // MARK: - Queries
+    //
+    // Not mutations, but they belong to the same seam: they are the only
+    // things the leaf needs to know about the tree *around* it, and each
+    // rendering path answers them from its own source of truth. Keeping them
+    // here is what lets `PanePlaceholder` drop its `@Binding var layout` and
+    // render on top of the daemon surface unchanged.
+
+    /// Whether this tab already shows a live transcript for `terminalID` —
+    /// drives the toolbar button's filled/accented state and its help text.
+    var isTranscriptOpen: @MainActor (_ terminalID: UUID) -> Bool
+
+    /// The slot history behind a viewer pane's back/forward chevrons and its
+    /// history palette. `content` is the pane's current content, used to seed
+    /// a single-entry history for a slot that has never navigated.
+    var history: @MainActor (_ paneID: UUID, _ content: PaneContent) -> PaneHistory
 }
 
 // MARK: - Legacy action set
@@ -138,6 +155,17 @@ extension PaneActions {
                 // Write back current ratios into the layout binding, targeting
                 // this split by its stable ID (never by child-array equality).
                 layout.wrappedValue = layout.wrappedValue.updatingRatios(forSplitID: splitID, to: ratios)
+            },
+            isTranscriptOpen: { terminalID in
+                layout.wrappedValue.firstPaneID(
+                    where: { isLiveTranscriptPane($0, for: terminalID) }
+                ) != nil
+            },
+            history: { paneID, content in
+                // A pane that hasn't navigated yet has no recorded history —
+                // but it always has its current content, so fall back to a
+                // single-entry history seeded with it rather than an empty one.
+                appState.paneHistories[paneID] ?? PaneHistory.seeded(with: content)
             }
         )
     }
