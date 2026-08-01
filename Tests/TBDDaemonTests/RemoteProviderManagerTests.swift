@@ -122,6 +122,9 @@ struct RemoteProviderManagerTests {
         let rows = try await db.remoteSessions.list()
         #expect(rows.map(\.sessionID) == ["a"])
         #expect(invoker.calls == [["list"]])
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .ok)
+        #expect(status?.lastSuccessfulSnapshotAt != nil)
     }
 
     @Test func authFailureMarksNeedsAuthAndSuccessClears() async throws {
@@ -480,6 +483,7 @@ struct RemoteProviderManagerTests {
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
 
         await m.pollOnce(provider: provider)
+        let firstSuccess = await m.providerStatuses().first?.lastSuccessfulSnapshotAt
         await m.pollOnce(provider: provider)
 
         let rows = try await db.remoteSessions.list()
@@ -490,7 +494,80 @@ struct RemoteProviderManagerTests {
         let status = await m.providerStatuses().first
         #expect(status?.health == .stale)
         #expect(status?.errorMessage == "provider transport overloaded")
+        #expect(status?.lastSuccessfulSnapshotAt == firstSuccess)
+        #expect(status?.hasStaleSnapshot == true)
         #expect(invoker.calls == [["list"], ["list"]])
+    }
+
+    @Test func truncatedInventoryErrorIsBoundedAndDoesNotExposeEmbeddedPayload() async throws {
+        let embedded = String(repeating: #"{"prompt":"sensitive"}"#, count: 100)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
+            ProviderResult(
+                exitCode: 2, stdout: Data(),
+                stderr: "unparseable remote output: \(embedded)--output truncated--")
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        await m.pollOnce(provider: provider)
+
+        let message = await m.providerStatuses().first?.errorMessage
+        #expect(message == "Provider inventory was truncated or malformed; showing the last successful snapshot.")
+        #expect(message?.contains("sensitive") == false)
+    }
+
+    @Test func arbitraryProviderErrorIsCappedToTheWireLimit() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: String(repeating: "x", count: 1_000))
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        let message = await m.providerStatuses().first?.errorMessage
+        #expect(message?.count == 240)
+        #expect(message?.hasSuffix("…") == true)
+    }
+
+    @Test func successfulInventoryAfterFailureRestoresFreshHealthAndAdvancesTimestamp() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "temporary"),
+            providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        let firstSuccess = await m.providerStatuses().first?.lastSuccessfulSnapshotAt
+        await m.pollOnce(provider: provider)
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+
+        await m.pollOnce(provider: provider)
+
+        let recovered = await m.providerStatuses().first
+        #expect(recovered?.health == .ok)
+        #expect(recovered?.hasStaleSnapshot == false)
+        #expect(recovered?.lastSuccessfulSnapshotAt != nil)
+        if let firstSuccess, let recoveredAt = recovered?.lastSuccessfulSnapshotAt {
+            #expect(recoveredAt >= firstSuccess)
+        }
+    }
+
+    @Test func failureAfterManagerRestartRecoversLastSuccessTimeFromMirror() async throws {
+        let lastGood = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            now: lastGood)
+        let m = manager(FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+        ]))
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .stale)
+        #expect(status?.lastSuccessfulSnapshotAt == lastGood)
+        #expect(status?.hasStaleSnapshot == true)
     }
 
     @Test func invokeByNameRoutesToConfiguredProvider() async throws {

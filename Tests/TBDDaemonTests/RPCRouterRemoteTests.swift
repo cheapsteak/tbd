@@ -119,6 +119,58 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(result.sessions.map(\.payload.id) == ["a"])
     }
 
+    @Test func sessionsProjectsCachedActiveRowsUnknownAfterInventoryFailure() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+        ])
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await manager.pollOnce(provider: provider)
+        await manager.pollOnce(provider: provider)
+
+        let response = await call(router(manager: manager), "remote.sessions")
+        let result = try response.decodeResult(RemoteSessionsResult.self)
+        let projected = try #require(result.sessions.first?.payload)
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+
+        // Projection is non-destructive: recovery still has the complete
+        // last-good payload to replace or inspect.
+        let rawRows = try await db.remoteSessions.list()
+        let raw = rawRows.first?.decodedPayload
+        #expect(raw?.state == .running)
+        #expect(raw?.agentState == .working)
+    }
+
+    @Test func staleInventoryBlocksMutationsButKeepsLogInspectionAvailable() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+            providerOK("last output"),
+        ])
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await manager.pollOnce(provider: provider)
+        await manager.pollOnce(provider: provider)
+        let r = router(manager: manager)
+
+        let stop = await call(r, "remote.stop", #"{"provider":"fake","sessionID":"a"}"#)
+        #expect(stop.success == false)
+        #expect(stop.error?.contains("inventory is stale") == true)
+
+        let log = await call(r, "remote.log", #"{"provider":"fake","sessionID":"a"}"#)
+        #expect(log.success)
+        #expect(try log.decodeResult(RemoteLogResult.self).text == "last output")
+        #expect(invoker.calls == [["list"], ["list"], ["log", "a"]])
+        #expect(await manager.providerStatuses().first?.health == .stale,
+                "a successful read-only verb must not claim inventory recovered")
+    }
+
     /// `remote.sessions` must surface the daemon's pinned repo resolution on
     /// the wire, and the returned `id` must match the deterministic
     /// derivation the app keys sidebar rows by.

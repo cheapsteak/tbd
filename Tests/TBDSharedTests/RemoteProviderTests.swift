@@ -32,6 +32,32 @@ struct RemoteProviderTests {
         #expect(s.agentState == .unknown)
     }
 
+    @Test func staleProjectionDemotesActiveStateWithoutMutatingTheSnapshot() {
+        let original = RemoteSessionPayload(
+            id: "x", title: "worker", state: .running,
+            agentState: .working, agentStateReason: "tool")
+        let projected = original.projectedForStaleSnapshot()
+
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+        #expect(projected.agentStateReason == nil)
+        #expect(original.state == .running)
+        #expect(original.agentState == .working)
+    }
+
+    @Test func staleProjectionPreservesAConfirmedExit() {
+        let exited = RemoteSessionPayload(
+            id: "x", state: .exited, exitCode: 0, agentState: .exited)
+        #expect(exited.projectedForStaleSnapshot() == exited)
+    }
+
+    @Test func providerStatusWithoutNewTimestampStillDecodes() throws {
+        let json = #"{"config":{"name":"acme","exec":"/x"},"health":"ok"}"#.data(using: .utf8)!
+        let status = try JSONDecoder().decode(RemoteProviderStatus.self, from: json)
+        #expect(status.lastSuccessfulSnapshotAt == nil)
+        #expect(status.hasStaleSnapshot == false)
+    }
+
     @Test func describeDecodesCreateParams() throws {
         let json = """
         {"contract_versions": [1], "name": "example", "provider_version": "0.1.0",

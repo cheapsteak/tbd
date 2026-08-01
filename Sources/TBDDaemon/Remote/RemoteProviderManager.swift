@@ -19,6 +19,10 @@ public actor RemoteProviderManager {
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
     private var health: [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
+    /// Most recent complete inventory accepted for each provider. Kept
+    /// independently from generic verb health: a successful `log`/`attach`
+    /// proves that verb worked, not that the cached inventory is current.
+    private var lastSuccessfulSnapshotAt: [String: Date] = [:]
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
     /// Guards `spawnPollLoops`'s compound stopAll()+startLoop() sequence
@@ -225,22 +229,25 @@ public actor RemoteProviderManager {
         do {
             let result = try await runner.run(provider, verb: ["list"], stdin: nil, timeout: 30)
             if let failure = result.failureClass {
-                recordFailure(provider: provider.name, class: failure, result: result)
+                await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
             }
             let envelope = try result.decoded(RemoteSessionListEnvelope.self)
-            try await apply(snapshot: envelope.sessions, provider: provider.name)
-            markHealthy(provider: provider.name)
+            let snapshotAt = Date()
+            try await apply(snapshot: envelope.sessions, provider: provider.name, now: snapshotAt)
         } catch {
             remoteLogger.debug("poll \(provider.name, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            await recoverLastSuccessfulSnapshotAtIfNeeded(provider: provider.name)
             setHealth(provider: provider.name, to: (.stale, String(describing: error), nil))
         }
     }
 
     /// Shared by the poll path and the events snapshot path (Task 6).
-    func apply(snapshot sessions: [RemoteSessionPayload], provider: String) async throws {
+    func apply(snapshot sessions: [RemoteSessionPayload], provider: String, now: Date = Date()) async throws {
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sessions, now: Date())
+            provider: provider, sessions: sessions, now: now)
+        lastSuccessfulSnapshotAt[provider] = now
+        markHealthy(provider: provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
@@ -309,8 +316,6 @@ public actor RemoteProviderManager {
         let result = try await runner.run(config, verb: verb, stdin: stdin, timeout: timeout)
         if let failure = result.failureClass {
             recordFailure(provider: providerName, class: failure, result: result)
-        } else {
-            markHealthy(provider: providerName)
         }
         return result
     }
@@ -338,10 +343,21 @@ public actor RemoteProviderManager {
             let h = health[config.name] ?? (.ok, nil, nil)
             return RemoteProviderStatus(
                 config: config, describe: describes[config.name],
-                health: h.state, errorMessage: h.message,
+                health: h.state, errorMessage: Self.boundedDisplayMessage(h.message),
                 remediationLabel: h.remediation?.label,
-                remediationCommand: h.remediation?.command)
+                remediationCommand: h.remediation?.command,
+                lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[config.name])
         }
+    }
+
+    /// Whether mutations that depend on the cached inventory should be
+    /// suppressed. Read-only inspection (`attach`, `log`) remains useful
+    /// during an inventory outage; create/stop/send/rename do not have a
+    /// trustworthy current-state basis once a previously-good snapshot is
+    /// stale.
+    func hasStaleSnapshot(provider name: String) -> Bool {
+        guard lastSuccessfulSnapshotAt[name] != nil else { return false }
+        return health[name]?.state != .ok
     }
 
     /// Correlates a locally-spawned `attach` exit (the app execs the provider
@@ -425,6 +441,41 @@ public actor RemoteProviderManager {
         case .permanent, .contractBug:
             setHealth(provider: provider, to: (.error, error?.message ?? result.stderr, nil))
         }
+    }
+
+    /// Poll failures need one extra piece of bookkeeping beyond generic
+    /// provider failures: if this manager restarted after the last success,
+    /// recover that timestamp from the mirror's last-seen rows before
+    /// publishing stale health. This keeps a persisted cached snapshot from
+    /// becoming confidently timeless after a daemon restart.
+    private func recordPollFailure(provider: String, class failureClass: ProviderFailureClass,
+                                   result: ProviderResult) async {
+        await recoverLastSuccessfulSnapshotAtIfNeeded(provider: provider)
+        recordFailure(provider: provider, class: failureClass, result: result)
+    }
+
+    private func recoverLastSuccessfulSnapshotAtIfNeeded(provider: String) async {
+        guard lastSuccessfulSnapshotAt[provider] == nil else { return }
+        if let recovered = try? await db.remoteSessions.latestLastSeen(provider: provider) {
+            lastSuccessfulSnapshotAt[provider] = recovered
+        }
+    }
+
+    /// The provider may return the entire truncated inventory inside its
+    /// error message. Keep the manager's internal health record unchanged for
+    /// diagnostics, but never put an unbounded wall of JSON on the RPC/UI
+    /// wire. The known
+    /// truncation shape receives safe copy rather than leaking a prompt from
+    /// the beginning of the embedded payload.
+    static func boundedDisplayMessage(_ message: String?, limit: Int = 240) -> String? {
+        guard let message else { return nil }
+        if message.localizedCaseInsensitiveContains("--output truncated--")
+            || message.localizedCaseInsensitiveContains("unparseable remote output") {
+            return "Provider inventory was truncated or malformed; showing the last successful snapshot."
+        }
+        guard message.count > limit else { return message }
+        let kept = max(0, limit - 1)
+        return String(message.prefix(kept)) + "…"
     }
 
     private func markHealthy(provider: String) {

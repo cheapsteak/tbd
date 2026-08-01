@@ -148,6 +148,23 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         agentStateAt = try c.decodeIfPresent(String.self, forKey: .agentStateAt)
         meta = try c.decodeIfPresent([String: String].self, forKey: .meta)
     }
+
+    /// A presentation-safe projection for a cached row whose provider has
+    /// failed to produce a fresh inventory. The mirror keeps the last good
+    /// payload intact for recovery and diagnostics, but callers must not
+    /// continue asserting that an active terminal or agent is still alive.
+    ///
+    /// A previously observed terminal exit remains a valid historical fact;
+    /// only non-terminal/unknown rows are demoted. In every demoted case the
+    /// agent axis also becomes unknown so a cached `working` or
+    /// `waiting_input` value cannot keep rendering as current activity.
+    public func projectedForStaleSnapshot() -> RemoteSessionPayload {
+        guard state != .exited else { return self }
+        return RemoteSessionPayload(
+            id: id, title: title, createdAt: createdAt,
+            state: .unknown, exitCode: exitCode, agentState: .unknown,
+            agentStateReason: nil, agentStateAt: agentStateAt, meta: meta)
+    }
 }
 
 public struct RemoteSessionListEnvelope: Codable, Sendable {
@@ -263,11 +280,25 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
     public let errorMessage: String?
     public let remediationLabel: String?
     public let remediationCommand: String?
+    /// Timestamp of the most recent complete `list` snapshot accepted into
+    /// the mirror. Nil means this manager has not observed (or recovered
+    /// from the mirror) a successful snapshot yet.
+    public let lastSuccessfulSnapshotAt: Date?
     public init(config: RemoteProviderConfig, describe: ProviderDescribe?, health: ProviderHealth,
-                errorMessage: String?, remediationLabel: String?, remediationCommand: String?) {
+                errorMessage: String?, remediationLabel: String?, remediationCommand: String?,
+                lastSuccessfulSnapshotAt: Date? = nil) {
         self.config = config; self.describe = describe; self.health = health
         self.errorMessage = errorMessage
         self.remediationLabel = remediationLabel; self.remediationCommand = remediationCommand
+        self.lastSuccessfulSnapshotAt = lastSuccessfulSnapshotAt
+    }
+
+    /// True only when the manager has a prior successful inventory that is
+    /// now known to be stale. This deliberately differs from a provider that
+    /// has never produced a snapshot, for which there are no cached rows to
+    /// project or stale controls to suppress.
+    public var hasStaleSnapshot: Bool {
+        health != .ok && lastSuccessfulSnapshotAt != nil
     }
 
     // Provider names are already the unique identity used everywhere else in

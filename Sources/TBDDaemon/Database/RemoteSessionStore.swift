@@ -258,6 +258,22 @@ public struct RemoteSessionStore: Sendable {
         }
     }
 
+    /// Best persisted approximation of a provider's last successful
+    /// inventory time. Every row observed in a complete snapshot receives
+    /// that snapshot's `now` as `lastSeen`, so the maximum survives daemon
+    /// restarts and lets provider health age an existing cache honestly.
+    /// An empty successful snapshot has no row from which to recover; that
+    /// case intentionally remains nil after restart rather than inventing a
+    /// timestamp.
+    public func latestLastSeen(provider: String) async throws -> Date? {
+        try await writer.read { db in
+            try Date.fetchOne(
+                db,
+                sql: "SELECT MAX(lastSeen) FROM remote_session WHERE provider = ?",
+                arguments: [provider])
+        }
+    }
+
     /// Returns whether a row actually changed (an unknown session, or one
     /// already dismissed, changes nothing) — mirrors `markGone`'s contract so
     /// callers can skip a pointless UI broadcast.
