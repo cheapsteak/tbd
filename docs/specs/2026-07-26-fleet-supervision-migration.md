@@ -308,7 +308,7 @@ only — no slice needs a later one:
 - **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12, and the
   [sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)).
   The case-detection surface: the `supervise report` intake with its
-  not-to-act floor, the `supervise facts` query, the daemon's default tick
+  not-to-act floor, the `supervise readout` query, the daemon's default tick
   running the seeded reference sweep script, and the contact-window watchdog
   with its anomaly lines and escalation. Desk briefing: the playbook installed
   as standing conduct at desk spawn through the agent-kind adapter (first-order

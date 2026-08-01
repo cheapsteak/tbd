@@ -144,17 +144,18 @@ The daemon processes every submission the same way, synchronously:
    design specifies (design §4 steps 3–5): spawn the desk lazily, deliver
    through the agent-kind adapter, write the ledger request-first.
 
-The facts the sweep program reads are the other half of the contract:
+The readout the sweep program reads is the other half of the contract:
 
 ```
-tbd supervise facts --project <name>      # JSON on stdout, schema-versioned
+tbd supervise readout --project <name>    # JSON on stdout, schema-versioned
 ```
 
-A read-only query, named for what it emits. It performs nothing and changes
-no state; it prints the project's live-agent facts — session state with
-source and observed-at, work facts, runaway counters, and the not-to-act
-facts. The sweep program runs it at the start of each evaluation; an
-operator or any other script may run it freely at any time. Both
+An instrument readout: read-only, the current values printed for whoever is
+consuming them, implying no action. It prints the project's live-agent
+facts — session state with source and observed-at, work facts, runaway
+counters, and the not-to-act facts. The sweep program reads the readout at
+the start of each evaluation and submits its report at the end; an operator
+or any other script may read it freely at any time. Both
 schemas are documented public surfaces under the requirements doc's Enabled
 rules: a fact the reference script cannot obtain from them is a failed
 conformance check and a concrete, scoped API request.
@@ -172,19 +173,29 @@ on a timer, per project, until the project overrides:
 
 - **Keep the tick, edit the script** — the common case. Tuning a threshold is
   editing a constant; the schedule is untouched.
-- **Disable the tick, bring your own triggers** — `"tick": "off"` in the
+- **Go external, bring your own triggers** — `"schedule": "external"` in the
   project's `supervision.json` entry. The project now owns its theory of
   attention outright, and declares a contact window in exchange (§6).
 - **Keep the tick alongside your own triggers** — legitimate and cheap: the
   tick becomes a reporting floor under an event-driven program.
 
-The selection is the `sweep` block of the project's `supervision.json` entry
-(design §8), on the default-props chain: no block means the default tick at
-the default interval; an interval overrides the cadence; `"off"` disables
-the tick, and the block then declares the contact window §6 requires:
+The selection is the `sweep` object inside the project's entry in
+`~/tbd/supervision/supervision.json` (design §8), on the default-props
+chain: no object means TBD's schedule at the default interval; an interval
+value overrides the cadence; `"external"` stands TBD's scheduler down, and
+the object then declares the contact window §6 requires:
 
 ```jsonc
-"sweep": { "tick": "off", "contactWindow": "30m" }
+// ~/tbd/supervision/supervision.json
+{
+  "projects": {
+    "acme-platform": {
+      "repos": ["<repoID-a>", "<repoID-b>"],
+      "mode": "autonomous",
+      "sweep": { "schedule": "external", "contactWindow": "30m" }
+    }
+  }
+}
 ```
 
 When the daemon itself runs the script, failure detection is direct — a
@@ -255,8 +266,8 @@ rather than duplicating it: §14's out-of-band watchdog asks whether the
 
 **The contact window** is the declared expectation silence is measured
 against. While the default tick runs, the window defaults to a multiple of
-the tick interval (§10) and the operator declares nothing. A project that
-disables the tick declares its own window in `supervision.json`. A project
+the tick interval (§10) and the operator declares nothing. A project on an
+external schedule declares its own window in `supervision.json`. A project
 that declines even that — a purely event-driven program with no periodic
 report has no honest cadence to declare — gets the degraded account in so
 many words:
@@ -297,9 +308,9 @@ authored.
   no per-repo threshold configuration surface in TBD and none deferred:
   numbers live in the script, which also preserves the design's one-column
   property (design §7) permanently — a number never becomes a config column.
-- **It is the conformance artifact** for the report and facts contracts,
+- **It is the conformance artifact** for the readout and report contracts,
   alongside the reference wake script for its surfaces: it may use only
-  documented public surfaces (`tbd supervise facts`, `tbd supervise
+  documented public surfaces (`tbd supervise readout`, `tbd supervise
   report`). A fact it cannot obtain that way is a failed conformance check
   and a scoped API request — the mechanism by which TBD's surface grows,
   pulled by a real consumer.
@@ -356,10 +367,13 @@ replacement desk needs no special briefing path. The ledger records the conduct 
 versioned file.
 
 **Installation is an adapter capability**, like the context apparatus
-(design §9): adapters that have a standing-instruction mechanism use it; an
-agent kind without one falls back to embedding the playbook in the first
-work order of each desk session, and nothing else changes. Both shipped desk
-kinds have the mechanism (dated note, §13).
+(design §9). The Claude adapter delivers the playbook as a named layer in
+the `SystemPromptBuilder` stack TBD already applies at spawn
+(`Sources/TBDDaemon/Lifecycle/SystemPromptBuilder.swift`) — the same
+mechanism as the existing `TBD_PROMPT_CONTEXT` layer; the Codex adapter
+passes it as `developerInstructions` at thread start (dated note, §13). An
+agent kind with no such mechanism falls back to embedding the playbook in
+the first work order of each desk session, and nothing else changes.
 
 ## 9. The work-order renderer
 
@@ -404,8 +418,8 @@ layer, transcripts and playbooks by path with hashes in the ledger.
 | Number | Default | Where it acts |
 | --- | --- | --- |
 | Default tick interval | 5 min | §4 |
-| Contact window, tick on | 3 × tick interval | §6 |
-| Contact window, tick off | declared, or coverage unknown | §6 |
+| Contact window, TBD schedule | 3 × tick interval | §6 |
+| Contact window, external schedule | declared, or coverage unknown | §6 |
 | Watchdog escalation | 3 consecutive missed windows | §6 |
 | Sweep script timeout (daemon-run tick) | 60 s | §4 |
 | Renderer timeout | 10 s | §9 |
@@ -475,15 +489,15 @@ documented defaults, not as TBD's.
 ## 12. Testing
 
 - **Intake round-trip** — the reference script's report against a synthetic
-  facts payload becomes a work order; a report with no proposals becomes a
+  readout becomes a work order; a report with no proposals becomes a
   ledger contact line and no work order.
 - **Floor** — a proposal duplicating an in-flight intervention or targeting
   a rate-limited agent is dropped, ledgered as such, and the script's exit
   is still recorded as contact.
 - **Watchdog** — a missed window writes the anomaly line; the configured
   consecutive count escalates; contact resets the count; a project with
-  `tick: off` and no declared window renders coverage unknown, and both
-  switch branches of the tick setting behave (per the flag-branch rule).
+  `schedule: external` and no declared window renders coverage unknown, and
+  both branches of the schedule setting behave (per the flag-branch rule).
 - **Dead-vs-quiet** — a quiet-report night and a no-contact night produce
   distinguishable accounts.
 - **Seeding** — first supervision touch seeds script and playbook; a second
@@ -504,14 +518,16 @@ Facts below are point-in-time observations of external tools, recorded here
 so they can rot without touching the design (the wake program's dated-note
 discipline). Verified 2026-08-01.
 
-- **Claude Code** — `CLAUDE.md` in the session's working directory loads as
-  project instructions; `--append-system-prompt` appends to the system
-  prompt at launch. Either serves as the desk's standing layer; project
-  instructions persist across auto-compaction. Resuming a session
-  (`claude --resume <id>`) launches a fresh process that re-reads
-  `CLAUDE.md`, which is what makes the conduct reload (§8) a resume with a
-  refreshed file; combining `--append-system-prompt` with resume is expected
-  to behave the same way — verify at implementation.
+- **Claude Code** — `--append-system-prompt` appends to the system prompt at
+  launch; TBD already delivers named prompt layers through it via
+  `SystemPromptBuilder`, and the desk's playbook layer rides that same
+  stack. (`CLAUDE.md` in the desk worktree would also load as project
+  instructions, but a materialized copy on disk can diverge from the
+  resolved playbook, so it is not used.) Resuming a session
+  (`claude --resume <id>`) launches a fresh process that rebuilds its launch
+  flags, which is what makes the conduct reload (§8) a resume with a
+  refreshed layer value — expected to behave as at spawn; verify at
+  implementation.
 - **Codex** (codex-cli 0.146.0; flags verified from the binary, behavior
   from `openai/codex` source) — the additive standing mechanism is
   `developer_instructions`: per-invocation via

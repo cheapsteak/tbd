@@ -100,7 +100,7 @@ A fact it cannot obtain that way is a failed conformance check and a concrete, s
 request; that is the mechanism by which TBD's surface grows, pulled by a real consumer
 rather than pushed by speculation. The corollary is a cost accepted here rather than
 discovered later: the surfaces an Enabled story depends on — listing output shapes,
-`hibernateReason` values, wake semantics, exit codes, the supervision facts and
+`hibernateReason` values, wake semantics, exit codes, the supervision readout and
 report schemas — stop being incidental CLI output
 and become a contract that migration and future change must respect.
 

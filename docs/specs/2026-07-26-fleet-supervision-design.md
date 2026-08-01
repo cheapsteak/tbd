@@ -1515,8 +1515,9 @@ The storage decision is otherwise plain: a **file** at
 atomically after each operator action, reloaded after a manual edit, and
 hand-editable throughout. With tens of entries and one writer at a time, a
 database adds nothing. Per-project sweep scheduling lives here too — the
-default tick's setting and the declared contact window (sweep-program
-sub-document §4, §6) — selection-tier operational choices, still zero rules.
+sweep schedule (TBD's tick or `external`) and the declared contact window
+(sweep-program sub-document §4, §6) — selection-tier operational choices,
+still zero rules.
 
 ### Project automation membership (operator-configurable)
 
