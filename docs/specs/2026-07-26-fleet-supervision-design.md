@@ -1206,7 +1206,8 @@ attention — it never changes what any verb is allowed to do.
   agent already present, as a roster snapshot. **escalation** and
   **resolution** record questions and their answers. **decision** records a
   durable answer the operator gave (P1-5, §8). **anomaly** records an unknown state,
-  a failed fetch, or a dark supervisor. Deliberate inaction is recorded as
+  a failed fetch, a dark supervisor, or a silent sweep program (a missed
+  contact window, sweep-program sub-document §6). Deliberate inaction is recorded as
   seriously as action. **note**
   is the one kind whose content is supervisor-authored prose — attributed prose
   added with `tbd supervise note`, written by the daemon's verb handler like
@@ -1223,8 +1224,9 @@ attention — it never changes what any verb is allowed to do.
   action with no confirming outcome by its deadline renders as unconfirmed,
   never as done; and certainty the system did not have, because unknowns are
   anomalies, not values.
-- Quiet ticks write nothing. Sweep liveness is one status field, not forty
-  lines an hour.
+- Quiet reports write nothing (sweep-program sub-document §3). Sweep liveness
+  is one status field, not forty lines an hour; the shift-close line carries
+  the coverage summary.
 - **`account.md`** sits beside the ledger. The daemon regenerates this view
   after every append, and the side panel displays it live. Nobody writes the
   account directly. The supervisor can only add attributed notes *into* it.
@@ -1916,6 +1918,20 @@ This is the complete `tbd supervise` surface. It is **normative for names
 and shapes**: exact flag spellings may grow, command and subcommand names may
 not drift. Everything the app can do appears here, because nothing exists only
 as a button.
+
+**Sweep-program surfaces — detection** (not desk verbs; a desk never sweeps,
+§1). The sweep program's two commands, specified in the
+[sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+§3:
+
+```
+tbd supervise readout --project <name>    # read-only: the project's live-agent facts
+tbd supervise report  --project <name>    # submit an evaluation report (stdin)
+```
+
+`readout` prints and changes nothing. `report` is how cases begin: proposals
+surviving the not-to-act floor become that project's next work order, and the
+command's synchronous response tells the program each proposal's disposition.
 
 **Desk verbs — acting** (execute, ledger line, 60-second re-check). None is
 gated; each is addressed to the calling desk's project (§3, §5).

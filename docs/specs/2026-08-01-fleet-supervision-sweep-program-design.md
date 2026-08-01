@@ -125,10 +125,15 @@ A report:
 
 The daemon processes every submission the same way, synchronously:
 
-1. **Timestamp and attribute.** The ledger records who submitted, when, and
-   what — before anything else happens. The intake is an actuation-adjacent
-   surface (a proposal can wake a desk, which spends real tokens), so
-   provenance is not optional.
+1. **Timestamp and attribute.** Every submission updates the project's
+   liveness record — last contact, evaluation count. A submission *carrying
+   proposals* is additionally ledgered with who submitted, when, and what,
+   before anything else happens: the intake is actuation-adjacent (a
+   proposal can wake a desk, which spends real tokens), so provenance on
+   proposals is not optional. A report with no proposals writes no ledger
+   line — the design's noise rule holds (design §6: quiet contact is one
+   status field, not forty lines an hour); its durable trace is the
+   shift-close line's coverage summary (§6).
 2. **Apply the not-to-act floor.** Compiled checks against TBD's own records
    drop proposals that must not become cases *now*: an intervention already
    in flight for that agent, a pending act re-check, a rate-limited target
@@ -138,7 +143,11 @@ The daemon processes every submission the same way, synchronously:
    resource). The same facts appear in the snapshot, so a script can reason
    with them; the floor holds regardless of whether it did. Skipping the
    floor is never unsafe — verb-time preconditions still refuse at the act
-   (design §3) — it is the economy layer, and it is not the script's to waive.
+   (design §3) — it is the economy layer, and it is not the script's to
+   waive. The command's synchronous response tells the program each
+   proposal's disposition — accepted, or dropped with the mechanical
+   reason — so a drop is visible to its submitter without a recurring
+   ledger line for every evaluation an intervention stays in flight.
 3. **Compose and deliver.** Surviving proposals become cases, grouped into
    one work order per project, rendered (§9), and delivered exactly as the
    design specifies (design §4 steps 3–5): spawn the desk lazily, deliver
@@ -240,8 +249,10 @@ distinguishable at the intake:
 
 - **Reports with proposals** — the program ran and found work.
 - **Reports with no proposals, arriving within the window** — the program ran
-  and the fleet is genuinely quiet. The account can say "checked 14 times,
-  nothing found": an *attested* calm night.
+  and the fleet is genuinely quiet. Quiet contact updates the liveness
+  record, never the ledger (noise rule, §3); the shift-close line carries the
+  coverage summary, so the account can still say "checked 14 times, nothing
+  found": an *attested* calm night, durably.
 - **No contact past the declared window** — nobody looked. Dead cron, crashed
   script, uninstalled schedule — the daemon cannot tell which and does not
   need to: it responds by tier (below). Silence means exactly one thing.
@@ -489,11 +500,12 @@ documented defaults, not as TBD's.
 ## 12. Testing
 
 - **Intake round-trip** — the reference script's report against a synthetic
-  readout becomes a work order; a report with no proposals becomes a
-  ledger contact line and no work order.
+  readout becomes a work order; a report with no proposals updates the
+  liveness record, writes no ledger line, produces no work order, and is
+  counted in the shift-close coverage summary.
 - **Floor** — a proposal duplicating an in-flight intervention or targeting
-  a rate-limited agent is dropped, ledgered as such, and the script's exit
-  is still recorded as contact.
+  a rate-limited agent is dropped, its disposition returned in the report
+  command's response, and the submission still counts as contact.
 - **Watchdog** — a missed window writes the anomaly line; the configured
   consecutive count escalates; contact resets the count; a project with
   `schedule: external` and no declared window renders coverage unknown, and
