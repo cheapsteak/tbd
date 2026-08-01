@@ -75,9 +75,16 @@ worktree.
 
 ### Each detected session carries a usable title
 
-Session entries are `{path, cwd, title}`. Titles are human-readable summaries of the conversation —
-observed examples include `"Investigate PR 561 brainstorming skip"` and
-`"Call-level triage actions: flag, log, dismiss"`. A picker can be built from `detect` alone.
+Session entries are `{path, cwd, title}`. Titles are human-readable summaries of the conversation
+rather than filenames or ids — this investigation's own session came back as
+`"Investigate PR 561 brainstorming skip"`. A picker can be built from `detect` alone.
+
+The other 48 are not reproduced here, and that is itself the finding: because session detection is
+home-scoped, the list spans every repository on the machine, and a title is a one-line description
+of what that work was about. Any picker built on `detect` will therefore show a user titles from
+unrelated projects — including, on a shared or work machine, ones that are confidential to another
+org. Filtering to the current worktree is a client-side concern with a confidentiality dimension,
+not just an ergonomic one.
 
 ### `import` returns the created thread id, so no client ledger is needed
 
