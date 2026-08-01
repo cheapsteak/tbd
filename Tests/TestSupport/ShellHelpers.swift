@@ -7,6 +7,16 @@ import Foundation
 /// deterministic author/committer identity so commits succeed in CI where
 /// `user.name`/`user.email` aren't configured.
 ///
+/// `HOME` is deliberately `NSHomeDirectory()` and not a literal. Under
+/// `scripts/test.sh` that is **not** the developer's real home: the wrapper
+/// sets `CFFIXED_USER_HOME`, which CoreFoundation resolves ahead of `getpwuid`,
+/// so `NSHomeDirectory()` returns the wrapper's scratch home and the spawned
+/// shell inherits the same fence the in-process code runs behind. Writing the
+/// real path in here — or reading `getpwuid` — would hand every test shell the
+/// developer's actual home and quietly punch through the fence. Bare `swift
+/// test` still yields the real home, which is one more reason the wrapper is
+/// not optional.
+///
 /// Throws `NSError(domain: "shell")` with the command output in the
 /// `NSLocalizedDescriptionKey` user info entry on non-zero exit.
 public func shell(_ command: String, at dir: URL) async throws {

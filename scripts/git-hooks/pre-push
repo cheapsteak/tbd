@@ -2,7 +2,9 @@
 # Runs SwiftLint --strict against .swift files changed vs. origin/main, then
 # the test suite through scripts/test.sh, which fences the run behind a scratch
 # TBD_HOME / TBD_CLAUDE_HOST_HOME so nothing can write into the real ~/tbd or
-# ~/.claude.
+# ~/.claude, plus a scratch HOME / CFFIXED_USER_HOME whose `tbd` and `.claude`
+# entries are mode 000 so code that hand-builds a home path fails at the call
+# site instead of escaping the fence.
 #
 # `--no-fingerprint`: the wrapper's other layer — diffing the real ~/tbd and
 # ~/.claude across the run — is deliberately NOT used here. It is trustworthy

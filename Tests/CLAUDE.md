@@ -67,11 +67,38 @@ test` writes into the developer's real `~/tbd` and `~/.claude` — 18k orphan
 profile dirs and ~2.9k fake worktrees accumulated that way before anyone
 noticed. Read `swift test …` below as `scripts/test.sh …`.
 
-The wrapper's second layer, a before/after fingerprint of those two real
+Those three variables only fence code that *asks* where home is. The wrapper
+also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
+`tbd` and `.claude` entries are pre-created mode `000`. That covers the code
+that assembles a path out of the home directory instead of asking: it gets
+`EACCES` at the call site, inside the failing test, with the offending path in
+the error.
+
+**So if a test fails with "You don't have permission to save the file …" on a
+path ending in `/tbd/…` or `/.claude/…`, read it as: this code hand-built a home
+path instead of going through `TBDConstants` (for TBD's own dirs) or
+`ClaudeProfileConfigDirManager.resolveHostBaseDirectory` (for the host Claude
+store).** On a developer box the same line writes into the real store. Fix the
+resolution; never relax the decoy.
+
+Two things the fence does *not* cover, so the existing disciplines stay
+load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
+`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
+breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
+must be reached through an injection seam such as
+`ClaudeCredentialsKeychainDeleting`. `getpwuid`/`getpwnam` and hardcoded
+`/Users/` literals escape both variables outright and are rejected mechanically
+in `Sources/` by the `no_passwd_home_lookup` and `no_hardcoded_users_path`
+SwiftLint rules.
+
+The wrapper's last layer, a before/after fingerprint of the two real
 directories, is on by default and off with `--no-fingerprint`. CI runs it; the
 pre-push hook does not, because a live daemon and sibling worktrees write to
-`~/tbd` legitimately for the whole duration of a local run. Full rationale is in
-the wrapper's header.
+`~/tbd` legitimately for the whole duration of a local run. It is a backstop,
+not the primary guard: it compares directory *listings*, so a leak that writes
+to a fixed path — or one that cleans up after itself in a `defer` — is invisible
+to it, while the tripwire fails on the permission check every run regardless.
+Full rationale is in the wrapper's header.
 
 ## Test tiers
 

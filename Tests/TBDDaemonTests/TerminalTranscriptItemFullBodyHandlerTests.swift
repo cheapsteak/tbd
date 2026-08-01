@@ -82,11 +82,10 @@ struct TerminalTranscriptItemFullBodyHandlerTests {
 
     @Test("returns full body for matching tool result")
     func returnsFullBodyForMatchingToolResult() async throws {
-        // ClaudeProjectDirectory.resolve() always looks under
-        // ~/.claude/projects/<encoded>/, so we plant the fixture there under a
-        // unique encoded dir name and clean up afterward.
-        let projectsBase = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".claude/projects")
+        // ClaudeProjectDirectory.resolve() looks under the host store's
+        // projects/<encoded>/, so we plant the fixture there under a unique
+        // encoded dir name and clean up afterward.
+        let projectsBase = Self.hostProjectsBase
         try FileManager.default.createDirectory(at: projectsBase, withIntermediateDirectories: true)
 
         // Pick a worktree path under /private/tmp so the tier-1 encoding
@@ -160,12 +159,27 @@ struct TerminalTranscriptItemFullBodyHandlerTests {
 
     // MARK: - includeBody
 
+    /// The `projects/` root `ClaudeProjectDirectory.resolve` searches when no
+    /// base is injected.
+    ///
+    /// Resolved the same way the production code resolves it, rather than
+    /// hand-built from `NSHomeDirectory()`. These fixtures are planted where
+    /// the resolver will look, and the resolver honours `TBD_CLAUDE_HOST_HOME`
+    /// — so hand-building it planted real `<encoded>/` directories in the
+    /// developer's own `~/.claude/projects` on every run, outside the fence
+    /// `scripts/test.sh` puts around that store. The `defer`-based cleanup hid
+    /// it from the wrapper's fingerprint too: the directories were gone again
+    /// before the after-snapshot was taken.
+    private static var hostProjectsBase: URL {
+        ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
+            .appendingPathComponent("projects", isDirectory: true)
+    }
+
     /// Plants a single-line JSONL fixture in the only place
-    /// `ClaudeProjectDirectory` looks (`~/.claude/projects/<encoded>/`) and
-    /// registers a terminal pointing at it. The caller removes `projectDir`.
+    /// `ClaudeProjectDirectory` looks (the host store's `projects/<encoded>/`)
+    /// and registers a terminal pointing at it. The caller removes `projectDir`.
     private func plantFixture(line: [String: Any]) async throws -> (terminalID: UUID, projectDir: URL) {
-        let projectsBase = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".claude/projects")
+        let projectsBase = Self.hostProjectsBase
         try FileManager.default.createDirectory(at: projectsBase, withIntermediateDirectories: true)
 
         let wtPath = "/private/tmp/tbd-fullbody-\(UUID().uuidString)"

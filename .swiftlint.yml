@@ -69,6 +69,31 @@ custom_rules:
     message: "New delays/timers take an injected clock (`clock: any Clock<Duration> = ContinuousClock()`) — see Tests/CLAUDE.md \"Clock and date seams\" and docs/specs/2026-07-24-test-hardening-design.md §5."
     severity: error
 
+  no_passwd_home_lookup:
+    name: "No getpwuid/getpwnam home lookup in Sources/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    regex: '\bgetpw(uid|nam)(_r)?\s*\('
+    match_kinds:
+      - identifier
+    message: "Reading the passwd database bypasses BOTH test fences: `getpwuid` ignores `$HOME` and is itself what `CFFIXED_USER_HOME` is resolved ahead of, so it returns the developer's real home under scripts/test.sh. Resolve TBD paths via TBDConstants, the host Claude store via ClaudeProfileConfigDirManager.resolveHostBaseDirectory, and anything else via NSHomeDirectory()/FileManager.homeDirectoryForCurrentUser. Suppress with `// swiftlint:disable:next no_passwd_home_lookup - <reason>` only with a reason."
+    severity: error
+
+  no_hardcoded_users_path:
+    name: "No hardcoded /Users/ path literal in Sources/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    # `match_kinds: string` on purpose — doc comments legitimately show example
+    # paths like `/Users/me/tbd/worktrees/mywork`, and those are `comment` /
+    # `doccomment` kinds, not `string`. Only a real literal fires.
+    regex: '/Users/'
+    match_kinds:
+      - string
+    message: "A hardcoded /Users/ literal bypasses both test fences and is machine-specific in a public, multi-tenant repo. Resolve paths via TBDConstants or NSHomeDirectory(). Suppress with `// swiftlint:disable:next no_hardcoded_users_path - <reason>` only with a reason."
+    severity: error
+
   no_scrollview_in_transcript_cards:
     name: "No direct ScrollView in transcript row cards"
     # included/excluded HERE take REGEX (not glob), matched against file path.
