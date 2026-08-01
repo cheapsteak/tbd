@@ -1307,13 +1307,13 @@ account, not a wrong action. The third category is **human-authored process**.
   between multiple writers and therefore the need for a table. Shift-scoped
   decisions are ledger events viewed in the same way. They end with the shift,
   and the shift directory contains everything needed for debugging or sharing.
-- **Durable files**, two of them, both operator-owned and hand-editable:
-  - `~/tbd/supervision/supervision.json` — the project definitions (§5),
-    automation membership and its default stance, and the per-project mode
-    selections (§8). Atomically rewritten after each operator action; the daemon
-    reloads it after a change and holds it in memory for lookups. Every change
-    appends a ledger line, so the current selections and the history of how they
-    came about live in the appropriate places.
+- **One durable file**, operator-owned and hand-editable:
+  `~/tbd/supervision/supervision.json` — the project definitions (§5),
+  automation membership and its default stance, and the per-project mode
+  selections (§8). Atomically rewritten after each operator action; the daemon
+  reloads it after a change and holds it in memory for lookups. Every change
+  appends a ledger line, so the current selections and the history of how they
+  came about live in the appropriate places.
   The playbook tiers (§5) are also durable files — and the playbook is where
   knowledge that must outlive a shift lives, changed by reviewed PR (§8).
 - **In-memory, deliberately not durable**: active one-minute re-check timers
@@ -1329,7 +1329,7 @@ account, not a wrong action. The third category is **human-authored process**.
   query-time rule, not a recovery sweep.
 
 Net property: **supervision adds one column to TBD's database** — the on/off
-switch. Everything else it knows is in files a human can open: two under
+switch. Everything else it knows is in files a human can open: one under
 `~/tbd/supervision/`, one directory per shift, and the playbooks in the repos
 themselves.
 
