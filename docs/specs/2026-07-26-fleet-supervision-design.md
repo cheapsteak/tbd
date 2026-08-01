@@ -2340,20 +2340,18 @@ to inaction at the largest scale.
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
-- **An advance liveness corroboration step** — an earlier shape of the sweep
-  checked the target pane's live process before creating a case, calling
-  disagreement `unknown`. Removed as redundant: a check made when a case is
-  cut can be stale by the time a desk acts minutes later, so it protected
-  nothing the act-time checks don't — the transport verifies pane liveness
-  and session identity synchronously at the send, and the state model's
-  liveness detector already reports gone agents. What the advance check
-  actually bought was avoiding a rare phantom case: a session that dies
-  silently can wake a desk whose send then fails as a recorded transport
-  error. That cost — one desk wake, a few thousand tokens, a self-announcing
-  ending — is accepted. A process check also never could arbitrate among
-  live states (working, idle, awaiting input all look identical from
-  outside), so "corroboration" overclaimed; activity distinctions ride hook
-  events and their observed-at, full stop.
+- **An advance liveness check before creating a case** — checking the target
+  pane's live process at case-creation time buys nothing, because the check
+  is stale by the time a desk acts minutes later. The act-time checks are
+  the ones that cannot be stale: the transport verifies pane liveness and
+  session identity synchronously at the send (§12), and the state model's
+  liveness detector already reports gone agents. The one thing an advance
+  check would prevent is a rare phantom case — a session that dies silently
+  can wake a desk whose send then fails as a recorded transport error — and
+  that cost (one desk wake, a few thousand tokens, a self-announcing ending)
+  is accepted. A process check also cannot arbitrate among live states:
+  working, idle, and awaiting input look identical from outside, so activity
+  distinctions ride hook events and their observed-at, full stop.
 - **Deferring delivery acknowledgement until more failures are observed** —
   rejected. The send path's synchronous checks catch only the failures the
   daemon can enumerate at send time: a dead pane, a wrong pane. The field
