@@ -692,10 +692,12 @@ mode to be active.
 
 The mechanics:
 
-- **Modes are named sections in the playbook** (§5), resolved per project. The
-  shipped default playbook defines `attended` and `autonomous`, so both are
-  available to every project without anyone authoring anything. A project may
-  define any number of others.
+- **A mode is a name plus prose.** The name lives in `supervision.json`'s
+  declared mode list (§8); the conduct it stands for is described in the
+  project's playbook (§5), by convention as a section under that name. The
+  built-in list is `attended` and `autonomous` — available to every project
+  with nobody authoring anything, described in the shipped default
+  playbook; a project may declare any number of others.
 - **Exactly one mode is active per project.** A project with no selection runs
   `attended`, the conservative one.
 - **Selection is operator-only**: `tbd supervise mode <project> <mode-name>`, or
@@ -1062,15 +1064,18 @@ conduct at spawn, and every work order names the active mode (sweep-program
 sub-document §8). There is no such thing as an order spanning two
 policies — that is the invariant the project exists to create.
 
-- **One playbook, all of a project's modes inside it.** A mode is a named
-  section of this file (§3); the desk holds every section, and each work
-  order names the one that is active. Keeping them together is what lets a
-  reader — and the desk — see a project's whole conduct — every posture it
-  can take — in one place, and it is why selecting a mode changes nothing
-  about which file gets resolved. Separate files per mode would split that
-  view for no gain, and would invite the reader to imagine the daemon
-  choosing between them; it chooses nothing, it names the section the
-  operator selected.
+- **One playbook, all of a project's modes inside it.** A mode's name is
+  declared in `supervision.json` (§8); the playbook describes its conduct,
+  by convention as a section under that name — a convention for the file's
+  readers, human and desk, never for the tool: **TBD does not parse the
+  playbook.** Compiled code resolves the file's path, hashes its bytes, and
+  installs it verbatim; the desk is the only structure-aware reader. Keeping
+  every mode in the one file is what lets a reader — and the desk — see a
+  project's whole conduct — every posture it can take — in one place, and it
+  is why selecting a mode changes nothing about which file gets resolved.
+  Separate files per mode would split that view for no gain, and would
+  invite the reader to imagine the daemon choosing between them; it chooses
+  nothing, it names the selection.
 - **Seeding without overwriting:** tool-provided content lives only in the level
   the tool owns: the shipped default, which updates may freely replace. The
   operator and repository levels are written exactly once. An explicit
@@ -1501,8 +1506,15 @@ most one project; the loader rejects the file if one appears twice, because
 "exactly one" is the property the whole grouping rests on.
 
 `automation` is case detection's configuration: which projects generate cases at all
-(below). `modes` records the operator's mode selection per project — a project
-absent from the object runs `attended` (§3). Both are selections. Neither is a
+(below). `modes` holds two things on the default-props chain: the **declared
+mode list** — the names a project's operator may select, defaulting to the
+built-in pair `attended`/`autonomous` when absent — and the operator's
+**selection** per project, defaulting to `attended` (§3). Selection is
+validated against the declared list: a lookup within this one file. TBD never
+derives the list from the playbook — compiled code does not parse prose
+(§5) — so a declared name the playbook says nothing about is simply playbook
+silence, which the desk handles as it handles all silence (§4). Both are
+selections. Neither is a
 rule, and there is nothing in this file for code to evaluate: the loader reads
 topology and choices, and every consumer does a lookup.
 
@@ -2394,7 +2406,7 @@ to inaction at the largest scale.
   dated note in the reference wake script, where they can rot without touching
   this document
   ([wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
-- **Per-mode playbook files** — a project's modes are named sections of its one
+- **Per-mode playbook files** — a project's modes are described in its one
   playbook (§3, §5), so a reader sees every posture a project can take in one
   place. Splitting them across files would also invite the reader to imagine the
   daemon choosing between them; it chooses nothing.

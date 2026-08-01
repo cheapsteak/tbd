@@ -38,7 +38,12 @@ A rule of thumb runs through every artifact in this document, stated once:
 **representation follows consumer.** Content read by judgment is prose (the
 playbook). Content read by lookup is structured data (`supervision.json`, the
 snapshot, proposals). Content that decides is code (the sweep program, the
-renderer). Schemas exist only where a parser is the reader.
+renderer). Schemas exist only where a parser is the reader — and the
+corollary is a hard rule: **TBD never parses the playbook.** Compiled code
+resolves its path, hashes its bytes, and installs and delivers it verbatim;
+its only structure-aware reader is a model. Structure a machine needs —
+the declared mode names — lives in `supervision.json` (design §8), never in
+the prose.
 
 ## 2. The placement split
 
@@ -335,11 +340,12 @@ authored.
 
 ## 8. Standing conduct: how the playbook reaches the desk
 
-The playbook — including **all of its mode sections** — is installed as a
+The playbook — every mode description included — is installed as a
 standing instruction layer when the desk session is spawned, through the
-agent-kind adapter. Each work order then carries the **active mode's name**,
-not its text. The desk holds the project's whole conduct for the life of its
-session; the order tells it which posture is selected right now.
+agent-kind adapter. Each work order then carries the **active mode's name**
+— a name from `supervision.json`'s declared list (design §8), never text
+extracted from the file. The desk holds the project's whole conduct for the
+life of its session; the order tells it which posture is selected right now.
 
 What this buys, in order of importance:
 
@@ -349,10 +355,11 @@ What this buys, in order of importance:
   verified for both shipped desk kinds (dated note, §13). Since deliberate
   recycling is an optimization and auto-compaction bears desk survival
   (design §9), conduct must live where compaction cannot reach it.
-- **A mode switch is zero-delta.** The next order names a different section
-  the desk already holds — mode selection takes effect on the next order
-  (design §3) with no conduct re-delivery and no desk restart. The daemon
-  delivers no section at all; it delivers the selection.
+- **A mode switch is zero-delta.** The next order names a different mode
+  whose description the desk already holds — mode selection takes effect on
+  the next order (design §3) with no conduct re-delivery and no desk
+  restart. The daemon extracts nothing and delivers no conduct; it delivers
+  the selection.
 - **Standing weight.** Conduct in the session's instruction layer reads as
   *who you are*; conduct in message one of forty reads as something someone
   said earlier.
