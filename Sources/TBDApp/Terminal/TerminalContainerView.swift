@@ -295,7 +295,12 @@ struct SingleWorktreeView: View {
                 node: layoutBinding.wrappedValue,
                 worktree: worktree,
                 tabID: tab.id,
-                layout: layoutBinding
+                layout: layoutBinding,
+                actions: .legacy(
+                    layout: layoutBinding,
+                    appState: appState,
+                    worktreeID: worktree.id
+                )
             )
             .id(tab.id) // Force new view hierarchy when switching tabs
         } else {
@@ -717,11 +722,17 @@ private struct MultiWorktreeCell: View {
                     appState.gridLayouts[worktreeID] = newLayout
                 }
             )
+            // Grid mode stays on the legacy app-side layout tree.
             PanePlaceholder(
                 content: .terminal(terminalID: terminal.id),
                 worktree: worktree,
                 tabID: activeTab?.id,
-                layout: layoutBinding
+                layout: layoutBinding,
+                actions: .legacy(
+                    layout: layoutBinding,
+                    appState: appState,
+                    worktreeID: worktree.id
+                )
             )
         } else {
             ZStack {

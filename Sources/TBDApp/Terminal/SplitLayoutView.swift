@@ -8,6 +8,7 @@ struct SplitLayoutView: View {
     let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
+    let actions: PaneActions
 
     var body: some View {
         switch node {
@@ -16,7 +17,8 @@ struct SplitLayoutView: View {
                 content: content,
                 worktree: worktree,
                 tabID: tabID,
-                layout: $layout
+                layout: $layout,
+                actions: actions
             )
         case .split(let id, let direction, let children, let ratios):
             SplitContainer(
@@ -26,7 +28,8 @@ struct SplitLayoutView: View {
                 ratios: ratios,
                 worktree: worktree,
                 tabID: tabID,
-                layout: $layout
+                layout: $layout,
+                actions: actions
             )
         }
     }
@@ -44,6 +47,7 @@ struct SplitContainer: View {
     let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
+    let actions: PaneActions
 
     /// Local mutable copy of ratios used during drag operations.
     @State private var currentRatios: [CGFloat] = []
@@ -88,7 +92,8 @@ struct SplitContainer: View {
                         node: child,
                         worktree: worktree,
                         tabID: tabID,
-                        layout: $layout
+                        layout: $layout,
+                        actions: actions
                     )
                     .frame(width: activeRatios[index] * availableSpace)
 
@@ -111,7 +116,8 @@ struct SplitContainer: View {
                         node: child,
                         worktree: worktree,
                         tabID: tabID,
-                        layout: $layout
+                        layout: $layout,
+                        actions: actions
                     )
                     .frame(height: activeRatios[index] * availableSpace)
 
@@ -130,10 +136,10 @@ struct SplitContainer: View {
         }
     }
 
-    /// Write back current ratios into the layout binding, targeting this
-    /// split by its stable ID (never by child-array equality).
+    /// Write back current ratios, targeting this split by its stable ID
+    /// (never by child-array equality).
     private func commitRatios() {
-        layout = layout.updatingRatios(forSplitID: splitID, to: currentRatios)
+        actions.resize(splitID, currentRatios)
     }
 }
 
