@@ -35,3 +35,30 @@ public func restoreTBDHome(_ previous: String?) {
         unsetenv("TBD_HOME")
     }
 }
+
+/// The same save/restore pair for `TBD_CLAUDE_HOST_HOME`, which fences
+/// `~/.claude` exactly as `TBD_HOME` fences `~/tbd`: a default-constructed
+/// `ClaudeProfileConfigDirManager` uses it as the host store it creates
+/// directories in, moves whole subtrees within, and writes symlinks into.
+///
+/// `scripts/test.sh` exports it for the whole run, so the `unsetenv` trap is
+/// identical — unsetting hands every concurrently running suite the
+/// developer's real `~/.claude` until something happens to set it again. Pair
+/// these two calls; never `unsetenv` in a teardown.
+@discardableResult
+public func setClaudeHostHome(_ path: String) -> String? {
+    let previous = getenv("TBD_CLAUDE_HOST_HOME").map { String(cString: $0) }
+    setenv("TBD_CLAUDE_HOST_HOME", path, 1)
+    return previous
+}
+
+/// Puts `TBD_CLAUDE_HOST_HOME` back to the value `setClaudeHostHome(_:)`
+/// returned. `nil` means it genuinely was unset, and only then is `unsetenv`
+/// the correct restore.
+public func restoreClaudeHostHome(_ previous: String?) {
+    if let previous {
+        setenv("TBD_CLAUDE_HOST_HOME", previous, 1)
+    } else {
+        unsetenv("TBD_CLAUDE_HOST_HOME")
+    }
+}

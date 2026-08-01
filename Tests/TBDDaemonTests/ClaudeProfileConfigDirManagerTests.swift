@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
@@ -876,8 +877,11 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(manager1.hostBaseDirectory == tempHostOverride)
 
         // Also verify default (nil) still uses ~/.claude/ by checking it
-        // contains ".claude" in the path.
-        let manager2 = ClaudeProfileConfigDirManager()
+        // contains ".claude" in the path. Through the environment seam, not the
+        // process environment: `scripts/test.sh` fences the whole run behind a
+        // scratch `TBD_CLAUDE_HOST_HOME`, and reading the process env here
+        // would assert the fence instead of the production fallback.
+        let manager2 = ClaudeProfileConfigDirManager(environment: [:])
         #expect(manager2.hostBaseDirectory.path.contains(".claude"))
         #expect(manager2.hostBaseDirectory.path.contains(NSHomeDirectory()))
     }
@@ -1111,15 +1115,11 @@ struct ClaudeProfileConfigDirManagerEnvVarTests {
         let tempHostOverride = tempHostBase()
         defer { try? FileManager.default.removeItem(at: tempHostOverride) }
 
-        let priorValue = ProcessInfo.processInfo.environment["TBD_CLAUDE_HOST_HOME"]
-        setenv("TBD_CLAUDE_HOST_HOME", tempHostOverride.path, 1)
-        defer {
-            if let prior = priorValue {
-                setenv("TBD_CLAUDE_HOST_HOME", prior, 1)
-            } else {
-                unsetenv("TBD_CLAUDE_HOST_HOME")
-            }
-        }
+        // Save/restore via the shared helpers rather than by hand: the run is
+        // fenced behind a scratch `TBD_CLAUDE_HOST_HOME`, and a teardown that
+        // unsets exposes the real `~/.claude` to every concurrent suite.
+        let priorValue = setClaudeHostHome(tempHostOverride.path)
+        defer { restoreClaudeHostHome(priorValue) }
 
         let manager = ClaudeProfileConfigDirManager()
         #expect(manager.hostBaseDirectory.resolvingSymlinksInPath()

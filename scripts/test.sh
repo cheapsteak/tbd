@@ -1,27 +1,61 @@
 #!/usr/bin/env bash
 #
-# `swift test`, with the developer's real `~/tbd` fenced off.
+# `swift test`, with the developer's real `~/tbd` and `~/.claude` fenced off.
 #
-# Two independent layers, because neither alone is enough:
+# Two independent layers, and they can now be used separately:
 #
-#   1. CONTAINMENT — `TBD_HOME` points at a fresh scratch dir for the whole
-#      run, so any code path that resolves a TBD-owned path lands there
-#      instead of in `~/tbd`. This catches leaks nobody has diagnosed yet,
-#      including ones in code that has no injection seam at all.
-#   2. DETECTION — `~/tbd` is fingerprinted before and after, and a changed
-#      fingerprint fails the run even when every test passed. Containment can
-#      be defeated (a path built by hand from `$HOME` ignores `TBD_HOME`
-#      entirely — `WorktreeLayout.basePath` used to do exactly that), so the
-#      run is also *checked*, not merely fenced.
+#   1. CONTAINMENT — always on. `TBD_HOME`, `TBD_SOCKET_PATH` and
+#      `TBD_CLAUDE_HOST_HOME` point at a fresh scratch dir for the whole run,
+#      so any code path that resolves a TBD-owned path — or the host Claude
+#      store a profile dir mirrors — lands there instead of in the real one.
+#      This catches leaks nobody has diagnosed yet, including ones in code that
+#      has no injection seam at all.
+#   2. DETECTION — on by default, off with `--no-fingerprint`. The real `~/tbd`
+#      and `~/.claude` are fingerprinted before and after, and a changed
+#      fingerprint fails the run even when every test passed. Containment can be
+#      defeated (a path built by hand from `$HOME` ignores `TBD_HOME` entirely —
+#      `WorktreeLayout.basePath` used to do exactly that), so where the detector
+#      runs, the run is *checked* and not merely fenced.
 #
-# All arguments are forwarded to `swift test`:
+# WHY DETECTION IS CI-ONLY. It is trustworthy only where nothing else writes to
+# those directories, and that means a CI runner: no live daemon, no real
+# worktrees, no sibling checkouts. The fingerprint brackets a build plus a full
+# suite — minutes, on a developer box where a running daemon legitimately
+# creates `worktrees/<slot>/<name>`, `scratch/`, `notes/` and `channels/`
+# entries, any sibling worktree running `scripts/restart.sh` drops a top-level
+# `state.db.pre-migration.<ts>`, and Claude Code writes into `~/.claude`
+# throughout. Those are real writes by real software, not leaks, and a guard
+# that reddens on them gets switched off inside a week. So the pre-push hook
+# passes `--no-fingerprint` and keeps the fence only; CI runs both layers, where
+# a red is always a real finding. The fence is the layer that actually *stops*
+# leaks, and it is never optional.
+#
+# The three env vars are OVERWRITTEN, not defaulted: an inherited value is
+# discarded for the duration of the run. That is the point — a fence you can
+# disable by exporting something first is not a fence — but it does mean this
+# wrapper cannot be pointed at a config dir of your own.
+#
+# `--no-fingerprint` must come first; everything after it is forwarded to
+# `swift test` untouched:
 #   scripts/test.sh
 #   scripts/test.sh --parallel -j 2 --filter '^TBDDaemonTests\.'
+#   scripts/test.sh --no-fingerprint --parallel -j 2
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-fingerprint_before="$(scripts/tbd-home-fingerprint.sh)"
+fingerprint=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-fingerprint) fingerprint=0; shift ;;
+    *) break ;;
+  esac
+done
+
+fingerprint_before=""
+if [ "$fingerprint" -eq 1 ]; then
+  fingerprint_before="$(scripts/tbd-home-fingerprint.sh)"
+fi
 
 # `/tmp`, not `mktemp -d`'s default `$TMPDIR`: on darwin TMPDIR is a ~50-char
 # path under /var/folders, and `sun_path` for a unix socket caps at ~104 bytes,
@@ -34,28 +68,41 @@ fingerprint_before="$(scripts/tbd-home-fingerprint.sh)"
 # overflow. It is set to exactly the value TBD_HOME would derive, so
 # `ConstantsTests.ProductionVarSmokeSuite.socketPathSuffix` — which asserts a
 # `/sock` suffix — still holds under this wrapper.
+#
+# TBD_CLAUDE_HOST_HOME is the third leg and is easy to forget, because fencing
+# `TBD_HOME` alone looks complete: a default-constructed
+# `ClaudeProfileConfigDirManager` then gets a scratch `baseDirectory` and the
+# developer's REAL `~/.claude` as its `hostBaseDirectory`, which
+# `ensureMirrorSlot` creates directories in, moves whole subtrees within, and
+# writes symlinks into.
 scratch_home="$(mktemp -d /tmp/tbd-test-home.XXXXXXXX)"
 cleanup() { rm -rf "$scratch_home"; }
 trap cleanup EXIT
 
 export TBD_HOME="$scratch_home"
 export TBD_SOCKET_PATH="$scratch_home/sock"
+export TBD_CLAUDE_HOST_HOME="$scratch_home/claude-host"
 
 set +e
 swift test "$@"
 test_status=$?
 set -e
 
+if [ "$fingerprint" -eq 0 ]; then
+  exit "$test_status"
+fi
+
 fingerprint_after="$(scripts/tbd-home-fingerprint.sh)"
 
 if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo >&2
   echo "=======================================================================" >&2
-  echo "  THE TEST RUN WROTE INTO ~/tbd" >&2
+  echo "  THE TEST RUN WROTE INTO ~/tbd OR ~/.claude" >&2
   echo "=======================================================================" >&2
   echo >&2
   echo "CLAUDE.md: \"Tests must not touch ~/tbd\". Something resolved a real" >&2
-  echo "config path despite TBD_HOME=$scratch_home." >&2
+  echo "config path despite TBD_HOME=$scratch_home and" >&2
+  echo "TBD_CLAUDE_HOST_HOME=$scratch_home/claude-host." >&2
   echo >&2
   echo "Entries added (+) or removed (-):" >&2
   diff <(printf '%s\n' "$fingerprint_before") <(printf '%s\n' "$fingerprint_after") \

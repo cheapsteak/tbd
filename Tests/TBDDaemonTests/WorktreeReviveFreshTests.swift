@@ -735,9 +735,9 @@ struct WorktreeReviveFreshTests {
     /// manager the path might still reach.
     private func isolateTBDHomeAndClaudeHost() -> (home: URL, cleanup: () -> Void) {
         let (home, cleanup) = isolateTBDHome()
-        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        let priorClaudeHost = setClaudeHostHome(home.appendingPathComponent("claude-host").path)
         return (home, {
-            unsetenv("TBD_CLAUDE_HOST_HOME")
+            restoreClaudeHostHome(priorClaudeHost)
             cleanup()
         })
     }

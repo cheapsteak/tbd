@@ -67,10 +67,13 @@ public struct WorktreeLayout: Sendable {
     ///   process at a scratch home; a hand-built home path silently ignored
     ///   the override and wrote real worktrees into the developer's `~/tbd`.
     public func basePath(for repo: Repo) -> String {
-        let base = TBDConstants.worktreesDir.path
         if let override = repo.worktreeRoot, !override.isEmpty {
             return override
         }
+        // Below the override guard on purpose: `worktreesDir` snapshots the
+        // whole process environment into a Dictionary on every access, and the
+        // override path has no use for the result.
+        let base = TBDConstants.worktreesDir.path
         if let slot = repo.worktreeSlot, !slot.isEmpty {
             return "\(base)/\(slot)"
         }

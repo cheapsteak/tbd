@@ -31,7 +31,14 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
     let hostBaseDirectory: URL
 
-    public init(baseDirectory: URL? = nil, hostBaseDirectory: URL? = nil) {
+    /// - Parameter environment: the environment `TBD_CLAUDE_HOST_HOME` is read
+    ///   from. Defaults to the process's, so production behavior is unchanged;
+    ///   a test that wants to assert the *production* `~/.claude` fallback
+    ///   passes `[:]` rather than unsetting the process-global variable, which
+    ///   would hand every concurrently running suite the real host store.
+    public init(baseDirectory: URL? = nil,
+                hostBaseDirectory: URL? = nil,
+                environment: [String: String] = ProcessInfo.processInfo.environment) {
         // Resolve inside the init to keep the `TBDConstants.configDir` access
         // out of the caller's compilation context — see HookResolver for the
         // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
@@ -43,7 +50,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         // in production.
         if let override = hostBaseDirectory {
             self.hostBaseDirectory = override
-        } else if let envOverride = ProcessInfo.processInfo.environment["TBD_CLAUDE_HOST_HOME"], !envOverride.isEmpty {
+        } else if let envOverride = environment["TBD_CLAUDE_HOST_HOME"], !envOverride.isEmpty {
             self.hostBaseDirectory = URL(fileURLWithPath: envOverride, isDirectory: true)
         } else {
             self.hostBaseDirectory = FileManager.default.homeDirectoryForCurrentUser

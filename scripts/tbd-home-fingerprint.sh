@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 #
-# Prints a stable fingerprint of the REAL `~/tbd` — deliberately `$HOME/tbd`,
-# never `$TBD_HOME`, because the whole point is to observe the directory a test
-# run is supposed to leave alone even while `TBD_HOME` points somewhere else.
+# Prints a stable fingerprint of the REAL `~/tbd` and the REAL `~/.claude` —
+# deliberately `$HOME/...`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME`, because
+# the whole point is to observe the directories a test run is supposed to leave
+# alone even while those overrides point somewhere else.
 #
 # Bracket a test run with two calls and diff them: any added or removed entry
-# means something wrote into the developer's real config dir, which
+# means something wrote into a real store the run should not have touched, which
 # `CLAUDE.md` ("Tests must not touch ~/tbd") forbids. Once cost 18k orphan
 # profile dirs and ~2.9k fake worktrees before anyone noticed.
+#
+# Only `scripts/test.sh` — and only when its detection layer is enabled — should
+# be diffing these. See that script's header for why detection is CI-only.
 #
 # Depth 3 covers the whole tree, not just `profiles/`:
 #   depth 1  a brand-new top-level directory nobody has thought of yet
@@ -27,13 +31,7 @@
 set -euo pipefail
 
 real_home="${HOME}/tbd"
-
-if [ ! -d "$real_home" ]; then
-  # Not "nothing to report": a run that CREATES ~/tbd must go red, so emit a
-  # marker the comparison can see change.
-  echo "<absent>"
-  exit 0
-fi
+real_claude="${HOME}/.claude"
 
 # Written by a live daemon on a developer box while an unrelated test run is in
 # flight, so their churn is noise rather than signal. Each is a name in the
@@ -67,9 +65,38 @@ for n in "${volatile_names[@]}"; do
   name_args+=(! -name "$n")
 done
 
-find "$real_home" -maxdepth 3 \
-  "${prune_args[@]}" \
-  \( "${name_args[@]}" -print \) \
-  2>/dev/null \
-  | sed "s|^${real_home}|~/tbd|" \
-  | LC_ALL=C sort
+if [ -d "$real_home" ]; then
+  find "$real_home" -maxdepth 3 \
+    "${prune_args[@]}" \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_home}|~/tbd|" \
+    | LC_ALL=C sort
+else
+  # Not "nothing to report": a run that CREATES ~/tbd must go red, so emit a
+  # marker the comparison can see change.
+  echo "~/tbd <absent>"
+fi
+
+# ~/.claude — one directory over, and reachable by the same class of leak. A
+# default-constructed `ClaudeProfileConfigDirManager` mirrors slots FROM this
+# store into each profile dir, and `ensureMirrorSlot` creates directories in it,
+# MOVES whole subtrees within it, and writes symlinks into it. Fencing only
+# `TBD_HOME` looks complete and leaves this wide open, so the detector covers
+# both or the same leak one directory over stays invisible.
+#
+# Depth 1, not 3. Claude Code itself writes below that continuously
+# (`projects/<slug>/*.jsonl`, `todos/`, `shell-snapshots/`), so anything deeper
+# is churn from whatever session happens to be running rather than signal. Every
+# name a leak would create here is a depth-1 one: the mirror slots are
+# `projects`, `plugins`, `skills`, `agents`, `commands`, `hooks`, `CLAUDE.md`
+# and `settings.json`.
+if [ -d "$real_claude" ]; then
+  find "$real_claude" -maxdepth 1 \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_claude}|~/.claude|" \
+    | LC_ALL=C sort
+else
+  echo "~/.claude <absent>"
+fi

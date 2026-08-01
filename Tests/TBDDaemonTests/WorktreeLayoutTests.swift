@@ -50,6 +50,24 @@ import Foundation
         #expect(layout.basePath(for: repo) == TBDConstants.worktreesDir.path + "/x")
     }
 
+    /// Pins the production shape — `~/tbd/worktrees/<slot>` — which the
+    /// assertion above no longer states: written against
+    /// `TBDConstants.worktreesDir` it holds under any `TBD_HOME`, including one
+    /// where the whole path is wrong. Two halves, composed: `basePath` appends
+    /// exactly `worktrees/<slot>` to the config root, and the config root with
+    /// no override is `$HOME/tbd`. The second half takes an explicit empty
+    /// environment rather than reading the process's, so a run fenced behind a
+    /// scratch `TBD_HOME` still asserts the real production shape.
+    @Test func basePathIsWorktreesSlotUnderTheConfigRoot() {
+        var repo = Repo(path: "/tmp/x", displayName: "X")
+        repo.worktreeSlot = "x"
+        #expect(WorktreeLayout().basePath(for: repo) == TBDConstants.configDir.path + "/worktrees/x")
+
+        let productionRoot = TBDConstants.configDir(environment: [:]).path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #expect(productionRoot == home + "/tbd")
+    }
+
     @Test func legacyAndCanonicalPrefixesReturnsBoth() {
         var repo = Repo(path: "/tmp/myrepo", displayName: "X")
         repo.worktreeSlot = "x"

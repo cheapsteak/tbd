@@ -23,10 +23,10 @@ struct ScratchPromoteReconcileTests {
             .appendingPathComponent("tbd-promote-rec-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let priorTBDHome = setTBDHome(home.path)
-        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        let priorClaudeHost = setClaudeHostHome(home.appendingPathComponent("claude-host").path)
         return (home, {
             restoreTBDHome(priorTBDHome)
-            unsetenv("TBD_CLAUDE_HOST_HOME")
+            restoreClaudeHostHome(priorClaudeHost)
             try? FileManager.default.removeItem(at: home)
         })
     }

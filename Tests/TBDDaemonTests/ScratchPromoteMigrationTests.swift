@@ -20,10 +20,10 @@ struct ScratchPromoteMigrationTests {
             .appendingPathComponent("tbd-promote-mig-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let priorTBDHome = setTBDHome(home.path)
-        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        let priorClaudeHost = setClaudeHostHome(home.appendingPathComponent("claude-host").path)
         return (home, {
             restoreTBDHome(priorTBDHome)
-            unsetenv("TBD_CLAUDE_HOST_HOME")
+            restoreClaudeHostHome(priorClaudeHost)
             try? FileManager.default.removeItem(at: home)
         })
     }
@@ -201,10 +201,10 @@ struct WakePathGuardTests {
             .appendingPathComponent("tbd-wake-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let priorTBDHome = setTBDHome(home.path)
-        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        let priorClaudeHost = setClaudeHostHome(home.appendingPathComponent("claude-host").path)
         return (home, {
             restoreTBDHome(priorTBDHome)
-            unsetenv("TBD_CLAUDE_HOST_HOME")
+            restoreClaudeHostHome(priorClaudeHost)
             try? FileManager.default.removeItem(at: home)
         })
     }
@@ -287,10 +287,10 @@ struct TerminalCreateResumeSyncWiringTests {
             .appendingPathComponent("tbd-create-resume-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let priorTBDHome = setTBDHome(home.path)
-        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        let priorClaudeHost = setClaudeHostHome(home.appendingPathComponent("claude-host").path)
         return (home, {
             restoreTBDHome(priorTBDHome)
-            unsetenv("TBD_CLAUDE_HOST_HOME")
+            restoreClaudeHostHome(priorClaudeHost)
             try? FileManager.default.removeItem(at: home)
         })
     }

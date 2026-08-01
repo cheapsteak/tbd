@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 # Runs SwiftLint --strict against .swift files changed vs. origin/main, then
-# the test suite through scripts/test.sh — which fences the run behind a
-# scratch TBD_HOME and fails if the real ~/tbd changed. That fingerprint is a
-# whole-run invariant no individual test can express, and pre-push is one of
-# only two places a whole run gets bracketed (CI is the other).
+# the test suite through scripts/test.sh, which fences the run behind a scratch
+# TBD_HOME / TBD_CLAUDE_HOST_HOME so nothing can write into the real ~/tbd or
+# ~/.claude.
+#
+# `--no-fingerprint`: the wrapper's other layer — diffing the real ~/tbd and
+# ~/.claude across the run — is deliberately NOT used here. It is trustworthy
+# only where nothing else writes to those directories, and a developer box is
+# the opposite of that: a live daemon creates worktree, scratch, notes and
+# channel entries throughout the minutes this pass takes, a sibling worktree
+# running scripts/restart.sh drops a state.db.pre-migration.<ts>, and Claude
+# Code writes into ~/.claude the whole time. Those reds would all be false, and
+# a hook that reddens for reasons the pusher cannot fix gets skipped with
+# TBD_SKIP_PREPUSH_TESTS=1 forever after. CI runs both layers on a runner where
+# a red is always real. The fence — the layer that actually prevents leaks —
+# is on here exactly as it is there.
 #
 # Set TBD_SKIP_PREPUSH_TESTS=1 to push without the test pass. CI still runs it
 # with the same guard, so skipping delays the answer rather than avoiding it.
@@ -37,5 +48,19 @@ if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
   exit 0
 fi
 
-echo "[pre-push] Running scripts/test.sh (scratch TBD_HOME + ~/tbd fingerprint guard)..."
-scripts/test.sh --parallel -j 2
+# Two passes, mirroring test.yml's fast/quiet split — NOT one `--parallel` run
+# over everything. The tier-3 suites in TBDDaemonLiveTests spawn real tmux
+# servers and children racing deadlines, and several pin
+# `.timeLimit(.minutes(1))` as a REGRESSION DETECTOR sized for the quiet pass
+# (SubprocessTimeoutStarvationTests waits out a `sleep 90` child). Run them in
+# the parallel pass and that limit is measuring machine load instead of the
+# behaviour it was written to catch. See Tests/CLAUDE.md "Test tiers".
+#
+# The fast pass is one invocation here, not the two CI splits it into: that
+# split trades +26 s of wall time for a shorter scheduling tail on a loaded
+# runner, and locally the wall time is what the pusher is waiting on.
+echo "[pre-push] Running scripts/test.sh — fast parallel pass (scratch TBD_HOME fence)..."
+scripts/test.sh --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+
+echo "[pre-push] Running scripts/test.sh — quiet pass (tier-3 live suites, serial)..."
+scripts/test.sh --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'

@@ -277,14 +277,23 @@ jobs:
       # ---------------------------------------------------------------------
       # Why every pass goes through `scripts/test.sh` and not bare `swift test`
       #
-      # The wrapper points `TBD_HOME` at a scratch dir for the run and, more to
-      # the point, fingerprints the real `~/tbd` on either side and fails the
-      # step if anything appeared or vanished. `CLAUDE.md` has said "Tests must
-      # not touch ~/tbd" all along, and the suite quietly violated it anyway:
-      # 18k orphan profile dirs and ~2.9k fake worktrees accumulated on a
-      # developer box before anyone noticed. No per-test assertion could have
-      # caught it — the invariant belongs to the whole run — so it lives here
-      # and in the pre-push hook, the two places a run is bracketed.
+      # The wrapper points `TBD_HOME`, `TBD_SOCKET_PATH` and
+      # `TBD_CLAUDE_HOST_HOME` at a scratch dir for the run and, more to the
+      # point, fingerprints the real `~/tbd` and `~/.claude` on either side and
+      # fails the step if anything appeared or vanished. `CLAUDE.md` has said
+      # "Tests must not touch ~/tbd" all along, and the suite quietly violated
+      # it anyway: 18k orphan profile dirs and ~2.9k fake worktrees accumulated
+      # on a developer box before anyone noticed. No per-test assertion could
+      # have caught it — the invariant belongs to the whole run.
+      #
+      # THIS JOB IS THE ONLY PLACE THE FINGERPRINT RUNS. The pre-push hook
+      # passes `--no-fingerprint` and keeps the fence alone, because a developer
+      # box writes to `~/tbd` and `~/.claude` for reasons that have nothing to
+      # do with the run under way — a live daemon creating worktree/scratch/
+      # notes/channel entries, a sibling worktree's `restart.sh` dropping a
+      # `state.db.pre-migration.<ts>`, Claude Code writing its own store — and a
+      # guard that reddens for reasons the pusher cannot fix gets disabled. A
+      # runner has none of that, which is what makes a red here always real.
       #
       # A CI runner has no `~/tbd` to pollute, so the guard reads as a no-op
       # there. It is not: an empty `~/tbd` makes it MORE sensitive, because the

@@ -58,6 +58,21 @@ merges and you stand down, delete your own `.build` — and reclaim only your
 own, never a sibling's, because a rebuild costs them ~2 minutes and silently
 invalidates any measurement they are midway through.
 
+## Running the suite — `scripts/test.sh`, never bare `swift test`
+
+Every invocation in this file, in `test.yml` and in the pre-push hook goes
+through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
+scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME`. Bare `swift
+test` writes into the developer's real `~/tbd` and `~/.claude` — 18k orphan
+profile dirs and ~2.9k fake worktrees accumulated that way before anyone
+noticed. Read `swift test …` below as `scripts/test.sh …`.
+
+The wrapper's second layer, a before/after fingerprint of those two real
+directories, is on by default and off with `--no-fingerprint`. CI runs it; the
+pre-push hook does not, because a live daemon and sibling worktrees write to
+`~/tbd` legitimately for the whole duration of a local run. Full rationale is in
+the wrapper's header.
+
 ## Test tiers
 
 Three tiers, defined by what a test may touch: tier 1 (deterministic,

@@ -35,10 +35,14 @@ The main chat session agent should not write code directly. Delegate all impleme
 - No prose tables in markdown docs — use lists (bolded lead term, en-dash, prose; nested bullets when a row has several fields). A table is acceptable only when its cells are mostly short numerical or scannable values: counts, defaults, thresholds, old→new line numbers. Prose crammed into cells gets squished and unreadable.
 - Spec and doc edits must leave a document that stands alone for a first-time reader. Never write revision history into prose: no "Amended \<date\>" notes, no "an earlier draft…" retracing, no reversal narratives — rewrite the superseded passage to state the current design as if it were always so; git history is the archive. Keep **evidence** ("field measurement showed X"), drop **chronology** ("removed \<date\> after review Y"). A rejected-alternatives section is welcome as timeless why-not rationale — written as rationale, never as a revision log. The one exemption is an **as-built audit record** of an existing system (e.g. [`docs/nightwatch.md`](docs/nightwatch.md)): there, dated banners recording what was measured against which tree are the evidence, and the document must declare that purpose at the top.
 - Verify your changes compile (`scripts/swift-safe build`) before committing.
-- Run `scripts/swift-safe test` if you changed daemon or shared code. The wrapper
-  serializes SwiftPM across TBD worktrees and defaults to two compiler jobs;
+- Run `scripts/test.sh` if you changed daemon or shared code. It fences the run
+  against the developer's real `~/tbd` and `~/.claude` (see "Tests must not
+  touch ~/tbd") and invokes SwiftPM through `scripts/swift-safe`, which
+  serializes builds across TBD worktrees and defaults to two compiler jobs;
   raw `swift build/test/run` is blocked by the repo guardrail because
-  concurrent default `-j12` builds can exhaust this development machine.
+  concurrent default `-j12` builds can exhaust this development machine. The
+  two wrappers are orthogonal — admission control and filesystem isolation —
+  and compose rather than replace each other.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
 ### Compile only what user-land cannot do well
@@ -91,14 +95,14 @@ Integration-style tests that exercise production code paths which internally rea
 
 For unit tests, prefer injection seams over `setenv`: pass an explicit env dict to `TBDConstants.*(environment:)`, override the themes directory via `ThemeStore(themesDirectory:)` or `AppearanceSettings(userThemesDirectory:)`, override the profile/host claude dirs via `ClaudeProfileConfigDirManager(baseDirectory:hostBaseDirectory:)` (`makeIsolatedConfigDirManager(tag:)` in `TestSupport`). **`setenv("TBD_HOME", ...)` in tests is allowed ONLY inside suites nested under `TBDHomeSerialized` in `Tests/TBDDaemonTests`.** All test targets compile into one process and Swift Testing runs suites in parallel across all targets; an unserialized `setenv` in any other target races every concurrent suite — this was the root cause of a real CI flake in `ConstantsTests.derivedPathsFollowTBDHome`.
 
-**Run tests with `scripts/test.sh`, not bare `swift test`.** It fences the run behind a scratch `TBD_HOME` and fingerprints the real `~/tbd` on either side, failing the run if anything appeared or vanished. CI and the pre-push hook both go through it. The rule above had been in this file all along and the suite violated it anyway — 18k orphan profile dirs and ~2.9k fake worktrees accumulated unnoticed — because the invariant belongs to a whole run and no per-test assertion can express it.
+**Run tests with `scripts/test.sh`, not bare `swift test`.** It forwards its arguments to `swift test` behind two layers. The **fence** (always on) points `TBD_HOME`, `TBD_SOCKET_PATH` and `TBD_CLAUDE_HOST_HOME` at a scratch dir — the third one matters as much as the first, since a default-constructed `ClaudeProfileConfigDirManager` otherwise gets a scratch profiles dir and the developer's real `~/.claude` as the host store it moves subtrees around in. The **detector** fingerprints the real `~/tbd` and `~/.claude` on either side and fails the run if any entry appeared or vanished; it is on by default and off with `--no-fingerprint`. CI runs both layers; the pre-push hook passes `--no-fingerprint`, because on a developer box a live daemon and sibling worktrees write to `~/tbd` legitimately throughout a run and a guard that reddens spuriously gets disabled. The rule above had been in this file all along and the suite violated it anyway — 18k orphan profile dirs and ~2.9k fake worktrees accumulated unnoticed — because the invariant belongs to a whole run and no per-test assertion can express it.
 
 Two shapes cause that leak, and both are worth recognizing:
 
 - **A static/ambient helper that ignores its caller's injected seam.** `ClaudeProfileConfigDirManager.resolveConfigDir` was `static` and built its own manager on `TBDConstants.configDir`, so every caller's injected temp-dir manager was decorative. If a type takes an injected collaborator, its path helpers must be instance members — do not add a static twin "for convenience".
 - **A path hand-built from `$HOME`.** `WorktreeLayout.basePath` composed `"\(home)/tbd/worktrees/…"` itself, so it silently ignored `TBD_HOME` and defeated the fence. Derive every TBD-owned path from `TBDConstants`.
 
-**Teardown must restore `TBD_HOME`, never `unsetenv` it.** Unsetting does not return to the harness's scratch home — it returns to the developer's real `~/tbd`, process-wide, for every concurrently running suite. Use `setTBDHome(_:)` / `restoreTBDHome(_:)` from `TestSupport`.
+**Teardown must restore `TBD_HOME` and `TBD_CLAUDE_HOST_HOME`, never `unsetenv` them.** Unsetting does not return to the harness's scratch home — it returns to the developer's real `~/tbd` (or real `~/.claude`), process-wide, for every concurrently running suite. Use `setTBDHome(_:)` / `restoreTBDHome(_:)` and `setClaudeHostHome(_:)` / `restoreClaudeHostHome(_:)` from `TestSupport`.
 
 ### Database migrations must update the shared model
 When adding a DB column in `Sources/TBDDaemon/Database/Database.swift`:
@@ -165,7 +169,7 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 ## Quick Reference
 
 - **Build**: `scripts/swift-safe build`
-- **Test**: `scripts/swift-safe test`
+- **Test**: `scripts/test.sh` (fences `~/tbd` and `~/.claude`, then runs SwiftPM through `scripts/swift-safe`)
 - **Restart**: `scripts/restart.sh`
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:

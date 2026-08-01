@@ -131,8 +131,16 @@ public enum LegacyHookScanner {
     /// number of entries removed and the backup file path (if a backup was
     /// just created — nil means a prior backup already existed or the file
     /// was missing).
+    ///
+    /// `path` is required and deliberately undefaulted. A default of
+    /// `globalSettingsPath` reads as a convenience and is really an ambient
+    /// write to the developer's real `~/.claude/settings.json` that no call
+    /// site names — the same shape as the `resolveConfigDir` static that let
+    /// every injected test seam be decorative. The one production caller
+    /// passes `globalSettingsPath` explicitly, alongside the `detectEntries`
+    /// call that always did.
     @discardableResult
-    public static func removeGlobalEntries(at path: String = globalSettingsPath) throws -> RemoveLegacyGlobalHooksResult {
+    public static func removeGlobalEntries(at path: String) throws -> RemoveLegacyGlobalHooksResult {
         guard FileManager.default.fileExists(atPath: path) else {
             return RemoveLegacyGlobalHooksResult(removedCount: 0, backupPath: nil)
         }

@@ -32,6 +32,9 @@
 
 set -uo pipefail
 
+# Absolute, so the wrapper is found regardless of the caller's cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # target|swift-test-filter-args|floor|issue|description
 #
 # Floors are MEASURED, never guessed. `swift test --filter` exits GREEN when it
@@ -153,6 +156,20 @@ run_governed_swift() {
     "$REPO_ROOT/scripts/swift-safe" "$@"
 }
 
+# Same governance as `run_governed_swift`, but through `scripts/test.sh` so the
+# run is also fenced off the developer's real `~/tbd`, `~/.claude` and
+# `~/.codex`. The two wrappers are orthogonal and stack: `test.sh` sets the
+# fence and then invokes SwiftPM via `swift-safe`, so the admission lock and the
+# lock-timeout env var below still apply. This harness is documented for local
+# use, where an unfenced run would write into the real config dirs.
+run_governed_fenced() {
+  local command_deadline_s="$1" log="$2"; shift 2
+  local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
+  run_with_deadline "$outer_deadline_s" "$log" env \
+    TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
+    "$REPO_ROOT/scripts/test.sh" "$@"
+}
+
 # The 1-MINUTE load average, which LAGS: measured here, the first iterations
 # after starting 6 spinners still reported ~7 while the run finished at ~24. It
 # is reported as `load1m` everywhere so nobody reads an early figure as the load
@@ -216,8 +233,15 @@ run_target() {
     log="$work_dir/$name-$i.log"
     load_before="$(loadavg)"
     local rc=0
+    # Through scripts/test.sh, not bare `swift test`: this script's documented
+    # use is LOCAL reproduction under induced load, where a bare run writes into
+    # the developer's real ~/tbd and ~/.claude. `--no-fingerprint` for the same
+    # reason the pre-push hook uses it — a live daemon writes to ~/tbd
+    # legitimately across the many minutes these iterations take, so the
+    # detection layer would report the machine rather than the run. The fence,
+    # which is what actually prevents the leak, is always on.
     # shellcheck disable=SC2086 # $filter is a deliberately word-split arg list
-    run_governed_swift "$ITERATION_DEADLINE_S" "$log" test $filter || rc=$?
+    run_governed_fenced "$ITERATION_DEADLINE_S" "$log" --no-fingerprint $filter || rc=$?
     verdict="$(judge_iteration "$rc" "$log" "$floor")"
     if [[ "$verdict" == PASS* ]]; then
       pass_counts+=("${verdict#PASS }")
@@ -241,7 +265,7 @@ run_target() {
     echo
     echo "- Machine: $(sysctl -n hw.ncpu 2>/dev/null || nproc) cores, ${#SPINNER_PIDS[@]} induced spinners, load1m now: $(loadavg)"
     echo "  (\`load1m\` is the 1-minute average and LAGS the induced load — early iterations under-report it. The spinner count is the reliable half.)"
-    echo "- Filter: \`swift test $filter\`, executed-test floor $floor"
+    echo "- Filter: \`scripts/test.sh --no-fingerprint $filter\`, executed-test floor $floor"
     echo "- Execution budget: ${ITERATION_DEADLINE_S}s after admission; lock wait: up to ${SWIFT_LOCK_TIMEOUT_S}s; outer backstop: $(governed_outer_deadline "$ITERATION_DEADLINE_S")s"
     echo
     echo "Signatures:"
