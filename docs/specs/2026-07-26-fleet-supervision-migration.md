@@ -236,7 +236,11 @@ only — no slice needs a later one:
   tool call and cannot signal that a prompt is on screen), add
   verify-before-acting, run the work-state sweep on the daemon's cadence,
   derive the context-load fact from the transcript tail. Pure observability;
-  safe to ship while the old system runs because it acts on nothing.
+  safe to ship while the old system runs because it acts on nothing. The fact
+  snapshot's output shape is a documented public contract from this slice on —
+  it is what the project-authored sweep program reads
+  ([sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+  §3).
 - **Slice 2 — the switch, shift, ledger** (design §3, §7, §9). The
   `supervision_enabled` config column — a **boolean**, not the old tri-state
   posture (migration + record type + Codable model, one commit, per the house
@@ -301,8 +305,16 @@ only — no slice needs a later one:
     (design §8). `resolve` is
     operator-only and must not be reachable from a desk, which keeps resolutions
     off the self-report path (design §10).
-- **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake
-  decision from facts, work-order composition **grouped by project**, desks as
+- **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12, and the
+  [sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)).
+  The case-detection surface: the `supervise propose` intake with its
+  not-to-act floor, the `supervise snapshot` query, the daemon's default tick
+  running the seeded reference sweep script, and the contact-window watchdog
+  with its anomaly lines and escalation. Desk briefing: the playbook installed
+  as standing conduct at desk spawn through the agent-kind adapter (first-order
+  embed fallback), work orders carrying the active mode's name with
+  superseding deltas on mid-shift edits, and the per-project renderer hook
+  with built-in fallback. Then work-order composition **grouped by project**, desks as
   first-class sessions **one per project, spawned lazily on that project's first
   case and all disposed at shift close**, the compiled **desk→project
   addressing check** (a verb whose target is outside the calling desk's project

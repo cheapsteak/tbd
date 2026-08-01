@@ -6,7 +6,10 @@ sessions lives outside the daemon, in a project-authored wake program specified
 in the sub-document
 [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md);
 TBD's obligation to programs it does not run is sufficient public surfaces,
-never guardrails. §12 pins dispatch-versus-delivery semantics, and the daemon
+never guardrails. Case detection for live agents is likewise authored — a
+project-owned sweep program behind a compiled intake and liveness contract,
+specified with the desk-briefing pipeline in the sub-document
+[`2026-08-01-fleet-supervision-sweep-program-design.md`](2026-08-01-fleet-supervision-sweep-program-design.md). §12 pins dispatch-versus-delivery semantics, and the daemon
 never inspects message content — freshness is authored discipline on both sides
 (§15, and P0-8 in the requirements doc). Companion to
 [`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md),
@@ -44,10 +47,11 @@ path changes by rebuild and release — and, once flagged, by migration — whil
 an authored artifact changes by editing a file. So a behavior that passes no
 compiled test decisively belongs outside, where a project can iterate on it
 freely, and it migrates inward only on field evidence (the requirements doc's
-Built/Enabled ratchet). The wake decision for parked sessions sits outside the
-daemon on this rule. Any future descope, and any proposal to compile something
-new in, argues from the same rule — the motivation for wanting change differs
-case by case; the placement philosophy does not.
+Built/Enabled ratchet). The wake decision for parked sessions and the case
+decision for live agents both sit outside the daemon on this rule. Any future
+descope, and any proposal to compile something new in, argues from the same
+rule — the motivation for wanting change differs case by case; the placement
+philosophy does not.
 
 The requirements brief names six specific items and asks where each one landed.
 The applications appear throughout this document; this list collects them for
@@ -55,12 +59,13 @@ a quick audit:
 
 - **State derivation** — compiled (§2). It is fact; a wrong answer poisons
   everything downstream, and it runs for the whole fleet every cycle.
-- **Intervention thresholds** — compiled default numbers, global (§2, §13).
-  Per-repo tuning is deliberately deferred (§15). Crossing a threshold produces
-  a case; the response is judged.
+- **Intervention thresholds** — authored: named constants in each project's
+  seeded sweep script (§13, and the
+  [sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+  §7). Crossing a threshold produces a proposal; the response is judged.
 - **Cooldowns and dedup** — excluded by the brief (solved elsewhere). The sliver
   in this design — "intervention already in flight" and "re-check pending"
-  checks — is compiled into the sweep (§4).
+  checks — is compiled into the intake's not-to-act floor (§4).
 - **Per-repo policy** — authored, and resolved per **supervision project** (§5,
   §8): the playbook (advisory prose, including mode definitions) plus the
   operator's selections in `supervision.json`.
@@ -75,26 +80,32 @@ a quick audit:
   Compiled TBD keeps nothing of it, not even actuation rails: TBD's obligation
   is sufficient public surfaces (the requirements doc's Built/Enabled
   classification), never guardrails on a program it does not run. The sweep
-  supervises live agents only.
+  program's remit is live agents only.
 
-**The daemon, not the supervisor, drives the loop.** On a timer, the daemon
-sweeps the whole fleet in its own process: it computes each live agent's
-state, then applies the mechanical reasons not to act — a rate limit, an
-intervention already in flight, a pending re-check. If an agent still needs
-judgment after that, the daemon writes the case into a work order and delivers
-it to the supervisor of that agent's project, spawning the supervisor first if
-the project has none this shift (§5). Delivering a work order is the only
-thing that ever starts a supervisor's turn (P0-6): a supervisor never polls or
-sweeps on its own, and never writes state or history directly. The daemon, for
-its part, never makes a judgment — it measures, decides whether to hand off,
-and records. Information and commands flow in one direction: daemon → work
-order → supervisor → verb → daemon. Parked sessions never enter this loop:
-whether to wake one is the wake program's decision (above), never the sweep's.
+**The daemon anchors the loop; the project decides when and what it notices.**
+The daemon maintains the fact snapshot continuously — each live agent's state
+with its source and age. The project's **sweep program** — authored, seeded
+with a working default, run by the daemon's default tick until the project
+brings its own triggers — reads that snapshot and submits case proposals to a
+compiled intake (the
+[sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)).
+At the intake the daemon applies the mechanical reasons not to act — an
+intervention already in flight, a pending re-check, a rate-limited target —
+then writes surviving proposals into a work order and delivers it to that
+project's supervisor, spawning the supervisor first if the project has none
+this shift (§5). Delivering a work order is the only thing that ever starts a
+supervisor's turn (P0-6): a supervisor never polls or sweeps on its own, and
+never writes state or history directly. The daemon, for its part, never makes
+a judgment — it keeps the facts, holds the floor, delivers, and records; and
+it holds the sweep program to a liveness contract, so a program that stops
+looking cannot impersonate a calm night. Information flows in one direction:
+facts → sweep program → proposal → daemon → work order → supervisor → verb →
+daemon. Parked sessions never enter this loop: whether to wake one is the
+wake program's decision (above), never a sweep concern.
 
-This is the same shape as the existing hibernation sweep: a cheap polling tick
-feeding a pure decision function, no model anywhere in the tick. However many
-projects exist, the sweep stays single and fleet-wide — only the work orders
-fan out.
+The compiled half keeps the hibernation sweep's economy: fact maintenance is
+cheap, in-process, and model-free, and there is one fact store however many
+projects exist — only proposals and work orders fan out per project.
 
 ## 2. State model (P0-5, decomposed)
 
@@ -197,8 +208,12 @@ once in full, because it governs both halves of the design: **TBD has no
 theory of work — every project authors one.** What counts as done, stalled, or
 abandoned is a team's convention, not a universal; the squash-merge night
 proved that a true git fact can answer the wrong question when the convention
-(squash merges) lives outside the tool. For parked sessions the authored
-theory is the wake program; for live agents it is the playbook. The desk
+(squash merges) lives outside the tool. The same refusal covers timing:
+**TBD has no theory of attention** — when the fleet deserves evaluation is
+equally a project convention
+([sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+§1). For parked sessions both theories are the wake program's; for live
+agents, detection is the sweep program's and response is the playbook's. The desk
 **applies** its project's theory and escalates when that theory is silent — it
 never supplies one of its own, and "is the work done" is never the desk's
 question to answer from first principles (§4). Policy and the supervisor
@@ -482,7 +497,7 @@ sources; the only difference is what the case carries and therefore what
 judgment it warrants.
 
 Two words earn their precision here, because the rest of this document leans on
-them. A **case** is daemon → desk: a fact the sweep or an event surfaced, with
+them. A **case** is daemon → desk: a fact the sweep program or an event surfaced, with
 no claim about what should happen. An **escalation** is desk → operator: a
 judgment that a human is needed, with an exact item and a recommendation (§3).
 A permission-prompt case is *not* automatically an escalation. Whether it
@@ -556,8 +571,8 @@ judgment chose and the record can be audited against.
 
 None of this makes stalls cheap to ignore, and nothing above slows detection.
 The one-minute re-check (P1-6, §4 step 7, §12) still notices a stalled agent
-within a minute of an intervention, and the sweep still raises awaiting-input
-as a case. Prevention plus fast escalation is how "a trivial prompt doesn't
+within a minute of an intervention, and the `Notification` event path still
+raises awaiting-input as a case. Prevention plus fast escalation is how "a trivial prompt doesn't
 cost a night" is actually met — the night is lost to a prompt nobody *sees*,
 not to a prompt nobody auto-answers.
 
@@ -623,8 +638,8 @@ toggle. That is P0-2's one-gesture handover for the whole fleet, unchanged in
 substance: one gesture, one shift, one ledger, one account, one queue.
 
 **`off` is not a mode; it is the pause of TBD's authority to act.** The
-switch governs acting, and only acting: off stops the sweep from cutting
-work orders, and the actuation preconditions (above) refuse the acting verbs
+switch governs acting, and only acting: off closes the intake so no proposal
+becomes a work order, and the actuation preconditions (above) refuse the acting verbs
 from that instant — a desk mid-thought when the switch flips can finish
 thinking, and its drive returns an ordinary error instead of touching
 anything. Everything else continues: desks stay alive and idle, the shift
@@ -633,7 +648,7 @@ record verbs (`note`, `escalate`) still land, so a desk interrupted
 mid-judgment can still write down what it was about to do. Watching
 continues; touching stops. Flipping back on resumes the same shift with the
 same desks at full context: the daemon writes a resumed lifecycle line and
-hastens a sweep tick, so work orders are cut from current state, never from
+hastens the default tick, so work orders are cut from current state, never from
 pre-pause state. Toggling is therefore cheap in both directions — which a
 control must be for an operator to actually reach for it.
 
@@ -787,28 +802,39 @@ command (`resolve`, §10), never a verb the supervisor holds.
 
 Example flow in autonomous mode at 2:00 a.m. with forty agents:
 
-1. **Tick.** The daemon sweeps the fleet table in its own process. It uses no
-   model and starts no subprocesses. It silently skips agents that are working.
-   Parked sessions are skipped as such: the sweep records their work facts for
-   the account, but waking them is never its call — that is the
-   [wake program's](2026-07-26-fleet-supervision-wake-program.md). It writes
-   no log and wakes nobody.
-2. **Hit.** An agent has been idle for 40 minutes and has uncommitted work.
-   Before doing anything, the daemon checks the mechanical reasons to stop:
-   a rate limit, insufficient quota, an intervention already
-   in progress, or a pending re-check timer.
+1. **Look.** The project's sweep program runs — here on the daemon's default
+   tick — and reads the project's snapshot: session states with their ages,
+   work facts, runaway counters. It evaluates them under whatever theory of
+   attention and of work its project authored; the seeded reference script
+   holds the defaults. Parked sessions appear in the snapshot as facts for
+   the account, but waking them is never a sweep concern — that is the
+   [wake program's](2026-07-26-fleet-supervision-wake-program.md). A quiet
+   evaluation submits an empty proposal: a heartbeat, not a no-op
+   (sweep-program sub-document §6).
+2. **Propose, then the floor.** The script finds an agent idle past its
+   threshold with uncommitted work and submits a proposal naming the agent,
+   the condition, and its evidence. At the intake the daemon applies the
+   mechanical reasons to stop — a rate limit, insufficient quota, an
+   intervention already in progress, or a pending re-check timer — and drops
+   what must not become a case now.
 3. **Work order.** The daemon prepares a case file. It includes the agent's
-   identity, session state and its age, work facts, the project's resolved
-   playbook **with its active mode's conduct** (§3), **any decisions in scope**
-   — answers the operator already gave, so the desk knows them and does not
-   re-ask (P1-5, §8) — and the transcript path. Cases are grouped by project
-   (§5): if one tick finds several cases in the same project, they travel as one
-   work order and wake that project's desk once. Cases in different projects
-   never share a work order.
+   identity, session state and its age, work facts, the sweep program's
+   evidence, the **name of the active mode** (§3) — the conduct itself stands
+   in the desk's session layer, with mid-shift playbook edits carried as
+   superseding deltas (sweep-program sub-document §8) — **any decisions in
+   scope** — answers the operator already gave, so the desk knows them and
+   does not re-ask (P1-5, §8) — and the transcript path. The assembled order
+   is rendered for delivery by the project's renderer hook, falling back to
+   the built-in renderer (sweep-program sub-document §9). Cases are grouped
+   by project (§5): if one evaluation finds several cases in the same
+   project, they travel as one work order and wake that project's desk once.
+   Cases in different projects never share a work order.
 4. **Wake.** The daemon delivers the order through the adapter for that kind of
    agent, just as it would for any other session. If the project has no desk yet
    this shift, the daemon spawns one first — desks are lazy, so a project that
-   stays quiet all night is never created. Each supervisor is an ordinary,
+   stays quiet all night is never created — and spawning installs the
+   project's playbook as the desk's standing conduct (sweep-program
+   sub-document §8). Each supervisor is an ordinary,
    visible session in its own worktree (P0-4). An operator can open its tab,
    watch it think, and type into it.
 5. **Judgment.** The supervisor reads the transcript and writes a specific next
@@ -845,11 +871,11 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
 8. **Everything else costs nothing.** The other agents: zero tokens, zero sends.
    The other projects: no desk spawned, nothing woken.
 
-**What per-project desks cost (P0-6, restated honestly).** The sweep is
-unchanged — one global, model-free pass over the whole fleet, whatever the
+**What per-project desks cost (P0-6, restated honestly).** The compiled fact
+side is unchanged — one global, model-free fact store, whatever the
 project count. A quiet project is free in the strongest sense: its desk is never
 spawned, so it holds no context and burns no tokens. What the grouping gives up
-is cross-project batching. A tick with cases in three projects wakes three
+is cross-project batching. A round of evaluations with cases in three projects wakes three
 desks where a single fleet desk would have woken once. Each of those wakes is
 smaller — one project's cases, one playbook, not the fleet's — so token cost
 roughly washes; what rises is the *wake count*. That is the honest price of the
@@ -898,8 +924,8 @@ Boundary cases:
   to an operator who is asleep, so detection is the dead-man's
   switch (§9) — a work order with no ledger line by the deadline, or a desk
   `working` past it with nothing ledgered — and firing means replacement
-  through §9's path, bounded by the reroll budget. The sweep continues to
-  collect mechanical facts throughout and makes no judgments; the daemon never
+  through §9's path, bounded by the reroll budget. The daemon continues to
+  collect mechanical facts throughout and makes no judgments; it never
   pretends to provide the supervisor's judgment. When the budget is spent, a
   dark desk darkens its own project only: other projects' desks are separate
   sessions and keep working, and the anomaly line names which project lost its
@@ -1030,17 +1056,20 @@ declared project, the operator's copy lives beside the project's definition
 (`~/tbd/supervision/projects/<name>/supervision.md`) and the repo level is
 whichever member repo the project designated.
 
-**Every work order carries exactly one playbook**, because a desk supervises
-exactly one project. There is no such thing as an order spanning two
+**Every desk stands on exactly one playbook**, because a desk supervises
+exactly one project: the whole file is installed as the desk's standing
+conduct at spawn, and every work order names the active mode (sweep-program
+sub-document §8). There is no such thing as an order spanning two
 policies — that is the invariant the project exists to create.
 
 - **One playbook, all of a project's modes inside it.** A mode is a named
-  section of this file (§3), and the active one's text arrives in every work
-  order. Keeping them together is what lets a reader see a project's whole
-  conduct — every posture it can take — in one place, and it is why selecting a
-  mode changes nothing about which file gets resolved. Separate files per mode
-  would split that view for no gain, and would invite the reader to imagine the
-  daemon choosing between them; it chooses nothing, it delivers the section the
+  section of this file (§3); the desk holds every section, and each work
+  order names the one that is active. Keeping them together is what lets a
+  reader — and the desk — see a project's whole conduct — every posture it
+  can take — in one place, and it is why selecting a mode changes nothing
+  about which file gets resolved. Separate files per mode would split that
+  view for no gain, and would invite the reader to imagine the daemon
+  choosing between them; it chooses nothing, it names the section the
   operator selected.
 - **Seeding without overwriting:** tool-provided content lives only in the level
   the tool owns: the shipped default, which updates may freely replace. The
@@ -1150,7 +1179,7 @@ shift's decision (item 2).
 **Worktree priority (P1-3) is an operator gesture on a particular thing, not
 policy.** *Worktrees whose progress matters most get looked at first* reuses
 an existing gesture: the worktree
-**pin**. The sweep orders cases within each project's work order pinned-first
+**pin**. Assembly orders cases within each project's work order pinned-first
 (the pin state worktrees already carry), then by case age, and that project's
 supervisor works the list top-down. Ordering is within a work order, so it never
 has to rank one project against another. Pinning is already how an operator
@@ -1310,7 +1339,7 @@ never used to allow or block behavior; an error there produces an inaccurate
 account, not a wrong action. The third category is **human-authored process**.
 
 - **DB: the on/off switch. One config column. Nothing else
-  supervision-specific.** The sweep reads it. Both the app and CLI can set it,
+  supervision-specific.** The daemon reads it. Both the app and CLI can set it,
   and all surfaces must see the same value immediately after a change — that is
   the purpose of the shared configuration object. Mode selections are *not*
   here; they are per-project operator choices in `supervision.json` (§8), which
@@ -1335,10 +1364,10 @@ account, not a wrong action. The third category is **human-authored process**.
   The playbook tiers (§5) are also durable files — and the playbook is where
   knowledge that must outlive a shift lives, changed by reviewed PR (§8).
 - **In-memory, deliberately not durable**: active one-minute re-check timers
-  and the sweep's temporary tracking. Timers may live in memory *because*
+  and the intake's temporary tracking. Timers may live in memory *because*
   everything they encode derives from the durable record — an action line's
   timestamp fixes its observation deadline — so a daemon restart during a
-  shift costs cadence, never data. For the sweep that is a one-cycle delay.
+  shift costs cadence, never data. For the default tick that is a one-cycle delay.
   For re-checks, the startup ledger replay (the same replay that rebuilds the
   escalation queue) surfaces actions past their deadline with no outcome, and
   the daemon performs those observations then: the envelope is durable in the
@@ -1469,7 +1498,7 @@ project lists its member `repos` and designates one `policy` source:
 most one project; the loader rejects the file if one appears twice, because
 "exactly one" is the property the whole grouping rests on.
 
-`automation` is the sweep's configuration: which projects generate cases at all
+`automation` is case detection's configuration: which projects generate cases at all
 (below). `modes` records the operator's mode selection per project — a project
 absent from the object runs `attended` (§3). Both are selections. Neither is a
 rule, and there is nothing in this file for code to evaluate: the loader reads
@@ -1485,7 +1514,9 @@ The storage decision is otherwise plain: a **file** at
 `~/tbd/supervision/supervision.json`, loaded into memory at startup, rewritten
 atomically after each operator action, reloaded after a manual edit, and
 hand-editable throughout. With tens of entries and one writer at a time, a
-database adds nothing.
+database adds nothing. Per-project sweep scheduling lives here too — the
+default tick's setting and the declared contact window (sweep-program
+sub-document §4, §6) — selection-tier operational choices, still zero rules.
 
 ### Project automation membership (operator-configurable)
 
@@ -1585,7 +1616,8 @@ enforcement openly, which is the same trade the old system made by accident
   durable home for anything needing a human.
 - **Shift end is a teardown with a caller — the explicit close action (§3,
   §10) — and it disposes every desk.** The
-  sequence is: stop the sweep → make a time-limited request to each live desk
+  sequence is: stop the default tick and close the intake → make a
+  time-limited request to each live desk
   for a closing note **and, where the shift produced learning-shaped notes, a
   capture suggestion in the proposals doc** (spawn a worker to fold them into
   that project's
@@ -1672,7 +1704,7 @@ The sequence, all daemon-driven:
    fullness is already a session-state fact (§2). Threshold: a compiled
    default fraction of the effective window (§13).
 2. **Hold** — the daemon stops delivering work orders to *that* desk. Its new
-   cases queue; the sweep keeps running; other projects' desks are unaffected;
+   cases queue; case detection keeps running; other projects' desks are unaffected;
    the fleet stays watched. The recycle waits until that supervisor is idle with
    no case in flight.
 3. **Flush** — the final flush nudge, if the staged ones have not already
@@ -2095,7 +2127,7 @@ the transcript — so at startup the daemon replays the ledger, finds actions
 past their deadline with no outcome, and performs the same observation late,
 writing the outcome the timer would have written (§7). What a restart costs
 is cadence, stated plainly: P1-6's sixty-second window degrades to the
-startup scan or the next sweep tick. What to *do* about a late-confirmed or
+startup scan or the next evaluation. What to *do* about a late-confirmed or
 unconfirmed act — re-drive, note, shrug — stays playbook judgment, never
 compiled repair.
 
@@ -2121,7 +2153,7 @@ pressed enter, a paste-and-submit delivery sends the human's unsent text
 together with the desk's message, as one submitted message *from the human* —
 words they never sent, into an agent that acts without asking. A message
 channel makes this impossible by construction; typing cannot. Three things
-limit how often it happens: the sweep only messages stuck-or-idle sessions,
+limit how often it happens: supervision only messages stuck-or-idle sessions,
 the pause switch stops all delivery while the operator works, and the
 subsystem ships behind a default-off flag. None of the three protects the
 specific session a human is typing in — that protection, a per-session
@@ -2197,16 +2229,17 @@ response. Each cycle collects inexpensive facts from interfaces the daemon
 already reads. These facts are the number of turns in the current window,
 counted from appended transcript JSONL records without parsing their content;
 the rate of hook events; and whether commits or the diff stayed unchanged
-across N cycles, which the git sweep already knows. Each threshold is a
-compiled global default. Per-repository overrides are deliberately deferred
-(§15): the old system had none, numeric tuning has no home in `supervision.json`
-(§8 holds topology and selection, not parameters), and a new repo-table
-column would quietly break §7's one-column property. If real shifts prove a
-repo needs different numbers, a repo-table column is the house pattern for it —
-added as a conscious change to §7, not a side effect.
+across N cycles, which the git sweep already knows. Each threshold is a named
+constant in the project's seeded sweep script
+([sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+§7): tuning is editing a file the project owns. Numeric tuning has no home in
+`supervision.json` (§8 holds topology and selection, not parameters) and never
+becomes a repo-table column — script placement preserves §7's one-column
+property permanently.
 
-Crossing a threshold does not itself cause an action. It creates a case in the
-next work order, such as "agent Y: 31 turns, no commits in 90 minutes." The
+Crossing a threshold does not itself cause an action. The sweep script
+proposes a case, which arrives in the next work order as a fact line such as
+"agent Y: 31 turns, no commits in 90 minutes." The
 supervisor reads the transcript and decides. If the agent is truly looping, it
 uses `pause`, and what it does with that judgment is its mode's conduct to say —
 a cautious mode tells it to propose and escalate, a bolder one tells it to act
@@ -2226,7 +2259,7 @@ to hunt for the value that governs a behavior:
 
 | Number | Default | Where it acts |
 | --- | --- | --- |
-| Idle-intervention threshold | 40 min | §4 step 2 |
+| Idle-intervention threshold | 40 min | seeded sweep script (sub-doc §7) |
 | Post-intervention re-check | 60 s | §4 step 7, §12 |
 | Delivery retries before anomaly | 2 sends | §12 |
 | Supervisor recycle preference | 50% of the effective window, per desk | §9 |
@@ -2234,11 +2267,13 @@ to hunt for the value that governs a behavior:
 | Unknown-denominator assumption | 200k, labeled | §2, §9 |
 | Dead-man deadline (work order unanswered) | 60 min | §9 |
 | Reroll budget | 2 consecutive stalled desks per project | §9 |
-| Runaway: turns in window | 30 turns | §13 |
-| Runaway: no-progress window | 90 min with no commits | §13 |
+| Runaway: turns in window | 30 turns | seeded sweep script (sub-doc §7) |
+| Runaway: no-progress window | 90 min with no commits | seeded sweep script (sub-doc §7) |
 | Heartbeat staleness | 10 min | §14 |
 
-**All of these are compiled constants at parity — no new config columns.** That
+**All of these are compiled constants at parity — except the rows marked as
+seeded-script constants, which ship in the reference sweep script — and none
+is a config column.** That
 preserves §7's one-column property, which is a real property of the design and
 not an accounting convenience: the moment numbers become columns, "where is this
 system's state?" stops having a one-line answer. If real shifts prove a number
@@ -2248,9 +2283,9 @@ overrides (§15).
 
 ## 14. Out-of-band heartbeat (P3-1)
 
-On every sweep tick, the daemon writes a small `status.json` file in the shift
-directory. It contains whether supervision is on, each project's active mode,
-and the last-sweep timestamp. The watchdog is an
+On a fixed cadence of its own, the daemon writes a small `status.json` file in
+the shift directory. It contains whether supervision is on, each project's
+active mode, and each project's last intake contact. The watchdog is an
 optional `launchd` job with one rule: *if a shift claims to be active and the
 status file has not changed in about 10 minutes, raise a notification.* It
 reads a file instead of the socket or DB, so a dead daemon cannot make the
@@ -2277,7 +2312,7 @@ to inaction at the largest scale.
   (terminal or worktree), how an operator discovers it exists, whether it
   expires when they walk away — and answering them as a side effect here
   would shortchange them. Until it lands, the operator's protections are the
-  pause switch, project membership marks, and the sweep's stuck-or-idle
+  pause switch, project membership marks, and supervision's stuck-or-idle
   targeting; the actuation preconditions (§3) are the seam the flag binds to
   when it arrives.
 - **A verdict enum / work-arc schema** — interpretations of work differ by
@@ -2363,12 +2398,23 @@ to inaction at the largest scale.
   it was: routine permission prompts prevented at spawn (the agent's own
   permission config, delivered through the settings overlay), config-answerable
   dialogs pre-answered by seeders, and genuine questions escalated. See §2.
-- **Per-repo threshold overrides** — global compiled defaults only, at parity.
-  Numbers have no home in `supervision.json`, and a repo-table column would
-  break the one-column property (§7); if operation proves the need, that
-  column is the house pattern for it, added as a conscious change. See §13.
+- **Per-repo threshold configuration** — no configuration surface exists or is
+  deferred: thresholds are named constants in each project's seeded sweep
+  script, so tuning is a file edit. Numbers have no home in `supervision.json`
+  and never become repo-table columns, preserving the one-column property
+  (§7). See §13 and the
+  [sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md).
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
+- **A compiled case-cutting sweep for live agents** — the daemon evaluating
+  thresholds and cutting cases itself. What facts mean is authored theory of
+  work, and when to look is authored theory of attention; both live in the
+  project's sweep program behind a compiled intake, floor, and liveness
+  watchdog. The intermediate shapes — a daemon-invoked decision script, a
+  fully external sweep with no liveness contract, a compiled baseline with an
+  authored overlay — are rejected in the
+  [sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+  §11.
 - **An advance liveness check before creating a case** — checking the target
   pane's live process at case-creation time buys nothing, because the check
   is stale by the time a desk acts minutes later. The act-time checks are
@@ -2479,9 +2525,10 @@ to inaction at the largest scale.
 
 **The judgment layer can only be as insightful as the triggers that wake it —
 and no judgment layer sees the whole fleet at all.** Supervisors are strictly
-reactive. They reason only about cases the sweep can detect mechanically, such
-as idle agents, blocked agents, and counters that cross thresholds. Anything the
-sweep cannot describe never reaches a judgment layer. Three agents failing in
+reactive. They reason only about cases their project's sweep program surfaces
+from the compiled facts — idle agents, blocked agents, counters past
+thresholds. Anything the facts cannot describe, or the program was not written
+to notice, never reaches a judgment layer. Three agents failing in
 the same way for the same system-wide reason may arrive as three separate cases,
 or may not arrive at all. A pattern that develops across the night has no path
 into a work order. A more expensive patrolling supervisor might notice such a

@@ -93,13 +93,15 @@ one piece at a time, each argued on its own evidence. This is the
 brief's own standing bias ("prefer the extension point") given a ratchet: the outside
 position is the default, and every move inward is deliberate.
 
-An Enabled guarantee also has a proof artifact. **The shipped reference implementation —
-today, the wake program's reference script — may use only documented public surfaces.**
+An Enabled guarantee also has a proof artifact. **The shipped reference implementations —
+today, the wake program's and the sweep program's reference scripts — may use only
+documented public surfaces.**
 A fact it cannot obtain that way is a failed conformance check and a concrete, scoped API
 request; that is the mechanism by which TBD's surface grows, pulled by a real consumer
 rather than pushed by speculation. The corollary is a cost accepted here rather than
 discovered later: the surfaces an Enabled story depends on — listing output shapes,
-`hibernateReason` values, wake semantics, exit codes — stop being incidental CLI output
+`hibernateReason` values, wake semantics, exit codes, the supervision snapshot and
+proposal schemas — stop being incidental CLI output
 and become a contract that migration and future change must respect.
 
 ### P0 — without these the subsystem has no point

@@ -8,7 +8,11 @@ came from, and `design §N` below refers to that document's sections. It
 specifies the project-authored wake program that decides whether a parked
 session should be woken: TBD's obligation to that program is sufficient public
 surfaces, never guardrails, and TBD keeps no compiled wake gate and no
-actuation rails of its own. This document also holds the dated source note
+actuation rails of its own. The live half's counterpart — the sweep program,
+held to a compiled liveness contract this program deliberately lacks — is the
+sibling sub-document
+[`2026-08-01-fleet-supervision-sweep-program-design.md`](2026-08-01-fleet-supervision-sweep-program-design.md);
+the asymmetry between the two is argued there (§11). This document also holds the dated source note
 (2026-07-29 field observations) that belongs beside the script that consults
 it rather than in the design: freshness is authored on both sides of the
 process boundary, and which source tells the truth is data. The requirements
