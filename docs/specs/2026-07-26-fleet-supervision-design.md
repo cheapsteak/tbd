@@ -972,7 +972,24 @@ a feature.
 
 **Each desk is addressed to its own project.** The daemon refuses a desk's verbs
 when the target lies outside that project — addressing correctness, not
-authority (§3). This deserves stating
+authority (§3). How the daemon knows the caller's project is deliberately
+plain: the desk's terminal environment carries its project's name
+(`TBD_PROJECT=<name>`, the same name that keys `supervision.json`, §8),
+injected at desk spawn like TBD's other spawn-time env layers, and the CLI
+sends it ambiently with every verb. A desk never types identity flags, so it
+cannot mistype them, and the value survives however far the desk `cd`s while
+investigating — location is where a desk is looking, never who it is.
+Attribution rides the one-desk-per-project invariant: the daemon knows which
+desk session is currently live for the named project (it spawned it, and
+recycling is sequenced), so the ledger line is attributed from the daemon's
+own records, never from the caller's text. The operator surfaces stay on the
+other side of the same declaration: `resolve` refuses a call arriving from a
+desk environment (§10). All of this is caller declaration, not
+authentication — any process could set the variable, and TBD declines to
+build stronger (§3): the capability the verbs wrap is already public surface
+(`terminal.send`), so impersonating a desk gains record-keeping and pacing,
+not reach; if field use ever shows verb traffic from non-desks, a
+spawn-minted per-session token is the evidence-driven next step. This deserves stating
 as a security property rather than as tidiness: the blast radius of a confused,
 mis-briefed, or prompt-injected supervisor shrinks from the whole fleet to one
 project. A desk that reads a hostile instruction in some agent's transcript can,
@@ -1946,7 +1963,12 @@ surviving the not-to-act floor become that project's next work order, and the
 command's synchronous response tells the program each proposal's disposition.
 
 **Desk verbs — acting** (execute, ledger line, 60-second re-check). None is
-gated; each is addressed to the calling desk's project (§3, §5).
+gated; each is addressed to the calling desk's project (§3, §5). Desk verbs
+carry no identity flags: the calling desk's project rides ambiently from its
+spawn environment (`TBD_PROJECT`, §5), and targets are checked against it —
+which is also why the sweep-program surfaces above take an explicit
+`--project`: their caller runs outside TBD's management and has no
+spawn-injected identity.
 
 ```
 tbd supervise drive --terminal <id> --text "…"

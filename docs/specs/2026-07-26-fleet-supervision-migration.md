@@ -318,7 +318,9 @@ only — no slice needs a later one:
   first-class sessions **one per project, spawned lazily on that project's first
   case and all disposed at shift close**, the compiled **desk→project
   addressing check** (a verb whose target is outside the calling desk's project
-  is refused as a routing error — correctness, not authority, design §3),
+  is refused as a routing error — correctness, not authority, design §3; the
+  check reads the project name injected into the desk's spawn environment,
+  design §5),
   `terminal.send` delivery for
   the fleet, the Channels adapter for desks behind its own default-off flag with
   automatic degrade and a **per-desk-spawn handshake** (not per shift), the
