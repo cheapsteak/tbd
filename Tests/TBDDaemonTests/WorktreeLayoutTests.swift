@@ -50,19 +50,19 @@ import Foundation
         #expect(layout.basePath(for: repo) == TBDConstants.worktreesDir.path + "/x")
     }
 
-    /// Pins the production shape — `~/tbd/worktrees/<slot>` — which the
-    /// assertion above no longer states: written against
-    /// `TBDConstants.worktreesDir` it holds under any `TBD_HOME`, including one
-    /// where the whole path is wrong. Two halves, composed: `basePath` appends
-    /// exactly `worktrees/<slot>` to the config root, and the config root with
-    /// no override is `$HOME/tbd`. The second half takes an explicit empty
-    /// environment rather than reading the process's, so a run fenced behind a
-    /// scratch `TBD_HOME` still asserts the real production shape.
-    @Test func basePathIsWorktreesSlotUnderTheConfigRoot() {
-        var repo = Repo(path: "/tmp/x", displayName: "X")
-        repo.worktreeSlot = "x"
-        #expect(WorktreeLayout().basePath(for: repo) == TBDConstants.configDir.path + "/worktrees/x")
-
+    /// An INTENT ANCHOR for the production config root the assertion above no
+    /// longer states: written against `TBDConstants.worktreesDir`, that one
+    /// holds under any `TBD_HOME` — including one where the whole path is
+    /// wrong.
+    ///
+    /// What it genuinely pins is the literal `tbd` component, and nothing more.
+    /// Home resolution is composed from `homeDirectoryForCurrentUser`, the same
+    /// call the implementation makes, so this cannot catch that call changing
+    /// meaning; it catches the directory being renamed or the trailing
+    /// component being dropped. The empty environment is deliberate: reading
+    /// the process's would assert the scratch `TBD_HOME` that
+    /// `scripts/test.sh` fences the run behind rather than the production shape.
+    @Test func productionConfigRootIsTbdUnderHome() {
         let productionRoot = TBDConstants.configDir(environment: [:]).path
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         #expect(productionRoot == home + "/tbd")

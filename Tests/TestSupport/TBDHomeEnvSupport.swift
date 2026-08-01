@@ -45,6 +45,15 @@ public func restoreTBDHome(_ previous: String?) {
 /// identical — unsetting hands every concurrently running suite the
 /// developer's real `~/.claude` until something happens to set it again. Pair
 /// these two calls; never `unsetenv` in a teardown.
+///
+/// The same constraint as `setTBDHome(_:)` applies, for the same reason: only
+/// suites nested under `TBDHomeSerialized` (in `TBDDaemonTests`) may mutate
+/// this at all. `@Suite(.serialized)` on the suite itself is not equivalent —
+/// it orders tests within that suite and does nothing against the several
+/// hundred other suites Swift Testing runs concurrently in the same process.
+/// Everywhere else, use an injection seam:
+/// `ClaudeProfileConfigDirManager(hostBaseDirectory:)` or
+/// `ClaudeProfileConfigDirManager.resolveHostBaseDirectory(environment:)`.
 @discardableResult
 public func setClaudeHostHome(_ path: String) -> String? {
     let previous = getenv("TBD_CLAUDE_HOST_HOME").map { String(cString: $0) }

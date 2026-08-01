@@ -104,12 +104,29 @@ public enum LegacyHookScanner {
         return removed
     }
 
-    /// Path to the user's global Claude settings.
-    public static var globalSettingsPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
+    /// Path to the user's global Claude settings, resolved from `environment`.
+    ///
+    /// Goes through `ClaudeProfileConfigDirManager.resolveHostBaseDirectory` —
+    /// the single resolution point for `TBD_CLAUDE_HOST_HOME` — rather than
+    /// hand-building `homeDirectoryForCurrentUser/.claude`. Hand-building it is
+    /// the leak shape `CLAUDE.md` names: it ignores the fence `scripts/test.sh`
+    /// puts around the developer's real `~/.claude`, so any test that reached
+    /// `handleDaemonRemoveLegacyGlobalHooks` would have rewritten the real
+    /// `settings.json` (and dropped a `SettingsJSONSafety` backup beside it).
+    /// Naming the path at the call site does not fence it; resolving it here
+    /// does. With the variable unset the result is `~/.claude/settings.json`,
+    /// exactly as before.
+    public static func globalSettingsPath(environment: [String: String]) -> String {
+        ClaudeProfileConfigDirManager.resolveHostBaseDirectory(environment: environment)
             .appendingPathComponent("settings.json")
             .path
+    }
+
+    /// The same path resolved from the process environment. Mirrors
+    /// `TBDConstants.configDir` / `configDir(environment:)`: the ambient
+    /// spelling for production call sites, the explicit one for tests.
+    public static var globalSettingsPath: String {
+        globalSettingsPath(environment: ProcessInfo.processInfo.environment)
     }
 
     /// Repo-level settings paths for every repo registered in the TBD DB.

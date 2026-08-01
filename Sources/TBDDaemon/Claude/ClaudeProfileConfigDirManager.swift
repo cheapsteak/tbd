@@ -31,31 +31,50 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
     let hostBaseDirectory: URL
 
-    /// - Parameter environment: the environment `TBD_CLAUDE_HOST_HOME` is read
-    ///   from. Defaults to the process's, so production behavior is unchanged;
-    ///   a test that wants to assert the *production* `~/.claude` fallback
-    ///   passes `[:]` rather than unsetting the process-global variable, which
-    ///   would hand every concurrently running suite the real host store.
+    /// The host Claude store: `TBD_CLAUDE_HOST_HOME` when set, `~/.claude`
+    /// otherwise. **The single resolution point for that override** — anything
+    /// that hand-builds `homeDirectoryForCurrentUser/.claude` escapes the fence
+    /// `scripts/test.sh` puts around the developer's real store, which is how
+    /// `LegacyHookScanner.globalSettingsPath` came to name the real
+    /// `settings.json` under the wrapper.
+    ///
+    /// - Parameter environment: the environment to read, or `nil` for the
+    ///   process's. `nil`-and-resolve-in-the-body rather than a
+    ///   `ProcessInfo.processInfo.environment` default argument: a defaulted
+    ///   cross-module computed class property is the shape behind the Xcode
+    ///   26.3 `unsafeMutableAddressor` link failure (see
+    ///   `Sources/TBDShared/HookResolver.swift`), and it would snapshot the
+    ///   whole environ even at call sites that discard the result.
+    ///
+    ///   A test asserting the *production* `~/.claude` fallback passes `[:]`
+    ///   rather than unsetting the process-global variable, which would hand
+    ///   every concurrently running suite the real host store.
+    public static func resolveHostBaseDirectory(environment: [String: String]? = nil) -> URL {
+        let env = environment ?? ProcessInfo.processInfo.environment
+        if let override = env["TBD_CLAUDE_HOST_HOME"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
+    }
+
+    /// - Parameter hostEnvironment: the environment `TBD_CLAUDE_HOST_HOME` is
+    ///   read from when `hostBaseDirectory` is not injected, or `nil` for the
+    ///   process's. Named for what it governs: `baseDirectory`'s own fallback
+    ///   still reads `TBD_HOME` through `TBDConstants.configDir`, which this
+    ///   parameter does not reach. Read below the `hostBaseDirectory` guard, so
+    ///   an explicit injection never pays for an environ snapshot it discards.
     public init(baseDirectory: URL? = nil,
                 hostBaseDirectory: URL? = nil,
-                environment: [String: String] = ProcessInfo.processInfo.environment) {
+                hostEnvironment: [String: String]? = nil) {
         // Resolve inside the init to keep the `TBDConstants.configDir` access
         // out of the caller's compilation context — see HookResolver for the
         // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
         self.baseDirectory = baseDirectory
             ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
 
-        // Honor TBD_CLAUDE_HOST_HOME env var (e.g., for test isolation, matching
-        // the TBD_HOME pattern used by TBDConstants). Falls back to ~/.claude/
-        // in production.
-        if let override = hostBaseDirectory {
-            self.hostBaseDirectory = override
-        } else if let envOverride = environment["TBD_CLAUDE_HOST_HOME"], !envOverride.isEmpty {
-            self.hostBaseDirectory = URL(fileURLWithPath: envOverride, isDirectory: true)
-        } else {
-            self.hostBaseDirectory = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude", isDirectory: true)
-        }
+        self.hostBaseDirectory = hostBaseDirectory
+            ?? Self.resolveHostBaseDirectory(environment: hostEnvironment)
     }
 
     public func profileDirectory(forProfileID profileID: UUID) -> URL {

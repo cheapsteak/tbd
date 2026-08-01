@@ -129,4 +129,30 @@ import Testing
         // Original (legacy entry) preserved in the backup.
         #expect(!LegacyHookScanner.detectEntries(in: backupDict).isEmpty)
     }
+
+    // MARK: - globalSettingsPath honors the ~/.claude fence
+
+    /// `removeGlobalEntries` rewrites whatever this resolves to and drops a
+    /// backup beside it, so a hand-built `$HOME/.claude/settings.json` would
+    /// name the developer's REAL file even under `scripts/test.sh`'s fence.
+    /// Asserted through the explicit-environment seam rather than `setenv`,
+    /// which would race every concurrently running suite.
+    @Test func globalSettingsPathFollowsClaudeHostHomeOverride() {
+        let path = LegacyHookScanner.globalSettingsPath(
+            environment: ["TBD_CLAUDE_HOST_HOME": "/tmp/acme-host"])
+        #expect(path == "/tmp/acme-host/settings.json")
+    }
+
+    /// The other branch: with the variable unset — and with it set but empty,
+    /// which `resolveHostBaseDirectory` treats as unset — production behavior
+    /// is exactly what it was before the fence existed.
+    @Test func globalSettingsPathIsRealClaudeDirWithoutOverride() {
+        let expected = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude")
+            .appendingPathComponent("settings.json")
+            .path
+        #expect(LegacyHookScanner.globalSettingsPath(environment: [:]) == expected)
+        #expect(LegacyHookScanner.globalSettingsPath(
+            environment: ["TBD_CLAUDE_HOST_HOME": ""]) == expected)
+    }
 }

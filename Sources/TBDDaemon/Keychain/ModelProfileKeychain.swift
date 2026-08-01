@@ -23,10 +23,37 @@ public enum ModelProfileKeychainError: Error, Equatable {
 }
 
 public enum ModelProfileKeychain {
-    /// Storage directory. Resolved lazily so tests can override via TMPDIR if needed.
+    /// Storage directory, resolved from `environment`.
+    ///
+    /// Two things are true at once here, and the split keeps both:
+    ///
+    /// - **The production path stays `~/.tbd/claude-tokens`.** Existing entries
+    ///   are keyed by it and moving them is a migration, not a path edit — see
+    ///   the note on this file. Nothing changes when `TBD_HOME` is unset.
+    /// - **A run fenced behind `TBD_HOME` must land inside the fence.** This
+    ///   used to be built straight from `homeDirectoryForCurrentUser`, so
+    ///   `scripts/test.sh` could not contain it: `ModelProfileRPCTests` created
+    ///   and deleted real `<uuid>.token` files in the developer's own store on
+    ///   every run (measured — the directory's mtime moved), and the
+    ///   fingerprint could not see it either, because `claude-tokens` is on the
+    ///   volatile-prune list. Both layers blind to the same writer is exactly
+    ///   the shape `CLAUDE.md`'s "Tests must not touch ~/tbd" forbids.
+    ///
+    /// Note the asymmetry that follows: under an override the directory is
+    /// `$TBD_HOME/claude-tokens`, dropping the legacy dot. The override is a
+    /// scratch dir with no entries to preserve, so there is nothing to key off
+    /// the old spelling.
+    static func storageDir(environment: [String: String]) -> URL {
+        if let override = environment["TBD_HOME"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+                .appendingPathComponent("claude-tokens", isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tbd/claude-tokens", isDirectory: true)
+    }
+
     private static var storageDir: URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".tbd/claude-tokens", isDirectory: true)
+        storageDir(environment: ProcessInfo.processInfo.environment)
     }
 
     private static func fileURL(id: String) -> URL {

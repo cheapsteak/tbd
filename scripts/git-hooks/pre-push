@@ -59,8 +59,37 @@ fi
 # The fast pass is one invocation here, not the two CI splits it into: that
 # split trades +26 s of wall time for a shorter scheduling tail on a loaded
 # runner, and locally the wall time is what the pusher is waiting on.
-echo "[pre-push] Running scripts/test.sh — fast parallel pass (scratch TBD_HOME fence)..."
-scripts/test.sh --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+#
+# Both passes carry an EXECUTED-TEST FLOOR, mirroring all three CI steps.
+# `swift test --filter`/`--skip` exits GREEN on zero matches, and the filter
+# matches the TYPE name rather than the @Suite display string — so a renamed or
+# collapsed target runs nothing and passes. The floors sit well below the real
+# counts (CI executes ~2194 + ~2342 fast, ~57 live) so ordinary test churn never
+# trips them; their job is to catch a collapse, not to track the population.
+run_pass() {
+  local label="$1" floor="$2" log; shift 2
+  log="$(mktemp -t tbd-prepush-XXXXXXXX)"
+  echo "[pre-push] Running scripts/test.sh — $label..."
+  local rc=0
+  # `|| rc=$?` so a red run still gets its temp log removed and reports the
+  # test failure rather than dying inside `set -e` with the file left behind.
+  scripts/test.sh "$@" 2>&1 | tee "$log" || rc=$?
+  local count
+  count="$(grep -oE 'Test run with [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | head -1)"
+  rm -f "$log"
+  if [ "$rc" -ne 0 ]; then
+    echo "[pre-push] ERROR: $label failed (exit $rc)." >&2
+    exit "$rc"
+  fi
+  if [ -z "$count" ] || [ "$count" -lt "$floor" ]; then
+    echo "[pre-push] ERROR: $label ran ${count:-no} tests (floor $floor) — the filter matched nothing, a target was renamed, or the run was truncated." >&2
+    exit 1
+  fi
+  echo "[pre-push] $label executed $count tests."
+}
 
-echo "[pre-push] Running scripts/test.sh — quiet pass (tier-3 live suites, serial)..."
-scripts/test.sh --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'
+run_pass "fast parallel pass (scratch TBD_HOME fence)" 3700 \
+  --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+
+run_pass "quiet pass (tier-3 live suites, serial)" 35 \
+  --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'

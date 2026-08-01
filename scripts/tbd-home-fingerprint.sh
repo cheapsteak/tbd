@@ -85,12 +85,31 @@ fi
 # `TBD_HOME` looks complete and leaves this wide open, so the detector covers
 # both or the same leak one directory over stays invisible.
 #
-# Depth 1, not 3. Claude Code itself writes below that continuously
-# (`projects/<slug>/*.jsonl`, `todos/`, `shell-snapshots/`), so anything deeper
-# is churn from whatever session happens to be running rather than signal. Every
-# name a leak would create here is a depth-1 one: the mirror slots are
-# `projects`, `plugins`, `skills`, `agents`, `commands`, `hooks`, `CLAUDE.md`
-# and `settings.json`.
+# TWO arms, and the second is the one that catches the leak this code can
+# actually produce.
+#
+#   `~/.claude` at depth 1 — the top-level shape. A leak cannot invent a name
+#   here: `ensureMirrorSlot` opens with `guard fm.fileExists(atPath:
+#   hostEntry.path) else { return }`, so every host-side write requires the
+#   depth-1 slot to exist already. What this arm catches is a run that creates
+#   `~/.claude` itself, or one that deletes/renames a slot out from under the
+#   user — not a new slot appearing.
+#
+#   `~/.claude/projects` at depth 1 — the `<cwd-hash>` entries. THIS is where
+#   the mutation lands: `mergeRecursive(src: cwdHashPath, dst: hostCwdHashPath)`
+#   moves a profile's whole `projects/<cwd-hash>/` subtree into the host store,
+#   which is depth 2 overall and invisible to the arm above.
+#
+# It stops there. Claude Code writes `projects/<slug>/*.jsonl` continuously
+# while any session is live, so a deeper walk would report the machine rather
+# than the run and get switched off within a week. A new `<cwd-hash>` directory
+# is rare enough on a runner to be signal — which is also why detection is
+# CI-only (see `scripts/test.sh`).
+#
+# On a CI runner `~/.claude` typically does not exist at all, so both arms read
+# `<absent>` on either side. That is thinner coverage than on a populated box,
+# not zero: a run that CREATES either directory flips `<absent>` to a listing
+# and goes red. Stated plainly rather than dressed up.
 if [ -d "$real_claude" ]; then
   find "$real_claude" -maxdepth 1 \
     \( "${name_args[@]}" -print \) \
@@ -99,4 +118,16 @@ if [ -d "$real_claude" ]; then
     | LC_ALL=C sort
 else
   echo "~/.claude <absent>"
+fi
+
+# `-mindepth 1`, so the `projects` entry itself is not printed twice — the arm
+# above already covers it.
+if [ -d "$real_claude/projects" ]; then
+  find "$real_claude/projects" -mindepth 1 -maxdepth 1 \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_claude}|~/.claude|" \
+    | LC_ALL=C sort
+else
+  echo "~/.claude/projects <absent>"
 fi

@@ -35,8 +35,12 @@
 # disable by exporting something first is not a fence — but it does mean this
 # wrapper cannot be pointed at a config dir of your own.
 #
-# `--no-fingerprint` must come first; everything after it is forwarded to
-# `swift test` untouched:
+# `--no-fingerprint` is consumed wherever it appears; every other argument is
+# forwarded to `swift test` untouched. Position-independent on purpose: a
+# leading-only strip forwards a late `--no-fingerprint` to `swift test`, which
+# errors out. That is loud rather than silent, but a positional collision is
+# impossible — `swift test` has no flag of that name — so filtering it out
+# everywhere is strictly safer at no cost.
 #   scripts/test.sh
 #   scripts/test.sh --parallel -j 2 --filter '^TBDDaemonTests\.'
 #   scripts/test.sh --no-fingerprint --parallel -j 2
@@ -45,10 +49,11 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fingerprint=1
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --no-fingerprint) fingerprint=0; shift ;;
-    *) break ;;
+swift_test_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-fingerprint) fingerprint=0 ;;
+    *) swift_test_args+=("$arg") ;;
   esac
 done
 
@@ -77,14 +82,25 @@ fi
 # writes symlinks into.
 scratch_home="$(mktemp -d /tmp/tbd-test-home.XXXXXXXX)"
 cleanup() { rm -rf "$scratch_home"; }
+# EXIT alone is sufficient, including when this wrapper is killed:
+# `scripts/nightly-flake-stress.sh` TERMs it when its outer deadline fires, and
+# bash runs an EXIT trap on a fatal signal as well as on a normal exit —
+# measured here, the scratch dir is gone either way. No INT/TERM handler needed.
+#
+# The other half of that interaction lives in the harness: it kills the process
+# tree LEAVES FIRST, so `swift test` is already dead before bash gets round to
+# this `rm -rf`. A parent-first kill would have this deleting a `TBD_HOME` an
+# orphaned test run was still writing into.
 trap cleanup EXIT
 
 export TBD_HOME="$scratch_home"
 export TBD_SOCKET_PATH="$scratch_home/sock"
 export TBD_CLAUDE_HOST_HOME="$scratch_home/claude-host"
 
+# `${a[@]+"${a[@]}"}` — macOS ships bash 3.2, where a bare `"${a[@]}"` on an
+# EMPTY array is an unbound-variable error under `set -u`.
 set +e
-swift test "$@"
+swift test ${swift_test_args[@]+"${swift_test_args[@]}"}
 test_status=$?
 set -e
 

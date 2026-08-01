@@ -54,4 +54,29 @@ struct ModelProfileKeychainTests {
         let loaded = try ModelProfileKeychain.load(id: id)
         #expect(loaded == nil)
     }
+
+    // MARK: - storage directory honors the TBD_HOME fence
+
+    /// Under a fenced run every token file lands inside `TBD_HOME`. Before
+    /// this, the store was built straight from the home directory, so the
+    /// tests above created and deleted real `<uuid>.token` files in the
+    /// developer's own `~/.tbd/claude-tokens` on every run — invisible to the
+    /// fingerprint as well, because `claude-tokens` is volatile-pruned.
+    @Test("storage dir follows TBD_HOME when set")
+    func storageDirFollowsTBDHome() {
+        let dir = ModelProfileKeychain.storageDir(
+            environment: ["TBD_HOME": "/tmp/acme-scratch-home"])
+        #expect(dir.path == "/tmp/acme-scratch-home/claude-tokens")
+    }
+
+    /// The other branch. The production path MUST NOT move — existing entries
+    /// are keyed by it — so with no override (and with an empty one, treated
+    /// as no override) it stays the legacy `~/.tbd/claude-tokens`.
+    @Test("storage dir is the legacy ~/.tbd path without an override")
+    func storageDirUnchangedWithoutOverride() {
+        let expected = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tbd/claude-tokens", isDirectory: true).path
+        #expect(ModelProfileKeychain.storageDir(environment: [:]).path == expected)
+        #expect(ModelProfileKeychain.storageDir(environment: ["TBD_HOME": ""]).path == expected)
+    }
 }

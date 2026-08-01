@@ -881,7 +881,7 @@ struct ClaudeProfileConfigDirManagerTests {
         // process environment: `scripts/test.sh` fences the whole run behind a
         // scratch `TBD_CLAUDE_HOST_HOME`, and reading the process env here
         // would assert the fence instead of the production fallback.
-        let manager2 = ClaudeProfileConfigDirManager(environment: [:])
+        let manager2 = ClaudeProfileConfigDirManager(hostEnvironment: [:])
         #expect(manager2.hostBaseDirectory.path.contains(".claude"))
         #expect(manager2.hostBaseDirectory.path.contains(NSHomeDirectory()))
     }
@@ -1101,28 +1101,34 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 }
 
-/// Run env-mutating tests serialized so they don't race each other. Each test
-/// snapshots the prior env value and restores it via defer.
-@Suite("ClaudeProfileConfigDirManager env vars", .serialized)
-struct ClaudeProfileConfigDirManagerEnvVarTests {
-    private func tempHostBase() -> URL {
-        URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
-    }
+// Nested under TBDHomeSerialized: mutates a process-global environment
+// variable. `@Suite(.serialized)` alone was NOT enough — it orders tests only
+// within this suite and does nothing against the ~520 other suites Swift
+// Testing runs concurrently in the same process, which is the documented root
+// cause of the `ConstantsTests.derivedPathsFollowTBDHome` flake.
+// See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
+    @Suite("ClaudeProfileConfigDirManager env vars")
+    struct ClaudeProfileConfigDirManagerEnvVarTests {
+        private func tempHostBase() -> URL {
+            URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
+        }
 
-    @Test("TBD_CLAUDE_HOST_HOME env var is honored in default init")
-    func hostBaseDirectoryRespectsTBDClaudeHostHomeEnvVar() {
-        let tempHostOverride = tempHostBase()
-        defer { try? FileManager.default.removeItem(at: tempHostOverride) }
+        @Test("TBD_CLAUDE_HOST_HOME env var is honored in default init")
+        func hostBaseDirectoryRespectsTBDClaudeHostHomeEnvVar() {
+            let tempHostOverride = tempHostBase()
+            defer { try? FileManager.default.removeItem(at: tempHostOverride) }
 
-        // Save/restore via the shared helpers rather than by hand: the run is
-        // fenced behind a scratch `TBD_CLAUDE_HOST_HOME`, and a teardown that
-        // unsets exposes the real `~/.claude` to every concurrent suite.
-        let priorValue = setClaudeHostHome(tempHostOverride.path)
-        defer { restoreClaudeHostHome(priorValue) }
+            // Save/restore via the shared helpers rather than by hand: the run is
+            // fenced behind a scratch `TBD_CLAUDE_HOST_HOME`, and a teardown that
+            // unsets exposes the real `~/.claude` to every concurrent suite.
+            let priorValue = setClaudeHostHome(tempHostOverride.path)
+            defer { restoreClaudeHostHome(priorValue) }
 
-        let manager = ClaudeProfileConfigDirManager()
-        #expect(manager.hostBaseDirectory.resolvingSymlinksInPath()
-                == tempHostOverride.resolvingSymlinksInPath())
+            let manager = ClaudeProfileConfigDirManager()
+            #expect(manager.hostBaseDirectory.resolvingSymlinksInPath()
+                    == tempHostOverride.resolvingSymlinksInPath())
+        }
     }
 }
