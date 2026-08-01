@@ -94,14 +94,15 @@ authored home; only the envelope remains compiled.
 
 ## 3. The intake
 
-The sweep program reaches TBD through one public surface: a proposal
-submitted to the daemon.
+The sweep program reaches TBD through one public surface: an **evaluation
+report** submitted to the daemon. Every evaluation ends in a report, findings
+or none; proposals are a report's content, not a separate message kind.
 
 ```
-tbd supervise propose --project <name>    # proposal JSON on stdin
+tbd supervise report --project <name>     # report JSON on stdin
 ```
 
-A proposal:
+A report:
 
 ```jsonc
 { "version": 1,
@@ -118,9 +119,9 @@ A proposal:
   `docs/nightwatch.md` §1) one layer down.
 - **`evidence` is authored per-case prose** that rides into the work order —
   the sweep program's voice in the desk's briefing.
-- **An empty `proposals` array is a heartbeat**, and it is not a no-op: it is
-  how "looked, found nothing" becomes distinguishable from "never looked"
-  (§6).
+- **A report with no proposals is still a report** — the attested "looked,
+  found nothing." It is not a courtesy: it is what makes a quiet fleet
+  distinguishable from a dead sensor (§6).
 
 The daemon processes every submission the same way, synchronously:
 
@@ -143,14 +144,17 @@ The daemon processes every submission the same way, synchronously:
    design specifies (design §4 steps 3–5): spawn the desk lazily, deliver
    through the agent-kind adapter, write the ledger request-first.
 
-The snapshot the sweep program reads is the other half of the contract:
+The facts the sweep program reads are the other half of the contract:
 
 ```
-tbd supervise snapshot --project <name>   # JSON on stdout, schema-versioned
+tbd supervise facts --project <name>      # JSON on stdout, schema-versioned
 ```
 
-It carries that project's agents only — session state with source and
-observed-at, work facts, runaway counters, and the not-to-act facts. Both
+A read-only query, named for what it emits. It performs nothing and changes
+no state; it prints the project's live-agent facts — session state with
+source and observed-at, work facts, runaway counters, and the not-to-act
+facts. The sweep program runs it at the start of each evaluation; an
+operator or any other script may run it freely at any time. Both
 schemas are documented public surfaces under the requirements doc's Enabled
 rules: a fact the reference script cannot obtain from them is a failed
 conformance check and a concrete, scoped API request.
@@ -172,7 +176,16 @@ on a timer, per project, until the project overrides:
   project's `supervision.json` entry. The project now owns its theory of
   attention outright, and declares a contact window in exchange (§6).
 - **Keep the tick alongside your own triggers** — legitimate and cheap: the
-  tick becomes a heartbeat floor under an event-driven program.
+  tick becomes a reporting floor under an event-driven program.
+
+The selection is the `sweep` block of the project's `supervision.json` entry
+(design §8), on the default-props chain: no block means the default tick at
+the default interval; an interval overrides the cadence; `"off"` disables
+the tick, and the block then declares the contact window §6 requires:
+
+```jsonc
+"sweep": { "tick": "off", "contactWindow": "30m" }
+```
 
 When the daemon itself runs the script, failure detection is direct — a
 crash, timeout, or unparseable output is observed as an exit condition and
@@ -210,26 +223,43 @@ would lie by omission.
 
 The rule that makes detection possible: **"nothing going on" is never
 expressed as silence.** A healthy sweep program that finds nothing still
-submits an empty proposal. That single obligation — the reference script
-honors it out of the box — makes three states cleanly distinguishable at the
-intake:
+submits its report — one with no proposals (§3). That single obligation — the
+reference script honors it out of the box — makes three states cleanly
+distinguishable at the intake:
 
-- **Proposals arriving** — the program ran and found work.
-- **Empty proposals arriving within the window** — the program ran and the
-  fleet is genuinely quiet. The account can say "checked 14 times, nothing
-  found": an *attested* calm night.
+- **Reports with proposals** — the program ran and found work.
+- **Reports with no proposals, arriving within the window** — the program ran
+  and the fleet is genuinely quiet. The account can say "checked 14 times,
+  nothing found": an *attested* calm night.
 - **No contact past the declared window** — nobody looked. Dead cron, crashed
   script, uninstalled schedule — the daemon cannot tell which and does not
-  need to: it writes the anomaly line and, on persistence (§10), escalates to
-  the operator, whose problem a broken sensor is. Silence means exactly one
-  thing.
+  need to: it responds by tier (below). Silence means exactly one thing.
+
+**What the watchdog does, by tier — and what it never does.** The
+last-contact age is a plain displayed fact wherever supervision status
+appears: an operator glancing at the app sees "last sweep report 4 min ago,"
+no alarm involved. The watchdog proper begins where display ends, because a
+status surface nobody is watching protects nobody overnight — that is the
+subsystem's founding premise. A missed window writes an **anomaly line into
+the ledger**, so the coverage gap is part of the durable account whether or
+not anyone was looking; persistent silence (§10) raises an **operator
+escalation through the existing escalation path** — no new channel, one more
+source writing into the one the design already has. The desk is deliberately
+never prompted: a broken sensor is an operator's problem, not a judgment
+call, and a desk told "your own sweep is dead" could do nothing but relay
+the message. Nor is this new timer machinery — the daemon already runs
+compiled cadences (the fact maintenance, §14's status write); the watchdog
+is one more deadline on the clock TBD already holds. It complements §14
+rather than duplicating it: §14's out-of-band watchdog asks whether the
+*daemon* is alive; this one asks whether anyone is *feeding* it.
 
 **The contact window** is the declared expectation silence is measured
 against. While the default tick runs, the window defaults to a multiple of
 the tick interval (§10) and the operator declares nothing. A project that
 disables the tick declares its own window in `supervision.json`. A project
-that declines even that — a purely event-driven program with no heartbeat has
-no honest cadence to declare — gets the degraded account in so many words:
+that declines even that — a purely event-driven program with no periodic
+report has no honest cadence to declare — gets the degraded account in so
+many words:
 its coverage renders as **unknown**, in the morning account and on the status
 surfaces. Every position is available; the one eliminated is the accidental
 version, where the account implies watchfulness nobody was providing. The
@@ -267,14 +297,14 @@ authored.
   no per-repo threshold configuration surface in TBD and none deferred:
   numbers live in the script, which also preserves the design's one-column
   property (design §7) permanently — a number never becomes a config column.
-- **It is the conformance artifact** for the intake and snapshot contracts,
+- **It is the conformance artifact** for the report and facts contracts,
   alongside the reference wake script for its surfaces: it may use only
-  documented public surfaces (`tbd supervise snapshot`, `tbd supervise
-  propose`). A fact it cannot obtain that way is a failed conformance check
+  documented public surfaces (`tbd supervise facts`, `tbd supervise
+  report`). A fact it cannot obtain that way is a failed conformance check
   and a scoped API request — the mechanism by which TBD's surface grows,
   pulled by a real consumer.
-- **It submits on every evaluation**, findings or none, satisfying §6's
-  heartbeat obligation.
+- **It reports on every evaluation**, findings or none, satisfying §6's
+  report obligation.
 - Its case-cutting defaults are deliberately modest — the design's compiled
   sweep semantics, relocated: idle past the threshold with uncommitted work
   proposes a case; runaway counters past their windows propose a case; facts
@@ -313,10 +343,15 @@ carry, and the file cannot be re-read into a live session by either shipped
 agent kind (dated note, §13) — so the delta travels in the next work order:
 the changed text, marked as superseding the standing conduct. The daemon
 tracks, per desk session, the hash of the conduct that session stands on;
-orders carry deltas only while the hashes differ, and a desk recycle
-re-baselines — the replacement spawns with the current playbook as its
-standing layer, which is also why a replacement desk needs no special
-briefing path. The ledger records the conduct hash per order either way, so
+orders carry deltas only while the hashes differ. Re-baselining does not
+wait for a full replacement: both shipped agent kinds support a **conduct
+reload** — relaunch the desk's session process *resuming the same
+conversation*, with the refreshed playbook as its standing layer (dated
+note, §13) — so the daemon schedules exactly that at the desk's next idle
+moment, and nothing of the shift's context is lost. Where an adapter lacks
+resume, deltas simply ride until the next recycle. Either way a replacement
+or reloaded desk spawns with the current playbook, which is also why a
+replacement desk needs no special briefing path. The ledger records the conduct hash per order either way, so
 "what conduct governed this act" is answerable per action against a
 versioned file.
 
@@ -375,7 +410,7 @@ layer, transcripts and playbooks by path with hashes in the ledger.
 | Sweep script timeout (daemon-run tick) | 60 s | §4 |
 | Renderer timeout | 10 s | §9 |
 | Renderer output bound | 256 KiB | §9 |
-| Proposal size bound | 1 MiB | §3 |
+| Report size bound | 1 MiB | §3 |
 | Idle-intervention threshold | 40 min | §7 (reference script constant) |
 | Runaway: turns in window | 30 turns | §7 (reference script constant) |
 | Runaway: no-progress window | 90 min | §7 (reference script constant) |
@@ -439,9 +474,9 @@ documented defaults, not as TBD's.
 
 ## 12. Testing
 
-- **Intake round-trip** — the reference script's proposal against a
-  synthetic snapshot becomes a work order; empty proposal becomes a ledger
-  heartbeat and no work order.
+- **Intake round-trip** — the reference script's report against a synthetic
+  facts payload becomes a work order; a report with no proposals becomes a
+  ledger contact line and no work order.
 - **Floor** — a proposal duplicating an in-flight intervention or targeting
   a rate-limited agent is dropped, ledgered as such, and the script's exit
   is still recorded as contact.
@@ -449,14 +484,15 @@ documented defaults, not as TBD's.
   consecutive count escalates; contact resets the count; a project with
   `tick: off` and no declared window renders coverage unknown, and both
   switch branches of the tick setting behave (per the flag-branch rule).
-- **Dead-vs-quiet** — an empty-proposal night and a no-contact night produce
+- **Dead-vs-quiet** — a quiet-report night and a no-contact night produce
   distinguishable accounts.
 - **Seeding** — first supervision touch seeds script and playbook; a second
   touch never overwrites either.
 - **Standing layer** — spawn installs the full playbook via the adapter; a
   mode switch changes only the name carried in the next order; a playbook
-  edit produces a superseding delta in the next order and a hash re-baseline
-  on recycle; the no-mechanism agent kind falls back to first-order embed.
+  edit produces a superseding delta in the next order; a conduct reload
+  resumes the same session with the refreshed layer and clears the delta;
+  the no-mechanism agent kind falls back to first-order embed.
 - **Renderer** — hook output is delivered verbatim within bounds; crash,
   timeout, and empty output each fall back to the built-in renderer plus an
   anomaly line; ledger carries assembled structure and delivered hash in
@@ -471,14 +507,20 @@ discipline). Verified 2026-08-01.
 - **Claude Code** — `CLAUDE.md` in the session's working directory loads as
   project instructions; `--append-system-prompt` appends to the system
   prompt at launch. Either serves as the desk's standing layer; project
-  instructions persist across auto-compaction.
+  instructions persist across auto-compaction. Resuming a session
+  (`claude --resume <id>`) launches a fresh process that re-reads
+  `CLAUDE.md`, which is what makes the conduct reload (§8) a resume with a
+  refreshed file; combining `--append-system-prompt` with resume is expected
+  to behave the same way — verify at implementation.
 - **Codex** (codex-cli 0.146.0; flags verified from the binary, behavior
   from `openai/codex` source) — the additive standing mechanism is
   `developer_instructions`: per-invocation via
   `codex exec -c developer_instructions="..."`, or per-thread via the
   app-server protocol's `developerInstructions` field on `thread/start` —
-  one field in the same call that spawns the desk. It lands as the first
-  developer-role message, above `AGENTS.md`. Compaction re-injects both
+  one field in the same call that spawns the desk. `thread/resume` and
+  `thread/fork` accept the same field (schema-verified), which is what makes
+  the conduct reload (§8) a resume with a refreshed value. It lands as the
+  first developer-role message, above `AGENTS.md`. Compaction re-injects both
   developer instructions and `AGENTS.md` into rebuilt history
   (`codex-rs/core/src/compact.rs`), so the layer survives by design.
   `AGENTS.md` in the desk worktree is the file-based alternative (loaded

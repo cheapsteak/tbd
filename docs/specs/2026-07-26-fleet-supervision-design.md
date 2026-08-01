@@ -809,8 +809,8 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    holds the defaults. Parked sessions appear in the snapshot as facts for
    the account, but waking them is never a sweep concern — that is the
    [wake program's](2026-07-26-fleet-supervision-wake-program.md). A quiet
-   evaluation submits an empty proposal: a heartbeat, not a no-op
-   (sweep-program sub-document §6).
+   evaluation still ends in a report, with nothing proposed — the attested
+   "looked, found nothing" (sweep-program sub-document §3, §6).
 2. **Propose, then the floor.** The script finds an agent idle past its
    threshold with uncommitted work and submits a proposal naming the agent,
    the condition, and its evidence. At the intake the daemon applies the
