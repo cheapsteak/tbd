@@ -86,11 +86,23 @@ chokepoint and changes no other component, so it is deliberately not built now.
 
 ### Conflicts
 
-The app sends the mirror's current `revision` as `baseRevision`. A stale value
-means an agent applied to the same tab in between — single-user, rare. The
-daemon rejects the operation; the app refetches via `panel.get` and re-renders,
-so the UI snaps to daemon truth and the user retries. Last-writer-wins. No CRDT,
-no operational transform.
+The app sends the mirror's current `revision` as `baseRevision`. Note what the
+daemon actually does with it: `PanelCoordinator` does not reject an otherwise
+valid operation for being based on a stale revision — it only *relabels* an
+already-failing vanished-target error as `.staleTarget`. A valid operation
+applies against current truth regardless. So `baseRevision` is diagnostic here,
+not a lock, and the refetch path is reached mainly through transport or daemon
+errors rather than through concurrency.
+
+Staleness is instead handled where it can actually bite: the mirror never
+accepts a tab whose `revision` is strictly older than the one it already holds.
+Without that guard a `panel.get` in flight (snapshotted at revision N) can
+resolve after an agent's delta at N+1 and silently revert the mirror — and
+because deltas are only emitted on change, nothing would correct it until the
+next mutation. The same window exists between an `apply` and its own response.
+Removal is exempt: a tab absent from a full `panel.get`, or named in a delta's
+`removedTabIDs`, is dropped whatever revision the mirror holds. Last-writer-wins
+on content, authoritative-set on existence. No CRDT, no operational transform.
 
 ## Ownership and operations
 
@@ -200,6 +212,14 @@ config column; app-only behavior may gate on `UserDefaults`).
   import reuses legacy pane IDs as panel IDs for viewers, so the same key returns
   plausible but stale legacy state. The fix is to return per-panel history from
   `panel.get` / `PanelApplyResult`, which is a daemon + `TBDShared` change.
+- **Surfaces for tabs created after the import — required before graduation.**
+  The legacy import is one-shot per worktree, and nothing in the daemon creates a
+  `WorkspaceTabSurface` outside it. A tab created after that import therefore has
+  no surface, so the render branch falls back to legacy for that tab. The
+  fallback is correct — rendering blank would be worse — but it means one window
+  can hold both models at once, with `tbd panel …` silently doing nothing on the
+  legacy tabs. That materially narrows what the soak exercises. The fix is
+  daemon-side surface creation on tab creation, outside 3b's app-only scope.
 - Note deletion affordance (#7) — required before graduation, since close no
   longer deletes.
 - Native resize indicator / unified divider (#9).
