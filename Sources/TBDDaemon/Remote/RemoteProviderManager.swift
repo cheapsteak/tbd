@@ -488,9 +488,9 @@ public actor RemoteProviderManager {
 
   private func recoverLastSuccessfulSnapshotAtIfNeeded(provider: String) async {
     guard lastSuccessfulSnapshotAt[provider] == nil else { return }
-    if let recovered = try? await db.remoteSessions.latestLastSeen(provider: provider) {
-      lastSuccessfulSnapshotAt[provider] = recovered
-    }
+        if let recovered = try? await db.remoteSessions.lastSuccessfulSnapshotAt(provider: provider) {
+            lastSuccessfulSnapshotAt[provider] = recovered
+        }
   }
 
   /// The provider may return the entire truncated inventory inside its

@@ -12,7 +12,10 @@ with false confidence.
 ## Decision
 
 The provider manager owns one inventory-health boundary. Every successful full
-snapshot records its time. After a later full-list failure, persisted active
+snapshot records its time in the same database transaction as the mirror update.
+The timestamp is separate from per-session `lastSeen`, because the independent
+events stream can update rows without proving that the full inventory works.
+After a later full-list failure, persisted active
 rows are projected as unknown and the provider status includes the last
 successful snapshot time. A daemon restart recovers that time from the newest
 persisted `lastSeen` value before publishing degraded health.

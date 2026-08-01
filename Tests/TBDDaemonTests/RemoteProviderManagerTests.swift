@@ -627,6 +627,25 @@ struct RemoteProviderManagerTests {
     #expect(status?.hasStaleSnapshot == true)
   }
 
+  @Test func eventUpsertCannotMasqueradeAsFullSnapshotAfterRestart() async throws {
+    let eventTime = Date(timeIntervalSince1970: 1_800_000_000)
+    _ = try await db.remoteSessions.upsertOne(
+      provider: "fake",
+      session: RemoteSessionPayload(id: "event-only", state: .running),
+      now: eventTime)
+    let m = manager(
+      FakeProviderInvoker(script: [
+        ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+      ]))
+
+    await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+    let status = await m.providerStatuses().first
+    #expect(status?.health == .stale)
+    #expect(status?.lastSuccessfulSnapshotAt == nil)
+    #expect(status?.hasStaleSnapshot == false)
+  }
+
   @Test func invokeByNameRoutesToConfiguredProvider() async throws {
     // Only exercises verb routing, so it calls loadRegistryAndDescribe()
     // (registry + describe, no poll loop) rather than start() — no
