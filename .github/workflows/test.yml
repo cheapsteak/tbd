@@ -273,6 +273,22 @@ jobs:
       # that) — it is to catch a *collapse or rename* of a target that is
       # named in one of these regexes, where `--filter`/`--skip` would
       # otherwise zero-match or over-skip its way to a green run of nothing.
+      #
+      # ---------------------------------------------------------------------
+      # Why every pass goes through `scripts/test.sh` and not bare `swift test`
+      #
+      # The wrapper points `TBD_HOME` at a scratch dir for the run and, more to
+      # the point, fingerprints the real `~/tbd` on either side and fails the
+      # step if anything appeared or vanished. `CLAUDE.md` has said "Tests must
+      # not touch ~/tbd" all along, and the suite quietly violated it anyway:
+      # 18k orphan profile dirs and ~2.9k fake worktrees accumulated on a
+      # developer box before anyone noticed. No per-test assertion could have
+      # caught it — the invariant belongs to the whole run — so it lives here
+      # and in the pre-push hook, the two places a run is bracketed.
+      #
+      # A CI runner has no `~/tbd` to pollute, so the guard reads as a no-op
+      # there. It is not: an empty `~/tbd` makes it MORE sensitive, because the
+      # fingerprint goes from "absent" to a listing on the first stray write.
       # ---------------------------------------------------------------------
       - name: Test (fast parallel pass 1/2 — TBDDaemonTests)
         # A tier-1 test can still hang indefinitely: an over-long TestClock
@@ -290,7 +306,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          swift test --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          scripts/test.sh --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
           count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1)
           # `swift test --filter/--skip` exits GREEN on zero matches, so a bad
           # regex or a renamed target would silently run nothing and pass.
@@ -319,7 +335,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          swift test --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          scripts/test.sh --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
           count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1)
           # `swift test --filter/--skip` exits GREEN on zero matches, so an
           # over-broad skip or a renamed target would silently run nothing and
@@ -344,7 +360,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          swift test --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
+          scripts/test.sh --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
           count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1)
           if [ -z "$count" ] || [ "$count" -lt 35 ]; then
             echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."

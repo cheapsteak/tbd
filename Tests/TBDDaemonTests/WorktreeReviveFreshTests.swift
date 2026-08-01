@@ -594,7 +594,8 @@ struct WorktreeReviveFreshTests {
             db: db,
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config
-            )
+            ),
+            configDirManager: hostStoreConfigDirManager()
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedSource(
@@ -654,7 +655,8 @@ struct WorktreeReviveFreshTests {
             recorder: recorder,
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config
-            )
+            ),
+            configDirManager: hostStoreConfigDirManager()
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedSource(
@@ -724,11 +726,13 @@ struct WorktreeReviveFreshTests {
         return invocation.range(of: permitted, options: .regularExpression) != nil
     }
 
-    /// `isolateTBDHome()` plus `TBD_CLAUDE_HOST_HOME`: the spawn (and now the
-    /// validation) resolves the profile config dir through
-    /// `ClaudeProfileConfigDirManager.resolveConfigDir`, which builds a DEFAULT
-    /// manager — the env var is the only seam that keeps its mirrored
-    /// `projects` slot off the developer's real `~/.claude`.
+    /// `isolateTBDHome()` plus `TBD_CLAUDE_HOST_HOME`: the spawn (and the
+    /// validation) resolves the profile config dir through the lifecycle's own
+    /// `configDirManager`, and the two tests that use this fixture pass
+    /// `hostStoreConfigDirManager()` so the mirrored `projects` slot lands in
+    /// this temp home rather than the developer's real `~/.claude`. The env var
+    /// stays set as the belt-and-braces seam for any default-constructed
+    /// manager the path might still reach.
     private func isolateTBDHomeAndClaudeHost() -> (home: URL, cleanup: () -> Void) {
         let (home, cleanup) = isolateTBDHome()
         setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
@@ -744,8 +748,9 @@ struct WorktreeReviveFreshTests {
         return profile.id
     }
 
-    /// The root `makeReviveFreshLifecycle`'s injected config-dir manager falls
-    /// back to when no profile resolves.
+    /// Where `writeSourceTranscript` puts the source conversation — the store
+    /// the default `makeReviveFreshLifecycle` manager mirrors, and NOT the one
+    /// `hostStoreConfigDirManager()` points a profile's `projects` slot at.
     private func ambientProjectsRoot() -> URL {
         TBDConstants.configDir
             .appendingPathComponent("claude-home/projects", isDirectory: true)
@@ -766,11 +771,30 @@ struct WorktreeReviveFreshTests {
             .write(to: file, atomically: true, encoding: .utf8)
     }
 
+    /// The manager the two host-store tests inject.
+    ///
+    /// Profile dirs under `$TBD_HOME/profiles`, mirrored host store at the
+    /// same `$TBD_CLAUDE_HOST_HOME` that `isolateTBDHomeAndClaudeHost()`
+    /// exports — so "the profile's `projects` slot" and "wherever
+    /// `writeSourceTranscript` put the source conversation" stay two
+    /// distinguishable stores, which is the entire thing those two tests
+    /// assert about. The default manager below deliberately points both at
+    /// `claude-home`, which collapses that distinction.
+    private func hostStoreConfigDirManager() -> ClaudeProfileConfigDirManager {
+        ClaudeProfileConfigDirManager(
+            baseDirectory: TBDConstants.configDir
+                .appendingPathComponent("profiles", isDirectory: true),
+            hostBaseDirectory: TBDConstants.configDir
+                .appendingPathComponent("claude-host", isDirectory: true)
+        )
+    }
+
     private func makeReviveFreshLifecycle(
         db: TBDDatabase,
         recorder: PreSessionRecordedCommands? = nil,
         subscriptions: StateSubscriptionManager? = nil,
-        modelProfileResolver: ModelProfileResolver? = nil
+        modelProfileResolver: ModelProfileResolver? = nil,
+        configDirManager: ClaudeProfileConfigDirManager? = nil
     ) -> WorktreeLifecycle {
         let claudeHome = TBDConstants.configDir
             .appendingPathComponent("claude-home", isDirectory: true)
@@ -791,10 +815,11 @@ struct WorktreeReviveFreshTests {
             hooks: HookResolver(),
             subscriptions: subscriptions,
             modelProfileResolver: modelProfileResolver,
-            configDirManager: ClaudeProfileConfigDirManager(
-                baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
-                hostBaseDirectory: claudeHome
-            ),
+            configDirManager: configDirManager
+                ?? ClaudeProfileConfigDirManager(
+                    baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
+                    hostBaseDirectory: claudeHome
+                ),
             preSessionPollInterval: 0.05
         )
     }

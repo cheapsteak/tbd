@@ -109,7 +109,9 @@ import Foundation
 /// Its wiring is covered transitively by the derived-path vars below.
 ///
 /// `socketPath` is safe to check with a suffix because no suite in this
-/// process sets TBD_SOCKET_PATH.
+/// process sets TBD_SOCKET_PATH, and `scripts/test.sh` — which does set it for
+/// the whole run — deliberately pins it to `$TBD_HOME/sock` so this suffix
+/// still holds.
 @Suite struct ProductionVarSmokeSuite {
     @Test func databasePathSuffix() {
         #expect(TBDConstants.databasePath.hasSuffix("/state.db"))

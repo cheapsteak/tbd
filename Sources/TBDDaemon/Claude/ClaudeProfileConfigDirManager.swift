@@ -465,15 +465,20 @@ extension ClaudeProfileConfigDirManager {
     ///
     /// Filesystem errors are logged and swallowed — failing to write
     /// the config dir shouldn't break terminal spawn.
-    static func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
+    ///
+    /// Deliberately an **instance** method with no static twin. A static
+    /// version used to exist and silently built its own manager on
+    /// `TBDConstants.configDir`, which resolves `TBD_HOME` on every access —
+    /// so every caller that had carefully injected a temp-dir manager still
+    /// wrote into the real `~/tbd/profiles`. There is one way to ask, and it
+    /// goes through the manager you hold.
+    func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
         guard let profile else { return nil }
-
-        let manager = ClaudeProfileConfigDirManager()
 
         switch profile.kind {
         case .oauth:
             do {
-                let url = try manager.ensureOAuthDir(forProfileID: profile.profileID)
+                let url = try ensureOAuthDir(forProfileID: profile.profileID)
                 return url.path
             } catch {
                 logger.warning("failed to ensure oauth config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -486,7 +491,7 @@ extension ClaudeProfileConfigDirManager {
                 return nil
             }
             do {
-                let url = try manager.ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
+                let url = try ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
                 return url.path
             } catch {
                 logger.warning("failed to ensure api-key config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")

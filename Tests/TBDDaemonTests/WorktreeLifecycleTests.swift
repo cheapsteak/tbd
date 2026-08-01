@@ -379,9 +379,10 @@ import Testing
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    // makeTestRepo, not a bare repos.create: without the worktreeRoot override
+    // the created worktree — and the stray dir this test plants where it used
+    // to live — land in the developer's real ~/tbd/worktrees.
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -659,12 +660,15 @@ import Testing
         git: GitManager(),
         tmux: tmux,
         hooks: HookResolver(),
-        modelProfileResolver: resolver
+        modelProfileResolver: resolver,
+        // This is the only test in the file that spawns Claude against a
+        // RESOLVED profile, so it is the only one whose spawn ensures a
+        // per-profile config dir. Without the injection it lands in the real
+        // ~/tbd/profiles.
+        configDirManager: makeIsolatedConfigDirManager(tag: "lifecycle")
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
 
     // (a) Token must be passed via tmux -e flag, NOT inlined into the shell command body.

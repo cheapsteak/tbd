@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Runs SwiftLint --strict against .swift files changed vs. origin/main.
-# Install once via scripts/install-hooks.sh.
+# Runs SwiftLint --strict against .swift files changed vs. origin/main, then
+# the test suite through scripts/test.sh — which fences the run behind a
+# scratch TBD_HOME and fails if the real ~/tbd changed. That fingerprint is a
+# whole-run invariant no individual test can express, and pre-push is one of
+# only two places a whole run gets bracketed (CI is the other).
+#
+# Set TBD_SKIP_PREPUSH_TESTS=1 to push without the test pass. CI still runs it
+# with the same guard, so skipping delays the answer rather than avoiding it.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -21,9 +27,15 @@ while IFS= read -r file; do
   files+=("$file")
 done < <(git diff --name-only --diff-filter=ACM "$base" HEAD -- '*.swift')
 
-if [ ${#files[@]} -eq 0 ]; then
+if [ ${#files[@]} -gt 0 ]; then
+  echo "[pre-push] Linting ${#files[@]} changed Swift file(s) with SwiftLint --strict..."
+  swiftlint --strict "${files[@]}"
+fi
+
+if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
+  echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."
   exit 0
 fi
 
-echo "[pre-push] Linting ${#files[@]} changed Swift file(s) with SwiftLint --strict..."
-swiftlint --strict "${files[@]}"
+echo "[pre-push] Running scripts/test.sh (scratch TBD_HOME + ~/tbd fingerprint guard)..."
+scripts/test.sh --parallel -j 2

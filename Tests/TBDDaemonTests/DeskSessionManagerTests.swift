@@ -102,8 +102,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -144,8 +144,8 @@ extension TBDHomeSerialized {
 
             // Run twice to test directory collision handling
             for attempt in 1...2 {
-                setenv("TBD_HOME", tmpHome.path, 1)
-                defer { unsetenv("TBD_HOME") }
+                let priorTBDHome = setTBDHome(tmpHome.path)
+                defer { restoreTBDHome(priorTBDHome) }
 
                 let db = try TBDDatabase(inMemory: true)
                 let lifecycle = WorktreeLifecycle(
@@ -175,8 +175,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -205,8 +205,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -243,8 +243,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -279,8 +279,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -329,8 +329,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -374,8 +374,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -434,8 +434,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -485,8 +485,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -547,8 +547,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -595,8 +595,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -643,8 +643,8 @@ extension TBDHomeSerialized {
                 .appendingPathComponent("tbd-desk-conc-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -679,8 +679,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -725,8 +725,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -779,8 +779,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -827,16 +827,20 @@ extension TBDHomeSerialized {
         /// Temp TBD_HOME + in-memory DB + a DeskSessionManager whose own tmux records argv
         /// and consults a mutable dead-window set. The lifecycle gets a separate dry-run
         /// tmux so desk *creation* never lands in the recorder the assertions read.
-        /// Caller owns cleanup of `home` and TBD_HOME.
+        /// Caller owns cleanup of `home` and TBD_HOME — hence `priorTBDHome` in
+        /// the tuple: restoring means putting the caller's value back, so the
+        /// fixture has to hand out what it displaced rather than let the caller
+        /// guess (guessing `unsetenv` here is what leaked the real `~/tbd`).
         private func makeDeskFixture(tag: String) throws -> (
             db: TBDDatabase, manager: DeskSessionManager,
             recorder: DeskTmuxRecorder, dead: DeadWindows,
-            commands: PaneCommands, spawnFailures: SpawnFailureSwitch, home: URL
+            commands: PaneCommands, spawnFailures: SpawnFailureSwitch, home: URL,
+            priorTBDHome: String?
         ) {
             let home = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-desk-\(tag)-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-            setenv("TBD_HOME", home.path, 1)
+            let priorTBDHome = setTBDHome(home.path)
 
             let db = try TBDDatabase(inMemory: true)
             let recorder = DeskTmuxRecorder()
@@ -862,7 +866,7 @@ extension TBDHomeSerialized {
                 ),
                 skillDir: home.appendingPathComponent("skills/nightwatch").path
             )
-            return (db, manager, recorder, dead, commands, spawnFailures, home)
+            return (db, manager, recorder, dead, commands, spawnFailures, home, priorTBDHome)
         }
 
         /// The regression: `TerminalStore.list` orders createdAt ASC, so resolving the desk
@@ -873,7 +877,7 @@ extension TBDHomeSerialized {
         @Test("nudgeDeskSession targets the newest Claude terminal, not the oldest")
         func testNudgeTargetsNewestClaudeTerminal() async throws {
             let f = try makeDeskFixture(tag: "nudge-newest")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -907,7 +911,7 @@ extension TBDHomeSerialized {
         @Test("nudgeDeskSession skips a newer terminal whose tmux window is gone")
         func testNudgeSkipsStaleTerminal() async throws {
             let f = try makeDeskFixture(tag: "nudge-stale")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -933,7 +937,7 @@ extension TBDHomeSerialized {
         @Test("a nudge with no live terminal sends nothing and does not start the cooldown")
         func testFailedNudgeDoesNotStartCooldown() async throws {
             let f = try makeDeskFixture(tag: "nudge-cooldown")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -964,7 +968,7 @@ extension TBDHomeSerialized {
         @Test("postShiftWrapUp targets the newest live terminal")
         func testWrapUpTargetsNewestLiveTerminal() async throws {
             let f = try makeDeskFixture(tag: "wrapup-live")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)

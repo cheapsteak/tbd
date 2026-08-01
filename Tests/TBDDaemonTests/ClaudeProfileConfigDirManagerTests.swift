@@ -186,31 +186,59 @@ struct ClaudeProfileConfigDirManagerTests {
 
     @Test("resolveConfigDir returns nil for nil profile")
     func resolveNilProfileReturnsNil() {
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: nil) == nil)
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase())
+        #expect(manager.resolveConfigDir(for: nil) == nil)
     }
 
-    @Test("ensureOAuthDir produces a per-profile path")
+    /// `resolveConfigDir` is an instance method precisely so this assertion is
+    /// possible: the dir it creates lands under the injected base, not under
+    /// the ambient `~/tbd/profiles`.
+    @Test("resolveConfigDir creates the oauth dir under the manager's own base")
     func resolveOAuthProfileReturnsPath() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
-        // resolveConfigDir is static and uses the default ~/tbd base, so the
-        // oauth branch is exercised here via ensureOAuthDir against a temp base.
         let profileID = UUID()
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
-        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: base, hostBaseDirectory: tempHostBase())
+        let profile = ResolvedModelProfile(
+            profileID: profileID,
+            name: "OAuth",
+            kind: .oauth,
+            baseURL: nil,
+            model: nil,
+            secret: nil,
+            awsRegion: nil,
+            awsProfile: nil,
+            fallbackModels: nil,
+            envOverrides: [:]
+        )
+        let path = try #require(manager.resolveConfigDir(for: profile))
+        #expect(path.contains(profileID.uuidString.lowercased()))
+        #expect(path.hasPrefix(base.path))
     }
 
-    @Test("ensureAPIKeyDir produces a per-profile path")
+    @Test("resolveConfigDir creates the api-key dir under the manager's own base")
     func ensureAPIKeyDirReturnsPath() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
-        // resolveConfigDir is static and uses the default ~/tbd base, so the
-        // api-key branch is exercised here via ensureAPIKeyDir against a temp base.
         let profileID = UUID()
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
-        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: "sk-ant-api03-test-key-XXXXX")
-        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: base, hostBaseDirectory: tempHostBase())
+        let profile = ResolvedModelProfile(
+            profileID: profileID,
+            name: "API Key",
+            kind: .apiKey,
+            baseURL: nil,
+            model: nil,
+            secret: "sk-ant-api03-test-key-XXXXX",
+            awsRegion: nil,
+            awsProfile: nil,
+            fallbackModels: nil,
+            envOverrides: [:]
+        )
+        let path = try #require(manager.resolveConfigDir(for: profile))
+        #expect(path.contains(profileID.uuidString.lowercased()))
+        #expect(path.hasPrefix(base.path))
     }
 
     @Test("resolveConfigDir returns nil for .bedrock profile")
@@ -227,7 +255,7 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+        #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
     }
 
     @Test("resolveConfigDir returns nil for .apiKey profile with no secret")
@@ -244,7 +272,7 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+        #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
     }
 
     // MARK: - host mirror slots

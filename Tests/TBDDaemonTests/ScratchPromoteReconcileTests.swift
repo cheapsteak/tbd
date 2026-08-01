@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -21,10 +22,10 @@ struct ScratchPromoteReconcileTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-promote-rec-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
         return (home, {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             unsetenv("TBD_CLAUDE_HOST_HOME")
             try? FileManager.default.removeItem(at: home)
         })

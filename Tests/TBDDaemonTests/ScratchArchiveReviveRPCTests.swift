@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -9,8 +10,8 @@ struct ScratchArchiveReviveRPCTests {
     private func isolateTBDHome() -> (URL, () -> Void) {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-scratcharch-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        return (home, { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) })
+        let priorTBDHome = setTBDHome(home.path)
+        return (home, { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) })
     }
 
     /// Router whose lifecycle and handlers share one StateSubscriptionManager,

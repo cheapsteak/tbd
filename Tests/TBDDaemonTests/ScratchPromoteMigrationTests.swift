@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -18,10 +19,10 @@ struct ScratchPromoteMigrationTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-promote-mig-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
         return (home, {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             unsetenv("TBD_CLAUDE_HOST_HOME")
             try? FileManager.default.removeItem(at: home)
         })
@@ -199,10 +200,10 @@ struct WakePathGuardTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-wake-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
         return (home, {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             unsetenv("TBD_CLAUDE_HOST_HOME")
             try? FileManager.default.removeItem(at: home)
         })
@@ -285,10 +286,10 @@ struct TerminalCreateResumeSyncWiringTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-create-resume-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
         return (home, {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             unsetenv("TBD_CLAUDE_HOST_HOME")
             try? FileManager.default.removeItem(at: home)
         })

@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -9,8 +10,8 @@ struct RepoAddScratchGuardTests {
     @Test func rejectsPathUnderScratchDir() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-addguard-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) }
+        let priorTBDHome = setTBDHome(home.path)
+        defer { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) }
 
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
@@ -29,8 +30,8 @@ struct RepoAddScratchGuardTests {
     @Test func acceptsPathOutsideScratchDir() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-addguard-normal-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) }
+        let priorTBDHome = setTBDHome(home.path)
+        defer { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) }
 
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
@@ -89,8 +90,8 @@ struct RepoAddScratchGuardTests {
     @Test func rejectsSymlinkBypassToScratchDir() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-addguard-symlink-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) }
+        let priorTBDHome = setTBDHome(home.path)
+        defer { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) }
 
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
