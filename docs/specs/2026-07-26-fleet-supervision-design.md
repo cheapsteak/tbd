@@ -2337,6 +2337,21 @@ to inaction at the largest scale.
   column is the house pattern for it, added as a conscious amendment. See §13.
 - **A supervisor patrol loop** — the daemon drives the loop and wakes the
   judgment layer with work orders. See §16 for the cost of this choice.
+- **Deferring delivery acknowledgement until more failures are observed** —
+  rejected. The send path's synchronous checks catch only the failures the
+  daemon can enumerate at send time: a dead pane, a wrong pane. The field
+  incident that motivated §12 was hours of sends reported as successes with
+  no error of any kind — which proves the failure class is *silent*, and a
+  silent class cannot produce the evidence that waiting would wait for: the
+  incident itself only surfaced because someone eventually noticed the
+  absence of any effect. The sentinel observation is the check for failures
+  nobody can enumerate at send time — a payload swallowed by a modal,
+  discarded mid-turn, stranded unsubmitted in the composer — and it adds no
+  machinery: the one-minute re-check timer already exists for P1-6, and the
+  transcript tail is a read the state pipeline already performs. One timer
+  serving both observations is an economy, not a conflation: the re-check
+  reads two facts — did the message land, and what state is the session in
+  now — and writes each where it belongs.
 - **A compiled wake gate for parked sessions** — removed 2026-07-29 after field
   measurement falsified its cost argument. The "outstanding work" fact list
   survives as report content only; the decision to wake is a project-authored
