@@ -941,7 +941,7 @@ convention to another, a mistake rather than a transgression, which structure
 prevents by removing the opportunity instead of gating the behavior — and
 **compromise**, where containment bounds what a bad night costs. Trusting a
 model's conduct and declining to hand it the chance to mix policies are the
-same posture, not a contradiction: the drawer is small because the teller is
+same position, not a contradiction: the drawer is small because the teller is
 trusted with the drawer, not with the vault.
 
 **What stays global.** The project is the unit of judgment and action. It is
@@ -1019,7 +1019,7 @@ policies — that is the invariant the project exists to create.
 - **One playbook, all of a project's modes inside it.** A mode is a named
   section of this file (§3), and the active one's text arrives in every work
   order. Keeping them together is what lets a reader see a project's whole
-  conduct — every posture it can take — in one place, and it is why selecting a
+  conduct — every mode it can run — in one place, and it is why selecting a
   mode changes nothing about which file gets resolved. Separate files per mode
   would split that view for no gain, and would invite the reader to imagine the
   daemon choosing between them; it chooses nothing, it delivers the section the
@@ -1058,9 +1058,10 @@ policies — that is the invariant the project exists to create.
   asks — reading backward in the transcript until the request makes sense, and
   escalating when it does not.** Its companion rule makes the discipline
   uniform: **write every message as if the target will execute it unchecked —
-  never lean on a safety net.** Targets genuinely differ in posture — most
-  fleet spawns run with permissions bypassed, yet a repo's explicit `ask`
-  rules still prompt even there, the mode can change mid-session from the
+  never lean on a safety net.** Targets genuinely differ in *permission*
+  posture — most fleet spawns run with permissions bypassed, yet a repo's
+  explicit `ask` rules still prompt even there, the mode can change
+  mid-session from the
   keyboard, and an adopted session may ask about everything — so the same
   drive is a suggestion behind a checkpoint into one session and the final
   checkpoint itself into another (field measurement caught exactly this
@@ -1586,7 +1587,7 @@ enforcement openly, which is the same trade the old system made by accident
 - **A daemon restart during a shift resumes it, never forks it.** The active
   shift is derivable from the record alone: the newest shift whose ledger has
   no closing line. On startup the daemon resumes that shift in whatever
-  posture the switch persists — running if on, paused if off — with the same
+  state the switch persists — running if on, paused if off — with the same
   ID, same directory, same desks, which are ordinary sessions and survive the
   daemon, and runs the overdue-observation scan (§7, §12). A half-finished
   teardown resumes idempotently from its durable steps. Only when no unclosed
@@ -2325,7 +2326,7 @@ to inaction at the largest scale.
   this document
   ([wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
 - **Per-mode playbook files** — a project's modes are named sections of its one
-  playbook (§3, §5), so a reader sees every posture a project can take in one
+  playbook (§3, §5), so a reader sees every mode a project can run in one
   place. Splitting them across files would also invite the reader to imagine the
   daemon choosing between them; it chooses nothing.
 - **The act-with-veto-window human-in-the-loop (HITL) variant** — rejected on

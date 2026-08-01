@@ -36,7 +36,7 @@ importantly, ignore how the current code draws the distinction — see story P0-
 
 ## How to use the repo
 
-Repo root: `/Users/chang/tbd/worktrees/tbd/20260725-condemned-anteater`
+Repo root: `<repo-root>`
 
 Read the repo to understand how TBD works generally — its data model, RPC surface, config
 precedence, hook system, terminal and session lifecycle, settings surfaces. Ground your
@@ -558,7 +558,7 @@ expressible in terms of the properties above rather than any one protocol's verb
 Write a markdown design document to:
 
 ```
-/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-20260725-condemned-anteater/485FD618-0F5B-4488-9741-9AE2A112DC68/scratchpad/fleet-supervision-design.md
+<scratch-deliverable-path>/fleet-supervision-design.md
 ```
 
 Sections it needs:
