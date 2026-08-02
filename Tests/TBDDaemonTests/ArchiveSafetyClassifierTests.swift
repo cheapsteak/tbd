@@ -7,10 +7,11 @@ import Testing
 
 @Suite("Archive bootstrap provenance")
 struct ArchiveSafetyClassifierTests {
+  /// The bootstrap families are deliberately left untracked rather than
+  /// gitignored. Ignored paths never reach the classifier, so ignoring them
+  /// here would let this test pass without the manifest doing any work.
   @Test func exactBootstrapFamiliesAndTrackedMutationAreArchiveSafe() async throws {
-    let fixture = try await makePublishedFixture(
-      name: "exact", withTrackedConfig: true, ignoresBootstrapPaths: true
-    )
+    let fixture = try await makePublishedFixture(name: "exact", withTrackedConfig: true)
     defer { fixture.cleanup() }
 
     let artifacts = try writeRuntimeOverlay(at: fixture.worktree)
@@ -63,7 +64,12 @@ struct ArchiveSafetyClassifierTests {
     #expect(report.uniqueUnpublishedWork.map(\.path) == ["infrastructure/agent-box.tf"])
   }
 
-  @Test func ignoredUnlistedFileRemainsUniqueWork() async throws {
+  /// `.gitignore` is the user's own declaration that these bytes are
+  /// reproducible, and it is the only signal Git offers. Folding ignored paths
+  /// in would make every worktree that has ever been built permanently
+  /// ineligible for archive, which trains users onto `--force` and bypasses
+  /// the unpublished-commit check this classifier exists to enforce.
+  @Test func ignoredFileDoesNotBlockArchive() async throws {
     let fixture = try await makePublishedFixture(name: "ignored")
     defer { fixture.cleanup() }
 
@@ -72,21 +78,58 @@ struct ArchiveSafetyClassifierTests {
       "git add .gitignore && git commit -m ignore-cache && git push",
       at: fixture.worktree
     )
-    let agents = fixture.worktree.appendingPathComponent("AGENTS.md")
-    try write("generated", to: agents)
-    let manifest = try writeManifest(
-      artifacts: [try artifact(path: "AGENTS.md", kind: "runtime", file: agents)],
-      at: fixture.worktree
-    )
     try write(
-      "unique ignored bytes",
+      "reproducible build output",
       to: fixture.worktree.appendingPathComponent("cache/notes.txt")
     )
 
-    let report = await classify(fixture, trustedManifest: manifest)
+    let report = await classify(fixture)
+
+    #expect(report.isEligible)
+    #expect(report.findings.isEmpty)
+  }
+
+  /// The boundary is `.gitignore`, not the path family. Bootstrap scaffolding
+  /// is untracked by convention rather than ignored, so it still arrives as
+  /// `??` and stays subject to the full provenance check.
+  @Test func untrackedFileUnderAnIgnoredSiblingStillBlocks() async throws {
+    let fixture = try await makePublishedFixture(name: "ignored-sibling")
+    defer { fixture.cleanup() }
+
+    try write("cache/\n", to: fixture.worktree.appendingPathComponent(".gitignore"))
+    try await shell(
+      "git add .gitignore && git commit -m ignore-cache && git push",
+      at: fixture.worktree
+    )
+    try write(
+      "reproducible build output",
+      to: fixture.worktree.appendingPathComponent("cache/notes.txt")
+    )
+    try write(
+      "unique unpublished bytes",
+      to: fixture.worktree.appendingPathComponent(".agents/skills/demo/SKILL.md")
+    )
+
+    let report = await classify(fixture)
 
     #expect(!report.isEligible)
-    #expect(report.uniqueUnpublishedWork.map(\.path) == ["cache/notes.txt"])
+    #expect(report.uniqueUnpublishedWork.map(\.path) == [".agents/skills/demo/SKILL.md"])
+  }
+
+  @Test func blockingSummaryTruncatesLargePathSets() {
+    let findings = (0..<250).map {
+      ArchiveArtifactFinding(
+        path: String(format: "src/file-%03d.txt", $0),
+        category: .uniqueUnpublishedWork,
+        reason: "no matching trusted out-of-worktree bootstrap attestation"
+      )
+    }
+
+    let summary = ArchiveSafetyReport(findings: findings, headIsPublished: true).blockingSummary
+
+    #expect(summary.contains("src/file-000.txt"))
+    #expect(summary.contains("and 230 more"))
+    #expect(!summary.contains("src/file-249.txt"))
   }
 
   @Test func generatedOutputStaysReviewable() async throws {
@@ -318,8 +361,7 @@ struct ArchiveSafetyClassifierTests {
 
   private func makePublishedFixture(
     name: String,
-    withTrackedConfig: Bool = false,
-    ignoresBootstrapPaths: Bool = false
+    withTrackedConfig: Bool = false
   ) async throws -> Fixture {
     let (temp, repo) = try await createTestRepoResolvingSymlinks()
     let remote = temp.appendingPathComponent("remote.git")
@@ -338,13 +380,6 @@ struct ArchiveSafetyClassifierTests {
         "git add .codex/config.toml && git commit -m tracked-config",
         at: worktree
       )
-    }
-    if ignoresBootstrapPaths {
-      try write(
-        ".agents/\n.Codex/\nhooks/\nAGENTS.md\n",
-        to: worktree.appendingPathComponent(".gitignore")
-      )
-      try await shell("git add .gitignore && git commit -m ignore-bootstrap", at: worktree)
     }
     try await shell("git push -u origin '\(branch)'", at: worktree)
     return Fixture(id: UUID(), temp: temp, repo: repo, worktree: worktree, branch: branch)
