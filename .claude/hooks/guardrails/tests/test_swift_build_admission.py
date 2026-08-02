@@ -51,6 +51,31 @@ class SwiftBuildAdmissionTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
 
+    def test_nested_shell_commands_cannot_bypass_admission(self):
+        commands = [
+            'bash -c "swift build"',
+            "sh -c 'swift test -j 12'",
+            "/bin/zsh -lc 'cd /tmp && /usr/bin/swift package resolve'",
+            "env FOO=bar bash -ec 'swift run TBDApp'",
+            "echo \"$(bash -c 'swift build')\"",
+            'printf "%s\\n" "$(swift test)"',
+            "echo `swift package resolve`",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                decision = _check(command)
+                self.assertIsNotNone(decision)
+                self.assertEqual(decision.action, "deny")
+
+    def test_nested_shell_may_call_the_governed_runner(self):
+        commands = [
+            'bash -c "scripts/swift-safe build"',
+            "zsh -lc './scripts/swift-safe test --filter Foo'",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIsNone(_check(command))
+
 
 if __name__ == "__main__":
     unittest.main()

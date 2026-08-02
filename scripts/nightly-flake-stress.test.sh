@@ -190,6 +190,32 @@ test_run_with_deadline_passes_through_a_fast_commands_status() {
   rm -rf "$d"
 }
 
+test_governed_swift_deadline_covers_lock_wait_and_command() {
+  local d; d="$(mktmpd)"
+  local fake_repo="$d/repo" args_file="$d/args"
+  mkdir -p "$fake_repo/scripts"
+  cat > "$fake_repo/scripts/swift-safe" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$TBD_SWIFT_LOCK_TIMEOUT_SECONDS|$*" > "$ARGS_FILE"
+EOF
+  chmod +x "$fake_repo/scripts/swift-safe"
+
+  local old_repo_root="${REPO_ROOT:-}" old_lock="$SWIFT_LOCK_TIMEOUT_S"
+  REPO_ROOT="$fake_repo"
+  SWIFT_LOCK_TIMEOUT_S=7
+  assert_eq "outer deadline includes lock wait, command budget, and grace" \
+    "48" "$(governed_outer_deadline 11)"
+  ARGS_FILE="$args_file" run_governed_swift 11 "$d/out.log" test --filter Foo
+
+  assert_eq "governed command receives the explicit lock timeout" \
+    "7|test --filter Foo" "$(cat "$args_file")"
+  assert_eq "governed command completes without consuming its outer deadline" \
+    "" "$(cat "$d/out.log")"
+  REPO_ROOT="$old_repo_root"
+  SWIFT_LOCK_TIMEOUT_S="$old_lock"
+  rm -rf "$d"
+}
+
 # ---------------------------------------------------------------------------
 # Target table
 # ---------------------------------------------------------------------------
