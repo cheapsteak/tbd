@@ -183,16 +183,6 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    public func setWatchDeskRole(id: UUID, role: WatchDeskRole?) async throws {
-        try await writer.write { db in
-            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                throw DatabaseError(message: "Terminal not found")
-            }
-            record.watch_desk_role = role?.rawValue
-            try record.update(db)
-        }
-    }
-
     /// Set or clear the pinned timestamp for a terminal.
     public func setPin(id: UUID, pinned: Bool, at date: Date = Date()) async throws {
         try await writer.write { db in

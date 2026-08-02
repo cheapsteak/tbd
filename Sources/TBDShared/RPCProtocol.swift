@@ -302,10 +302,14 @@ public struct WatchDeskLeaseSnapshot: Codable, Sendable {
     public let expiresAt: Date
     public let valid: Bool
     public let role: WatchDeskRole
+    /// `role` defaults to the powerless role for the same reason
+    /// `WatchDeskRole`'s decoder falls back to it: an unstated role must never
+    /// be reported as mutable authority. Callers that know the lease is valid
+    /// pass `.judge` explicitly.
     public init(
         worktreeID: UUID, terminalID: UUID, generation: Int64,
         acquiredAt: Date, renewedAt: Date, expiresAt: Date, valid: Bool,
-        role: WatchDeskRole = .judge
+        role: WatchDeskRole = .readOnlyCoordinator
     ) {
         self.worktreeID = worktreeID; self.terminalID = terminalID
         self.generation = generation; self.acquiredAt = acquiredAt

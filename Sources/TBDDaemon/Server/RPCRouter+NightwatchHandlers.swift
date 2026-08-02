@@ -3,11 +3,16 @@ import TBDShared
 
 extension RPCRouter {
     private func leaseSnapshot(_ lease: WatchDeskLease, now: Date = Date()) -> WatchDeskLeaseSnapshot {
-        WatchDeskLeaseSnapshot(
+        let valid = lease.isValid(at: now)
+        return WatchDeskLeaseSnapshot(
             worktreeID: lease.worktreeID, terminalID: lease.terminalID,
             generation: lease.generation,
             acquiredAt: lease.acquiredAt, renewedAt: lease.renewedAt,
-            expiresAt: lease.expiresAt, valid: lease.isValid(at: now))
+            expiresAt: lease.expiresAt, valid: valid,
+            // A tombstoned or expired row still names its last holder, so the
+            // reported role has to follow validity rather than the row's mere
+            // existence. Only an unexpired holder is the judge.
+            role: valid ? .judge : .readOnlyCoordinator)
     }
 
     func handleSetNightwatchMode(_ data: Data) async throws -> RPCResponse {
