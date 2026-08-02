@@ -70,7 +70,9 @@ The alternative to this exclusion is not a stricter system but a bypassed one: a
 
 ## Archive eligibility
 
-Normal and automatic archive run an initial classifier before changing state. The archive hook then runs, metadata needed for restoration is captured, and classification runs again as the immediately preceding worktree operation before forced removal. Physical removal errors propagate, path absence is verified, and only then may the database become archived-final, terminals be torn down, events broadcast, or removal callbacks fire. Archive is eligible only when:
+Normal and automatic archive run an initial classifier before changing state. Once that gate passes, the worktree's terminals are captured and their windows killed — this comes first, because a live agent left running through the hook and the final check could create a file that neither observed and that forced removal then discards. Killing a window touches only tmux and the history rows, never the directory, and the terminal rows themselves survive until removal is verified.
+
+The archive hook then runs, metadata needed for restoration is captured, and classification runs again as the immediately preceding worktree operation before forced removal. Physical removal errors propagate, path absence is verified, and only then may the database become archived-final, terminal rows be deleted, events broadcast, or removal callbacks fire. Publishing archived-final state is what waits on physical absence; silencing writers is a precondition for a safe removal and belongs before it. Archive is eligible only when:
 
 - no reviewable generated output exists;
 - no unique unpublished work exists; and

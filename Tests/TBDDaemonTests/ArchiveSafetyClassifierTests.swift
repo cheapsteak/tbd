@@ -402,7 +402,71 @@ struct ArchiveSafetyClassifierTests {
     #expect(FileManager.default.fileExists(atPath: fixture.worktree.path))
   }
 
+  /// The worktree's own terminals must be silenced before the archive hook,
+  /// the final revalidation, and forced removal. A live agent that outlives
+  /// the last check can create a file in the gap before `git worktree remove
+  /// --force` runs, and that file is then discarded with nothing having
+  /// observed it — the exact loss this classifier exists to prevent.
+  @Test func terminalsAreSilencedBeforeRevalidationAndRemoval() async throws {
+    let fixture = try await makePublishedFixture(name: "ordering")
+    defer { fixture.cleanup() }
+
+    let events = OrderLog()
+    let db = try TBDDatabase(inMemory: true)
+    let repo = try await db.repos.create(
+      path: fixture.repo.path, displayName: "acme", defaultBranch: "main")
+    let worktree = try await db.worktrees.create(
+      repoID: repo.id, name: "ordering", branch: fixture.branch,
+      path: fixture.worktree.path, tmuxServer: "tbd-test")
+    _ = try await db.terminals.create(
+      worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+
+    let lifecycle = WorktreeLifecycle(
+      db: db,
+      git: GitManager(),
+      tmux: TmuxManager(
+        dryRun: true,
+        dryRunRecorder: { args in
+          if args.contains("kill-window") { events.record("kill") }
+        }
+      ),
+      hooks: HookResolver(),
+      archiveSafetyEvaluator: { _, _ in
+        events.record("classify")
+        return ArchiveSafetyReport(findings: [], headIsPublished: true)
+      },
+      worktreeRemover: { _, path in
+        events.record("remove")
+        try FileManager.default.removeItem(atPath: path)
+      }
+    )
+
+    let pair = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id)
+    try await lifecycle.completeArchiveWorktree(worktree: pair.0, repo: pair.1)
+
+    // Phase 1 gates, then the window dies, then the revalidation attests a
+    // worktree nothing can still be writing to, then removal.
+    #expect(events.all == ["classify", "kill", "classify", "remove"])
+  }
+
   // MARK: - Fixtures
+
+  /// Synchronous ordered event log — `dryRunRecorder` is a non-async
+  /// `@Sendable` closure, so this cannot be an actor.
+  final class OrderLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+    func record(_ event: String) {
+      lock.lock()
+      defer { lock.unlock() }
+      events.append(event)
+    }
+    var all: [String] {
+      lock.lock()
+      defer { lock.unlock() }
+      return events
+    }
+  }
 
   private struct Fixture {
     let id: UUID
