@@ -220,8 +220,13 @@ struct RPCRouterNightwatchLeaseTests {
         #expect(transferred.lease.role == .judge)
 
         // The successor holds exactly one capability, and it is the returned one.
+        // Canonicalize both sides: the directory listing resolves /var to
+        // /private/var while the handler returns the path it composed.
         let successorPaths = WatchDeskLeaseCredentialFile.paths(terminalID: f.codex.id)
-        #expect(successorPaths == [transferred.credentialFile])
+            .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        let returnedPath = URL(fileURLWithPath: transferred.credentialFile)
+            .resolvingSymlinksInPath().path
+        #expect(successorPaths == [returnedPath])
         // The predecessor's capability is gone, and its old triple is fenced.
         #expect(WatchDeskLeaseCredentialFile.paths(terminalID: f.claude.id).isEmpty)
         let fencedRenew = await f.router.handle(try RPCRequest(
