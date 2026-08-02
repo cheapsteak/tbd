@@ -69,6 +69,11 @@ jobs:
       - name: Check for committed implementation plans
         run: scripts/check-no-committed-plans.sh
 
+      - name: Test agent guardrails and Swift admission wrapper
+        run: |
+          python3 .claude/hooks/guardrails/dispatch.py --self-test
+          python3 scripts/test-swift-safe.py
+
   test:
     runs-on: macos-26
     # All three test steps below append their `.flaky(issue:)` retry records

@@ -21,7 +21,7 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Verify your changes compile (`scripts/swift-safe build`) before committing.
 - Run `scripts/swift-safe test` if you changed daemon or shared code. The wrapper
   serializes SwiftPM across TBD worktrees and defaults to two compiler jobs;
-  raw `swift build/test/run/package` is blocked by the repo guardrail because
+  raw `swift build/test/run` is blocked by the repo guardrail because
   concurrent default `-j12` builds can exhaust this development machine.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 

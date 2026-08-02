@@ -13,7 +13,6 @@ import fcntl
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import time
 
@@ -22,7 +21,39 @@ DEFAULT_JOBS = 2
 MAX_JOBS = 4
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
-SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS | {"package"}
+SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS
+RUN_OPTIONS_WITH_VALUES = {
+    "--build-system",
+    "--cache-path",
+    "--config-path",
+    "--configuration",
+    "--default-registry-url",
+    "--explicit-target-dependency-import-check",
+    "--jobs",
+    "--manifest-cache",
+    "--netrc-file",
+    "--package-path",
+    "--pkg-config-path",
+    "--resolver-fingerprint-checking",
+    "--resolver-signing-entity-checking",
+    "--sanitize",
+    "--scratch-path",
+    "--sdk",
+    "--security-path",
+    "--swift-sdk",
+    "--swift-sdks-path",
+    "--toolchain",
+    "--toolset",
+    "--traits",
+    "--triple",
+    "-Xcc",
+    "-Xcxx",
+    "-Xlinker",
+    "-Xswiftc",
+    "-c",
+    "-debug-info-format",
+    "-j",
+}
 
 
 def _positive_number(name: str, default: float) -> float:
@@ -83,14 +114,41 @@ def _requested_jobs(arguments: list[str]) -> int | None:
     return None
 
 
+def _run_swiftpm_arguments(arguments: list[str]) -> list[str]:
+    """Return only `swift run` options before the executable and app args."""
+    prefix: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            break
+        if not argument.startswith("-"):
+            break
+        prefix.append(argument)
+        option = argument.split("=", 1)[0]
+        if option in RUN_OPTIONS_WITH_VALUES and "=" not in argument:
+            if index + 1 >= len(arguments):
+                break
+            prefix.append(arguments[index + 1])
+            index += 2
+            continue
+        index += 1
+    return prefix
+
+
 def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
     result = [subcommand, *arguments]
     if subcommand not in COMPILE_SUBCOMMANDS:
         return result
 
     limit = _job_limit()
-    requested = _requested_jobs(arguments)
+    job_arguments = (
+        _run_swiftpm_arguments(arguments) if subcommand == "run" else arguments
+    )
+    requested = _requested_jobs(job_arguments)
     if requested is None:
+        if subcommand == "run":
+            return [subcommand, "--jobs", str(limit), *arguments]
         return [*result, "--jobs", str(limit)]
     if requested <= 0:
         raise SystemExit("SwiftPM --jobs must be positive")
@@ -170,7 +228,15 @@ def main(arguments: list[str]) -> int:
         )
         lock_file.flush()
         os.fsync(lock_file.fileno())
-        return subprocess.run([swift, *bounded], check=False).returncode
+        # Keep the kernel lock on the exact process that becomes SwiftPM. A
+        # wrapper subprocess would release the flock if killed while leaving
+        # an orphaned compiler alive, allowing the next worktree to overlap it.
+        os.set_inheritable(lock_file.fileno(), True)
+        try:
+            os.execv(swift, [swift, *bounded])
+        except OSError as error:
+            print(f"swift-safe: could not exec {swift}: {error}", file=sys.stderr)
+            return 71
 
 
 if __name__ == "__main__":

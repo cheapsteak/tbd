@@ -122,10 +122,13 @@ Everything else is removed by default. Use `--dry-run` to preview. See the Env v
 
 ## Swift build admission
 
-All local SwiftPM compilation goes through `scripts/swift-safe`. It holds a
+Local SwiftPM `build`, `test`, and `run` compilation goes through
+`scripts/swift-safe`. It holds a
 kernel-managed, machine-global lock at `~/tbd/runtime/swift-build.lock`, so a
 fleet of TBD worktrees cannot compile simultaneously. Compile commands default
-to two jobs and reject more than four unless a developer explicitly opts out.
+to two jobs and rejects an explicit job count above that configured limit unless
+a developer opts out. Non-compiling `swift package` metadata and resolution
+commands do not enter the governor.
 
 - `TBD_SWIFT_JOBS` sets the default and maximum job count (default `2`).
 - `TBD_SWIFT_LOCK_TIMEOUT_SECONDS` sets the wait timeout (default `1800`).
@@ -133,8 +136,9 @@ to two jobs and reject more than four unless a developer explicitly opts out.
 - `TBD_SWIFT_ALLOW_HIGH_JOBS=1` permits an explicit higher job count on an
   otherwise idle machine.
 
-The repository guardrail rejects raw `swift build`, `swift test`, `swift run`,
-and `swift package` commands issued by agents. CI remains unaffected.
+The repository guardrail rejects raw `swift build`, `swift test`, and `swift
+run` commands issued by agents. CI and non-compiling package commands remain
+unaffected.
 
 ## Shared module cache
 

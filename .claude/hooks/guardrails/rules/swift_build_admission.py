@@ -9,7 +9,7 @@ import shlex
 from guardrails.lib.rule import Decision, Rule
 
 
-_COMPILE_SUBCOMMANDS = {"build", "package", "run", "test"}
+_COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 _DISPLAY_COMMANDS = {"awk", "cat", "echo", "grep", "printf", "rg", "sed"}
 _SHELL_COMMANDS = {"bash", "dash", "sh", "zsh"}
 _BOUNDARIES = {"&", "&&", "(", ")", ";", "|", "||"}
@@ -18,7 +18,7 @@ _DENY_REASON = (
     "[swift-build-admission] Blocked raw SwiftPM compilation. Multiple TBD "
     "worktrees once launched concurrent default -j12 builds, filled 15 GB of "
     "swap, and left swift-test parents respawning killed swift-frontends. "
-    "Fix: run `scripts/swift-safe <build|test|run|package> ...`; it holds one "
+    "Fix: run `scripts/swift-safe <build|test|run> ...`; it holds one "
     "machine-global build slot and defaults compilation to two jobs."
 )
 
@@ -111,7 +111,7 @@ def _command_contains_raw_swift_compile(command: str, depth: int = 0) -> bool:
 class SwiftBuildAdmissionRule(Rule):
     id = "swift-build-admission"
     description = (
-        "Require Swift build/test/run/package commands to use scripts/swift-safe "
+        "Require Swift build/test/run commands to use scripts/swift-safe "
         "for a machine-global build slot and bounded compiler jobs."
     )
     tools = {"Bash"}

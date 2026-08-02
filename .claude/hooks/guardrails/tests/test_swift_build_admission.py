@@ -24,7 +24,6 @@ class SwiftBuildAdmissionTests(unittest.TestCase):
             "swift test --filter TranscriptPresentation",
             "cd /tmp && /usr/bin/swift test -j 12",
             "xcrun swift run TBDApp",
-            "swift package resolve",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -41,6 +40,8 @@ class SwiftBuildAdmissionTests(unittest.TestCase):
             'echo "swift build"',
             "rg 'swift test' docs",
             "git diff -- Tests/TBDAppTests",
+            "swift package resolve",
+            "swift package dump-package",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -55,11 +56,11 @@ class SwiftBuildAdmissionTests(unittest.TestCase):
         commands = [
             'bash -c "swift build"',
             "sh -c 'swift test -j 12'",
-            "/bin/zsh -lc 'cd /tmp && /usr/bin/swift package resolve'",
+            "/bin/zsh -lc 'cd /tmp && /usr/bin/swift run TBDApp'",
             "env FOO=bar bash -ec 'swift run TBDApp'",
             "echo \"$(bash -c 'swift build')\"",
             'printf "%s\\n" "$(swift test)"',
-            "echo `swift package resolve`",
+            "echo `swift build`",
         ]
         for command in commands:
             with self.subTest(command=command):
