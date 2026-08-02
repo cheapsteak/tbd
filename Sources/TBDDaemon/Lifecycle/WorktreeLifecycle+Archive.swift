@@ -99,6 +99,21 @@ extension WorktreeLifecycle {
         force: Bool = false,
         knownPublished: Bool = false
     ) async throws {
+        // Silence the worktree's own writers first. Phase 1 already gated
+        // eligibility, so reaching here means archive is going ahead; leaving
+        // a live agent running through the hook, the revalidation and the
+        // forced removal would let it create a file that the final check
+        // never saw and `git worktree remove --force` then discards. Killing
+        // the windows costs nothing here — `captureThenKillWindow` only
+        // touches tmux and the history rows, never the directory — and the
+        // terminal rows themselves stay until removal is verified.
+        let terminals = try await db.terminals.list(worktreeID: worktree.id)
+        let sessionIDs = terminals.sorted(by: { $0.createdAt < $1.createdAt })
+            .filter(\.isClaudeResumable).compactMap(\.claudeSessionID)
+        for terminal in terminals {
+            await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
+        }
+
         // Run archive hook
         if !force {
             let archiveHookPath = hooks.resolve(
@@ -139,14 +154,12 @@ extension WorktreeLifecycle {
             try await db.worktrees.updateBranch(id: worktree.id, branch: gitWorktree.branch)
         }
 
-        let terminals = try await db.terminals.list(worktreeID: worktree.id)
-        let sessionIDs = terminals.sorted(by: { $0.createdAt < $1.createdAt })
-            .filter(\.isClaudeResumable).compactMap(\.claudeSessionID)
         let capturedSHA = try? await git.headSHA(worktreePath: worktree.path)
 
         // This is intentionally the final worktree operation before removal.
-        // The hook and all metadata reads happen first so they cannot mutate
-        // or race the content attested by this check.
+        // Terminals are already dead and the hook and all metadata reads have
+        // run, so nothing is left that can mutate or race the content this
+        // check attests.
         if !force {
             let report: ArchiveSafetyReport
             if let archiveSafetyEvaluator {
@@ -177,9 +190,6 @@ extension WorktreeLifecycle {
             claudeSessionIDs: sessionIDs,
             archivedHeadSHA: capturedSHA
         )
-        for terminal in terminals {
-            await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
-        }
         try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
         try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
         for terminal in terminals { await pendingQuestions.clear(terminalID: terminal.id) }
