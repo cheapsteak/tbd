@@ -19,8 +19,8 @@ tbd supervise shift close
 tbd supervise status [--json]
 tbd supervise mode <project> [<mode-name>]
 tbd supervise project <list|create|delete|move> …
-tbd supervise anoint <project> --terminal <id>
-tbd supervise release <project>
+tbd supervise appoint <project> --terminal <id>
+tbd supervise relieve <project>
 tbd supervise automation <default|set|list> …
 tbd supervise sweep customize <project>
 
@@ -44,7 +44,7 @@ append-only **ledger** the daemon writes.
 
 Each project's supervisor is either the **hosted desk** — a session TBD
 spawns lazily and disposes at shift close (the default; zero setup) — or an
-existing session the operator **anoints** into the role. Both stand on the
+existing session the operator **appoints** into the role. Both stand on the
 project's **playbook** (`supervision.md`, installed as a standing prompt
 layer) and run under an operator-selected **mode**, which is conduct prose in
 that playbook.
@@ -70,7 +70,7 @@ Operating (human operators):
 - **status** – switch, shift, and per-project supervision state
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
-- **anoint / release** – bind or unbind an operator-chosen supervisor
+- **appoint / relieve** – bind or unbind an operator-chosen supervisor
 - **automation** – which projects generate cases at all
 - **sweep customize** – take ownership of a project's sweep program
 
@@ -103,7 +103,7 @@ shift opened (2026-08-02, 3 projects in automation)
 $ tbd supervise status
 supervision: on   shift: open since 22:04
 acme-platform   mode autonomous   supervisor: hosted desk   last sweep report 2m ago
-tbd             mode attended     supervisor: anointed (⌁ main session)   last sweep report 4m ago
+tbd             mode attended     supervisor: appointed (⌁ main session)   last sweep report 4m ago
 
 # Read the facts the way the sweep program does
 $ tbd supervise readout --project acme-platform
@@ -112,8 +112,8 @@ $ tbd supervise readout --project acme-platform
 $ tbd supervise ledger --project acme-platform --since 22:00
 
 # Make your current pairing session the project's supervisor for the day
-$ tbd supervise anoint tbd --terminal t42
-anointed: session t42 supervises "tbd" (relaunched with playbook layer)
+$ tbd supervise appoint tbd --terminal t42
+appointed: session t42 supervises "tbd" (relaunched with playbook layer)
 ```
 
 ## tbd supervise on / off
@@ -136,7 +136,7 @@ tbd supervise shift close
 ```
 
 Finalizes the shift's account, requests a closing note from each live
-supervisor, disposes hosted desks (anointed supervisors are never disposed),
+supervisor, disposes hosted desks (appointed supervisors are never disposed),
 and — with the switch still on — opens a fresh shift in the same gesture.
 
 ## tbd supervise status
@@ -174,14 +174,14 @@ Declares multi-repo projects and moves repos between them. A repo in no
 declared project is its own singleton project with its repo name — most
 fleets never need these commands.
 
-## tbd supervise anoint / release
+## tbd supervise appoint / relieve
 
 ```
-tbd supervise anoint  <project> --terminal <id>
-tbd supervise release <project>
+tbd supervise appoint  <project> --terminal <id>
+tbd supervise relieve <project>
 ```
 
-`anoint` binds an existing TBD-managed session as the project's supervisor,
+`appoint` binds an existing TBD-managed session as the project's supervisor,
 replacing the hosted desk. It is an operation, not a registry write: it is
 refused with the reason unless the session's agent kind is
 supervisor-capable (Claude Code today), waits for the session to be idle,
@@ -189,10 +189,10 @@ then relaunches it — same conversation, nothing lost — with the playbook
 layer installed and its supervisor identity injected. The pane visibly
 restarts for a moment.
 
-`release` is the symmetric relaunch without either, returning the session to
+`relieve` is the symmetric relaunch without either, returning the session to
 ordinary life; the hosted desk resumes lazily on the next briefing need.
 Both write the binding into `supervision.json` and a lifecycle line into the
-ledger. An anointed supervisor outlives shifts and is never disposed,
+ledger. An appointed supervisor outlives shifts and is never disposed,
 recycled, or restarted by TBD; if it goes dark or its session disappears,
 TBD notifies the operator and does not silently substitute the hosted desk.
 
@@ -387,7 +387,7 @@ that keep the record one hop from off-record threads ("question posted to
   contract: retry when supervision resumes. Stable; scripts may branch on it.
 - **other nonzero** – refusal or failure, with the condition named on
   stderr: usage errors, unmet preconditions, rate or size bounds, an
-  unsupported agent kind at `anoint`. Codes other than 0 and 75 are not yet
+  unsupported agent kind at `appoint`. Codes other than 0 and 75 are not yet
   pinned as contract; branch on 0 / 75 / nonzero, not on specific values.
 
 ## Files
@@ -405,7 +405,7 @@ that keep the record one hop from off-record threads ("question posted to
 ## Environment
 
 - `TBD_PROJECT` – injected by TBD into supervisor sessions at spawn or
-  anointment; carries the acting verbs' ambient identity. Not set by hand.
+  appointment; carries the acting verbs' ambient identity. Not set by hand.
 
 ## See also
 

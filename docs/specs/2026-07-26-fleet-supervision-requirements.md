@@ -115,7 +115,7 @@ and become a contract that migration and future change must respect.
   sessions
   do the judging is the design's choice, provided a quiet fleet costs nothing and the
   account stays whole. A project's supervisor may be the TBD-hosted desk (the shipped
-  default) or an existing session the operator anoints into the role (design §9); the
+  default) or an existing session the operator appoints into the role (design §9); the
   guarantees — identity, standing conduct, briefing delivery, the daemon-written record —
   are identical in either arrangement.
 - **P0-2 [both]** As an operator, I want a single supervision switch — on / off —
@@ -161,7 +161,7 @@ and become a contract that migration and future change must respect.
   steerable, never a black box running somewhere I can't see.
 
   This holds in both supervisor arrangements: the hosted desk is spawned as exactly such a
-  session, and an anointed supervisor is by definition one already — a TBD-managed session
+  session, and an appointed supervisor is by definition one already — a TBD-managed session
   in a tab the operator can open, watch, and type into (design §9).
 - **P0-5 [both]** As the daemon, I want to answer what any managed agent is doing right now —
   working, idle, awaiting input, rate-limited, gone — cheaply enough to ask about every agent

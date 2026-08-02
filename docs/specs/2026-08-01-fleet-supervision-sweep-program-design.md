@@ -167,7 +167,7 @@ does, synchronously:
 4. **Deliver.** A surviving briefing goes to the project's supervisor: the
    daemon
    prepends the compiled **header** — the active mode's name and any pending
-   conduct delta (§8) — resolves the supervisor (the operator's anointed
+   conduct delta (§8) — resolves the supervisor (the operator's appointed
    session where a binding stands, otherwise the hosted desk, spawned lazily
    if the project has none this shift — design §5, §9),
    delivers through the agent-kind adapter, and writes the ledger's
@@ -421,14 +421,14 @@ What the program is, wherever it runs from:
 
 The playbook — every mode description included — is installed as a
 standing instruction layer when the desk session is launched, through the
-agent-kind adapter: at spawn for a hosted desk, at the anointment relaunch
-for an operator-anointed supervisor (design §9) — the same layer, installed
+agent-kind adapter: at spawn for a hosted desk, at the appointment relaunch
+for an operator-appointed supervisor (design §9) — the same layer, installed
 at the same kind of moment. Each delivered briefing then carries the **active
 mode's
 name** in its compiled header (§3) — a name from `supervision.json`'s
 declared list (design §8), never text extracted from the file. The desk
 holds the project's whole conduct for the life of its session; the header
-tells it which posture is selected right now. For an anointed supervisor the
+tells it which posture is selected right now. For an appointed supervisor the
 layer is present, never alone: the session also carries whatever context and
 instructions the operator chose it for (design §9).
 
@@ -473,8 +473,8 @@ governed this act" is answerable per action against a versioned file.
 with a chosen standing layer and environment — fresh at spawn, resuming the
 same conversation every time after — is the whole of the mechanism, and it
 is exercised four ways: the install at desk spawn, the
-anointment relaunch that adds the layer and the injected identity, the
-release relaunch that removes both, and the conduct reload above that
+appointment relaunch that adds the layer and the injected identity, the
+relieving relaunch that removes both, and the conduct reload above that
 refreshes the layer's value after a playbook edit (design §9). Nothing
 conduct-shaped travels any other way.
 
@@ -483,7 +483,7 @@ adapter nicety.** Standing-layer install at (re)launch is one of the four
 requirements of the supervisor-capability qualification (design §9, the
 normative home; resume without conversation loss, briefing delivery, and CLI
 reachability for the verbs are the others). An agent kind without the
-mechanism cannot run a supervisor at all — hosted or anointed; anointing a
+mechanism cannot run a supervisor at all — hosted or appointed; appointing a
 session of such a kind is refused at the gesture with the reason — so there
 is exactly one conduct-delivery story, this section's. The Claude adapter
 delivers the playbook as a named layer in
@@ -684,9 +684,9 @@ refusal means.
   mode switch changes only the name in the next delivery's header; a
   playbook edit produces a superseding delta in the next header; a conduct
   reload resumes the same session with the refreshed layer and clears the
-  delta; anointment resumes the same conversation with the layer added and
-  `TBD_PROJECT` injected, and release resumes it with both removed (design
-  §9); anointing a session whose agent kind lacks the supervisor-capability
+  delta; appointment resumes the same conversation with the layer added and
+  `TBD_PROJECT` injected, and relief resumes it with both removed (design
+  §9); appointing a session whose agent kind lacks the supervisor-capability
   qualification is refused at the gesture with the reason.
 
 ## 13. Dated source note: standing-instruction mechanics per agent kind

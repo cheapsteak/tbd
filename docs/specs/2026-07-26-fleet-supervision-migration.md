@@ -322,20 +322,20 @@ only — no slice needs a later one:
   conduct hashes. Then per-project briefing delivery, supervisors as
   first-class sessions **one per project** — the hosted desk spawned lazily
   on that project's first case and disposed at shift close, or the operator's
-  anointed session where a binding stands (design §9) — the compiled
+  appointed session where a binding stands (design §9) — the compiled
   **desk→project
   addressing check** (a verb whose target is outside the calling desk's project
   is refused as a routing error — correctness, not authority, design §3; the
   check reads the project name injected into the desk's spawn environment,
-  or into the anointment relaunch's environment,
-  design §5), the **anoint/release gestures** (design §9, §10): the
+  or into the appointment relaunch's environment,
+  design §5), the **appoint/relieve gestures** (design §9, §10): the
   supervisor-capability qualification check refusing unqualified agent kinds
   at the gesture with the reason, the idle-waiting relaunch that resumes the
   same conversation with the layer installed and `TBD_PROJECT` injected, the
-  symmetric release, the `supervisors` binding in `supervision.json` (design
+  symmetric relief, the `supervisors` binding in `supervision.json` (design
   §8) with lifecycle ledger lines for both gestures, the hosted default
   standing down while a binding stands, and the forked dead-man remediation
-  (hosted: replacement within the reroll budget; anointed: operator
+  (hosted: replacement within the reroll budget; appointed: operator
   notification only, never an automatic restart; a dangling binding: loud
   anomaly, no silent takeover),
   `terminal.send` delivery for
