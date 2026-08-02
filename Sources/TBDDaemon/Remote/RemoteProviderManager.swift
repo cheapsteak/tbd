@@ -394,7 +394,8 @@ public actor RemoteProviderManager {
                 ),
                 remediationLabel: h.remediation?.label,
                 remediationCommand: h.remediation?.command,
-                lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[config.name])
+                lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[config.name],
+                freshnessUnreadable: snapshotFreshnessUnreadable.contains(config.name))
         }
     }
 
@@ -405,13 +406,14 @@ public actor RemoteProviderManager {
     /// stale.
     func hasStaleSnapshot(provider name: String) async -> Bool {
         await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
-        // Unreadable freshness fails CLOSED. The fail-open branch below is
-        // justified only by positive knowledge that no snapshot was ever
-        // accepted; a failed read carries no such proof, so it must not be
-        // allowed to look like one.
-        if snapshotFreshnessUnreadable.contains(name) { return true }
-        guard lastSuccessfulSnapshotAt[name] != nil else { return false }
-        return health[name]?.state != .ok
+        // Same rule the wire DTO and every UI call site use, so the mutation
+        // gate and the display projection cannot disagree. Fails open only on
+        // positive knowledge that no snapshot was ever accepted; an unreadable
+        // read carries no such proof and gates.
+        return RemoteProviderStatus.isStaleSnapshot(
+            health: health[name]?.state ?? .ok,
+            lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[name],
+            freshnessUnreadable: snapshotFreshnessUnreadable.contains(name))
     }
 
     /// Correlates a locally-spawned `attach` exit (the app execs the provider

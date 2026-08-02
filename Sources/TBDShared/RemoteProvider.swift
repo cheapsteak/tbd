@@ -284,21 +284,67 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
     /// the mirror. Nil means this manager has not observed (or recovered
     /// from the mirror) a successful snapshot yet.
     public let lastSuccessfulSnapshotAt: Date?
+    /// True when the daemon could not READ the persisted freshness row, so it
+    /// cannot say whether a successful snapshot exists. Distinct from a nil
+    /// `lastSuccessfulSnapshotAt`, which by itself cannot tell "confirmed
+    /// never" apart from "unknown" — and only the former is safe to fail open
+    /// on. Carried on the wire so this DTO reaches the same verdict as the
+    /// daemon's authoritative `RemoteProviderManager.hasStaleSnapshot`; the two
+    /// disagreeing is how cached rows once kept rendering as confidently
+    /// running in exactly the case the daemon knew the least.
+    public let freshnessUnreadable: Bool
     public init(config: RemoteProviderConfig, describe: ProviderDescribe?, health: ProviderHealth,
                 errorMessage: String?, remediationLabel: String?, remediationCommand: String?,
-                lastSuccessfulSnapshotAt: Date? = nil) {
+                lastSuccessfulSnapshotAt: Date? = nil, freshnessUnreadable: Bool = false) {
         self.config = config; self.describe = describe; self.health = health
         self.errorMessage = errorMessage
         self.remediationLabel = remediationLabel; self.remediationCommand = remediationCommand
         self.lastSuccessfulSnapshotAt = lastSuccessfulSnapshotAt
+        self.freshnessUnreadable = freshnessUnreadable
     }
 
-    /// True only when the manager has a prior successful inventory that is
-    /// now known to be stale. This deliberately differs from a provider that
-    /// has never produced a snapshot, for which there are no cached rows to
-    /// project or stale controls to suppress.
+    private enum CodingKeys: String, CodingKey {
+        case config, describe, health, errorMessage, remediationLabel, remediationCommand
+        case lastSuccessfulSnapshotAt, freshnessUnreadable
+    }
+
+    /// Hand-written so `freshnessUnreadable` can default when absent: a
+    /// payload from a daemon predating the field must still decode, and
+    /// Swift's synthesized `init(from:)` ignores property default values.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        config = try c.decode(RemoteProviderConfig.self, forKey: .config)
+        describe = try c.decodeIfPresent(ProviderDescribe.self, forKey: .describe)
+        health = try c.decode(ProviderHealth.self, forKey: .health)
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        remediationLabel = try c.decodeIfPresent(String.self, forKey: .remediationLabel)
+        remediationCommand = try c.decodeIfPresent(String.self, forKey: .remediationCommand)
+        lastSuccessfulSnapshotAt = try c.decodeIfPresent(Date.self, forKey: .lastSuccessfulSnapshotAt)
+        freshnessUnreadable = try c.decodeIfPresent(Bool.self, forKey: .freshnessUnreadable) ?? false
+    }
+
+    /// True when there is cached state on screen that must stop being
+    /// presented as current. Two ways to get there: a prior successful
+    /// inventory that is now stale, or a freshness row the daemon could not
+    /// read at all. A provider confirmed never to have snapshotted is
+    /// deliberately excluded — there are no cached rows to project or stale
+    /// controls to suppress.
     public var hasStaleSnapshot: Bool {
-        health != .ok && lastSuccessfulSnapshotAt != nil
+        Self.isStaleSnapshot(
+            health: health,
+            lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt,
+            freshnessUnreadable: freshnessUnreadable)
+    }
+
+    /// The one definition of "stale snapshot", shared by this DTO and the
+    /// daemon's `RemoteProviderManager.hasStaleSnapshot(provider:)`. It lives
+    /// here as a static so the display projection and the RPC mutation gate
+    /// cannot answer differently: when they did, the mutation gate failed
+    /// closed while the session list went on rendering cached rows as running.
+    public static func isStaleSnapshot(
+        health: ProviderHealth, lastSuccessfulSnapshotAt: Date?, freshnessUnreadable: Bool
+    ) -> Bool {
+        health != .ok && (lastSuccessfulSnapshotAt != nil || freshnessUnreadable)
     }
 
     // Provider names are already the unique identity used everywhere else in

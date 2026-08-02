@@ -31,6 +31,19 @@ Successful non-list verbs do not clear inventory degradation; only a complete
 full-list refresh can re-establish authoritative state. Provider errors shown
 in the UI are bounded and redact the known oversized/truncated payload shape.
 
+One "stale snapshot" rule serves both the mutation gate and the display
+projection, and it lives in one place (`RemoteProviderStatus.isStaleSnapshot`)
+that the daemon actor and the wire DTO both call. Two same-named
+implementations had already drifted once: the gate refused mutations while the
+session list went on rendering cached rows as running.
+
+Accepted tradeoff: `health` is a single per-provider slot shared by every verb,
+so a transient non-`list` failure (a `log`, a `send`) marks the provider
+degraded and therefore gates mutations and demotes rows until the next
+successful poll, up to one poll interval later. It self-heals and errs toward
+blocking, so it is UX noise rather than a safety hole. Separating list-health
+from verb-health is the real fix and is deliberately out of scope here.
+
 Fail direction is decided by what the daemon can prove, not by convenience.
 "No successful snapshot was ever recorded" is positive knowledge — the mirror
 was never authoritative, so there is nothing to misrepresent and mutations

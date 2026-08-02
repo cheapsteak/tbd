@@ -635,6 +635,11 @@ struct RemoteProviderManagerTests {
         // No timestamp is claimed — the daemon must not invent an age it
         // could not read.
         #expect(status?.lastSuccessfulSnapshotAt == nil)
+        // The wire DTO must reach the SAME verdict as the actor. When these
+        // disagreed, `handleRemoteSessions` skipped demotion and cached rows
+        // kept rendering as running while mutations were being refused.
+        #expect(status?.freshnessUnreadable == true)
+        #expect(status?.hasStaleSnapshot == true)
     }
 
     /// Tier 1. The unreadable state is not sticky: it is a cache of one failed
@@ -664,6 +669,8 @@ struct RemoteProviderManagerTests {
         let status = await m.providerStatuses().first
         #expect(status?.health == .ok)
         #expect(status?.lastSuccessfulSnapshotAt == Date(timeIntervalSince1970: 1_700_000_500))
+        #expect(status?.freshnessUnreadable == false)
+        #expect(status?.hasStaleSnapshot == false)
     }
 
     @Test func failureAfterManagerRestartRecoversLastSuccessTimeFromMirror() async throws {

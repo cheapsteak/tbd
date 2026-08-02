@@ -145,6 +145,42 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(raw?.agentState == .working)
     }
 
+    /// The display projection and the mutation gate must agree even when the
+    /// persisted freshness row is unreadable. They previously did not: the gate
+    /// failed closed off the actor's own state while `remote.sessions` consulted
+    /// the DTO, whose `lastSuccessfulSnapshotAt` is nil after a failed read — so
+    /// cached rows kept rendering as confidently `running` in exactly the case
+    /// the daemon knew the least. Dropping `tbd_meta` makes the SELECT throw.
+    @Test func sessionsDemoteCachedRowsWhenFreshnessRowIsUnreadable() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running, agentState: .working)],
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs,
+            runner: FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable")
+            ]),
+            registryURL: registryURL)
+        await manager.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        let r = router(manager: manager)
+
+        let response = await call(r, "remote.sessions")
+        let result = try response.decodeResult(RemoteSessionsResult.self)
+        let projected = try #require(result.sessions.first?.payload)
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+
+        // And the gate the projection is supposed to match still refuses.
+        let stop = await call(r, "remote.stop", #"{"provider":"fake","sessionID":"a"}"#)
+        #expect(stop.success == false)
+        #expect(stop.error?.contains("inventory is stale") == true)
+    }
+
     @Test func staleInventoryBlocksMutationsButKeepsLogInspectionAvailable() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
