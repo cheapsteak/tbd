@@ -35,7 +35,10 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
         case .invalidOperation(let detail):
             return detail
         case .archiveUnsafe(let detail):
-            return "Archive blocked: \(detail)"
+            // The recovery belongs in the message: the app archives without
+            // force and has no override control, so this string is a GUI
+            // user's only route to the escape hatch.
+            return "Archive blocked: \(detail). To discard this content anyway, run `tbd worktree archive <name> --force`."
         case .archiveRemovalFailed(let detail):
             return "Archive removal failed: \(detail)"
         case .worktreePathAlreadyExists(let path):
