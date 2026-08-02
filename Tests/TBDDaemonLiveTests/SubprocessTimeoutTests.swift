@@ -15,7 +15,34 @@ import TestSupport
 /// both suites map the same `runBoundedProcess` machinery to different error
 /// types, and `SubprocessTimeoutStarvationTests` covers the production
 /// `SubprocessWatchdog` on a real clock.
-@Suite("Subprocess timeout / kill path", .clockDriven)
+///
+/// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Do not
+/// "tidy" this back to the shared trait — the two halves below are why.
+///
+/// 1. **60 s is this suite's detector, not a hang guard.**
+///    `runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen` and
+///    `runExternalCommandReturnsWithoutWaitingForGrandchildEOF` prove promptness
+///    *structurally*: their grandchildren hold the pipe write ends open for 120 s
+///    and 30 s of REAL time, and the only thing that distinguishes "returned
+///    without waiting for EOF" from "regressed into an EOF-waiting drain" is that
+///    the latter blocks past the limit. At 240 s a regressed 120 s drain finishes
+///    inside the budget and the test goes green — mutation-verified proof,
+///    silently disarmed, with nothing going red to tell you.
+/// 2. **It does not need the raised budget.** `.clockDriven` was raised to
+///    4 minutes to absorb the arming latency of the fast parallel pass, whose
+///    ~4536-test population is what makes a `TestClock` handshake take tens of
+///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
+///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
+///    machine, so real arming latency here is milliseconds.
+///
+/// One residual, stated rather than glossed: `waitForSuspension`'s default is
+/// now 45 s, so a test that waited **twice** would need 90 s and would trip this
+/// 60 s limit, where at the old 15 s default two waits cost only 30 s. No test
+/// here chains two — the suite's two `advanceWhenSuspended` sites are in
+/// different `@Test`s, one each — and in the quiet pass a healthy handshake
+/// returns in milliseconds, so only a genuine hang ever pays the timeout, which
+/// is exactly what this limit is here to catch.
+@Suite("Subprocess timeout / kill path", .timeLimit(.minutes(1)))
 struct SubprocessTimeoutTests {
 
     /// Far enough out that the real watchdog cannot reach it inside the suite's
@@ -60,7 +87,7 @@ struct SubprocessTimeoutTests {
         // original detectOrphanedClaudeProcesses call site, never). Lock down
         // that a 100KB emitter completes and returns its FULL output. With the
         // deadline virtual and never advanced, a regression presents as a hang
-        // caught by `.clockDriven` instead of being masked as a timeout.
+        // caught by the suite's limit instead of being masked as a timeout.
         let bytes = 102_400
         let out = try await TmuxManager.runExternalCommand(
             executable: "/bin/sh",
@@ -84,7 +111,7 @@ struct SubprocessTimeoutTests {
         // resolves after 600 VIRTUAL seconds while the grandchild holds the pipe
         // for 120 REAL ones, so returning at all proves nothing waited for EOF.
         // A regressed EOF-waiting drain would block ~120 real seconds and trip
-        // `.clockDriven`'s 60 s limit. This replaces a wall-clock upper bound
+        // the suite's 60 s limit. This replaces a wall-clock upper bound
         // RAISED TWICE after measured breaches (4s → 15s → 60s, the last at
         // 19.2s on a 2-core runner) — the tolerance-widening shape hygiene rule
         // 2 forbids.

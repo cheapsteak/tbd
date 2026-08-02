@@ -37,18 +37,65 @@ jobs:
     steps:
       - name: Determine author trust
         id: trust
-        # Trusted = branch pushed to this repo, OR the author is a
-        # collaborator/member/owner. Only the string `true`/`false` reaches the
-        # shell — no PR-controlled text is interpolated — so this is safe under
-        # pull_request_target. Untrusted-fork code is never checked out or run
-        # (every step below that touches PR content is gated on trusted == true).
+        # Trusted = the branch lives in this repo, OR the author has PUSH access to it.
+        #
+        # This deliberately checks effective permission rather than the PR's
+        # `author_association`. `COLLABORATOR` is granted to anyone invited to
+        # collaborate at ANY level — including read-only and triage — and `MEMBER`
+        # would cover every org member if this repo ever moves under an org. Since a
+        # trusted author gets their fork's code executed in this job (see the
+        # allow-unsafe-pr-checkout comment below and docs/pr-review-gate.md), the gate
+        # must admit only people who could already push a branch here and run this
+        # workflow anyway. Otherwise a triage-level collaborator gains code execution
+        # alongside CLAUDE_CODE_OAUTH_TOKEN and the reviewer App token.
+        #
+        # NOTE: on a PUBLIC repo this endpoint returns "read" for a complete stranger
+        # rather than 404, so `read` and `none` must both be treated as untrusted —
+        # only admin/maintain/write may pass. Verified in Actions: the default
+        # GITHUB_TOKEN reads this endpoint fine with just `contents: read`
+        # (zionts -> write, octocat -> read), so no App token is needed here and the
+        # reviewer App is still minted only after the gate passes.
+        #
+        # Injection safety: no PR-controlled text is interpolated into the script.
+        # The author login arrives via env (and GitHub logins are [A-Za-z0-9-] only),
+        # and only the literal strings true/false are written to $GITHUB_OUTPUT.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          echo "trusted=${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}" >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+
+          # Probe unconditionally — even for same-repo PRs, where the result does not
+          # affect the verdict — so that every run logs whether the App token can read
+          # collaborator permissions at all. A same-repo PR therefore proves the probe
+          # works before any fork PR has to depend on it.
+          if probe_out="$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" --jq '.permission' 2>&1)"; then
+            perm="$probe_out"
+          else
+            perm="probe-failed"
+            echo "::warning::Could not read collaborator permission for $PR_AUTHOR: $probe_out"
+            echo "::warning::Until this resolves, fork PRs are all treated as untrusted (fail closed). Same-repo branches are unaffected."
+          fi
+          echo "Permission probe for '$PR_AUTHOR' on '$REPO': $perm (same-repo branch: $SAME_REPO)"
+
+          if [ "$SAME_REPO" = "true" ]; then
+            trusted=true
+          else
+            case "$perm" in
+              admin|maintain|write) trusted=true ;;
+              *)                    trusted=false ;;
+            esac
+          fi
+
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
+          echo "Trusted: $trusted"
 
       - name: Block untrusted fork
         if: steps.trust.outputs.trusted != 'true'
         run: |
-          echo "::error::Claude review is required, but this PR is from an untrusted fork and cannot be auto-reviewed (the review needs repository secrets that are withheld from fork runs). Push the branch to this repository to have it reviewed. No untrusted code is executed here."
+          echo "::error::Claude review is required, but this PR is from a fork whose author does not have push access to this repository, so it cannot be auto-reviewed (the review executes the checked-out branch's tooling alongside repository secrets). A maintainer can push the branch to this repository to have it reviewed. No untrusted code is executed here."
           exit 1
 
       - name: Checkout PR head
@@ -60,7 +107,23 @@ jobs:
           # base branch for `git diff origin/main...HEAD` (a shallow clone made
           # that impossible — PR #434 diagnostics), and git log/blame for
           # premise-audit checks. The repo packs to ~10 MB; the cost is seconds.
+          #
+          # NOT sufficient on its own for a FORK PR: the head SHA is not reachable
+          # from any base-repo branch, so checkout fetches it as a targeted fetch
+          # and the clone stays shallow regardless of this value. The "Ensure a
+          # merge-base" step below repairs that — don't delete it thinking
+          # fetch-depth covers it.
           fetch-depth: 0
+          # actions/checkout v7.0.0 (backported to the floating v4 tag in v4.4.0,
+          # 2026-07-20) refuses to check out a fork PR head under
+          # pull_request_target unless this opt-in is set. Its check is purely
+          # event_name + head.repo != base.repo — it cannot see the author-trust
+          # step above, so without this EVERY fork PR fails the required
+          # claude-review check even from a COLLABORATOR (PR #545). This step is
+          # already gated on trusted == true, so the opt-in restores exactly the
+          # pre-v4.4.0 behavior and adds no exposure. Untrusted forks are still
+          # blocked before reaching here. See docs/pr-review-gate.md.
+          allow-unsafe-pr-checkout: true
 
       - name: Reset any pre-committed verdict file
         if: steps.trust.outputs.trusted == 'true'
@@ -71,6 +134,42 @@ jobs:
         # killed or timed out before writing its own, sail through the gate.
         run: rm -f "$GITHUB_WORKSPACE/claude-verdict.txt"
 
+      - name: Ensure a merge-base with the base branch
+        if: steps.trust.outputs.trusted == 'true'
+        # `fetch-depth: 0` does NOT give a fork PR full history. The head SHA
+        # isn't reachable from any base-repo branch, so checkout fetches just
+        # that commit and the clone stays shallow — `origin/<base>` ends up with
+        # a single commit and no common ancestor with HEAD.
+        #
+        # Measured on PR #545, the first fork PR through this gate:
+        #   git rev-parse --is-shallow-repository -> true
+        #   git diff origin/main...HEAD -> fatal: no merge base
+        # The reviewer silently fell back to `gh pr diff`, which still yields a
+        # diff but loses `git log`/`git blame` — exactly what the premise-audit
+        # instructions in the prompt below depend on. Same-repo PRs were never
+        # affected, which is why this survived until the gate admitted forks.
+        #
+        # `--unshallow` errors on an already-complete repo, hence the guard.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -uo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            echo "Shallow clone (expected on a fork PR) — unshallowing."
+            git fetch --no-tags --unshallow origin
+          else
+            echo "Clone already complete — nothing to unshallow."
+          fi
+
+          # Self-reporting check: if this ever regresses, the run says so rather
+          # than the reviewer quietly degrading to gh-pr-diff-only again.
+          if merge_base="$(git merge-base "origin/$BASE_REF" HEAD 2>&1)"; then
+            echo "Merge base with origin/$BASE_REF: $merge_base"
+          else
+            # git merge-base exits 1 with no output on unrelated histories.
+            echo "::warning::No merge base with origin/$BASE_REF (${merge_base:-unrelated histories}). The reviewer will fall back to \`gh pr diff\` and lose git log/blame for premise-audit checks."
+          fi
+
       - name: Restore review hooks from the base branch
         if: steps.trust.outputs.trusted == 'true'
         # The Stop hook + its settings.json must come from the BASE branch, not the PR
@@ -79,9 +178,8 @@ jobs:
         # (ENOENT) — this blocked pre-existing fork PRs; (2) a PR must not be able to
         # neuter the gate that reviews it. github.event.pull_request.base.ref is the
         # base branch under pull_request_target; FETCH_HEAD is its tip after the fetch.
-        # No --depth=1 on this fetch: a shallow fetch into the now-complete clone
-        # (checkout uses fetch-depth: 0) would write shallow grafts and break the
-        # merge-base the reviewer relies on for `git diff origin/main...HEAD`.
+        # No --depth=1 on this fetch: it would re-introduce shallow grafts and undo
+        # the unshallow the previous step just performed.
         run: |
           git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
           rm -rf "$GITHUB_WORKSPACE/.github/workflows/claude-review-hooks"
@@ -139,6 +237,8 @@ jobs:
             Default-off flag requirement: a PR that introduces NEW autonomous or destructive behavior — anything that acts without a user gesture (background sweeps, timers, "auto-" anything), kills processes, deletes or mutates persisted state, or sends input to sessions — or that wholesale-replaces a load-bearing path (rendering, input routing, persistence) must gate that behavior behind a flag that defaults to OFF (see the CLAUDE.md section "Large or risky new behavior ships behind a default-off flag"). An ungated introduction with no justification in the PR description is High severity for autonomous or destructive behavior, Medium for a wholesale path replacement. A written justification can satisfy this (e.g. the behavior only runs on an explicit user action, or it extends behavior already behind a flag). Do not demand flags for bug fixes, small additive UI, refactors, changes to already-gated behavior, or DB schema migrations themselves (they cannot be flag-gated; the CLAUDE.md migration rules govern them) — flag sprawl is its own defect.
 
             TUI screen-scraping is a High-severity defect. REJECT any PR that adds logic parsing captured terminal screen text (tmux capture-pane output, pane text, composer lines) to infer agent state — e.g. matching TUI glyphs like ❯, prompts, placeholder or status strings. Agent state must come from machine interfaces (Claude Code hooks, transcript JSONL, control mode, exit codes). Likewise treat as High severity any file added to the `excluded:` lists of the `no_tui_scraping_literals` or `capture_pane_allowlist` rules in .swiftlint.yml without a compelling justification in the PR description. See the CLAUDE.md section "No TUI screen-scraping".
+
+            Public repo, multi-tenant product. This repository is public and TBD is used by people across different organizations. Treat as High severity any change that checks private context into the tree — real employer, org, repo, host, account, person, or ticket names, internal URLs, machine-specific paths, or another organization's product features, roadmaps, or task descriptions — in code, docs, tests, or fixtures; the convention is `acme`/`acme-prod` placeholders. Treat as Medium severity any feature, default, hardcoded value, or doc framed around one repo, one project, or one individual's setup rather than generalizing across users and orgs. See the CLAUDE.md section "Public repo, multi-tenant product".
 
             INVESTIGATION REQUIREMENTS for guard/safety-shaped changes. Apply this section when the PR adds or modifies a guard, veto, safety check, gate, or interceptor whose failure could lose user data or state, or let an unsafe action proceed — NOT routine logging, telemetry, or UI observers. For such changes the dangerous bug is usually not in the diff: it is a false belief about unchanged code. Verify the premises, not just the logic built on them. This is targeted verification of the load-bearing premises (typically a handful), not an exhaustive audit — keep it within a fraction of your turn budget.
 

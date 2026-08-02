@@ -31,6 +31,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
     var promotedToRepoID: String?  // set only on promoted scratch rows
     var pr_number: Int?  // number of the PR this worktree was created from, nil otherwise
+    // Contents checked out from an unvetted ref (fork PR head); nil on rows
+    // written before v67, which read as false.
+    var foreign_head: Bool?
     var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
     var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
     var pinSortOrder: Int?  // sidebar dock ordering; nil = falls back to pinnedAt
@@ -61,6 +64,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
         self.pr_number = wt.prNumber
+        self.foreign_head = wt.foreignHead
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
         self.pinnedAt = wt.pinnedAt
         self.pinSortOrder = wt.pinSortOrder
@@ -121,6 +125,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
             prStatus: pr,
             prNumber: pr_number,
+            foreignHead: foreign_head ?? false,
             pinnedAt: pinnedAt,
             pinSortOrder: pinSortOrder
         )
@@ -362,14 +367,28 @@ public struct WorktreeStore: Sendable {
     /// note `repoID: nil` alone means "no repo filter" (every repo plus
     /// scratch), not "scratch only"; `scratchOnly` is the only way to get
     /// scratch-only rows.
-    /// This composes with `status`: all filters are applied when given together.
+    /// When `nameQuery` is non-nil and not whitespace-only, restricts to rows
+    /// whose folder `name` OR `displayName` *contains* the query
+    /// (case-insensitive substring, not a prefix match). A blank or
+    /// whitespace-only query means "no filter". LIKE metacharacters (`%`, `_`)
+    /// and the escape character in the query are escaped, so they match
+    /// literally rather than acting as wildcards.
+    ///
+    /// Case-insensitivity comes from SQLite's built-in `LIKE`, which folds
+    /// **ASCII only** — a non-ASCII query matches case-sensitively. Accepted:
+    /// worktree names are generated ASCII slugs.
+    ///
+    /// This composes with `status`: all filters are applied when given
+    /// together, and all of them are applied *before* `limit`/`offset` so
+    /// pagination pages over the matching set.
     public func list(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         excludeArchived: Bool = false,
         scratchOnly: Bool = false,
         limit: Int? = nil,
-        offset: Int? = nil
+        offset: Int? = nil,
+        nameQuery: String? = nil
     ) async throws -> [Worktree] {
         try await writer.read { db in
             var request = WorktreeRecord.all()
@@ -385,6 +404,14 @@ public struct WorktreeStore: Sendable {
             if excludeArchived {
                 request = request.filter(Column("status") != WorktreeStatus.archived.rawValue)
             }
+            if let pattern = Self.likePattern(for: nameQuery) {
+                // GRDB's `.like()` operator has no escape-character overload,
+                // so the ESCAPE clause is spelled out as raw SQL. Arguments
+                // stay bound (no interpolation of user text into SQL).
+                request = request.filter(sql: """
+                    (name LIKE ? ESCAPE '\\' OR displayName LIKE ? ESCAPE '\\')
+                    """, arguments: [pattern, pattern])
+            }
             if status == .archived {
                 request = request.order(Column("archivedAt").desc)
             } else {
@@ -395,6 +422,25 @@ public struct WorktreeStore: Sendable {
             }
             return try request.fetchAll(db).compactMap { $0.toModel() }
         }
+    }
+
+    /// Build the `%…%` LIKE pattern for a user-typed name query, or nil when
+    /// the query is absent/blank (== no filter).
+    ///
+    /// The escaping is the load-bearing part: without it a typed `%` is a
+    /// wildcard that matches every row, and `_` matches any single character.
+    /// The escape character itself must be escaped first, otherwise a trailing
+    /// `\` would escape the closing `%` we append. `internal` so it is directly
+    /// unit-testable.
+    static func likePattern(for nameQuery: String?) -> String? {
+        guard let raw = nameQuery else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let escaped = trimmed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        return "%\(escaped)%"
     }
 
     /// Get a worktree by ID.
@@ -549,6 +595,19 @@ public struct WorktreeStore: Sendable {
             }
             record.branch = branch
             try record.update(db)
+        }
+    }
+
+    /// Record that this worktree's contents were checked out from an unvetted
+    /// ref (a PR head, whose commits may come from a third-party fork).
+    /// One-way: only ever sets the flag to `true`. Nothing clears it, because
+    /// the contents never stop being foreign-authored.
+    public func markForeignHead(id: UUID) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET foreign_head = ? WHERE id = ?",
+                arguments: [true, id.uuidString]
+            )
         }
     }
 

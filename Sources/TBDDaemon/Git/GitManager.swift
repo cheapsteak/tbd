@@ -213,6 +213,22 @@ public struct GitManager: Sendable {
         return trimmed
     }
 
+    /// Returns the committer date for a ref.
+    public func commitDate(repoPath: String, ref: String = "HEAD") async throws -> Date {
+        let output = try await run(
+            arguments: ["show", "-s", "--format=%cI", ref],
+            at: repoPath
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let date = ISO8601DateFormatter().date(from: output) else {
+            throw GitError(
+                command: "git show -s --format=%cI \(ref)",
+                exitCode: 0,
+                stderr: "git returned an invalid commit date: \(output)"
+            )
+        }
+        return date
+    }
+
     /// Returns `true` if the repo at `path` has at least one commit (HEAD resolves).
     public func hasCommits(path: String) async -> Bool {
         (try? await run(arguments: ["rev-parse", "--verify", "HEAD"], at: path)) != nil

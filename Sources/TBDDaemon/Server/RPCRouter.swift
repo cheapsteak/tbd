@@ -191,6 +191,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeRerunPreSession(request.paramsData)
             case RPCMethod.worktreeRevive:
                 return try await handleWorktreeRevive(request.paramsData)
+            case RPCMethod.worktreeReviveConversationFresh:
+                return try await handleWorktreeReviveConversationFresh(request.paramsData)
             case RPCMethod.worktreeAdopt:
                 return try await handleWorktreeAdopt(request.paramsData)
             case RPCMethod.worktreeRename:
@@ -305,6 +307,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileSetGlobalDefault(request.paramsData)
             case RPCMethod.modelProfileSetPrimaryAgentPreference:
                 return try await handleModelProfileSetPrimaryAgentPreference(request.paramsData)
+            case RPCMethod.codexUsageFetch:
+                return try await handleCodexUsageFetch()
             case RPCMethod.modelProfileSetRepoOverride:
                 return try await handleModelProfileSetRepoOverride(request.paramsData)
             case RPCMethod.modelProfileReorder:
@@ -390,6 +394,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
+            case RPCMethod.configSetAutoTrustWorktrees:
+                return try await handleConfigSetAutoTrustWorktrees(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -457,6 +463,7 @@ public final class RPCRouter: Sendable {
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
+            autoTrustWorktrees: config.autoTrustWorktrees,
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
             remoteBackendsLive: remoteManager != nil))

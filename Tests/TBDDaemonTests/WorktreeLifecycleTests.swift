@@ -51,6 +51,34 @@ import Testing
     #expect(!terminals.contains { $0.kind == .claude || $0.label == "Claude Code" })
 }
 
+@Test func testCreateWorktreeExplicitAgentOverrideWinsBothDirections() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    try await db.config.setPrimaryAgentPreference(.claude)
+    let codex = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        primaryAgentPreference: .codex
+    )
+    #expect(try await db.terminals.list(worktreeID: codex.id).contains { $0.kind == .codex })
+
+    try await db.config.setPrimaryAgentPreference(.codex)
+    let claude = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        primaryAgentPreference: .claude
+    )
+    #expect(try await db.terminals.list(worktreeID: claude.id).contains { $0.kind == .claude })
+}
+
 @Test func testCreateWorktreePersistsPrimaryAgentAsFirstAndActiveTab() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }

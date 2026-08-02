@@ -68,6 +68,14 @@ public struct TmuxManager: Sendable {
     /// command string without relying on tmux's actual pane_current_command.
     public let realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)?
 
+    /// Whether callers should treat `paneCurrentCommand` as a meaningful
+    /// process-liveness signal. Plain dry-run fixtures intentionally return a
+    /// synthetic `zsh`; tests that inject `dryRunPaneCurrentCommand` opt back
+    /// into command verification.
+    var verifiesPaneCurrentCommand: Bool {
+        !dryRun || dryRunPaneCurrentCommand != nil
+    }
+
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
         private let _value = OSAllocatedUnfairLock(initialState: 0)

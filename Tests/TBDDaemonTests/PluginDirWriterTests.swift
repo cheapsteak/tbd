@@ -118,7 +118,7 @@ struct PluginDirWriterTests {
     /// `--selftest` short-circuits before tick.py's machine-global flock, so a
     /// live tick running concurrently can't turn this into a silent exit 0.
     /// The `scenarios passed` assertion is the backstop for that regardless.
-    @Test("tick.py --selftest passes: composer ghost-guard matrix (no DB/tmux invoked)")
+    @Test("tick.py --selftest passes: agent-state matrix (no DB/tmux invoked)")
     func tickPySelftest() throws {
         let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
         defer { try? FileManager.default.removeItem(atPath: tempRoot) }
@@ -134,7 +134,7 @@ struct PluginDirWriterTests {
         proc.waitUntilExit()
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         #expect(proc.terminationStatus == 0, "tick.py --selftest failed:\n\(output)")
-        #expect(output.contains("composer ghost-guard scenarios passed"), "unexpected output:\n\(output)")
+        #expect(output.contains("agent-state scenarios passed"), "unexpected output:\n\(output)")
     }
 
     /// The relay decides whether a desk shift survives its context ceiling, so

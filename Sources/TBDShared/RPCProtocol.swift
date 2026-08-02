@@ -105,6 +105,7 @@ public enum RPCMethod {
     public static let worktreeArchive = "worktree.archive"
     public static let worktreeRerunPreSession = "worktree.rerunPreSession"
     public static let worktreeRevive = "worktree.revive"
+    public static let worktreeReviveConversationFresh = "worktree.reviveConversationFresh"
     public static let worktreeAdopt = "worktree.adopt"
     public static let worktreeRename = "worktree.rename"
     public static let worktreeReorder = "worktree.reorder"
@@ -158,6 +159,7 @@ public enum RPCMethod {
     public static let modelProfileUpdateBedrock = "modelProfile.updateBedrock"
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
     public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
+    public static let codexUsageFetch = "codex.usage.fetch"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileReorder = "modelProfile.reorder"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
@@ -215,6 +217,7 @@ public enum RPCMethod {
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
+    public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
     public static let gcList = "gc.list"
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
@@ -877,6 +880,9 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// profile default. nil preserves the profile's own model. Optional/
     /// defaulted for backward compatibility with older clients.
     public let model: String?
+    /// Explicit primary-agent override for this creation only. nil preserves
+    /// the configured global preference. Optional for backward compatibility.
+    public let primaryAgentPreference: PrimaryAgentPreference?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
     /// per-session `--settings` overlay for this spawn's Claude agent. General
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
@@ -903,7 +909,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Optional/defaulted for backward compatibility (old daemons ignore the
     /// unknown key; old clients omit it).
     public let autoArchiveOnMerge: Bool?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -913,6 +919,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.useExistingBranch = useExistingBranch
         self.profileID = profileID
         self.model = model
+        self.primaryAgentPreference = primaryAgentPreference
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.prNumber = prNumber
         self.checkoutPRHead = checkoutPRHead
@@ -942,6 +949,17 @@ public struct WorktreeListParams: Codable, Sendable {
     /// backward compatibility — old daemons ignore the unknown key and always
     /// enrich; old clients omit it and get the enriched default.
     public let includeSessionCounts: Bool?
+    /// Substring filter over the worktree's folder `name` **and** its
+    /// `displayName`: a row matches when the query appears anywhere in either
+    /// (not just as a prefix). Matching is case-insensitive for ASCII — the
+    /// daemon implements this with SQLite `LIKE`, whose built-in case folding
+    /// does not cover non-ASCII characters.
+    ///
+    /// nil or blank (whitespace-only) means "no filter". The filter is applied
+    /// *before* `limit`/`offset`, so pagination pages over the matching set.
+    /// Optional (nil == no filter) for backward compatibility — old daemons
+    /// ignore the unknown key and return everything; old clients omit it.
+    public let nameQuery: String?
     public init(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
@@ -949,7 +967,8 @@ public struct WorktreeListParams: Codable, Sendable {
         offset: Int? = nil,
         excludeArchived: Bool? = nil,
         scratchOnly: Bool? = nil,
-        includeSessionCounts: Bool? = nil
+        includeSessionCounts: Bool? = nil,
+        nameQuery: String? = nil
     ) {
         self.repoID = repoID
         self.status = status
@@ -958,6 +977,7 @@ public struct WorktreeListParams: Codable, Sendable {
         self.excludeArchived = excludeArchived
         self.scratchOnly = scratchOnly
         self.includeSessionCounts = includeSessionCounts
+        self.nameQuery = nameQuery
     }
 }
 
@@ -1211,6 +1231,35 @@ public struct WorktreeReviveParams: Codable, Sendable {
         self.cols = cols
         self.rows = rows
         self.preferredSessionID = preferredSessionID
+    }
+}
+
+public struct WorktreeReviveConversationFreshParams: Codable, Sendable {
+    public let archivedWorktreeID: UUID
+    public let sessionID: String
+    public let cols: Int?
+    public let rows: Int?
+
+    public init(
+        archivedWorktreeID: UUID,
+        sessionID: String,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) {
+        self.archivedWorktreeID = archivedWorktreeID
+        self.sessionID = sessionID
+        self.cols = cols
+        self.rows = rows
+    }
+}
+
+public struct WorktreeReviveConversationFreshResult: Codable, Sendable {
+    public let worktree: Worktree
+    public let warning: String?
+
+    public init(worktree: Worktree, warning: String?) {
+        self.worktree = worktree
+        self.warning = warning
     }
 }
 
@@ -1631,6 +1680,15 @@ public struct ConfigSetAutoCloseSetupParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setAutoTrustWorktrees` — pre-accept Claude's folder-trust
+/// dialog for TBD-created worktrees (default ON). Read fresh at every Claude
+/// spawn/wake, so the change applies to the next one; no daemon restart needed.
+/// Turning it off never un-trusts an already-seeded path.
+public struct ConfigSetAutoTrustWorktreesParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCEnabled` — the orphan-GC master switch.
 public struct ConfigSetGCEnabledParams: Codable, Sendable {
     public var enabled: Bool
@@ -1775,6 +1833,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
+    /// Whether TBD pre-accepts Claude's folder-trust dialog for the worktrees of
+    /// registered repos — the ones TBD created plus the repo's own checkout, but
+    /// never a fork-PR-head checkout (default ON). Re-evaluated by the daemon on
+    /// every call.
+    public let autoTrustWorktrees: Bool
     /// Whether the daemon owns panel-surface state (`daemon_panel_surface_enabled`,
     /// spec C Phase 2 §8/§10). Default OFF while the feature soaks — the app
     /// uses this to decide whether `panel.get`/`panel.apply` are live or the
@@ -1805,6 +1868,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 controlModeSupported: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
+                autoTrustWorktrees: Bool = true,
                 panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 remoteBackendsLive: Bool = false) {
@@ -1813,6 +1877,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.autoTrustWorktrees = autoTrustWorktrees
         self.panelSurfaceEnabled = panelSurfaceEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.remoteBackendsLive = remoteBackendsLive
@@ -1829,6 +1894,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // New field for worktree auto-trust; absent from older daemons defaults
+        // to true, matching the column default (it is not a soak flag).
+        autoTrustWorktrees = try c.decodeIfPresent(Bool.self, forKey: .autoTrustWorktrees) ?? true
         // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
         panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
         // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).

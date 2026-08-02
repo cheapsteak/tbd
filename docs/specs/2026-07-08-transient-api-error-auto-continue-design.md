@@ -140,6 +140,10 @@ Same choke points as the parent, plus toggle scoping:
   regardless of type (unchanged).
 - **`autoResumeOnApiError` switched off cancels pending `api_error` rows
   only**; `autoResumeOnLimitReset` off cancels only limit rows.
+- The scheduler's pre-`fireAt` early-cancel pass applies to `api_error` rows
+  too (unchanged): the same user-already-continued predicate the fire-time
+  eligibility check runs, just reached sooner — a transcript that grew before
+  the backoff elapses cancels the row on the spot.
 
 ## UI
 

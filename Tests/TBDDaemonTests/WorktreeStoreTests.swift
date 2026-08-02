@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import TBDDaemonLib
 import TBDShared
 
@@ -466,5 +467,181 @@ import TBDShared
 
         let result = try await db.worktrees.list(scratchOnly: true)
         #expect(result.map(\.id) == [scratch.id])
+    }
+
+    // MARK: - nameQuery filter
+    //
+    // Tier 1 (in-memory DB). The archived list is paginated, so this filter has
+    // to run in SQL: a client-side filter would silently miss archives in pages
+    // the app never loaded.
+
+    /// Create + archive a worktree, so it lands in the `status: .archived` set
+    /// the search field queries.
+    private func makeArchived(
+        db: TBDDatabase, repoID: UUID, name: String, displayName: String? = nil
+    ) async throws -> Worktree {
+        let wt = try await db.worktrees.create(
+            repoID: repoID, name: name, displayName: displayName, branch: "b-\(name)",
+            path: "/tmp/\(name)-\(UUID())", tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: wt.id)
+        return wt
+    }
+
+    /// Overwrite a row's `archivedAt` with a deterministic value
+    /// (`2026-01-01T00:00:00Z + seconds`). `archive()` has no date seam, and
+    /// several archives inside the same stored-millisecond tie on the
+    /// `archivedAt desc` order.
+    private func stampArchivedAt(db: TBDDatabase, id: UUID, seconds: Int) async throws {
+        let date = Date(timeIntervalSince1970: 1_767_225_600).addingTimeInterval(TimeInterval(seconds))
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE worktree SET archivedAt = ? WHERE id = ?",
+                arguments: [date, id.uuidString]
+            )
+        }
+    }
+
+    @Test func nameQueryMatchesFolderName() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let hit = try await makeArchived(db: db, repoID: repo.id, name: "curious-wolverine", displayName: "Zebra")
+        _ = try await makeArchived(db: db, repoID: repo.id, name: "sleepy-otter", displayName: "Yak")
+
+        let result = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "wolverine")
+        #expect(result.map(\.id) == [hit.id])
+    }
+
+    @Test func nameQueryMatchesDisplayName() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let hit = try await makeArchived(db: db, repoID: repo.id, name: "aaa", displayName: "Search Rail")
+        _ = try await makeArchived(db: db, repoID: repo.id, name: "bbb", displayName: "Other")
+
+        let result = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "rail")
+        #expect(result.map(\.id) == [hit.id])
+    }
+
+    @Test func nameQueryIsCaseInsensitive() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let hit = try await makeArchived(db: db, repoID: repo.id, name: "MixedCaseName")
+
+        let lower = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "mixedcase")
+        let upper = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "MIXEDCASE")
+        #expect(lower.map(\.id) == [hit.id])
+        #expect(upper.map(\.id) == [hit.id])
+    }
+
+    /// Substring, not prefix: a query matching only the middle of the name hits.
+    @Test func nameQueryMatchesSubstringNotOnlyPrefix() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let hit = try await makeArchived(db: db, repoID: repo.id, name: "tbd-archived-search")
+
+        let result = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "archiv")
+        #expect(result.map(\.id) == [hit.id])
+    }
+
+    @Test func blankOrWhitespaceNameQueryAppliesNoFilter() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let a = try await makeArchived(db: db, repoID: repo.id, name: "alpha")
+        let b = try await makeArchived(db: db, repoID: repo.id, name: "beta")
+        let all: Set<UUID> = [a.id, b.id]
+
+        for query in ["", "   ", "\n\t "] {
+            let result = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: query)
+            #expect(Set(result.map(\.id)) == all, "query \(query.debugDescription) must not filter")
+        }
+        let noQuery = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: nil)
+        #expect(Set(noQuery.map(\.id)) == all)
+    }
+
+    /// Regression: LIKE metacharacters in the user's query must be escaped.
+    /// Unescaped, `%` is a wildcard that matches every row and `_` matches any
+    /// single character — a search would silently stop filtering.
+    @Test func likeMetacharactersInQueryMatchLiterally() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let percent = try await makeArchived(db: db, repoID: repo.id, name: "fifty%off")
+        let underscore = try await makeArchived(db: db, repoID: repo.id, name: "snake_case")
+        _ = try await makeArchived(db: db, repoID: repo.id, name: "plain")
+
+        // `%` is literal: matches only the row that really contains it.
+        let percentHits = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "%")
+        #expect(percentHits.map(\.id) == [percent.id])
+
+        // `_` is literal: "snake_case" hits, "snakeXcase" would not.
+        let underscoreHits = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "e_c")
+        #expect(underscoreHits.map(\.id) == [underscore.id])
+
+        // A backslash (the escape char itself) is literal too and matches nothing here.
+        let backslashHits = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "\\")
+        #expect(backslashHits.isEmpty)
+    }
+
+    /// Composes with `status` and `repoID`: an active row with a matching name,
+    /// and an archived row in another repo, are both excluded.
+    @Test func nameQueryComposesWithStatusAndRepoFilters() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let otherRepo = try await createRepo(db: db)
+
+        let hit = try await makeArchived(db: db, repoID: repo.id, name: "match-me")
+        let active = try await db.worktrees.create(
+            repoID: repo.id, name: "match-me-too", branch: "b-active",
+            path: "/tmp/active-\(UUID())", tmuxServer: "srv"
+        )
+        let otherRepoHit = try await makeArchived(db: db, repoID: otherRepo.id, name: "match-me-elsewhere")
+
+        let result = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "match-me")
+        let ids = Set(result.map(\.id))
+        #expect(ids == [hit.id])
+        #expect(!ids.contains(active.id))
+        #expect(!ids.contains(otherRepoHit.id))
+    }
+
+    /// Pagination applies AFTER the match filter, so offset pages over the
+    /// matching set — not over all archived rows. Without this, page 2 of a
+    /// search would skip matches that happened to sit behind non-matching rows.
+    @Test func nameQueryPaginationPagesOverMatchesOnly() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        // Interleave matches and non-matches so an unfiltered offset would
+        // land on the wrong rows.
+        var matches: [UUID] = []
+        var ordinal = 0
+        for i in 1...4 {
+            let hit = try await makeArchived(db: db, repoID: repo.id, name: "keep-\(i)")
+            matches.append(hit.id)
+            let miss = try await makeArchived(db: db, repoID: repo.id, name: "drop-\(i)")
+            // `archive()` stamps `Date()`, and eight archives inside one
+            // millisecond tie on the `archivedAt desc` sort — which makes page
+            // boundaries arbitrary. Restamp with explicit, well-separated
+            // values so the ordering under test is the query's, not the clock's.
+            for id in [hit.id, miss.id] {
+                ordinal += 1
+                try await stampArchivedAt(db: db, id: id, seconds: ordinal)
+            }
+        }
+        // `archivedAt desc` — newest first.
+        let expected = matches.reversed().map { $0 }
+
+        let page1 = try await db.worktrees.list(
+            repoID: repo.id, status: .archived, limit: 2, offset: 0, nameQuery: "keep-"
+        )
+        #expect(page1.map(\.id) == Array(expected[0..<2]))
+
+        let page2 = try await db.worktrees.list(
+            repoID: repo.id, status: .archived, limit: 2, offset: 2, nameQuery: "keep-"
+        )
+        #expect(page2.map(\.id) == Array(expected[2..<4]))
+
+        let page3 = try await db.worktrees.list(
+            repoID: repo.id, status: .archived, limit: 2, offset: 4, nameQuery: "keep-"
+        )
+        #expect(page3.isEmpty)
     }
 }

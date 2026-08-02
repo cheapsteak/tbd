@@ -198,4 +198,21 @@ struct ConfigStoreTests {
         let cfg = try await db.config.get()
         #expect(cfg.hibernateInputVetoEnabled == false)
     }
+
+    /// `auto_trust_worktrees` (v66) ships default ON, unlike its soak-flag
+    /// siblings: the trust answer is known by construction for a TBD-created
+    /// worktree, and the dialog stalls the spawn invisibly when it renders.
+    @Test func autoTrustWorktreesDefaultsToTrue() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.autoTrustWorktrees == true, "auto_trust_worktrees must default ON")
+    }
+
+    @Test func setAutoTrustWorktreesRoundtrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setAutoTrustWorktrees(enabled: false)
+        #expect(try await db.config.get().autoTrustWorktrees == false)
+        try await db.config.setAutoTrustWorktrees(enabled: true)
+        #expect(try await db.config.get().autoTrustWorktrees == true)
+    }
 }

@@ -1061,7 +1061,7 @@ convention to another, a mistake rather than a transgression, which structure
 prevents by removing the opportunity instead of gating the behavior — and
 **compromise**, where containment bounds what a bad night costs. Trusting a
 model's conduct and declining to hand it the chance to mix policies are the
-same posture, not a contradiction: the drawer is small because the teller is
+same position, not a contradiction: the drawer is small because the teller is
 trusted with the drawer, not with the vault.
 
 **What stays global.** The project is the unit of judgment and action. It is
@@ -1151,7 +1151,7 @@ spanning two policies — that is the invariant the project exists to create.
   playbook.** Compiled code resolves the file's path, hashes its bytes, and
   installs it verbatim; the desk is the only structure-aware reader. Keeping
   every mode in the one file is what lets a reader — and the desk — see a
-  project's whole conduct — every posture it can take — in one place, and it
+  project's whole conduct — every mode it can run — in one place, and it
   is why selecting a mode changes nothing about which file gets resolved.
   Separate files per mode would split that view for no gain, and would
   invite the reader to imagine the daemon choosing between them; it chooses
@@ -1191,9 +1191,10 @@ spanning two policies — that is the invariant the project exists to create.
   asks — reading backward in the transcript until the request makes sense, and
   escalating when it does not.** Its companion rule makes the discipline
   uniform: **write every message as if the target will execute it unchecked —
-  never lean on a safety net.** Targets genuinely differ in posture — most
-  fleet spawns run with permissions bypassed, yet a repo's explicit `ask`
-  rules still prompt even there, the mode can change mid-session from the
+  never lean on a safety net.** Targets genuinely differ in *permission*
+  posture — most fleet spawns run with permissions bypassed, yet a repo's
+  explicit `ask` rules still prompt even there, the mode can change
+  mid-session from the
   keyboard, and an adopted session may ask about everything — so the same
   drive is a suggestion behind a checkpoint into one session and the final
   checkpoint itself into another (field measurement caught exactly this
@@ -1469,7 +1470,7 @@ account, not a wrong action. The third category is **human-authored process**.
   query-time rule, not a recovery sweep.
 
 Net property: **supervision adds one column to TBD's database** — the on/off
-switch. Everything else it knows is in files a human can open: two under
+switch. Everything else it knows is in files a human can open: one under
 `~/tbd/supervision/`, one directory per shift, and the playbooks in the repos
 themselves.
 
@@ -1701,7 +1702,7 @@ supervising repos it is meant to leave alone. It has two pieces:
   membership is still exactly one mark per repo when nothing is declared.
 
 A project that resolves to *out* produces no cases, so no briefings, so no
-desk is ever spawned for it. It still appears in the fact sweep and the account —
+desk is ever spawned for it. It still appears in the readout and the account —
 observability is never withheld, and "project X needed attention but is out of
 supervision" is the honest report.
 
@@ -1807,7 +1808,7 @@ enforcement openly, which is the same trade the old system made by accident
 - **A daemon restart during a shift resumes it, never forks it.** The active
   shift is derivable from the record alone: the newest shift whose ledger has
   no closing line. On startup the daemon resumes that shift in whatever
-  posture the switch persists — running if on, paused if off — with the same
+  state the switch persists — running if on, paused if off — with the same
   ID, same directory, same desks, which are ordinary sessions and survive the
   daemon, and runs the overdue-observation scan (§7, §12). A half-finished
   teardown resumes idempotently from its durable steps. Only when no unclosed
@@ -2011,7 +2012,7 @@ been in the record," never "a human should have approved the recycle."
 
 Context is not the only way a desk fails, and field experience supplied the
 receipt: a desk can stall on its own question, wedge mid-turn, or sit silent
-with cases queued — failing exactly like the agents it exists to catch, and an
+with briefings queued — failing exactly like the agents it exists to catch, and an
 anomaly line addressed to an operator who is asleep is no answer. So the desk
 does not go without a liveness contract, and the contract is compiled.
 
@@ -2036,7 +2037,7 @@ same measure. What firing *does* forks by ownership.
 **For a hosted desk, firing means replacement, not reporting.** Replacement
 costs a briefing, not work state. Anomaly line, then the
 replacement path above with the flush skipped — the desk is by definition not
-answering — and queued and unanswered cases redeliver to the successor. A
+answering — and queued and unanswered briefings redeliver to the successor. A
 lifecycle line links the sessions, as with any recycle.
 
 **For an appointed supervisor, firing means the operator notification, and
@@ -2679,7 +2680,7 @@ to inaction at the largest scale.
   this document
   ([wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
 - **Per-mode playbook files** — a project's modes are described in its one
-  playbook (§3, §5), so a reader sees every posture a project can take in one
+  playbook (§3, §5), so a reader sees every mode a project can run in one
   place. Splitting them across files would also invite the reader to imagine the
   daemon choosing between them; it chooses nothing.
 - **The act-with-veto-window human-in-the-loop (HITL) variant** — rejected on

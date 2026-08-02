@@ -42,19 +42,24 @@ Three tiers, defined by what a test may touch:
 
 This deviates from the original roadmap sketch ("tier 2 gets one retry") deliberately: blanket retry hides regressions, quarantine names them.
 
-**Enforcement mechanism = target boundary.** Tier 3 physically moves to a new `TBDDaemonLiveTests` test target (all current live suites are daemon-side; other modules can grow sibling `*LiveTests` targets if ever needed). Tiers 1 and 2 stay co-resident in the existing targets — their distinction is behavioral and enforced by convention + review, since they schedule fine together. The target boundary is the load-bearing one: compiler-enforced, cannot silently zero-match like a `--filter` regex, and gives CI an unambiguous handle.
+**Enforcement mechanism = target boundary.** Tier 3 physically moves to a new `TBDDaemonLiveTests` test target (all current live suites are daemon-side; other modules can grow sibling `*LiveTests` targets if ever needed). Tiers 1 and 2 stay co-resident in the existing targets — their distinction is behavioral and enforced by convention + review, since they schedule fine together. The target boundary is the load-bearing one: compiler-enforced, cannot silently zero-match like a `--filter` regex, and gives CI an unambiguous handle. CI does now select targets with `--filter`/`--skip` regexes (§4), so the zero-match hazard is live in the *invocation* even though the boundary itself is sound — which is why the fast pass's second step is expressed as a complement (`--skip`) rather than an enumeration: a target nobody listed still runs.
 
 ## 4. CI topology
 
-The existing `test` job keeps one build (no extra runner drawn from the 5-job macOS pool) and splits the test run into two sequential steps:
+The existing `test` job keeps one build (no extra runner drawn from the 5-job macOS pool) and splits the test run into three sequential steps:
 
-1. **Fast parallel pass:** `swift test --parallel -j 2 --skip TBDDaemonLiveTests`
-2. **Quiet pass:** the `TBDDaemonLiveTests` target run serially (no `--parallel`), with the machine otherwise idle.
+1. **Fast parallel pass 1/2:** `swift test --parallel -j 2 --filter '^TBDDaemonTests\.'`
+2. **Fast parallel pass 2/2:** `swift test --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'`
+3. **Quiet pass:** the `TBDDaemonLiveTests` target run serially (`--no-parallel`), with the machine otherwise idle.
+
+The fast pass was a single step originally; it was split in two to halve the in-flight test population, because Swift Testing runs every non-serialized test in one process with no concurrency cap and per-test scheduling latency scales with that total. Measured interleaved under induced load with population held constant: p90 26.4 s → 14.6 s, at a cost of +26 s of wall time (the second invocation re-pays SPM's no-op build check and process startup). This is not the cross-runner sharding §1 rejected — one job, one build, two sequential invocations.
+
+Step 2 is expressed as a **complement** (`--skip`) rather than an enumeration of the remaining targets, specifically to preserve §3's fail-safe property: `swift test --filter` exits green on zero matches, so a new test target listed in neither filter would run in no pass at all, and the count floors below cannot catch that (adding a target reduces no existing step's count). As a complement, the three steps partition the package exhaustively by construction and a new target lands in step 2 automatically.
 
 Guard rails:
 
-- The quiet pass parses the executed-test count from output and **fails if zero tests ran** (`swift test --filter` exits green on zero matches; a renamed target must not silently fall out of both passes).
-- The quiet step gets an explicit `timeout-minutes` so a wedged tmux test cannot eat the job's 6 h default.
+- Every step parses the executed-test count from output and **fails below a floor** (`swift test --filter`/`--skip` exits green on zero matches; a renamed or collapsed target must not silently fall out of its pass). The floors catch collapse and rename; the complement shape above is what catches an unlisted *new* target.
+- Every step gets an explicit `timeout-minutes` so a wedged tmux test — or a wedged clock-driven suite, whose per-test limit is now 4 minutes — cannot eat the job's 6 h default.
 
 PR CI never runs randomized anything. A new scheduled `nightly.yml` workflow (§9) carries fuzzing, live probes, the flake-ledger stress loop, and the quarantine audit.
 

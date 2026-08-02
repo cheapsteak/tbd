@@ -75,6 +75,9 @@ extension RPCRouter {
         // Per-spawn Claude model override (picker model buttons). Initial
         // spawn only — respawns fall back to the profile default.
         let modelOverride = params.model
+        // Explicit primary agent for this creation. nil preserves the global
+        // preference resolved by the lifecycle.
+        let primaryAgentPreference = params.primaryAgentPreference
         // General Claude settings passthrough, deep-merged into the per-session
         // --settings overlay on the fresh-primary spawn (see ClaudeHookOverlay).
         let claudeSettingsOverlay = params.claudeSettingsOverlay
@@ -88,7 +91,7 @@ extension RPCRouter {
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
                 await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, claudeSettingsOverlay: claudeSettingsOverlay)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
                 switch completion {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
@@ -107,8 +110,13 @@ extension RPCRouter {
             } catch {
                 // completeCreateWorktree already deletes the DB row on failure.
                 // Broadcast an archive delta so clients remove the pending entry.
+                // `creationFailed: true` is set ONLY here — this is the single
+                // path where a row disappears because its creation actually
+                // failed, so it's the only place that can tell clients apart
+                // from a deliberate archive of a still-`.creating` row.
                 subs.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
-                    worktreeID: pending.id
+                    worktreeID: pending.id,
+                    creationFailed: true
                 )))
                 logger.error("background worktreeCreate failed for \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -125,7 +133,8 @@ extension RPCRouter {
             excludeArchived: params.excludeArchived ?? false,
             scratchOnly: params.scratchOnly ?? false,
             limit: params.limit,
-            offset: params.offset
+            offset: params.offset,
+            nameQuery: params.nameQuery
         )
         // Enrich archived worktrees with a real session-file count so the
         // client can filter on actual disk state, not stale stored IDs.
@@ -236,6 +245,66 @@ extension RPCRouter {
         )))
 
         return try RPCResponse(result: worktree)
+    }
+
+    func handleWorktreeReviveConversationFresh(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            WorktreeReviveConversationFreshParams.self,
+            from: paramsData
+        )
+        guard let source = try await db.worktrees.get(id: params.archivedWorktreeID) else {
+            throw WorktreeLifecycleError.worktreeNotFound(params.archivedWorktreeID)
+        }
+        guard source.status == .archived else {
+            throw WorktreeLifecycleError.worktreeNotArchived(params.archivedWorktreeID)
+        }
+        guard let repoID = source.repoID else {
+            throw WorktreeLifecycleError.invalidOperation(
+                "Cannot revive a conversation on a fresh branch without a repository."
+            )
+        }
+
+        let lifecycle = self.lifecycle
+        let outcome: (
+            completion: WorktreeCreateCompletion,
+            result: WorktreeReviveConversationFreshResult
+        ) = try await withCheckedThrowingContinuation { continuation in
+            Task {
+                await repoSerializer.submit(repoID: repoID) {
+                    do {
+                        let outcome = try await lifecycle
+                            .reviveConversationOnFreshBranch(
+                                archivedWorktreeID: params.archivedWorktreeID,
+                                sessionID: params.sessionID,
+                                cols: params.cols,
+                                rows: params.rows
+                            )
+                        continuation.resume(returning: outcome)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+
+        let created = outcome.result.worktree
+        switch outcome.completion {
+        case .ready:
+            subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                worktreeID: created.id,
+                repoID: created.repoID,
+                name: created.name,
+                path: created.path
+            )))
+        case .preSessionPending:
+            // The lifecycle already broadcast `.worktreeCreated` alongside
+            // the pre-session terminal. Match ordinary create and do not
+            // duplicate the row.
+            break
+        }
+        return try RPCResponse(result: outcome.result)
     }
 
     func handleWorktreeAdopt(_ paramsData: Data) async throws -> RPCResponse {

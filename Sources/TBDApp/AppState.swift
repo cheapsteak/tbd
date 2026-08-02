@@ -303,6 +303,36 @@ final class AppState: ObservableObject {
     /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
     @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
 
+    // MARK: Archived-worktree search
+    //
+    // The archived list is paginated (50/page), so a purely client-side filter
+    // would silently miss older, unloaded archives — and fetching every
+    // remaining page is unaffordable (`handleWorktreeList` enriches each
+    // archived row with a `~/.claude/projects` scan; full enrichment measured
+    // ~19 s). So search is a daemon-side SQL filter with its OWN paginated
+    // result set, held separately from the unsearched `archivedWorktrees`
+    // pages so clearing the query restores them without a refetch.
+
+    /// The query whose search RPC is currently IN FLIGHT for a repo, stamped
+    /// before the await so a superseded response can be dropped.
+    ///
+    /// This is deliberately NOT the query the stored rows answer — that lives
+    /// inside `ArchivedSearchResults`. Deciding what to *display* from this
+    /// value would render the previous query's rows as if they were the answer
+    /// for the new one during the whole in-flight window.
+    @Published var archivedSearchQuery: [UUID: String] = [:]
+    /// Daemon-side search results (page-accumulated) and the query they answer,
+    /// keyed by repo ID. Absent until some response has landed.
+    @Published var archivedSearchResults: [UUID: ArchivedSearchResults] = [:]
+    /// Repos whose most recent archived-search RPC failed. Set only for the
+    /// query that was in flight, cleared when the next search starts or the
+    /// search is cleared. The rail reads it so a failed search degrades to a
+    /// *labelled* client-side view rather than silently claiming the loaded
+    /// rows are the whole answer.
+    @Published var archivedSearchFailed: [UUID: Bool] = [:]
+    /// Guards against concurrent `loadMoreArchivedSearchResults` calls.
+    @Published var isLoadingMoreArchivedSearch: [UUID: Bool] = [:]
+
     /// Orphan-GC reap records (History → Reclaimed), keyed by repo ID and
     /// fetched on demand alongside `archivedWorktrees`.
     @Published var reapRecords: [UUID: [ReapRecord]] = [:]
@@ -596,6 +626,10 @@ final class AppState: ObservableObject {
     @Published var prStatuses: [UUID: PRStatus] = [:]
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
+    /// Ephemeral one-shot Codex account/usage snapshot loaded when the
+    /// worktree picker opens. It is intentionally neither polled nor persisted.
+    @Published var codexUsage: CodexUsageResult?
+    @Published var isLoadingCodexUsage = false
     @Published var primaryAgentPreference: PrimaryAgentPreference = .defaultValue
     /// Global free-form env overrides (config scope). Loaded from the daemon
     /// alongside `defaultProfileID` via `loadModelProfiles()`.
@@ -998,6 +1032,19 @@ final class AppState: ObservableObject {
     /// RPC here. Production default asks the daemon; nil result = fetch failed.
     lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
         { [daemonClient] in try? await daemonClient.daemonCapabilities() }
+    /// How `reviveConversationOnFreshBranch` asks the daemon to create the
+    /// destination worktree and resume its selected session. Injectable so
+    /// AppState tests can exercise the action without a live daemon.
+    lazy var freshConversationReviver:
+        @MainActor (UUID, String, Int?, Int?) async throws
+            -> WorktreeReviveConversationFreshResult = { [daemonClient] worktreeID, sessionID, cols, rows in
+                try await daemonClient.reviveConversationOnFreshBranch(
+                    worktreeID: worktreeID,
+                    sessionID: sessionID,
+                    cols: cols,
+                    rows: rows
+                )
+            }
     /// How `setControlModeEnabled` persists the flag — injectable for the same
     /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
     /// protocol), so the Settings-toggle tests can exercise the success branch.
@@ -1011,6 +1058,10 @@ final class AppState: ObservableObject {
     /// same reason as `controlModeSetter`.
     lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
+    /// How `setAutoTrustWorktrees` persists the flag — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
     /// Asks the user to confirm closing a note tab whose note has content —
     /// closing a note tab hard-deletes the note row (`closeTab` →
     /// `deleteNote`). Injectable so tests can exercise both branches without
@@ -1763,7 +1814,41 @@ final class AppState: ObservableObject {
     /// client). Tombstone it and drop the row so it cannot be resurrected by a
     /// poll snapshot that predates the archive.
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
+        // Look the row up before it gets removed so we can name it in the alert.
+        let worktree = findWorktree(id: delta.worktreeID)
+        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+
         removeArchivedWorktreeFromState(id: delta.worktreeID)
+
+        // The daemon tells us whether creation actually failed; we never infer
+        // it from `.creating` status. A deliberate archive of a still-creating
+        // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
+        // pre-session hook — arrives with creationFailed == false and must stay
+        // silent, even though the row is `.creating` at this moment.
+        if let message = failureMessage {
+            showAlert(message, isError: true)
+        }
+    }
+
+    /// Returns a failure alert message when the daemon reported that this
+    /// worktree's *creation* failed, or nil otherwise (deliberate archive, or
+    /// an unknown row we can't name).
+    ///
+    /// `creationFailed` comes from the daemon via `WorktreeIDDelta`; status is
+    /// deliberately NOT consulted, because a `.creating` row can also be
+    /// archived on purpose from the CLI and the two are indistinguishable by
+    /// status alone.
+    ///
+    /// Pure static helper for testability — every branch is unit-testable
+    /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
+    nonisolated static func creationFailureMessage(
+        _ worktree: Worktree?, creationFailed: Bool
+    ) -> String? {
+        guard creationFailed, let worktree else {
+            return nil
+        }
+        return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
+               "See Console (log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)

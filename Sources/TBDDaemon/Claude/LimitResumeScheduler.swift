@@ -28,6 +28,23 @@ public enum ResumeActuationOutcome: Equatable, Sendable {
 /// Seam between the scheduler (timing) and the actuator (tmux side effects).
 public protocol LimitResumeActuating: Sendable {
     func actuate(_ resume: ScheduledResume) async -> ResumeActuationOutcome
+
+    /// Read-only probe for the scheduler's early-cancel pass: has this
+    /// session's transcript gained a record newer than the resume's
+    /// detection instant?
+    ///
+    /// True means the session is alive again — either the user typed, or
+    /// (the case with no other signal) Claude Code retried and recovered
+    /// its OWN turn, which fires no `UserPromptSubmit` activity event. The
+    /// scheduler cancels the row immediately instead of leaving a live,
+    /// working session wearing an "auto-resume scheduled" badge until fire
+    /// time.
+    ///
+    /// Called for every not-yet-due pending row on the loop's
+    /// `earlyCheckInterval` cadence, so implementations must stay cheap:
+    /// `LimitResumeActuator` gates its whole-file transcript read behind an
+    /// mtime pre-filter.
+    func userAlreadyContinued(_ resume: ScheduledResume) async -> Bool
 }
 
 /// Terminal outcome surfaced to the user (notification copy lives in the
@@ -53,6 +70,13 @@ public actor LimitResumeScheduler {
     public static let jitterMax: TimeInterval = 30
     public static let copyModeRetryDelay: TimeInterval = 120
     public static let maxCopyModeAttempts = 15
+
+    /// Cap on any single sleep while a row is pending, so the loop runs an
+    /// early-cancel pass (`cancelResumesAlreadyContinued`) at least this
+    /// often instead of only waking at fire time. NOT a new timer or task —
+    /// it only shortens the existing `clock.sleep(until:)`, which `wake()`
+    /// already cancels and `PollerClock` already chunks internally.
+    static let earlyCheckInterval: TimeInterval = 15
 
     /// Post-actuation store-write retry (double-fire protection).
     private static let writeRetryAttempts = 3
@@ -215,7 +239,9 @@ public actor LimitResumeScheduler {
             }
 
             let clock = self.clock
-            let deadline = next.fireAt
+            // Cap the wait at `earlyCheckInterval` so a row whose session
+            // came back to life is cancelled early rather than at fire time.
+            let deadline = min(next.fireAt, clock.now().addingTimeInterval(Self.earlyCheckInterval))
             let sleepTask = Task<Void, Error> {
                 try await clock.sleep(until: deadline)
             }
@@ -225,15 +251,47 @@ public actor LimitResumeScheduler {
             if Task.isCancelled { return }
 
             let now = clock.now()
-            let due: [ScheduledResume]
+            let refreshed: [ScheduledResume]
             do {
-                due = try await store.pending().filter { $0.fireAt <= now && !inFlightOrFired.contains($0.id) }
+                refreshed = try await store.pending()
             } catch {
                 logger.error("runLoop: pending() read failed while collecting due rows: \(String(describing: error), privacy: .public)")
-                due = []
+                refreshed = []
             }
+            var due: [ScheduledResume] = []
+            var upcoming: [ScheduledResume] = []
+            for row in refreshed where !inFlightOrFired.contains(row.id) {
+                if row.fireAt <= now { due.append(row) } else { upcoming.append(row) }
+            }
+            // Rows that aren't due yet get the cheap transcript-growth probe;
+            // due rows skip it because `actuate`'s own eligibility pass runs
+            // the same predicate on fresher bytes moments from now.
+            await cancelResumesAlreadyContinued(upcoming)
             for row in due {
                 await fire(row)
+            }
+        }
+    }
+
+    /// Early cancel: drop pending rows whose session's transcript has grown
+    /// past the detection instant. Reuses `fire`'s cancel path
+    /// (`setStatusWithRetry` → `.cancelled`, which nils
+    /// `terminal.pendingResumeAt` in the same write) and its
+    /// `inFlightOrFired` bookkeeping, so an early cancel can never race a
+    /// fire of the same row.
+    private func cancelResumesAlreadyContinued(_ rows: [ScheduledResume]) async {
+        for row in rows {
+            guard await actuator.userAlreadyContinued(row) else { continue }
+            inFlightOrFired.insert(row.id)
+            // Log only on a write that actually landed — a row whose retries
+            // all failed was NOT cancelled in the store. The failure itself is
+            // already logged at `.error` inside `setStatusWithRetry`, so
+            // there's no else branch here (same shape as `fire`).
+            if await setStatusWithRetry(
+                id: row.id, status: .cancelled, terminalID: row.terminalID,
+                context: "early transcript growth") {
+                inFlightOrFired.remove(row.id)
+                logger.info("runLoop: cancelled pending resume early — transcript grew for terminal \(row.terminalID.uuidString, privacy: .public)")
             }
         }
     }

@@ -456,11 +456,18 @@ actor DaemonClient {
     /// When `useExistingBranch` is true, `branch` MUST be set to an existing
     /// ref name (local like `foo` or remote like `origin/foo`) — the daemon
     /// checks it out instead of creating a new `tbd/*` branch.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil, model: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) async throws -> Worktree {
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID, model: model, prNumber: prNumber, checkoutPRHead: checkoutPRHead),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID, model: model, primaryAgentPreference: primaryAgentPreference, prNumber: prNumber, checkoutPRHead: checkoutPRHead),
             resultType: Worktree.self
+        )
+    }
+
+    func fetchCodexUsage() async throws -> CodexUsageResult {
+        try await callNoParamsAsync(
+            method: RPCMethod.codexUsageFetch,
+            resultType: CodexUsageResult.self
         )
     }
 
@@ -532,7 +539,8 @@ actor DaemonClient {
         offset: Int? = nil,
         excludeArchived: Bool = false,
         scratchOnly: Bool = false,
-        includeSessionCounts: Bool? = nil
+        includeSessionCounts: Bool? = nil,
+        nameQuery: String? = nil
     ) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
@@ -543,7 +551,8 @@ actor DaemonClient {
                 offset: offset,
                 excludeArchived: excludeArchived,
                 scratchOnly: scratchOnly,
-                includeSessionCounts: includeSessionCounts
+                includeSessionCounts: includeSessionCounts,
+                nameQuery: nameQuery
             ),
             resultType: [Worktree].self
         )
@@ -574,6 +583,25 @@ actor DaemonClient {
             method: RPCMethod.worktreeRevive,
             params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID),
             resultType: Worktree.self
+        )
+    }
+
+    /// Revive an archived conversation in a newly created worktree branch.
+    func reviveConversationOnFreshBranch(
+        worktreeID: UUID,
+        sessionID: String,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) async throws -> WorktreeReviveConversationFreshResult {
+        try await callAsync(
+            method: RPCMethod.worktreeReviveConversationFresh,
+            params: WorktreeReviveConversationFreshParams(
+                archivedWorktreeID: worktreeID,
+                sessionID: sessionID,
+                cols: cols,
+                rows: rows
+            ),
+            resultType: WorktreeReviveConversationFreshResult.self
         )
     }
 
@@ -895,6 +923,15 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetAutoCloseSetup,
             params: ConfigSetAutoCloseSetupParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the worktree auto-trust switch (default ON). Applies to the
+    /// next Claude spawn or wake.
+    func setAutoTrustWorktrees(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoTrustWorktrees,
+            params: ConfigSetAutoTrustWorktreesParams(enabled: enabled)
         )
     }
 

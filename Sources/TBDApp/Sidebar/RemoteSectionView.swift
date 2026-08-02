@@ -466,7 +466,8 @@ struct RemoteSessionRowView: View {
                                 : nil
                         }
                     if let caption = RemoteSessionRowView.caption(
-                        state: session.payload.state, gone: session.gone, exitCode: session.payload.exitCode,
+                        state: session.payload.state, agentState: session.payload.agentState,
+                        gone: session.gone, exitCode: session.payload.exitCode,
                         staleness: RemoteSessionRowView.stalenessCaption(health: providerHealth, lastSeen: session.lastSeen)
                     ) {
                         Text(caption)
@@ -594,25 +595,20 @@ struct RemoteSessionRowView: View {
     /// `staleness` renders alone rather than being dropped — this is
     /// precisely the case the maintainer flagged: a row that otherwise looks
     /// completely normal during an outage.
-    nonisolated static func caption(state: RemoteProcessState, gone: Bool, exitCode: Int?, staleness: String? = nil) -> String? {
-        let base: String? = {
-            if gone { return "no longer reported" }
-            switch state {
-            case .starting:
-                return "Starting…"
-            case .exited:
-                if let exitCode { return "exited (code \(exitCode))" }
-                return "exited"
-            case .running, .unknown:
-                return nil
-            }
-        }()
-        switch (base, staleness) {
-        case (nil, nil): return nil
-        case (let base?, nil): return base
-        case (nil, let staleness?): return staleness
-        case (let base?, let staleness?): return "\(base) · \(staleness)"
-        }
+    nonisolated static func caption(
+        state: RemoteProcessState,
+        agentState: RemoteAgentState,
+        gone: Bool,
+        exitCode: Int?,
+        staleness: String? = nil
+    ) -> String? {
+        RemoteSessionStatePresentation.sidebarCaption(
+            terminalState: state,
+            agentState: agentState,
+            gone: gone,
+            exitCode: exitCode,
+            staleness: staleness
+        )
     }
 
     /// "as of 2h ago" style note shown when this session's provider isn't

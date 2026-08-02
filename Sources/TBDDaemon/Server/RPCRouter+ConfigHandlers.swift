@@ -120,6 +120,18 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the worktree auto-trust switch (default ON). Every Claude spawn
+    /// and wake re-reads it, so this applies to the next one immediately.
+    /// Turning it off never un-trusts a path that was already seeded — it only
+    /// stops TBD from seeding new non-scratch worktrees.
+    func handleConfigSetAutoTrustWorktrees(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoTrustWorktreesParams.self, from: paramsData)
+        try await db.config.setAutoTrustWorktrees(enabled: params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphan-GC master switch. Turning it off does not cancel or
     /// undo any in-progress sweep — `OrphanGC.sweep` re-reads the flag itself
     /// on its next pass — this just flips the persisted gate.

@@ -3,6 +3,7 @@ import os
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
+private let archiveLogger = Logger(subsystem: "com.tbd.daemon", category: "archive")
 
 extension WorktreeLifecycle {
 
@@ -136,6 +137,11 @@ extension WorktreeLifecycle {
             // process — spawn with defaults.
             let archivedSessions = worktree.archivedClaudeSessions ?? []
             let isMidRevive = !archivedSessions.isEmpty
+            if !isMidRevive {
+                archiveLogger.warning(
+                    "recovery: resuming ordinary .creating worktree \(worktree.id, privacy: .public); any ephemeral conversation carryover cannot survive a daemon restart. If this create came from a fresh-branch conversation revive, the user can run that action again."
+                )
+            }
             logger.info("recovery: resuming pre-session wait for .creating worktree \(worktree.id, privacy: .public) (\(isMidRevive ? "mid-revive" : "mid-create", privacy: .public))")
             let task = Task.detached { [self] in
                 await runPreSessionPhase3(

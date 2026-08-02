@@ -172,7 +172,7 @@ does, synchronously:
    if the project has none this shift — design §5, §9),
    delivers through the agent-kind adapter, and writes the ledger's
    delivery line request-first, carrying the delivered text's hash and the
-   conduct hash (design §4 steps 3–5, §6, §12). Delivery arms the desk
+   conduct hash (design §4 steps 3–4, §6, §12). Delivery arms the desk
    dead-man's deadline: a briefing delivered at T with no ledger line from
    that desk by the deadline is the switch's trigger (design §9).
 

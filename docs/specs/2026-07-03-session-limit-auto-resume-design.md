@@ -151,6 +151,13 @@ terminal (user continued manually), terminal close/suspend, global toggle
 switched off (cancels all pending), or explicit user action ("Cancel
 scheduled resume" in the terminal context menu / notification).
 
+The scheduler also cancels early, before `fireAt`: on its own loop cadence it
+runs step 2's **user-already-continued** predicate against every not-yet-due
+row, so a session whose transcript grew (user typed, or Claude Code recovered
+its own turn — which fires no `UserPromptSubmit`) drops its badge right away
+instead of wearing "auto-resume scheduled" until fire time. Same verdict as
+the fire-time check, reached sooner.
+
 ## UI
 
 - New `NotificationType` case `limit_reached`: toggle on → "Session limit hit

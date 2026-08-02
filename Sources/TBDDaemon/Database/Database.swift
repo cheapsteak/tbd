@@ -1123,6 +1123,51 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "remote_session", column: "pinnedAt", type: .datetime)
         }
 
+        // Pre-accept Claude Code's folder-trust dialog for worktrees TBD itself
+        // created. Default ON — deliberately, and NOT a soak flag:
+        //
+        // The dialog asks "is this a project you created or one you trust?" For
+        // a worktree TBD created from a repo the operator explicitly registered,
+        // the answer is yes *by construction* — TBD holds every fact the dialog
+        // is asking about. Pre-seeding just writes that already-known answer
+        // through Claude's own config persistence, so the dialog never renders.
+        //
+        // Prevention is the only available fix: the dialog blocks BEFORE
+        // SessionStart, so no hook fires while it is up and a stalled-on-trust
+        // session is machine-invisible to TBD. A default-OFF flag would leave
+        // the stall in place for everyone who never finds the toggle.
+        //
+        // `ADD COLUMN ... DEFAULT true` backfills existing rows to true, which
+        // IS the intent here (see the CLAUDE.md default-flip note): every
+        // existing install should stop stalling on first spawn.
+        migrator.registerMigration("v66_config_auto_trust_worktrees") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_trust_worktrees",
+                type: .boolean, defaults: true)
+        }
+
+        // Marks a worktree whose CONTENTS came from a ref TBD cannot vouch for
+        // — a `refs/pull/<n>/head` checkout, whose commits may be authored by a
+        // third-party fork contributor. TBD created the directory; it did not
+        // create what is inside it, so v66's auto-trust seeding must skip these
+        // rows and let Claude ask (see `ClaudeTrustSeeder`).
+        //
+        // Persisted rather than passed as a create-time parameter because
+        // seeding happens at six call sites — create, extra-session restore,
+        // terminal create, revive, profile swap, hibernation wake — and all but
+        // the first see only the stored row.
+        //
+        // `ADD COLUMN ... DEFAULT false` backfills existing rows to false, which
+        // is the intended reading: rows created before this column existed are
+        // treated as ordinary TBD-created contents (the status quo ante). The
+        // default-flip trap in CLAUDE.md does not apply — this is not a
+        // user-facing toggle and there is no plan to flip its default.
+        migrator.registerMigration("v67_worktree_foreign_head") { db in
+            try db.addColumnIfMissing(
+                table: "worktree", column: "foreign_head",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }

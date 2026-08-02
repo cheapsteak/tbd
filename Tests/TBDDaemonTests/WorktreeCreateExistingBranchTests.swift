@@ -251,3 +251,103 @@ import Testing
     #expect(second.branch == "feature/auth-refactor-other")
 }
 
+
+// MARK: - Named branch that already exists, WITHOUT `useExistingBranch`
+//
+// The `useExistingBranch` flag above is the deliberate, opt-in path. These
+// cover the accidental one: `tbd worktree create --branch <name>` where the
+// branch happens to already exist locally — which is every branch that already
+// has a PR, i.e. the normal case when spawning a session onto existing work.
+//
+// It used to fail with "Worktree creation failed (see daemon logs)". Cause was
+// `git worktree add -b <branch>`, fatal when the ref exists; all four attempts
+// (two base branches, then both again after the folder-rename retry, which
+// keeps a user-specified branch) hit the same wall.
+
+@Test func testNamedExistingBranchIsCheckedOutWithoutTheFlag() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    try await shell("git branch already-here", at: repoDir)
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Note: no `useExistingBranch`. This is the plain create path.
+    let wt = try await lifecycle.createWorktree(
+        repoID: repo.id, branch: "already-here", skipClaude: true
+    )
+
+    #expect(wt.status == .active)
+    #expect(wt.branch == "already-here", "should have adopted the existing branch, not renamed around it")
+    #expect(FileManager.default.fileExists(atPath: wt.path))
+
+    let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+    #expect(listed.contains { $0.branch == "already-here" })
+}
+
+/// The other side of the same gate: a named branch that does NOT exist still
+/// takes the create-it path. Without this, "always check out" would silently
+/// replace worktree creation with worktree adoption.
+@Test func testNamedAbsentBranchIsStillCreated() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    let wt = try await lifecycle.createWorktree(
+        repoID: repo.id, branch: "brand-new-branch", skipClaude: true
+    )
+
+    #expect(wt.status == .active)
+    #expect(wt.branch == "brand-new-branch")
+    let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+    #expect(listed.contains { $0.branch == "brand-new-branch" })
+}
+
+/// Branch exists but is already checked out somewhere else — git refuses, and
+/// the point of the fix is that its stderr survives into the thrown error,
+/// because that stderr names the directory holding the branch. A bare
+/// "creation failed" leaves the user hunting for a path the tool already knew.
+@Test func testBranchCheckedOutElsewhereReportsTheHoldingPath() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    try await shell("git branch contested", at: repoDir)
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    let first = try await lifecycle.createWorktree(
+        repoID: repo.id, branch: "contested", skipClaude: true
+    )
+    #expect(first.status == .active)
+
+    await #expect(throws: WorktreeLifecycleError.self) {
+        _ = try await lifecycle.createWorktree(
+            repoID: repo.id, folder: "second-take", branch: "contested", skipClaude: true
+        )
+    }
+
+    do {
+        _ = try await lifecycle.createWorktree(
+            repoID: repo.id, folder: "third-take", branch: "contested", skipClaude: true
+        )
+        Issue.record("expected a second checkout of 'contested' to fail")
+    } catch {
+        let text = String(describing: error)
+        #expect(text.contains("contested"), "error does not name the branch: \(text)")
+        #expect(text.contains("already used by worktree"),
+                "git's stderr was swallowed; it is what names the holding directory: \(text)")
+    }
+}
