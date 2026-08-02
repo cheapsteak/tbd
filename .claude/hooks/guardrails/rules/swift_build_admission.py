@@ -11,6 +11,7 @@ from guardrails.lib.rule import Decision, Rule
 
 _COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 _DISPLAY_COMMANDS = {"awk", "cat", "echo", "grep", "printf", "rg", "sed"}
+_EVAL_COMMANDS = {"eval"}
 _SHELL_COMMANDS = {"bash", "dash", "sh", "zsh"}
 _BOUNDARIES = {"&", "&&", "(", ")", ";", "|", "||"}
 _MAX_NESTED_SHELL_DEPTH = 4
@@ -41,7 +42,11 @@ def _segments(command: str) -> list[list[str]]:
     return [segment for segment in segments if segment]
 
 
-def _nested_shell_payloads(segment: list[str]):
+def _nested_interpreter_payloads(segment: list[str]):
+    for eval_index, token in enumerate(segment[:-1]):
+        if os.path.basename(token) in _EVAL_COMMANDS:
+            yield segment[eval_index + 1]
+
     for shell_index, token in enumerate(segment[:-1]):
         if os.path.basename(token) not in _SHELL_COMMANDS:
             continue
@@ -85,7 +90,7 @@ def _contains_raw_swift_compile(segment: list[str], depth: int = 0) -> bool:
             for payload in _command_substitution_payloads(token):
                 if _command_contains_raw_swift_compile(payload, depth + 1):
                     return True
-        for payload in _nested_shell_payloads(segment):
+        for payload in _nested_interpreter_payloads(segment):
             if _command_contains_raw_swift_compile(payload, depth + 1):
                 return True
     if segment and os.path.basename(segment[0]) in _DISPLAY_COMMANDS:

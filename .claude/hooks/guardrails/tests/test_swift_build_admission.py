@@ -68,6 +68,22 @@ class SwiftBuildAdmissionTests(unittest.TestCase):
                 self.assertIsNotNone(decision)
                 self.assertEqual(decision.action, "deny")
 
+    def test_eval_cannot_bypass_admission(self):
+        commands = [
+            'eval "swift build"',
+            "eval 'swift test --filter TranscriptPresentation'",
+            'eval "/usr/bin/swift run TBDApp"',
+            'bash -c \'eval "swift build"\'',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                decision = _check(command)
+                self.assertIsNotNone(decision)
+                self.assertEqual(decision.action, "deny")
+
+    def test_eval_may_call_the_governed_runner(self):
+        self.assertIsNone(_check('eval "scripts/swift-safe build"'))
+
     def test_nested_shell_may_call_the_governed_runner(self):
         commands = [
             'bash -c "scripts/swift-safe build"',
