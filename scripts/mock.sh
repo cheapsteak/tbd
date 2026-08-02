@@ -50,7 +50,7 @@ up() {
     [ -f "$fixture" ] || { echo "No fixture: $fixture" >&2; exit 1; }
 
     echo "Building..."
-    (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3
+    (cd "$REPO_ROOT" && scripts/swift-safe build) 2>&1 | tail -3
 
     down_quiet
     rm -rf "$MOCK_HOME"          # fresh DB each `up`; re-seeding an existing state.db collides on UNIQUE (now fail-loud)
@@ -100,6 +100,6 @@ case "$cmd" in
     up)      up "${1:-default}" ;;
     down)    down ;;
     shot)    shot "${1:-}" ;;
-    restart) (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3; down; up "${1:-default}" ;;
+    restart) (cd "$REPO_ROOT" && scripts/swift-safe build) 2>&1 | tail -3; down; up "${1:-default}" ;;
     *) echo "usage: mock.sh {up [scenario]|down|shot <name>|restart [scenario]}" >&2; exit 1 ;;
 esac
