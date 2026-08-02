@@ -1857,7 +1857,7 @@ weaker registry-declaration mode exists — a session either goes through the
 relaunch and holds the full mechanics, or it is not a supervisor. The
 operation waits for the session to be idle, and it is visible: the pane
 restarts — a flicker at an idle moment — which is the honest cost of a real
-relaunch. **Release is the symmetric operation**: the same idle-waiting
+relaunch. **Relieving is the symmetric operation**: the same idle-waiting
 resume, without the layer and without `TBD_PROJECT`, returning the session to
 ordinary life with its conversation intact.
 
