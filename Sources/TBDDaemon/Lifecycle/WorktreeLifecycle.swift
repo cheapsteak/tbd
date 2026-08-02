@@ -86,6 +86,12 @@ public struct WorktreeLifecycle: Sendable {
         (@Sendable (_ worktreePath: String, _ knownPublished: Bool) async -> ArchiveSafetyReport)?
     /// Test seam only. Production leaves this nil and uses GitManager.
     let worktreeRemover: (@Sendable (_ repoPath: String, _ worktreePath: String) async throws -> Void)?
+    /// Resolves the Codex CLI before lifecycle code creates tmux or DB state.
+    /// Stored as a seam so tests do not require Codex or ChatGPT.app installed.
+    let codexExecutableResolver: @Sendable () throws -> String
+    /// Prepares TBD's profile in the user's existing global Codex home before
+    /// lifecycle code creates tmux or terminal state.
+    let codexHomeEnsurer: @Sendable () throws -> URL
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
@@ -135,7 +141,9 @@ public struct WorktreeLifecycle: Sendable {
         preSessionPollInterval: TimeInterval = 0.5,
         processSignaller: ProcessSignaller = ProductionProcessSignaller(),
         reaperGraceAttempts: Int = 30,
-        reaperPollInterval: Duration = .milliseconds(100)
+        reaperPollInterval: Duration = .milliseconds(100),
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
     ) {
         self.init(
             db: db, git: git, tmux: tmux, hooks: hooks,
@@ -144,6 +152,8 @@ public struct WorktreeLifecycle: Sendable {
             preSessionTimeout: preSessionTimeout, preSessionPollInterval: preSessionPollInterval,
             processSignaller: processSignaller, reaperGraceAttempts: reaperGraceAttempts,
             reaperPollInterval: reaperPollInterval,
+            codexExecutableResolver: codexExecutableResolver,
+            codexHomeEnsurer: codexHomeEnsurer,
             archiveSafetyEvaluator: nil, worktreeRemover: nil
         )
     }
@@ -164,6 +174,8 @@ public struct WorktreeLifecycle: Sendable {
         processSignaller: ProcessSignaller = ProductionProcessSignaller(),
         reaperGraceAttempts: Int = 30,
         reaperPollInterval: Duration = .milliseconds(100),
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         archiveSafetyEvaluator:
             (@Sendable (_ worktreePath: String, _ knownPublished: Bool) async -> ArchiveSafetyReport)?,
         worktreeRemover:
@@ -185,6 +197,16 @@ public struct WorktreeLifecycle: Sendable {
         self.reaperPollInterval = reaperPollInterval
         self.archiveSafetyEvaluator = archiveSafetyEvaluator
         self.worktreeRemover = worktreeRemover
+        self.codexExecutableResolver = codexExecutableResolver ?? {
+            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
+            return try CodexExecutableResolver.resolve()
+        }
+        self.codexHomeEnsurer = codexHomeEnsurer ?? {
+            if tmux.dryRun {
+                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
+            }
+            return try CodexHomeManager().ensureProfilePlugin()
+        }
     }
 
     /// Projects root for a revive spawn's resolved profile config dir path,

@@ -70,6 +70,30 @@ public final class RPCRouter: Sendable {
     /// re-implement gating. Broadcasts through the same `subscriptions`
     /// channel every other mutating handler uses.
     public let panelCoordinator: PanelCoordinator
+    /// Native Claude-to-Codex import seams. Production uses the installed
+    /// Codex app-server; tests replace these before invoking the handler.
+    nonisolated(unsafe) var codexExecutableResolver: @Sendable () throws -> String
+    nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
+    nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
+        CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in
+            CodexSpawnCommandBuilder.commandOutput(arguments: arguments, timeout: 3)
+        }
+    }
+    nonisolated(unsafe) var codexSessionImport: @Sendable (
+        _ executablePath: String,
+        _ codexHome: URL,
+        _ transcriptPath: String,
+        _ cwd: String,
+        _ title: String?
+    ) async throws -> String = { executablePath, codexHome, transcriptPath, cwd, title in
+        try await CodexSessionImporter(
+            executablePath: executablePath,
+            codexHome: codexHome
+        ).importSession(
+            transcriptPath: transcriptPath,
+            cwd: cwd,
+            title: title)
+    }
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -105,7 +129,9 @@ public final class RPCRouter: Sendable {
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
-        remoteManager: RemoteProviderManager? = nil
+        remoteManager: RemoteProviderManager? = nil,
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -134,6 +160,16 @@ public final class RPCRouter: Sendable {
         self.panelCoordinator = PanelCoordinator(
             db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
         self.remoteManager = remoteManager
+        self.codexExecutableResolver = codexExecutableResolver ?? {
+            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
+            return try CodexExecutableResolver.resolve()
+        }
+        self.codexHomeEnsurer = codexHomeEnsurer ?? {
+            if tmux.dryRun {
+                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
+            }
+            return try CodexHomeManager().ensureProfilePlugin()
+        }
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -205,6 +241,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeForget(request.paramsData)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData)
+            case RPCMethod.terminalContinueInCodex:
+                return try await handleTerminalContinueInCodex(request.paramsData)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
@@ -380,6 +418,18 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
             case RPCMethod.nightwatchSetMode:
                 return try await handleSetNightwatchMode(request.paramsData)
+            case RPCMethod.nightwatchLeaseStatus:
+                return try await handleNightwatchLeaseStatus(request.paramsData)
+            case RPCMethod.nightwatchLeaseAcquire:
+                return try await handleNightwatchLeaseAcquire(request.paramsData)
+            case RPCMethod.nightwatchLeaseValidate:
+                return try await handleNightwatchLeaseValidate(request.paramsData)
+            case RPCMethod.nightwatchLeaseRenew:
+                return try await handleNightwatchLeaseRenew(request.paramsData)
+            case RPCMethod.nightwatchLeaseTransfer:
+                return try await handleNightwatchLeaseTransfer(request.paramsData)
+            case RPCMethod.nightwatchLeaseRelease:
+                return try await handleNightwatchLeaseRelease(request.paramsData)
             case RPCMethod.terminalHibernate:
                 return try await handleTerminalHibernate(request.paramsData)
             case RPCMethod.terminalWake:

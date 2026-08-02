@@ -24,6 +24,9 @@ public enum StateDelta: Codable, Sendable {
     case terminalSessionUpdated(TerminalSessionDelta)
     case terminalActivityUpdated(TerminalActivityDelta)
     case terminalProfileChanged(TerminalProfileDelta)
+    /// Explicit Watch Desk Judge/Read-only role markers changed. The app
+    /// refetches that worktree's terminal rows; lease credentials stay daemon-side.
+    case watchDeskRolesChanged(WorktreeIDDelta)
     case worktreeMoved(WorktreeMovedDelta)
     case terminalHibernationChanged(TerminalHibernationDelta)
     case controlModeInputHealthChanged(ControlModeInputHealthDelta)

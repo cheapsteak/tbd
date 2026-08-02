@@ -181,11 +181,15 @@ struct RemoteSectionViewTests {
 
     // MARK: - shouldShowHeader(provider:sessions:knownRepoIDs:)
 
-    private func status(name: String = "acme", health: ProviderHealth) -> RemoteProviderStatus {
+    private func status(
+        name: String = "acme", health: ProviderHealth,
+        errorMessage: String? = nil, lastSuccess: Date? = nil
+    ) -> RemoteProviderStatus {
         RemoteProviderStatus(
             config: RemoteProviderConfig(name: name, exec: "/usr/bin/true"),
             describe: nil, health: health,
-            errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+            errorMessage: errorMessage, remediationLabel: nil, remediationCommand: nil,
+            lastSuccessfulSnapshotAt: lastSuccess)
     }
 
     @Test func shouldShowHeader_trueWhenHealthyWithUnmatchedSessions() {
@@ -389,25 +393,48 @@ struct RemoteSectionViewTests {
     // MARK: - RemoteSessionRowView.stalenessCaption(health:lastSeen:now:)
 
     @Test func stalenessCaption_nilWhenProviderIsHealthy() {
-        #expect(RemoteSessionRowView.stalenessCaption(health: .ok, lastSeen: Date(), now: Date()) == nil)
+        #expect(RemoteSessionRowView.stalenessCaption(
+            health: .ok, lastSuccessfulSnapshotAt: Date(), now: Date()) == nil)
     }
 
     @Test func stalenessCaption_reflectsRelativeAgeWhenStale() {
         let now = Date(timeIntervalSince1970: 10_000)
         let lastSeen = now.addingTimeInterval(-2 * 3600)
-        #expect(RemoteSessionRowView.stalenessCaption(health: .stale, lastSeen: lastSeen, now: now) == "as of 2h ago")
+        #expect(RemoteSessionRowView.stalenessCaption(
+            health: .stale, lastSuccessfulSnapshotAt: lastSeen, now: now) == "as of 2h ago")
     }
 
     @Test func stalenessCaption_justNowOmitsTheTrailingAgo() {
         let now = Date(timeIntervalSince1970: 10_000)
         let lastSeen = now.addingTimeInterval(-5)
-        #expect(RemoteSessionRowView.stalenessCaption(health: .error, lastSeen: lastSeen, now: now) == "as of just now")
+        #expect(RemoteSessionRowView.stalenessCaption(
+            health: .error, lastSuccessfulSnapshotAt: lastSeen, now: now) == "as of just now")
     }
 
     @Test func stalenessCaption_rendersForNeedsAuthHealthToo() {
         let now = Date(timeIntervalSince1970: 10_000)
         let lastSeen = now.addingTimeInterval(-5 * 60)
-        #expect(RemoteSessionRowView.stalenessCaption(health: .needsAuth, lastSeen: lastSeen, now: now) == "as of 5m ago")
+        #expect(RemoteSessionRowView.stalenessCaption(
+            health: .needsAuth, lastSuccessfulSnapshotAt: lastSeen, now: now) == "as of 5m ago")
+    }
+
+    @Test func providerIssueSummaryShowsBoundedErrorAndLastGoodAge() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let provider = status(
+            health: .stale, errorMessage: "Inventory response was truncated",
+            lastSuccess: now.addingTimeInterval(-2 * 3600))
+        #expect(RemoteProviderStatusPresentation.issueSummary(provider, now: now)
+                == "Inventory response was truncated · last good 2h ago")
+    }
+
+    @Test func providerIssueSummarySaysWhenNoSuccessfulSnapshotExists() {
+        let provider = status(health: .error, errorMessage: "Provider failed")
+        #expect(RemoteProviderStatusPresentation.issueSummary(provider)
+                == "Provider failed · no successful snapshot yet")
+    }
+
+    @Test func providerIssueSummaryIsNilWhenHealthy() {
+        #expect(RemoteProviderStatusPresentation.issueSummary(status(health: .ok)) == nil)
     }
 
     // MARK: - AppState.remoteUnreadType(kind:exitCode:)

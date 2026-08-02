@@ -32,12 +32,12 @@ struct NightwatchDeskPromptsTests {
         ]
     }
 
-    @Test("No prompt references a `tbd terminal close` subcommand", arguments: liveModes)
+    @Test("No prompt references nonexistent `tbd terminal close --all`", arguments: liveModes)
     func noPhantomCloseCommand(mode: NightwatchMode) {
         for (label, text) in prompts(mode: mode, skillDir: "/skill") {
             #expect(
-                !text.contains("terminal close"),
-                "\(mode) \(label) references `tbd terminal close`, which does not exist"
+                !text.contains("terminal close --all"),
+                "\(mode) \(label) references unsupported multi-terminal close"
             )
         }
     }
@@ -282,6 +282,38 @@ struct NightwatchDeskPromptsTests {
             }
             #expect(py.contains("refusing to close myself"),
                     "handoff.py lost the self-close guard the relay depends on")
+            #expect(py.contains("tbd\", \"terminal\", \"close\""),
+                    "handoff.py must close through TBD so terminal history is preserved")
+            #expect(!py.contains("kill-window"),
+                    "handoff.py must not bypass TBD's close/history path")
+            #expect(py.contains("tbd nightwatch lease renew"),
+                    "successor must renew and validate authority before mutating")
+            #expect(py.contains("refusing handoff: judge lease renewal failed"))
+            #expect(py.contains("--credential-file"))
+            #expect(!py.contains("--token"),
+                    "handoff must not expose the capability in argv or transcript text")
+            #expect(py.contains("refusing to close predecessor: this terminal does not hold the judge lease"),
+                    "successor close must be fenced by its transferred capability")
+        }
+
+        @Test("mutable shipped scripts renew judge authority before acting")
+        func mutableScriptsGuardActions() {
+            let wake = NightwatchSkillContent.wakePy
+            #expect(wake.contains("def require_judge_lease():"))
+            #expect(wake.contains("if act:\n            require_judge_lease()"))
+
+            let judge = NightwatchSkillContent.judgePy
+            #expect(judge.contains("def require_judge_lease():"))
+            #expect(judge.contains("if not act or not tid: return False\n    require_judge_lease()"))
+        }
+
+        @Test("initial desk prompt is read-only until lease-bearing nudge")
+        func initialPromptWaitsForLease() {
+            for mode in NightwatchDeskPromptsTests.liveModes {
+                let prompt = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: "/skill")
+                #expect(prompt.contains("Authority starts at the first lease-bearing nudge"))
+                #expect(prompt.contains("you are read-only"))
+            }
         }
 
         /// The ceiling is the one number in this skill that both prompts quote in

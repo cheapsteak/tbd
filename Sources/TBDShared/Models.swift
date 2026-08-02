@@ -316,6 +316,23 @@ public enum HibernateReason: String, Codable, Sendable {
         self = HibernateReason(rawValue: raw) ?? .auto
     }
 }
+public enum WatchDeskRole: String, Codable, Sendable, Equatable {
+    case judge
+    case readOnlyCoordinator = "read_only_coordinator"
+
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        // A role introduced by a newer daemon must never acquire mutable
+        // semantics in an older app. Render it as read-only and keep decoding.
+        self = Self(rawValue: raw) ?? .readOnlyCoordinator
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -357,6 +374,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// row). Drives the "⏳ resumes 1:01pm" tab badge. Optional for
     /// decode-compat with pre-v43 rows/JSON.
     public var pendingResumeAt: Date?
+    /// Explicit Watch Desk authority. Nil means an ordinary terminal.
+    /// The lease row, not this display marker, is authoritative for mutation.
+    public var watchDeskRole: WatchDeskRole?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
@@ -369,7 +389,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 hibernatedAt: Date? = nil,
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
-                pendingResumeAt: Date? = nil) {
+                pendingResumeAt: Date? = nil,
+                watchDeskRole: WatchDeskRole? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -388,13 +409,14 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
         self.pendingResumeAt = pendingResumeAt
+        self.watchDeskRole = watchDeskRole
     }
 
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
         case activityState
-        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt
+        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
     }
 
     public init(from decoder: Decoder) throws {
@@ -417,6 +439,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
         pendingResumeAt = try c.decodeIfPresent(Date.self, forKey: .pendingResumeAt)
+        watchDeskRole = try c.decodeIfPresent(WatchDeskRole.self, forKey: .watchDeskRole)
     }
 }
 

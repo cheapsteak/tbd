@@ -183,7 +183,10 @@ struct RemoteSessionDetailView: View {
 
             contentArea
 
-            if RemoteSessionDetailGates.showsSendField(capabilities: capabilities, gone: isGone) {
+            if RemoteSessionDetailGates.showsSendField(
+                capabilities: capabilities, gone: isGone,
+                snapshotFresh: providerStatus?.hasStaleSnapshot != true
+            ) {
                 Divider()
                 sendField
             }
@@ -284,7 +287,7 @@ struct RemoteSessionDetailView: View {
                     .fontWeight(.semibold)
                     .lineLimit(1)
                 Spacer()
-                if let session, !session.gone {
+                if let session, !session.gone, providerStatus?.hasStaleSnapshot != true {
                     Button("Stop", role: .destructive) { showStopConfirm = true }
                         .confirmationDialog(
                             "Stop \(displayName)?",
@@ -320,6 +323,19 @@ struct RemoteSessionDetailView: View {
                 Label("Session not found in the current mirror", systemImage: "questionmark.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if let providerStatus,
+               let issue = RemoteProviderStatusPresentation.issueSummary(providerStatus) {
+                Label(issue, systemImage: "clock.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                if providerStatus.hasStaleSnapshot {
+                    Text("Attach and logs remain available; changes are paused until inventory refresh recovers.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if let session,

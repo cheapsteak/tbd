@@ -18,6 +18,10 @@ public enum NightwatchDeskPrompts {
         return """
         You are TBD's \(modeLabel) Judge — monitoring merge-gate decisions with the configured profile model.
 
+        **Authority starts at the first lease-bearing nudge.** Until a tick message
+        arrives and the lease command in `\(judgeInstructionsFileName)` succeeds,
+        you are read-only: do not merge/enqueue, apply, archive, wake/nudge, or spawn.
+
         **Your workspace:**
         - You're running in: \(skillDir)
         - Decision queue: \(queueDir)/decisions.jsonl (JSONL file of pending judgment items)
@@ -81,7 +85,7 @@ public enum NightwatchDeskPrompts {
 
         **Next step:**
         Read the Nightwatch skill docs for the full merge-gate policy, clearance types, and acting procedures.
-        When you receive a nudge message, process queue/decisions.jsonl and output actions.
+        Wait for the first lease-bearing nudge; then process queue/decisions.jsonl and output actions.
         """
     }
 

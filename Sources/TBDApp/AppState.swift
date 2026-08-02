@@ -1695,6 +1695,8 @@ final class AppState: ObservableObject {
             applyTerminalActivityDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
+        case .watchDeskRolesChanged(let d):
+            Task { [weak self] in await self?.refreshTerminals(worktreeID: d.worktreeID) }
         case .terminalHibernationChanged(let d):
             applyTerminalHibernationDelta(d)
         case .worktreeMoved(let d):

@@ -23,6 +23,7 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
 extension TBDHomeSerialized {
 @Suite("Claude Token Spawn + Swap")
 struct ModelProfileSpawnTests {
+    private struct ExpectedCodexPreparationFailure: Error {}
 
     /// Recorder for tmux argv lists invoked during dryRun.
     final class TmuxRecorder: @unchecked Sendable {
@@ -187,6 +188,75 @@ struct ModelProfileSpawnTests {
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
+    @Test("terminal.create prepares Codex home before tmux or terminal mutation")
+    func terminalCreateCodexHomeFailurePrecedesMutation() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        router.codexExecutableResolver = { "/opt/test/bin/codex" }
+        router.codexHomeEnsurer = {
+            throw ExpectedCodexPreparationFailure()
+        }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .codex)))
+
+        #expect(!response.success)
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
+    @Test("terminal.create spawns the injected absolute Codex executable")
+    func terminalCreateUsesResolvedAbsoluteCodexExecutable() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        router.codexExecutableResolver = { "/opt/TBD Codex/bin/codex" }
+        router.codexHomeEnsurer = {
+            FileManager.default.temporaryDirectory.appendingPathComponent(
+                "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
+        }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .codex)))
+
+        #expect(response.success)
+        #expect(recorder.shellBodies.contains("'/opt/TBD Codex/bin/codex'"))
+        #expect(!recorder.shellBodies.contains("; codex --profile"))
+        #expect(!recorder.shellBodies.contains("; codex --profile-v2"))
+    }
+
+    @Test("terminal.recreate prepares Codex home before killing the old window")
+    func terminalRecreateCodexHomeFailurePreservesOldWindowAndRow() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@old-codex",
+            tmuxPaneID: "%old-codex",
+            label: TerminalLabel.codex,
+            kind: .codex)
+        router.codexExecutableResolver = { "/opt/test/bin/codex" }
+        router.codexHomeEnsurer = {
+            throw ExpectedCodexPreparationFailure()
+        }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(recorder.calls.isEmpty)
+        let unchanged = try #require(
+            try await db.terminals.get(id: terminal.id))
+        #expect(unchanged.tmuxWindowID == terminal.tmuxWindowID)
+        #expect(unchanged.tmuxPaneID == terminal.tmuxPaneID)
+        #expect(unchanged.kind == .codex)
+    }
+
     // MARK: - Spawn: Codex free-form env overrides (branch-test rule)
 
     /// Build a lifecycle + recorder fixture. Unlike `makeFixture`, this exposes
@@ -195,7 +265,15 @@ struct ModelProfileSpawnTests {
     /// `ModelProfileResolver` is attached so the Claude branch resolves the
     /// worktree's effective profile (Codex tests ignore it — Codex resolves no
     /// profile).
-    private func makeLifecycleFixture() -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
+    private func makeLifecycleFixture(
+        codexExecutableResolver: @escaping @Sendable () throws -> String = {
+            "/usr/bin/true"
+        },
+        codexHomeEnsurer: @escaping @Sendable () throws -> URL = {
+            FileManager.default.temporaryDirectory.appendingPathComponent(
+                "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
+        }
+    ) -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
         let recorder = TmuxRecorder()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
         let db = try! TBDDatabase(inMemory: true)
@@ -205,7 +283,9 @@ struct ModelProfileSpawnTests {
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             modelProfileResolver: resolver,
-            configDirManager: isolatedConfigDirManager()
+            configDirManager: isolatedConfigDirManager(),
+            codexExecutableResolver: codexExecutableResolver,
+            codexHomeEnsurer: codexHomeEnsurer
         )
         return (lifecycle, db, recorder)
     }
@@ -285,6 +365,29 @@ struct ModelProfileSpawnTests {
         #expect(codexCall.contains("DISABLE_AUTO_UPDATE=true"),
                 "codex window must suppress the oh-my-zsh update prompt via -e")
         #expect(!recorder.joinedAll.contains("FOO=bar"))
+    }
+
+    @Test("spawn: missing Codex executable fails before tmux or terminal mutation")
+    func codexResolutionFailurePrecedesSpawnMutation() async throws {
+        let expected = CodexExecutableResolutionError.notFound(
+            searchPath: "/missing",
+            fallbackPath: CodexExecutableResolver.chatGPTBundlePath)
+        let (lifecycle, db, recorder) = makeLifecycleFixture(
+            codexExecutableResolver: { throw expected })
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+
+        await #expect(throws: expected) {
+            _ = try await lifecycle.spawnPrimaryTerminals(
+                worktree: wt,
+                repo: repo,
+                skipClaude: false,
+                preSessionTerminalID: nil)
+        }
+
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     // MARK: - Spawn: Claude free-form env overrides (branch-test rule)

@@ -94,6 +94,15 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot create a terminal there.")
         }
 
+        // Resolve Codex before creating any tmux state. A GUI-launched daemon
+        // can have a minimal PATH, and a resolution failure must not leave an
+        // orphan window or terminal row behind.
+        let codexPreparation = params.type == .codex
+            ? try CodexLaunchPreparation.prepare(
+                executableResolver: codexExecutableResolver,
+                homeEnsurer: codexHomeEnsurer)
+            : nil
+
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
@@ -151,7 +160,10 @@ extension RPCRouter {
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
         if params.type == .codex {
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
+            guard let codexPreparation else {
+                return RPCResponse(
+                    error: "Codex launch preparation unexpectedly returned no result.")
+            }
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
             codexEnv["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
@@ -159,7 +171,7 @@ extension RPCRouter {
             // the design's allowed "set the global path" option — not leftover
             // per-repo isolation: it pins deterministic behavior and lets the
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
-            codexEnv["CODEX_HOME"] = codexHome.path
+            codexEnv["CODEX_HOME"] = codexPreparation.codexHome.path
             // COLORFGBG isn't Claude-specific — Codex shells benefit from it too,
             // so include it at spawn time. (Live updates also reach Codex via
             // `tmux setenv -g COLORFGBG` fanned out by handleAppearanceUpdateColorFgBg.)
@@ -183,7 +195,9 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.build(initialPrompt: params.prompt),
+                shellCommand: CodexSpawnCommandBuilder.build(
+                    initialPrompt: params.prompt,
+                    executablePath: codexPreparation.executablePath),
                 env: codexEnv,
                 sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,
@@ -813,6 +827,17 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot recreate the terminal window.")
         }
 
+        // Resolve and prepare Codex before killing a recreatable pane. A bad
+        // executable override must leave the existing terminal untouched.
+        let codexPreparation: CodexLaunchPreparation?
+        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+            codexPreparation = try CodexLaunchPreparation.prepare(
+                executableResolver: codexExecutableResolver,
+                homeEnsurer: codexHomeEnsurer)
+        } else {
+            codexPreparation = nil
+        }
+
         // Kill the old window if it still exists (avoids orphans)
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
 
@@ -832,7 +857,9 @@ extension RPCRouter {
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             // Recreate as codex — preserve identity
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
+            guard let codexPreparation else {
+                return RPCResponse(error: "Codex launch preparation was unavailable")
+            }
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
             codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString
@@ -840,7 +867,7 @@ extension RPCRouter {
             // the design's allowed "set the global path" option — not leftover
             // per-repo isolation: it pins deterministic behavior and lets the
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
-            codexEnv["CODEX_HOME"] = codexHome.path
+            codexEnv["CODEX_HOME"] = codexPreparation.codexHome.path
 
             // Codex: re-apply the merged free-form overrides (global < repo) so a
             // recreated Codex pane keeps them, plus omz-update suppression via
@@ -863,7 +890,8 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.command,
+                shellCommand: CodexSpawnCommandBuilder.command(
+                    executablePath: codexPreparation.executablePath),
                 env: codexEnv,
                 sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,
