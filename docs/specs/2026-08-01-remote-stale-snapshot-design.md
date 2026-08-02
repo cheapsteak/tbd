@@ -1,13 +1,14 @@
-# Agent Box stale-snapshot visibility
+# Remote provider stale-snapshot visibility
 
 ## Problem
 
 TBD persists the last successful remote-session inventory so users can still
 inspect and attach to known sessions after a provider error. Before this
 change, a failed full-list refresh left those cached rows looking live and
-kept inventory-dependent mutations enabled. An AWS/SSM output truncation could
-therefore make a healthy Agent Box feel broken while TBD presented stale state
-with false confidence.
+kept inventory-dependent mutations enabled. A remote host can be healthy while
+its unbounded `list` response is truncated by the transport, so a
+provider-path failure was indistinguishable from real remote work: TBD
+presented stale state with false confidence.
 
 ## Decision
 
@@ -30,9 +31,18 @@ Successful non-list verbs do not clear inventory degradation; only a complete
 full-list refresh can re-establish authoritative state. Provider errors shown
 in the UI are bounded and redact the known oversized/truncated payload shape.
 
+Fail direction is decided by what the daemon can prove, not by convenience.
+"No successful snapshot was ever recorded" is positive knowledge — the mirror
+was never authoritative, so there is nothing to misrepresent and mutations
+stay enabled. A freshness read that *fails* proves nothing, so it gates
+instead: it is recorded distinctly from a confirmed absence, reports its own
+health text, and clears as soon as a read succeeds or a live snapshot lands.
+Conflating the two would let a database error silently buy back the exact
+false confidence this change removes.
+
 ## Boundaries
 
-- No provider protocol, credential, or Agent Box host changes.
+- No provider protocol, credential, or remote host changes.
 - No automatic retry, restart, stop, or other remote mutation.
 - No TUI screen scraping.
 - Cached rows remain attachable because provider session IDs are still useful
@@ -51,3 +61,5 @@ in the UI are bounded and redact the known oversized/truncated payload shape.
   and Log remain usable.
 - First-ever malformed output says that no successful snapshot exists rather
   than claiming that one is displayed.
+- An unreadable persisted freshness row gates mutations and claims no age,
+  and stops gating once a snapshot succeeds.
