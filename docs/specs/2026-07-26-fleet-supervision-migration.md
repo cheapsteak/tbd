@@ -249,10 +249,12 @@ only — no slice needs a later one:
   bound to that switch. The ledger envelope carries `mode` per line from the
   start, even though mode selection lands in slice 3; a shift with no selections
   records `attended`. Shift
-  open spawns no desks by design (design §9 — desks are lazy, born on their
+  open spawns no desks by design (design §9 — hosted desks are lazy, born on
+  their
   project's first case in slice 4), so this slice's shift opens, writes its
   ledger, and closes on its own; no slice needs a later one. Shift close gains
-  its dispose-every-desk step in slice 4, when there are desks to dispose.
+  its dispose-every-hosted-desk step in slice 4, when there are desks to
+  dispose.
 - **Slice 3 — verbs and `supervision.json`** (design §3, §5, §8, §10).
   Nothing here is gated (design §3), which keeps the slice small and simple.
   - **The verbs as RPC, none of them gated**: `drive`, `wake`, `pause`,
@@ -312,17 +314,30 @@ only — no slice needs a later one:
   and the contact-window watchdog with its anomaly lines and its
   operator notification on persistent silence, armed only while supervision
   is on and a shift is open. Desk briefing: the playbook installed
-  as standing conduct at desk spawn through the agent-kind adapter
-  (first-briefing embed fallback), the compiled header on every delivered
+  as standing conduct at desk launch through the agent-kind adapter — a
+  supervisor-capability requirement, with no embed fallback of any kind
+  (design §9, sub-document §8) — the compiled header on every delivered
   briefing carrying the active mode's name and any superseding conduct delta
   on mid-shift edits, and the `delivery` ledger line with delivered-text and
-  conduct hashes. Then per-project briefing delivery, desks as
-  first-class sessions **one per project, spawned lazily on that project's first
-  case and all disposed at shift close**, the compiled **desk→project
+  conduct hashes. Then per-project briefing delivery, supervisors as
+  first-class sessions **one per project** — the hosted desk spawned lazily
+  on that project's first case and disposed at shift close, or the operator's
+  anointed session where a binding stands (design §9) — the compiled
+  **desk→project
   addressing check** (a verb whose target is outside the calling desk's project
   is refused as a routing error — correctness, not authority, design §3; the
   check reads the project name injected into the desk's spawn environment,
-  design §5),
+  or into the anointment relaunch's environment,
+  design §5), the **anoint/release gestures** (design §9, §10): the
+  supervisor-capability qualification check refusing unqualified agent kinds
+  at the gesture with the reason, the idle-waiting relaunch that resumes the
+  same conversation with the layer installed and `TBD_PROJECT` injected, the
+  symmetric release, the `supervisors` binding in `supervision.json` (design
+  §8) with lifecycle ledger lines for both gestures, the hosted default
+  standing down while a binding stands, and the forked dead-man remediation
+  (hosted: replacement within the reroll budget; anointed: operator
+  notification only, never an automatic restart; a dangling binding: loud
+  anomaly, no silent takeover),
   `terminal.send` delivery for
   the fleet, the Channels adapter for desks behind its own default-off flag with
   automatic degrade and a **per-desk-spawn handshake** (not per shift), the

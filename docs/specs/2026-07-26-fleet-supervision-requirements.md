@@ -111,9 +111,13 @@ and become a contract that migration and future change must respect.
   fleet and intervening on my behalf, so that a stuck or idle agent doesn't sit dead for
   hours because nobody noticed. What must be singular is my experience of it: one switch,
   one record, one morning report, one place to look. The judgment layer underneath may
-  shard by policy scope (the design's one-desk-per-project invariant) — how many sessions
+  shard by policy scope (the design's one-supervisor-per-project invariant) — how many
+  sessions
   do the judging is the design's choice, provided a quiet fleet costs nothing and the
-  account stays whole.
+  account stays whole. A project's supervisor may be the TBD-hosted desk (the shipped
+  default) or an existing session the operator anoints into the role (design §9); the
+  guarantees — identity, standing conduct, briefing delivery, the daemon-written record —
+  are identical in either arrangement.
 - **P0-2 [both]** As an operator, I want a single supervision switch — on / off —
   persisted in the daemon and settable from the app and the CLI, so that I can hand over or
   take back the fleet with one gesture, and a daemon restart resumes the same state without
@@ -155,6 +159,10 @@ and become a contract that migration and future change must respect.
 - **P0-4 [both]** As an operator, I want the supervisor to be a visible, first-class session
   I can open, read, and type into at any time, so that supervision is inspectable and
   steerable, never a black box running somewhere I can't see.
+
+  This holds in both supervisor arrangements: the hosted desk is spawned as exactly such a
+  session, and an anointed supervisor is by definition one already — a TBD-managed session
+  in a tab the operator can open, watch, and type into (design §9).
 - **P0-5 [both]** As the daemon, I want to answer what any managed agent is doing right now —
   working, idle, awaiting input, rate-limited, gone — cheaply enough to ask about every agent
   every cycle, and again a minute later, without a model call and without reading rendered

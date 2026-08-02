@@ -164,10 +164,13 @@ does, synchronously:
    refuses with a distinct machine-readable paused result — a pinned exit
    code (§10) — so a program can tell "not now" from "broken." Refusals
    while paused do not feed the watchdog (§6), and nothing is delivered.
-4. **Deliver.** A surviving briefing goes to the project's desk: the daemon
+4. **Deliver.** A surviving briefing goes to the project's supervisor: the
+   daemon
    prepends the compiled **header** — the active mode's name and any pending
-   conduct delta (§8) — spawns the desk lazily if the project has none this
-   shift, delivers through the agent-kind adapter, and writes the ledger's
+   conduct delta (§8) — resolves the supervisor (the operator's anointed
+   session where a binding stands, otherwise the hosted desk, spawned lazily
+   if the project has none this shift — design §5, §9),
+   delivers through the agent-kind adapter, and writes the ledger's
    delivery line request-first, carrying the delivered text's hash and the
    conduct hash (design §4 steps 3–5, §6, §12). Delivery arms the desk
    dead-man's deadline: a briefing delivered at T with no ledger line from
@@ -417,12 +420,17 @@ What the program is, wherever it runs from:
 ## 8. Standing conduct: how the playbook reaches the desk
 
 The playbook — every mode description included — is installed as a
-standing instruction layer when the desk session is spawned, through the
-agent-kind adapter. Each delivered briefing then carries the **active mode's
+standing instruction layer when the desk session is launched, through the
+agent-kind adapter: at spawn for a hosted desk, at the anointment relaunch
+for an operator-anointed supervisor (design §9) — the same layer, installed
+at the same kind of moment. Each delivered briefing then carries the **active
+mode's
 name** in its compiled header (§3) — a name from `supervision.json`'s
 declared list (design §8), never text extracted from the file. The desk
 holds the project's whole conduct for the life of its session; the header
-tells it which posture is selected right now.
+tells it which posture is selected right now. For an anointed supervisor the
+layer is present, never alone: the session also carries whatever context and
+instructions the operator chose it for (design §9).
 
 What this buys, in order of importance:
 
@@ -444,31 +452,46 @@ What this buys, in order of importance:
   a busy night, tens of thousands of tokens of duplication removed from the
   context window that the mid-shift ceiling already threatens.
 
-**Mid-shift playbook edits** are the one thing a spawn-time layer cannot
+**Mid-shift playbook edits** are the one thing a launch-time layer cannot
 carry, and the file cannot be re-read into a live session by either shipped
 agent kind (dated note, §13) — so the delta travels in the compiled header
 of the next delivered briefing: the changed text, marked as superseding the
 standing conduct. The daemon tracks, per desk session, the hash of the
 conduct that session stands on; headers carry deltas only while the hashes
-differ. Re-baselining does not wait for a full replacement: both shipped
-agent kinds support a **conduct reload** — relaunch the desk's session
+differ. Re-baselining does not wait for a full replacement: every
+supervisor-capable adapter has a **conduct reload** — relaunch the desk's
+session
 process *resuming the same conversation*, with the refreshed playbook as its
 standing layer (dated note, §13) — so the daemon schedules exactly that at
 the desk's next idle moment, and nothing of the shift's context is lost.
-Where an adapter lacks resume, deltas simply ride until the next recycle.
-Either way a replacement or reloaded desk spawns with the current playbook,
+A replacement or reloaded desk launches with the current playbook,
 which is also why a replacement desk needs no special briefing path. The
 ledger records the conduct hash per delivery either way, so "what conduct
 governed this act" is answerable per action against a versioned file.
 
-**Installation is an adapter capability**, like the context apparatus
-(design §9). The Claude adapter delivers the playbook as a named layer in
+**One mechanism serves every conduct moment.** Launching a session's process
+with a chosen standing layer and environment — fresh at spawn, resuming the
+same conversation every time after — is the whole of the mechanism, and it
+is exercised four ways: the install at desk spawn, the
+anointment relaunch that adds the layer and the injected identity, the
+release relaunch that removes both, and the conduct reload above that
+refreshes the layer's value after a playbook edit (design §9). Nothing
+conduct-shaped travels any other way.
+
+**Installation is a supervisor-capability requirement, not an optional
+adapter nicety.** Standing-layer install at (re)launch is one of the four
+requirements of the supervisor-capability qualification (design §9, the
+normative home; resume without conversation loss, briefing delivery, and CLI
+reachability for the verbs are the others). An agent kind without the
+mechanism cannot run a supervisor at all — hosted or anointed; anointing a
+session of such a kind is refused at the gesture with the reason — so there
+is exactly one conduct-delivery story, this section's. The Claude adapter
+delivers the playbook as a named layer in
 the `SystemPromptBuilder` stack TBD already applies at spawn
 (`Sources/TBDDaemon/Lifecycle/SystemPromptBuilder.swift`) — the same
 mechanism as the existing `TBD_PROMPT_CONTEXT` layer; the Codex adapter
-passes it as `developerInstructions` at thread start (dated note, §13). An
-agent kind with no such mechanism falls back to embedding the playbook in
-the first briefing of each desk session, and nothing else changes.
+passes it as `developerInstructions` at thread start (dated note, §13, which
+also carries each adapter's version floors).
 
 ## 9. The delivered briefing
 
@@ -661,13 +684,20 @@ refusal means.
   mode switch changes only the name in the next delivery's header; a
   playbook edit produces a superseding delta in the next header; a conduct
   reload resumes the same session with the refreshed layer and clears the
-  delta; the no-mechanism agent kind falls back to first-briefing embed.
+  delta; anointment resumes the same conversation with the layer added and
+  `TBD_PROJECT` injected, and release resumes it with both removed (design
+  §9); anointing a session whose agent kind lacks the supervisor-capability
+  qualification is refused at the gesture with the reason.
 
 ## 13. Dated source note: standing-instruction mechanics per agent kind
 
 Facts below are point-in-time observations of external tools, recorded here
 so they can rot without touching the design (the wake program's dated-note
-discipline). Verified 2026-08-01.
+discipline). They are also the per-harness evidence behind the
+supervisor-capability qualification (design §9): the standing-layer and
+resume mechanics each adapter's qualification rests on live here, and so do
+its version floors — qualification facts belong with the adapter, not in the
+design's prose. Verified 2026-08-01.
 
 - **Claude Code** — `--append-system-prompt` appends to the system prompt at
   launch; TBD already delivers named prompt layers through it via
