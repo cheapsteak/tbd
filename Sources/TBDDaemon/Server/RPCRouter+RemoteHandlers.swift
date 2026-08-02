@@ -18,6 +18,10 @@ extension RPCRouter {
     /// one call site is edited and the others aren't.
     private static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
 
+    private static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
+        RPCResponse(error: "provider '\(provider)' inventory is stale; refresh must recover before changing remote sessions")
+    }
+
     private func remoteGate() async throws -> RemoteProviderManager? {
         guard try await db.config.get().remoteBackendsEnabled else { return nil }
         return remoteManager
@@ -58,12 +62,19 @@ extension RPCRouter {
     }
 
     func handleRemoteSessions() async throws -> RPCResponse {
-        guard try await remoteGate() != nil else {
+        guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
+        let staleProviders = Set(
+            await manager.providerStatuses()
+                .filter(\.hasStaleSnapshot)
+                .map { $0.config.name })
         let rows = try await db.remoteSessions.list()
         let sessions = rows.compactMap { row -> RemoteSessionInfo? in
-            guard let payload = row.decodedPayload else { return nil }
+            guard var payload = row.decodedPayload else { return nil }
+            if staleProviders.contains(row.provider) {
+                payload = payload.projectedForStaleSnapshot()
+            }
             return RemoteSessionInfo(provider: row.provider, payload: payload,
                                      gone: row.gone, dismissed: row.dismissed,
                                      lastSeen: row.lastSeen, resolvedRepoID: row.resolvedRepoIDUUID,
@@ -77,6 +88,9 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteCreateParams.self, from: paramsData)
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
         guard let paramsJSON = Self.normalizedParamsJSON(params.paramsJSON) else {
             return RPCResponse(error: "remote.create paramsJSON must be a JSON object; got: \(params.paramsJSON)")
         }
@@ -121,6 +135,9 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteStopParams.self, from: paramsData)
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
         let result: ProviderResult
         do {
             result = try await manager.invoke(
@@ -146,6 +163,9 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteSendParams.self, from: paramsData)
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
         let result: ProviderResult
         do {
             result = try await manager.invoke(
@@ -207,6 +227,9 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteRenameParams.self, from: paramsData)
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
         let result: ProviderResult
         do {
             result = try await manager.invoke(

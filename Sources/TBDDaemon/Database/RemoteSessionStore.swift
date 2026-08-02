@@ -208,6 +208,16 @@ public struct RemoteSessionStore: Sendable {
                 changed = true
                 try row.update(db)
             }
+
+            // Persist the authoritative full-inventory observation in this
+            // same transaction. Event-stream upserts deliberately do not
+            // touch this key: a healthy single-session stream must never make
+            // a broken full-list path look fresh after daemon restart.
+            try db.execute(
+                sql: "INSERT INTO tbd_meta (key, value) VALUES (?, ?) "
+                    + "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                arguments: [Self.snapshotTimestampKey(provider: provider), String(now.timeIntervalSince1970)]
+            )
             return SnapshotOutcome(changed: changed, attention: attention)
         }
     }
@@ -256,6 +266,24 @@ public struct RemoteSessionStore: Sendable {
         try await writer.read { db in
             try RemoteSessionRow.order(Column("firstSeen").desc).fetchAll(db)
         }
+    }
+
+    /// Exact persisted time of the provider's last complete inventory. This
+    /// is intentionally separate from row `lastSeen`, which can advance from
+    /// the independent events stream.
+    public func lastSuccessfulSnapshotAt(provider: String) async throws -> Date? {
+        try await writer.read { db in
+            guard let value = try String.fetchOne(
+                db, sql: "SELECT value FROM tbd_meta WHERE key = ?",
+                arguments: [Self.snapshotTimestampKey(provider: provider)]),
+                let seconds = TimeInterval(value)
+            else { return nil }
+            return Date(timeIntervalSince1970: seconds)
+        }
+    }
+
+    private static func snapshotTimestampKey(provider: String) -> String {
+        "remote.last-successful-snapshot.\(provider)"
     }
 
     /// Returns whether a row actually changed (an unknown session, or one

@@ -69,10 +69,12 @@ enum RemoteSessionDetailGates {
 
     /// Whether the Send footer renders. `gone` suppresses it for the same
     /// reason `available` drops Attach: sending input to a session the
-    /// provider no longer reports isn't meaningful, and this keeps the
-    /// detail view consistent with the context menu, which drops Send Text…
-    /// for gone rows too.
-    static func showsSendField(capabilities: [String], gone: Bool) -> Bool {
-        !gone && capabilities.contains(sendCapability)
+    /// provider no longer reports isn't meaningful, and mutating a session
+    /// from a stale snapshot is unsafe. This keeps the detail view consistent
+    /// with the context menu, which drops Send Text… in both cases.
+    static func showsSendField(
+        capabilities: [String], gone: Bool, snapshotFresh: Bool = true
+    ) -> Bool {
+        snapshotFresh && !gone && capabilities.contains(sendCapability)
     }
 }
