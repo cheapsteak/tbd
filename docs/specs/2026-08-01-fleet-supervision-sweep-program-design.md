@@ -240,7 +240,6 @@ shipped program.
   "projects": {
     "acme-platform": {
       "repos": ["<repoID-a>", "<repoID-b>"],
-      "mode": "autonomous",
       "sweep": { "script": "~/tbd/supervision/projects/acme-platform/sweep.py",
                  "interval": "10m" }
     },
@@ -251,6 +250,9 @@ shipped program.
   }
 }
 ```
+
+(Mode selection is not part of the `sweep` object — it lives in the file's
+top-level `modes` map; design §8 shows the whole file.)
 
 When the daemon itself runs the program, failure detection is direct — a
 crash or timeout is observed as an exit condition and recorded (§6). When the
@@ -334,10 +336,31 @@ holds. It complements design §14 rather than duplicating it: that
 out-of-band watchdog asks
 whether the *daemon* is alive; this one asks whether anyone is *feeding* it.
 
+**Daemon-run failures are observed, not inferred.** Silence is the detection
+path for schedules TBD does not run; when the default tick runs the program,
+TBD watches the process itself, and a crash, hang past the timeout bound
+(§10), or nonzero exit writes an **immediate anomaly line** — naming the
+program, the exit condition, and the tick — with no window latency. The two
+paths share one escalation ledger: a **failed contact** is a missed window
+(external schedules) or a failed daemon run (the tick), and the notification
+threshold (§10) counts consecutive failed contacts of either kind — so a
+customized script crashing on every tick reaches the operator in three tick
+intervals, not three contact windows. What counts as contact is precise:
+**an accepted submission to the brief pipe.** A run that submits and then
+exits badly has made contact — it looked and reported; the bad exit is still
+an anomaly. A run that dies before submitting makes none. And contact
+attests aliveness, never sense: a program that runs and submits nonsense
+prose is delivered like any briefing — TBD never parses the text — and is
+caught where prose is read, by the desk's judgment and the operator's
+account, not by a liveness clock that is deliberately measuring only whether
+anyone looked.
+
 **The contact window** is the declared expectation silence is measured
 against. It is armed only while supervision is on and a shift is open (§4):
 a pause disarms it, because silence the system itself requested is not a
-coverage gap. While the default tick runs, the window defaults to a multiple
+coverage gap. Each window is measured from the later of the last accepted
+contact and the moment the watchdog armed — a fresh shift owes no contact
+for time before it opened. While the default tick runs, the window defaults to a multiple
 of the tick interval (§10) and the operator declares nothing. A project on
 an external schedule declares its own window in `supervision.json`. A
 project that declines even that — a purely event-driven program with no
@@ -491,7 +514,8 @@ the `SystemPromptBuilder` stack TBD already applies at spawn
 (`Sources/TBDDaemon/Lifecycle/SystemPromptBuilder.swift`) — the same
 mechanism as the existing `TBD_PROMPT_CONTEXT` layer; the Codex adapter
 passes it as `developerInstructions` at thread start (dated note, §13, which
-also carries each adapter's version floors).
+carries the per-harness mechanics and, where one is established, the
+version floor).
 
 ## 9. The delivered briefing
 
@@ -524,7 +548,7 @@ layer, transcripts and playbooks by path with hashes in the ledger.
 | Default tick interval | 5 min | §4 |
 | Contact window, TBD schedule | 3 × tick interval | §6 |
 | Contact window, external schedule | declared, or coverage unknown | §6 |
-| Watchdog notification | 3 consecutive missed windows | §6 |
+| Watchdog notification | 3 consecutive failed contacts (missed windows or failed runs) | §6 |
 | Sweep program timeout (daemon-run tick) | 60 s | §4 |
 | Per-project briefing rate limit | 1 briefing / 2 min | §3 |
 | Briefing size bound (`brief` stdin) | 256 KiB | §3 |
@@ -565,7 +589,7 @@ refusal means.
   sessions parked — a safe state, deferred work — while a dead sweep leaves
   stuck agents unnoticed all night, the product's core promise silently off,
   indistinguishable from calm. The parked half accepts that ambiguity
-  deliberately; the live half measured its cost at five days once and does
+  deliberately; the live half measured its cost at five nights once and does
   not accept it again (§6).
 - **A compiled baseline with an authored overlay** — a compiled sweep stays
   and a script may add or suppress cases. Fails toward stock behavior
@@ -673,7 +697,12 @@ refusal means.
   consecutive count raises the operator notification; contact resets the
   count; the window is disarmed while supervision is paused or no shift is
   open; a project with `schedule: external` and no declared window renders
-  coverage unknown, and both branches of the schedule setting behave.
+  coverage unknown, and both branches of the schedule setting behave. On the
+  daemon-run path: a crash, timeout, or nonzero exit of a tick run writes an
+  immediate anomaly line without waiting for a window; consecutive failed
+  runs reach the notification threshold on their own; a run that submits an
+  accepted brief and then exits nonzero counts as contact *and* writes the
+  anomaly.
 - **Dead-vs-quiet** — a quiet-contact night and a no-contact night produce
   distinguishable accounts.
 - **Selection** — with nothing configured the tick runs the shipped program;

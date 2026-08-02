@@ -1613,7 +1613,11 @@ briefing must carry and no one ever reviews.
     }
   },
   "automation": { "default": "in", "projects": { "acme-checkout": "out" } },
-  "modes": { "acme-checkout": "autonomous" },
+  "modes": {
+    "acme-checkout": "autonomous",
+    "acme-hooks": { "selected": "friday-freeze",
+                    "declared": ["attended", "autonomous", "friday-freeze"] }
+  },
   "supervisors": { "acme-checkout": { "terminal": "<terminal-id>" } }
 }
 ```
@@ -1631,7 +1635,13 @@ most one project; the loader rejects the file if one appears twice, because
 (below). `modes` holds two things on the default-props chain: the **declared
 mode list** — the names a project's operator may select, defaulting to the
 built-in pair `attended`/`autonomous` when absent — and the operator's
-**selection** per project, defaulting to `attended` (§3). Selection is
+**selection** per project, defaulting to `attended` (§3). The map's value
+carries both, in two shapes: a bare mode name is a selection against the
+built-in list (the common case — `acme-checkout` above); an object names the
+project's `declared` list and the `selected` name within it
+(`acme-hooks` above, a singleton keyed by its implicit repo name like every
+per-project map here). A declared list is complete when present — include
+the built-in names to keep them selectable. Selection is
 validated against the declared list: a lookup within this one file. TBD never
 derives the list from the playbook — compiled code does not parse prose
 (§5) — so a declared name the playbook says nothing about is simply playbook
