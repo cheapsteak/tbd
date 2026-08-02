@@ -88,6 +88,16 @@ struct RemoteSessionActionMenuTests {
         #expect(kinds(items) == [.rename, .attach, .viewLog, .sendText, .copySessionID, .pin, nil, .stop])
     }
 
+    @Test func staleSnapshotKeepsInspectionAndDropsStateChangingActions() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "log", "send"], gone: false,
+            snapshotFresh: false, isPinned: false)
+        #expect(kinds(items) == [.attach, .viewLog, .copySessionID, .pin])
+        #expect(!kinds(items).contains(.rename))
+        #expect(!kinds(items).contains(.sendText))
+        #expect(!kinds(items).contains(.stop))
+    }
+
     /// Items are omitted, never disabled — `RemoteSessionActionMenu` carries
     /// no `isEnabled`/disabled-help concept the way `RowActionMenu.Action`
     /// does, so an absent capability simply never produces an `Action` at

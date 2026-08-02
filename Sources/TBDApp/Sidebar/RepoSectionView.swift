@@ -400,12 +400,14 @@ struct RepoSectionView: View {
         if !appState.remoteProviders.isEmpty {
             if appState.remoteProviders.count == 1, let only = appState.remoteProviders.first {
                 Button("New Remote Session…") { openRemoteCreateSheet(for: only) }
+                    .disabled(only.hasStaleSnapshot)
             } else {
                 Menu("New Remote Session…") {
                     ForEach(appState.remoteProviders, id: \.config.name) { provider in
                         Button(provider.describe?.name ?? provider.config.name) {
                             openRemoteCreateSheet(for: provider)
                         }
+                        .disabled(provider.hasStaleSnapshot)
                     }
                 }
             }

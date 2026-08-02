@@ -111,6 +111,11 @@ struct RemoteSessionDetailGatesTests {
         #expect(RemoteSessionDetailGates.showsSendField(capabilities: [], gone: true) == false)
         #expect(RemoteSessionDetailGates.showsSendField(capabilities: [], gone: false) == false)
     }
+
+    @Test func showsSendFieldIsFalseWhenSnapshotIsStale() {
+        #expect(RemoteSessionDetailGates.showsSendField(
+            capabilities: ["send"], gone: false, snapshotFresh: false) == false)
+    }
 }
 
 /// Tier 1: pure state-to-copy mapping with no I/O, clock, or process.

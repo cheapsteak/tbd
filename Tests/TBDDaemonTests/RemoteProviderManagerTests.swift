@@ -1,5 +1,6 @@
-import Testing
 import Foundation
+import Testing
+
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -34,8 +35,10 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         self.script = outcomes
     }
 
-    func run(_ config: RemoteProviderConfig, verb: [String], stdin: Data?,
-             timeout: TimeInterval) async throws -> ProviderResult {
+    func run(
+        _ config: RemoteProviderConfig, verb: [String], stdin: Data?,
+        timeout: TimeInterval
+    ) async throws -> ProviderResult {
         try popScript(verb, stdin: stdin)
     }
 
@@ -43,7 +46,8 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
     /// `async` context (recent Foundation marks `NSLock.lock`/`unlock` as
     /// unavailable from async contexts to discourage blocking there).
     private func popScript(_ verb: [String], stdin: Data?) throws -> ProviderResult {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         calls.append(verb)
         stdins.append(stdin)
         precondition(!script.isEmpty, "FakeProviderInvoker script exhausted for verb \(verb)")
@@ -59,13 +63,15 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
     /// background poll `Task` may still be writing (the plain `calls`
     /// getter is fine only when nothing concurrent is running).
     func callsSnapshot() -> [[String]] {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return calls
     }
 
     /// Locked snapshot of `stdins`, same rationale as `callsSnapshot()`.
     func stdinsSnapshot() -> [Data?] {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return stdins
     }
 }
@@ -82,12 +88,14 @@ private final class BroadcastDeltas: @unchecked Sendable {
     private var deltas: [StateDelta] = []
 
     func append(_ delta: StateDelta) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         deltas.append(delta)
     }
 
     func snapshot() -> [StateDelta] {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return deltas
     }
 }
@@ -122,13 +130,18 @@ struct RemoteProviderManagerTests {
         let rows = try await db.remoteSessions.list()
         #expect(rows.map(\.sessionID) == ["a"])
         #expect(invoker.calls == [["list"]])
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .ok)
+        #expect(status?.lastSuccessfulSnapshotAt != nil)
     }
 
     @Test func authFailureMarksNeedsAuthAndSuccessClears() async throws {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "acme-provider login"}}}"#.utf8),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "acme-provider login"}}}"#
+                        .utf8),
                 stderr: ""),
             providerOK(#"{"sessions": []}"#),
         ])
@@ -151,8 +164,10 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 1,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "credentials expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
-                stderr: ""),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "credentials expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#
+                        .utf8),
+                stderr: "")
         ])
         let m = manager(invoker)
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
@@ -169,8 +184,9 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 1,
-                stdout: Data(#"{"error": {"code": "credential_unresolvable", "message": "no such credential"}}"#.utf8),
-                stderr: ""),
+                stdout: Data(
+                    #"{"error": {"code": "credential_unresolvable", "message": "no such credential"}}"#.utf8),
+                stderr: "")
         ])
         let m = manager(invoker)
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
@@ -189,15 +205,18 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
-                stderr: ""),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#
+                        .utf8),
+                stderr: "")
         ])
         let m = manager(invoker)
         try await m.recordAttachExit(provider: "fake", exitCode: 4)
         let statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .needsAuth)
-        #expect(statuses.first?.remediationCommand == "acme-provider login",
-                "the out-of-band probe is what turns an exit code into a remediation")
+        #expect(
+            statuses.first?.remediationCommand == "acme-provider login",
+            "the out-of-band probe is what turns an exit code into a remediation")
         #expect(invoker.calls == [["list"]], "exactly one probe per health transition")
     }
 
@@ -206,12 +225,15 @@ struct RemoteProviderManagerTests {
     /// flapping session would otherwise turn into a poll flood), and must
     /// preserve the remediation already on file rather than clobbering it
     /// with the nothing an attach exit carries.
-    @Test func authAttachExitWhileAlreadyNeedsAuthPreservesRemediationAndDoesNotReprobe() async throws {
+    @Test func authAttachExitWhileAlreadyNeedsAuthPreservesRemediationAndDoesNotReprobe() async throws
+    {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
-                stderr: ""),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#
+                        .utf8),
+                stderr: "")
         ])
         let m = manager(invoker)
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
@@ -243,8 +265,8 @@ struct RemoteProviderManagerTests {
     /// persisted flag.
     @Test func successfulPollAfterAnAttachAuthExitClearsNeedsAuth() async throws {
         let invoker = FakeProviderInvoker(script: [
-            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),   // the probe confirms
-            providerOK(#"{"sessions": []}"#),                          // the next poll succeeds
+            ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),  // the probe confirms
+            providerOK(#"{"sessions": []}"#),  // the next poll succeeds
         ])
         let m = manager(invoker)
         try await m.recordAttachExit(provider: "fake", exitCode: 4)
@@ -266,7 +288,9 @@ struct RemoteProviderManagerTests {
             // First poll parses a full error object → message + remediation.
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#
+                        .utf8),
                 stderr: ""),
             // The attach-exit probe re-confirms auth-needed but says nothing.
             ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
@@ -282,9 +306,12 @@ struct RemoteProviderManagerTests {
 
         let statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .needsAuth)
-        #expect(statuses.first?.errorMessage == "expired", "an empty probe must not clobber the message on file")
-        #expect(statuses.first?.remediationCommand == "acme-provider login",
-                "an empty probe must not clobber the remediation on file")
+        #expect(
+            statuses.first?.errorMessage == "expired",
+            "an empty probe must not clobber the message on file")
+        #expect(
+            statuses.first?.remediationCommand == "acme-provider login",
+            "an empty probe must not clobber the remediation on file")
     }
 
     /// Inheritance branch B — previous state is NOT `.needsAuth`, so nothing
@@ -310,8 +337,9 @@ struct RemoteProviderManagerTests {
 
         let statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .needsAuth)
-        #expect(statuses.first?.errorMessage == nil,
-                "a transport message must not become the authentication explanation")
+        #expect(
+            statuses.first?.errorMessage == nil,
+            "a transport message must not become the authentication explanation")
         #expect(statuses.first?.remediationCommand == nil)
     }
 
@@ -323,7 +351,8 @@ struct RemoteProviderManagerTests {
             // Permanent → .error, with a parsed message on file.
             ProviderResult(
                 exitCode: 1,
-                stdout: Data(#"{"error": {"code": "credential_unresolvable", "message": "no such credential"}}"#.utf8),
+                stdout: Data(
+                    #"{"error": {"code": "credential_unresolvable", "message": "no such credential"}}"#.utf8),
                 stderr: ""),
             ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
         ])
@@ -336,8 +365,9 @@ struct RemoteProviderManagerTests {
 
         let statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .needsAuth)
-        #expect(statuses.first?.errorMessage == nil,
-                "a provisioning error must not become the authentication explanation")
+        #expect(
+            statuses.first?.errorMessage == nil,
+            "a provisioning error must not become the authentication explanation")
         #expect(statuses.first?.remediationCommand == nil)
     }
 
@@ -360,11 +390,13 @@ struct RemoteProviderManagerTests {
 
         let statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .needsAuth)
-        #expect(statuses.first?.errorMessage == nil,
-                "the transport message must not survive into the auth CTA via the probe")
+        #expect(
+            statuses.first?.errorMessage == nil,
+            "the transport message must not survive into the auth CTA via the probe")
         #expect(statuses.first?.remediationCommand == nil)
-        #expect(invoker.calls == [["list"], ["list"]],
-                "the transition off .stale still fires exactly one probe")
+        #expect(
+            invoker.calls == [["list"], ["list"]],
+            "the transition off .stale still fires exactly one probe")
     }
 
     /// The other branch of the same fallback: a newly parsed value always
@@ -374,11 +406,15 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#
+                        .utf8),
                 stderr: ""),
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "still expired", "remediation": {"label": "Sign in again", "command": "acme-provider login --renew"}}}"#.utf8),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "still expired", "remediation": {"label": "Sign in again", "command": "acme-provider login --renew"}}}"#
+                        .utf8),
                 stderr: ""),
         ])
         let m = manager(invoker)
@@ -410,7 +446,9 @@ struct RemoteProviderManagerTests {
         }
         let withRemediation = ProviderResult(
             exitCode: 4,
-            stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#.utf8),
+            stdout: Data(
+                #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "Sign in", "command": "acme-provider login"}}}"#
+                    .utf8),
             stderr: "")
         let invoker = FakeProviderInvoker(script: [
             // ok → needs_auth, message only, no remediation.
@@ -430,12 +468,14 @@ struct RemoteProviderManagerTests {
         #expect(healthBroadcastCount(deltas) == 1, "ok → needs_auth broadcasts")
 
         await m.pollOnce(provider: provider)
-        #expect(healthBroadcastCount(deltas) == 2,
-                "a remediation arriving on an already-needs_auth provider must reach the app")
+        #expect(
+            healthBroadcastCount(deltas) == 2,
+            "a remediation arriving on an already-needs_auth provider must reach the app")
 
         await m.pollOnce(provider: provider)
-        #expect(healthBroadcastCount(deltas) == 2,
-                "a genuinely unchanged re-set must not broadcast (60s polls would flood the wire)")
+        #expect(
+            healthBroadcastCount(deltas) == 2,
+            "a genuinely unchanged re-set must not broadcast (60s polls would flood the wire)")
     }
 
     private func healthBroadcastCount(_ deltas: BroadcastDeltas) -> Int {
@@ -480,6 +520,7 @@ struct RemoteProviderManagerTests {
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
 
         await m.pollOnce(provider: provider)
+        let firstSuccess = await m.providerStatuses().first?.lastSuccessfulSnapshotAt
         await m.pollOnce(provider: provider)
 
         let rows = try await db.remoteSessions.list()
@@ -490,7 +531,204 @@ struct RemoteProviderManagerTests {
         let status = await m.providerStatuses().first
         #expect(status?.health == .stale)
         #expect(status?.errorMessage == "provider transport overloaded")
+        #expect(status?.lastSuccessfulSnapshotAt == firstSuccess)
+        #expect(status?.hasStaleSnapshot == true)
         #expect(invoker.calls == [["list"], ["list"]])
+    }
+
+    @Test func truncatedInventoryErrorIsBoundedAndDoesNotExposeEmbeddedPayload() async throws {
+        let embedded = String(repeating: #"{"prompt":"sensitive"}"#, count: 100)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
+            ProviderResult(
+                exitCode: 2, stdout: Data(),
+                stderr: "unparseable remote output: \(embedded)--output truncated--"),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        await m.pollOnce(provider: provider)
+
+        let message = await m.providerStatuses().first?.errorMessage
+        #expect(
+            message
+                == "Provider inventory was truncated or malformed; showing the last successful snapshot.")
+        #expect(message?.contains("sensitive") == false)
+    }
+
+    @Test func firstTruncatedInventoryIsHonestWithoutSnapshot() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 2, stdout: Data(),
+                stderr: "unparseable remote output: private--output truncated--")
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        let message = await m.providerStatuses().first?.errorMessage
+        #expect(
+            message
+                == "Provider inventory was truncated or malformed; no successful snapshot is available yet."
+        )
+        #expect(message?.contains("private") == false)
+    }
+
+    @Test func arbitraryProviderErrorIsCappedToTheWireLimit() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: String(repeating: "x", count: 1_000))
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        let message = await m.providerStatuses().first?.errorMessage
+        #expect(message?.count == 240)
+        #expect(message?.hasSuffix("…") == true)
+    }
+
+    @Test func successfulInventoryAfterFailureRestoresFreshHealthAndAdvancesTimestamp() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "temporary"),
+            providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
+        ])
+        let m = manager(invoker)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
+        let firstSuccess = await m.providerStatuses().first?.lastSuccessfulSnapshotAt
+        await m.pollOnce(provider: provider)
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+
+        await m.pollOnce(provider: provider)
+
+        let recovered = await m.providerStatuses().first
+        #expect(recovered?.health == .ok)
+        #expect(recovered?.hasStaleSnapshot == false)
+        #expect(recovered?.lastSuccessfulSnapshotAt != nil)
+        if let firstSuccess, let recoveredAt = recovered?.lastSuccessfulSnapshotAt {
+            #expect(recoveredAt >= firstSuccess)
+        }
+    }
+
+    /// Tier 1. An unreadable freshness row must gate mutations, because the
+    /// daemon cannot prove the cached mirror was never authoritative. Contrast
+    /// `eventUpsertCannotMasqueradeAsFullSnapshotAfterRestart`, where the read
+    /// SUCCEEDS and returns "never" — that is positive knowledge and is allowed
+    /// to fail open. Dropping `tbd_meta` makes the SELECT throw, which is the
+    /// only way to reach the catch branch through the real store.
+    @Test func unreadableFreshnessStateGatesMutationsInsteadOfFailingOpen() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let m = manager(
+            FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]))
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .stale)
+        // No timestamp is claimed — the daemon must not invent an age it
+        // could not read.
+        #expect(status?.lastSuccessfulSnapshotAt == nil)
+        // The wire DTO must reach the SAME verdict as the actor. When these
+        // disagreed, `handleRemoteSessions` skipped demotion and cached rows
+        // kept rendering as running while mutations were being refused.
+        #expect(status?.freshnessUnreadable == true)
+        #expect(status?.hasStaleSnapshot == true)
+    }
+
+    /// Tier 1. The unreadable state is not sticky: it is a cache of one failed
+    /// read, so a later successful snapshot must clear the gate rather than
+    /// wedging the provider until daemon restart.
+    @Test func unreadableFreshnessStateClearsOnceASnapshotSucceeds() async throws {
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let m = manager(
+            FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]))
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "CREATE TABLE tbd_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
+        }
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(id: "a", state: .running)],
+            provider: "fake",
+            now: Date(timeIntervalSince1970: 1_700_000_500))
+
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .ok)
+        #expect(status?.lastSuccessfulSnapshotAt == Date(timeIntervalSince1970: 1_700_000_500))
+        #expect(status?.freshnessUnreadable == false)
+        #expect(status?.hasStaleSnapshot == false)
+    }
+
+    @Test func failureAfterManagerRestartRecoversLastSuccessTimeFromMirror() async throws {
+        let lastGood = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            now: lastGood)
+        let m = manager(
+            FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]))
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .stale)
+        #expect(status?.lastSuccessfulSnapshotAt == lastGood)
+        #expect(status?.hasStaleSnapshot == true)
+    }
+
+    @Test func restartHydratesAndGatesBeforeTheInitialProviderPoll() async throws {
+        let lastGood = Date(timeIntervalSince1970: 1_700_000_123)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            now: lastGood)
+        let invoker = FakeProviderInvoker(script: [])
+        let m = manager(invoker)
+
+        // Do not call start() or pollOnce(). RPC is deliberately available
+        // before either can finish during daemon boot.
+        let status = await m.providerStatuses().first
+
+        #expect(status?.health == .stale)
+        #expect(status?.lastSuccessfulSnapshotAt == lastGood)
+        #expect(status?.hasStaleSnapshot == true)
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+        #expect(invoker.callsSnapshot().isEmpty)
+    }
+
+    @Test func eventUpsertCannotMasqueradeAsFullSnapshotAfterRestart() async throws {
+        let eventTime = Date(timeIntervalSince1970: 1_800_000_000)
+        _ = try await db.remoteSessions.upsertOne(
+            provider: "fake",
+            session: RemoteSessionPayload(id: "event-only", state: .running),
+            now: eventTime)
+        let m = manager(
+            FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]))
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .stale)
+        #expect(status?.lastSuccessfulSnapshotAt == nil)
+        #expect(status?.hasStaleSnapshot == false)
     }
 
     @Test func invokeByNameRoutesToConfiguredProvider() async throws {
@@ -523,9 +761,10 @@ struct RemoteProviderManagerTests {
             }
             return true
         }
-        let invoker = FakeProviderInvoker(script: Array(
-            repeating: ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky network"),
-            count: 4))
+        let invoker = FakeProviderInvoker(
+            script: Array(
+                repeating: ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky network"),
+                count: 4))
         let m = manager(invoker)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
         for _ in 0..<4 {
@@ -537,8 +776,9 @@ struct RemoteProviderManagerTests {
             if case .remoteSessionsChanged = $0 { return true }
             return false
         }
-        #expect(healthBroadcasts.count == 1,
-                "four identical failures must broadcast exactly once (ok→stale), not on every poll")
+        #expect(
+            healthBroadcasts.count == 1,
+            "four identical failures must broadcast exactly once (ok→stale), not on every poll")
     }
 
     @Test func describeExitFourRoutesThroughFailurePathWithRemediation() async throws {
@@ -550,8 +790,10 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
                 exitCode: 4,
-                stdout: Data(#"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "fake login"}}}"#.utf8),
-                stderr: ""),
+                stdout: Data(
+                    #"{"error": {"code": "auth_expired", "message": "expired", "remediation": {"label": "login", "command": "fake login"}}}"#
+                        .utf8),
+                stderr: "")
         ])
         let m = manager(invoker)
         await m.loadRegistryAndDescribe()
@@ -569,12 +811,13 @@ struct RemoteProviderManagerTests {
         // a typo here would silently disable it for real providers.
         let invoker = FakeProviderInvoker(script: [
             providerOK(#"{"contract_versions": [1], "name": "fake", "capabilities": ["events"]}"#),
-            providerOK(#"{"sessions": []}"#),   // in case the 60s poll's first tick fires before teardown
+            providerOK(#"{"sessions": []}"#),  // in case the 60s poll's first tick fires before teardown
         ])
         let m = manager(invoker)
         await m.start()
-        #expect(await m.hasSupervisor(named: "fake"),
-                "describe declaring the events capability must spawn a supervisor")
+        #expect(
+            await m.hasSupervisor(named: "fake"),
+            "describe declaring the events capability must spawn a supervisor")
         await m.stopAll()
     }
 
@@ -588,8 +831,9 @@ struct RemoteProviderManagerTests {
         ])
         let m = manager(invoker)
         await m.start()
-        #expect(await !m.hasSupervisor(named: "fake"),
-                "describe without the events capability must not spawn a supervisor")
+        #expect(
+            await !m.hasSupervisor(named: "fake"),
+            "describe without the events capability must not spawn a supervisor")
 
         // The poll loop's first tick fires with no initial delay but runs on
         // a background Task, so bound-poll for it rather than asserting
@@ -599,8 +843,10 @@ struct RemoteProviderManagerTests {
             if invoker.callsSnapshot().contains(["list"]) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(invoker.callsSnapshot().contains(["list"]),
-                "provider without events capability must still be covered by the 60s list poll; observed calls=\(invoker.callsSnapshot())")
+        #expect(
+            invoker.callsSnapshot().contains(["list"]),
+            "provider without events capability must still be covered by the 60s list poll; observed calls=\(invoker.callsSnapshot())"
+        )
         await m.stopAll()
     }
 

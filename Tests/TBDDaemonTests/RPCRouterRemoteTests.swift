@@ -119,6 +119,94 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(result.sessions.map(\.payload.id) == ["a"])
     }
 
+    @Test func sessionsProjectsCachedActiveRowsUnknownAfterInventoryFailure() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+        ])
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await manager.pollOnce(provider: provider)
+        await manager.pollOnce(provider: provider)
+
+        let response = await call(router(manager: manager), "remote.sessions")
+        let result = try response.decodeResult(RemoteSessionsResult.self)
+        let projected = try #require(result.sessions.first?.payload)
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+
+        // Projection is non-destructive: recovery still has the complete
+        // last-good payload to replace or inspect.
+        let rawRows = try await db.remoteSessions.list()
+        let raw = rawRows.first?.decodedPayload
+        #expect(raw?.state == .running)
+        #expect(raw?.agentState == .working)
+    }
+
+    /// The display projection and the mutation gate must agree even when the
+    /// persisted freshness row is unreadable. They previously did not: the gate
+    /// failed closed off the actor's own state while `remote.sessions` consulted
+    /// the DTO, whose `lastSuccessfulSnapshotAt` is nil after a failed read — so
+    /// cached rows kept rendering as confidently `running` in exactly the case
+    /// the daemon knew the least. Dropping `tbd_meta` makes the SELECT throw.
+    @Test func sessionsDemoteCachedRowsWhenFreshnessRowIsUnreadable() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running, agentState: .working)],
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs,
+            runner: FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable")
+            ]),
+            registryURL: registryURL)
+        await manager.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        let r = router(manager: manager)
+
+        let response = await call(r, "remote.sessions")
+        let result = try response.decodeResult(RemoteSessionsResult.self)
+        let projected = try #require(result.sessions.first?.payload)
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+
+        // And the gate the projection is supposed to match still refuses.
+        let stop = await call(r, "remote.stop", #"{"provider":"fake","sessionID":"a"}"#)
+        #expect(stop.success == false)
+        #expect(stop.error?.contains("inventory is stale") == true)
+    }
+
+    @Test func staleInventoryBlocksMutationsButKeepsLogInspectionAvailable() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+            providerOK("last output"),
+        ])
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await manager.pollOnce(provider: provider)
+        await manager.pollOnce(provider: provider)
+        let r = router(manager: manager)
+
+        let stop = await call(r, "remote.stop", #"{"provider":"fake","sessionID":"a"}"#)
+        #expect(stop.success == false)
+        #expect(stop.error?.contains("inventory is stale") == true)
+
+        let log = await call(r, "remote.log", #"{"provider":"fake","sessionID":"a"}"#)
+        #expect(log.success)
+        #expect(try log.decodeResult(RemoteLogResult.self).text == "last output")
+        #expect(invoker.calls == [["list"], ["list"], ["log", "a"]])
+        #expect(await manager.providerStatuses().first?.health == .stale,
+                "a successful read-only verb must not claim inventory recovered")
+    }
+
     /// `remote.sessions` must surface the daemon's pinned repo resolution on
     /// the wire, and the returned `id` must match the deterministic
     /// derivation the app keys sidebar rows by.

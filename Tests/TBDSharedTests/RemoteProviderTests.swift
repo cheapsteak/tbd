@@ -32,6 +32,32 @@ struct RemoteProviderTests {
         #expect(s.agentState == .unknown)
     }
 
+    @Test func staleProjectionDemotesActiveStateWithoutMutatingTheSnapshot() {
+        let original = RemoteSessionPayload(
+            id: "x", title: "worker", state: .running,
+            agentState: .working, agentStateReason: "tool")
+        let projected = original.projectedForStaleSnapshot()
+
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+        #expect(projected.agentStateReason == nil)
+        #expect(original.state == .running)
+        #expect(original.agentState == .working)
+    }
+
+    @Test func staleProjectionPreservesAConfirmedExit() {
+        let exited = RemoteSessionPayload(
+            id: "x", state: .exited, exitCode: 0, agentState: .exited)
+        #expect(exited.projectedForStaleSnapshot() == exited)
+    }
+
+    @Test func providerStatusWithoutNewTimestampStillDecodes() throws {
+        let json = #"{"config":{"name":"acme","exec":"/x"},"health":"ok"}"#.data(using: .utf8)!
+        let status = try JSONDecoder().decode(RemoteProviderStatus.self, from: json)
+        #expect(status.lastSuccessfulSnapshotAt == nil)
+        #expect(status.hasStaleSnapshot == false)
+    }
+
     @Test func describeDecodesCreateParams() throws {
         let json = """
         {"contract_versions": [1], "name": "example", "provider_version": "0.1.0",
@@ -193,6 +219,43 @@ struct RemoteProviderTests {
         let decoded = try JSONDecoder().decode(
             RemoteSessionInfo.self, from: try JSONEncoder().encode(info))
         #expect(decoded.pinnedAt == pinnedAt)
+    }
+
+    // MARK: - RemoteProviderStatus — freshnessUnreadable wire defaults
+
+    /// A status payload from a daemon predating the field must decode as
+    /// "readable", not fail. `RemoteProviderStatus` hand-writes `init(from:)`
+    /// precisely because Swift's synthesized one ignores property defaults.
+    @Test func providerStatusDecodesWhenFreshnessUnreadableIsAbsent() throws {
+        let json = """
+        {"config": {"name": "acme", "exec": "/x"}, "health": "stale",
+         "errorMessage": "inventory unavailable"}
+        """.data(using: .utf8)!
+        let status = try JSONDecoder().decode(RemoteProviderStatus.self, from: json)
+        #expect(status.freshnessUnreadable == false)
+        // No snapshot on file and not unreadable — nothing cached to
+        // misrepresent, so this must not gate.
+        #expect(status.hasStaleSnapshot == false)
+    }
+
+    @Test func providerStatusRoundTripsFreshnessUnreadable() throws {
+        let status = RemoteProviderStatus(
+            config: RemoteProviderConfig(name: "acme", exec: "/x"), describe: nil,
+            health: .stale, errorMessage: nil, remediationLabel: nil, remediationCommand: nil,
+            lastSuccessfulSnapshotAt: nil, freshnessUnreadable: true)
+        let decoded = try JSONDecoder().decode(
+            RemoteProviderStatus.self, from: try JSONEncoder().encode(status))
+        #expect(decoded.freshnessUnreadable)
+        // An unreadable freshness row gates even with no timestamp on file.
+        #expect(decoded.hasStaleSnapshot)
+    }
+
+    /// The gate is about cached rows being misrepresented, so a HEALTHY
+    /// provider never gates regardless of how the freshness row read.
+    @Test func providerStatusHealthyNeverCountsAsStaleSnapshot() throws {
+        #expect(
+            RemoteProviderStatus.isStaleSnapshot(
+                health: .ok, lastSuccessfulSnapshotAt: Date(), freshnessUnreadable: true) == false)
     }
 
     @Test func setPinParamsRoundTrip() throws {
