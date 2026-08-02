@@ -44,6 +44,10 @@ extension AppState {
             let sessions = try await remoteSessionsFetcher()
             remoteProviders = providers.providers
             remoteSessions = sessions.sessions
+            if let selectedRemoteProvider,
+               !providers.providers.contains(where: { $0.config.name == selectedRemoteProvider }) {
+                self.selectedRemoteProvider = nil
+            }
             pruneRemoteSessionState(toKnownSessions: sessions.sessions)
         } catch {
             switch AppState.classifyRemoteRefreshFailure(error) {
