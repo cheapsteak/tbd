@@ -2,6 +2,197 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 
+@Suite("CodexExecutableResolver")
+struct CodexExecutableResolverTests {
+    @Test("configured absolute executable override wins before PATH and fallback")
+    func configuredOverrideWins() throws {
+        var checked: [String] = []
+
+        let result = try CodexExecutableResolver.resolve(
+            configuredOverride: "/opt/tbd/bin/codex",
+            searchPath: "/first/bin:/second/bin",
+            currentDirectory: "/worktree",
+            fallbackPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
+            isExecutable: { candidate in
+                checked.append(candidate)
+                return true
+            }
+        )
+
+        #expect(result == "/opt/tbd/bin/codex")
+        #expect(checked == ["/opt/tbd/bin/codex"])
+    }
+
+    @Test("relative configured override fails without falling back to PATH")
+    func relativeConfiguredOverrideFails() {
+        var checked: [String] = []
+
+        do {
+            _ = try CodexExecutableResolver.resolve(
+                configuredOverride: "tools/codex",
+                searchPath: "/usr/bin:/bin",
+                currentDirectory: "/worktree",
+                isExecutable: { candidate in
+                    checked.append(candidate)
+                    return true
+                }
+            )
+            Issue.record("Expected relative Codex executable override to fail")
+        } catch let error as CodexExecutableResolutionError {
+            #expect(error == .invalidOverride(
+                environmentKey: CodexExecutableResolver.executableOverrideEnvironmentKey,
+                value: "tools/codex",
+                reason: "the path must be absolute"
+            ))
+            #expect(error.localizedDescription.contains("absolute"))
+            #expect(error.localizedDescription.contains("unset it"))
+            #expect(error.localizedDescription.contains("restart TBD"))
+            #expect(checked.isEmpty)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("non-executable configured override fails without falling back")
+    func nonExecutableConfiguredOverrideFails() {
+        var checked: [String] = []
+
+        do {
+            _ = try CodexExecutableResolver.resolve(
+                configuredOverride: "/missing/codex",
+                searchPath: "/usr/bin:/bin",
+                currentDirectory: "/worktree",
+                isExecutable: { candidate in
+                    checked.append(candidate)
+                    return candidate == "/usr/bin/codex"
+                }
+            )
+            Issue.record("Expected non-executable Codex override to fail")
+        } catch let error as CodexExecutableResolutionError {
+            #expect(error == .invalidOverride(
+                environmentKey: CodexExecutableResolver.executableOverrideEnvironmentKey,
+                value: "/missing/codex",
+                reason: "the path is not executable"
+            ))
+            #expect(error.localizedDescription.contains("TBD_CODEX_EXECUTABLE"))
+            #expect(error.localizedDescription.contains("executable"))
+            #expect(checked == ["/missing/codex"])
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("empty configured override behaves as unset")
+    func emptyConfiguredOverrideUsesPath() throws {
+        let result = try CodexExecutableResolver.resolve(
+            configuredOverride: "",
+            searchPath: "/usr/bin",
+            currentDirectory: "/worktree",
+            isExecutable: { $0 == "/usr/bin/codex" }
+        )
+
+        #expect(result == "/usr/bin/codex")
+    }
+
+    @Test("an executable directory is rejected as an override")
+    func executableDirectoryIsRejected() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tbd-codex-directory-\(UUID().uuidString)",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        do {
+            _ = try CodexExecutableResolver.resolve(
+                configuredOverride: directory.path,
+                searchPath: "",
+                currentDirectory: directory.deletingLastPathComponent().path)
+            Issue.record("Expected a directory override to be rejected")
+        } catch let error as CodexExecutableResolutionError {
+            #expect(error == .invalidOverride(
+                environmentKey: CodexExecutableResolver.executableOverrideEnvironmentKey,
+                value: directory.path,
+                reason: "the path is not executable"
+            ))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("PATH entries win over the ChatGPT.app fallback")
+    func pathEntriesWinInOrder() throws {
+        var checked: [String] = []
+
+        let result = try CodexExecutableResolver.resolve(
+            searchPath: "/first/bin:/second/bin",
+            currentDirectory: "/worktree",
+            fallbackPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
+            isExecutable: { candidate in
+                checked.append(candidate)
+                return candidate == "/second/bin/codex"
+            }
+        )
+
+        #expect(result == "/second/bin/codex")
+        #expect(checked == ["/first/bin/codex", "/second/bin/codex"])
+    }
+
+    @Test("ChatGPT.app CLI is used when PATH has no executable Codex")
+    func fallsBackToChatGPTBundle() throws {
+        let result = try CodexExecutableResolver.resolve(
+            searchPath: "/usr/bin:/bin",
+            currentDirectory: "/worktree",
+            isExecutable: { $0 == CodexExecutableResolver.chatGPTBundlePath }
+        )
+
+        #expect(result == CodexExecutableResolver.chatGPTBundlePath)
+    }
+
+    @Test("relative and empty PATH entries cannot resolve a worktree-local executable")
+    func relativeAndEmptyPathEntriesAreIgnored() throws {
+        var checked: [String] = []
+        let result = try CodexExecutableResolver.resolve(
+            searchPath: "tools::/usr/bin",
+            currentDirectory: "/tmp/project",
+            isExecutable: { candidate in
+                checked.append(candidate)
+                return candidate == CodexExecutableResolver.chatGPTBundlePath
+            }
+        )
+
+        #expect(result == CodexExecutableResolver.chatGPTBundlePath)
+        #expect(!checked.contains("/tmp/project/tools/codex"))
+        #expect(!checked.contains("/tmp/project/codex"))
+        #expect(checked.contains("/usr/bin/codex"))
+    }
+
+    @Test("non-executable candidates produce an actionable error")
+    func missingExecutableIsActionable() {
+        do {
+            _ = try CodexExecutableResolver.resolve(
+                searchPath: "/usr/bin:/bin",
+                currentDirectory: "/worktree",
+                isExecutable: { _ in false }
+            )
+            Issue.record("Expected Codex executable resolution to fail")
+        } catch let error as CodexExecutableResolutionError {
+            #expect(error == .notFound(
+                searchPath: "/usr/bin:/bin",
+                fallbackPath: CodexExecutableResolver.chatGPTBundlePath
+            ))
+            let message = error.localizedDescription
+            #expect(message.contains("ChatGPT.app"))
+            #expect(message.contains("PATH"))
+            #expect(message.contains("TBD_CODEX_EXECUTABLE"))
+            #expect(message.contains("restart TBD"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+}
+
 @Suite("CodexSpawnCommandBuilder")
 struct CodexSpawnCommandBuilderTests {
     @Test("Codex 0.134 and newer use the renamed --profile flag")
@@ -12,11 +203,11 @@ struct CodexSpawnCommandBuilderTests {
                 codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
                 codexVersionOutput: "codex-cli 0.134.0"
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
         )
         #expect(
             CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: "codex-cli 0.135.0-alpha.1")
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -31,7 +222,7 @@ struct CodexSpawnCommandBuilderTests {
                 """,
                 codexVersionOutput: nil
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -39,7 +230,7 @@ struct CodexSpawnCommandBuilderTests {
     func olderCodexUsesProfileV2Flag() {
         #expect(
             CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: "codex-cli 0.133.0")
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -47,7 +238,7 @@ struct CodexSpawnCommandBuilderTests {
     func missingVersionFallsBackToProfileFlag() {
         #expect(
             CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: nil)
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
         )
     }
 
@@ -80,6 +271,34 @@ struct CodexSpawnCommandBuilderTests {
         #expect(probedArguments == [["codex", "--help"], ["codex", "--version"]])
     }
 
+    @Test("runtime detection probes the resolved absolute executable")
+    func detectionUsesResolvedExecutable() {
+        var probedArguments: [[String]] = []
+        let executable = "/Applications/ChatGPT.app/Contents/Resources/codex"
+
+        let flag = CodexSpawnCommandBuilder.detectProfileFlag(
+            executablePath: executable
+        ) { arguments in
+            probedArguments.append(arguments)
+            return "  -p, --profile <CONFIG_PROFILE_V2>"
+        }
+
+        #expect(flag == "--profile")
+        #expect(probedArguments == [[executable, "--help"]])
+    }
+
+    @Test("resolved executable is shell escaped in the spawn command")
+    func shellEscapesResolvedExecutable() {
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: nil,
+                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
+                executablePath: "/Applications/ChatGPT Preview.app/Contents/Resources/codex"
+            )
+                == "unset CODEX_CI CODEX_THREAD_ID; '/Applications/ChatGPT Preview.app/Contents/Resources/codex' --profile tbd --dangerously-bypass-approvals-and-sandbox"
+        )
+    }
+
     @Test("initial prompt is appended as a shell-escaped trailing argument")
     func appendsInitialPrompt() {
         #expect(
@@ -87,8 +306,36 @@ struct CodexSpawnCommandBuilderTests {
                 initialPrompt: "fix the failing test",
                 codexVersionOutput: "codex-cli 0.134.0"
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox 'fix the failing test'"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --dangerously-bypass-approvals-and-sandbox 'fix the failing test'"
         )
+    }
+
+    @Test("resume thread is appended without an initial prompt")
+    func appendsResumeThread() {
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: nil,
+                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
+                resumeThreadID: "thread-123",
+                executablePath: "/opt/bin/codex"
+            )
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --dangerously-bypass-approvals-and-sandbox resume 'thread-123'"
+        )
+    }
+
+    @Test("nil resume thread preserves the ordinary launch command")
+    func nilResumePreservesLaunch() {
+        let ordinary = CodexSpawnCommandBuilder.build(
+            initialPrompt: nil,
+            codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
+            executablePath: "/opt/bin/codex")
+        let explicitNil = CodexSpawnCommandBuilder.build(
+            initialPrompt: nil,
+            codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
+            resumeThreadID: nil,
+            executablePath: "/opt/bin/codex")
+
+        #expect(explicitNil == ordinary)
     }
 
     @Test("command output helper returns stdout and stderr")

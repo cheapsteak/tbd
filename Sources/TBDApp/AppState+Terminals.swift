@@ -348,6 +348,41 @@ extension AppState {
         }
     }
 
+    /// Import a Claude transcript through Codex's native app-server surface,
+    /// then select the ordinary Codex tab created by the daemon.
+    func continueInCodex(sourceTerminalID: UUID) async {
+        guard let source = terminals.values
+            .flatMap({ $0 })
+            .first(where: { $0.id == sourceTerminalID }) else {
+            showAlert("Couldn't continue in Codex: source terminal not found.", isError: true)
+            return
+        }
+
+        do {
+            let result = try await daemonClient.continueInCodex(
+                terminalID: sourceTerminalID)
+            let rows = try await daemonClient.listTerminals(
+                worktreeID: source.worktreeID)
+            guard let terminal = rows.first(where: { $0.id == result.terminalID }) else {
+                throw DaemonClientError.invalidResponse
+            }
+            appendCreatedTerminal(terminal)
+            if let index = tabs[source.worktreeID]?.firstIndex(where: { tab in
+                (layouts[tab.id] ?? .pane(tab.content))
+                    .allTerminalIDs().contains(terminal.id)
+            }) {
+                setActiveTab(worktreeID: source.worktreeID, tabIndex: index)
+            }
+        } catch {
+            logger.error(
+                "Continue in Codex failed: \(error.localizedDescription, privacy: .public)")
+            showAlert(
+                "Couldn't continue in Codex: \(error.localizedDescription)",
+                isError: true)
+            handleConnectionError(error)
+        }
+    }
+
     /// Toggle pin state for a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async {
         // Optimistic local update

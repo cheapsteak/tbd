@@ -514,6 +514,13 @@ enum TabParkMenuModel {
 
 // MARK: - TabBarItem
 
+enum ContinueInCodexMenu {
+    static func isVisible(for terminal: Terminal?) -> Bool {
+        terminal?.isClaudeResumable == true
+            && terminal?.transcriptPath?.isEmpty == false
+    }
+}
+
 private struct TabBarItem: View {
     let tab: TBDShared.Tab
     let index: Int
@@ -885,6 +892,18 @@ private struct TabBarItem: View {
                 swapProfileMenuItems(mode: .fork)
             } label: {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
+            }
+
+            if ContinueInCodexMenu.isVisible(for: terminal) {
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task {
+                        await appState.continueInCodex(
+                            sourceTerminalID: terminalID)
+                    }
+                } label: {
+                    Label("Continue in Codex", systemImage: "arrow.right.circle")
+                }
             }
 
             // Park (formerly the Suspend/Resume play/pause button) lives here

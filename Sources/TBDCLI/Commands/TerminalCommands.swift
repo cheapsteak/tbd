@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self]
     )
 }
 
@@ -514,6 +514,40 @@ struct TerminalSwapProfile: AsyncParsableCommand {
             } else {
                 print("Respawned under '\(targetLabel)'.")
             }
+        }
+    }
+}
+
+// MARK: - terminal continue-in-codex
+
+struct TerminalContinueInCodex: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "continue-in-codex",
+        abstract: "Import a Claude terminal's conversation and open it in Codex"
+    )
+
+    @Argument(help: "Claude terminal ID (UUID)")
+    var terminal: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let result: TerminalContinueInCodexResult = try SocketClient().call(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(terminalID: terminalID),
+            resultType: TerminalContinueInCodexResult.self)
+
+        if json {
+            printJSON(result)
+        } else {
+            print("Continued in Codex:")
+            print("  Terminal: \(result.terminalID)")
+            print("  Thread:   \(result.threadID)")
         }
     }
 }

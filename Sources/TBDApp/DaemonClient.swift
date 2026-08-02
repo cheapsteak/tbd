@@ -650,6 +650,16 @@ actor DaemonClient {
         )
     }
 
+    /// Import one Claude terminal's native transcript into Codex and open the
+    /// returned thread as an ordinary Codex terminal.
+    func continueInCodex(terminalID: UUID) async throws
+        -> TerminalContinueInCodexResult {
+        try await callAsync(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(terminalID: terminalID),
+            resultType: TerminalContinueInCodexResult.self)
+    }
+
     /// List terminals, optionally filtered by worktree.
     func listTerminals(worktreeID: UUID? = nil) async throws -> [Terminal] {
         return try await callAsync(
