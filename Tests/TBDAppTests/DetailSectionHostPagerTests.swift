@@ -1,61 +1,74 @@
 import Testing
 @testable import TBDApp
 
-/// `DetailSectionHostPager.showsRemoteTab` is the pure decision behind which
-/// of the two always-mounted tabs (`.remote`/`.other`) is in front — see
-/// that type's doc comment for why the `.remote` tab stays mounted (rather
-/// than torn down) when not showing. Covers both inputs' branches.
+/// `DetailSectionHostPager.targetTab` is the pure decision behind which of
+/// the three always-mounted tabs (`.remote`/`.providerDesk`/`.other`) is in
+/// front — see that type's doc comment for why each stays mounted (rather
+/// than torn down) when not showing. Covers every input's branches.
 @Suite("DetailSectionHostPager tab selection")
 struct DetailSectionHostPagerTests {
     private let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
 
     @Test("connected with a selected remote session shows the remote tab")
     func connectedWithSelectionShowsRemote() {
-        #expect(DetailSectionHostPager.showsRemoteTab(isConnected: true, selectedRemoteSession: selection))
+        #expect(DetailSectionHostPager.targetTab(
+            isConnected: true, selectedRemoteSession: selection, selectedRemoteProvider: nil
+        ) == .remote)
     }
 
-    @Test("connected with no selected remote session shows the other tab")
+    @Test("connected with no selection at all shows the other tab")
     func connectedWithoutSelectionShowsOther() {
-        #expect(!DetailSectionHostPager.showsRemoteTab(isConnected: true, selectedRemoteSession: nil))
+        #expect(DetailSectionHostPager.targetTab(
+            isConnected: true, selectedRemoteSession: nil, selectedRemoteProvider: nil
+        ) == .other)
     }
 
-    @Test("connected with a selected provider shows the remote tab")
-    func connectedWithProviderShowsRemote() {
-        #expect(DetailSectionHostPager.showsRemoteTab(
+    @Test("connected with a selected provider shows the provider desk tab")
+    func connectedWithProviderShowsDesk() {
+        #expect(DetailSectionHostPager.targetTab(
             isConnected: true, selectedRemoteSession: nil, selectedRemoteProvider: "acme-cloud"
-        ))
+        ) == .providerDesk)
     }
 
     @Test("disconnected with a selected remote session still shows the other tab")
     func disconnectedWithSelectionShowsOther() {
-        #expect(!DetailSectionHostPager.showsRemoteTab(isConnected: false, selectedRemoteSession: selection))
+        #expect(DetailSectionHostPager.targetTab(
+            isConnected: false, selectedRemoteSession: selection, selectedRemoteProvider: nil
+        ) == .other)
     }
 
-    @Test("disconnected with no selected remote session shows the other tab")
+    @Test("disconnected with no selection shows the other tab")
     func disconnectedWithoutSelectionShowsOther() {
-        #expect(!DetailSectionHostPager.showsRemoteTab(isConnected: false, selectedRemoteSession: nil))
+        #expect(DetailSectionHostPager.targetTab(
+            isConnected: false, selectedRemoteSession: nil, selectedRemoteProvider: nil
+        ) == .other)
     }
 
     @Test("disconnected with a selected provider still shows the other tab")
     func disconnectedWithProviderShowsOther() {
-        #expect(!DetailSectionHostPager.showsRemoteTab(
+        #expect(DetailSectionHostPager.targetTab(
             isConnected: false, selectedRemoteSession: nil, selectedRemoteProvider: "acme-cloud"
-        ))
+        ) == .other)
     }
 
-    @Test("explicit provider selection beats the recently attached session fallback")
-    func providerSelectionWinsRemoteHost() {
-        #expect(DetailSectionHostPager.remoteHostContent(
-            selectedRemoteProvider: "acme-cloud",
-            remoteSessionHostSelection: selection
-        ) == .provider("acme-cloud"))
+    /// The Provider Desk must never displace the `.remote` tab's content:
+    /// that tab hosts `RemoteAttachPager`, and rendering the desk in its
+    /// place would dismantle every live attach connection. A provider
+    /// selection therefore resolves to its OWN tab, leaving `.remote`
+    /// mounted-but-detached exactly as a worktree excursion does.
+    @Test("a provider selection never resolves to the attach-hosting remote tab")
+    func providerSelectionNeverTakesOverRemoteTab() {
+        #expect(DetailSectionHostPager.targetTab(
+            isConnected: true, selectedRemoteSession: nil, selectedRemoteProvider: "acme-cloud"
+        ) != .remote)
     }
 
-    @Test("remote host preserves a session when no provider is selected")
-    func sessionSelectionUsesRemoteHost() {
-        #expect(DetailSectionHostPager.remoteHostContent(
-            selectedRemoteProvider: nil,
-            remoteSessionHostSelection: selection
-        ) == .session(selection))
+    /// The two selections are mutually exclusive in `AppState`; this pins
+    /// the tie-break so an unreachable both-set state is still deterministic.
+    @Test("a session selection outranks a provider selection")
+    func sessionOutranksProvider() {
+        #expect(DetailSectionHostPager.targetTab(
+            isConnected: true, selectedRemoteSession: selection, selectedRemoteProvider: "acme-cloud"
+        ) == .remote)
     }
 }

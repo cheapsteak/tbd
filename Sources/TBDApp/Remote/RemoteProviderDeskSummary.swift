@@ -28,6 +28,18 @@ struct RemoteProviderDeskSummary: Equatable {
 
     var total: Int { sessions.count }
 
+    /// "just now" / "2h ago" — the same freshness vocabulary every other
+    /// staleness surface in the app already speaks
+    /// (`ProfileUsagePresentation.ageText`, `RemoteSessionRowView.stalenessCaption`),
+    /// rather than SwiftUI's `Text(_, style: .relative)`, which renders a
+    /// bare magnitude with no direction ("Latest mirror update 2 minutes").
+    /// `ageText`'s "just now" is already a complete phrase, so it never
+    /// takes the trailing "ago".
+    nonisolated static func agePhrase(since date: Date, now: Date = Date()) -> String {
+        let age = ProfileUsagePresentation.ageText(since: date, now: now)
+        return age == "just now" ? age : "\(age) ago"
+    }
+
     init(provider: String, sessions allSessions: [RemoteSessionInfo]) {
         sessions = allSessions
             .filter { $0.provider == provider && !$0.dismissed }

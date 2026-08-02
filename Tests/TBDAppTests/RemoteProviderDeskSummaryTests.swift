@@ -68,6 +68,28 @@ struct RemoteProviderDeskSummaryTests {
         #expect(summary.sessions.map(\.payload.id) == ["newer", "older"])
     }
 
+    @Test("an empty provider reports no mirror timestamp rather than inventing one")
+    func emptyProviderHasNoMirrorUpdate() {
+        let summary = RemoteProviderDeskSummary(provider: provider, sessions: [])
+
+        #expect(summary.latestMirrorUpdate == nil)
+        #expect(summary.total == 0)
+    }
+
+    @Test("age phrasing carries a direction and never reads 'just now ago'")
+    func agePhraseMatchesTheAppsFreshnessVocabulary() {
+        let now = Date(timeIntervalSince1970: 100_000)
+
+        #expect(RemoteProviderDeskSummary.agePhrase(
+            since: now.addingTimeInterval(-5), now: now) == "just now")
+        #expect(RemoteProviderDeskSummary.agePhrase(
+            since: now.addingTimeInterval(-5 * 60), now: now) == "5m ago")
+        #expect(RemoteProviderDeskSummary.agePhrase(
+            since: now.addingTimeInterval(-2 * 3600), now: now) == "2h ago")
+        #expect(RemoteProviderDeskSummary.agePhrase(
+            since: now.addingTimeInterval(-3 * 86_400), now: now) == "3d ago")
+    }
+
     private func session(
         id: String,
         provider: String? = nil,

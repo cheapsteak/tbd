@@ -55,7 +55,7 @@ struct RemoteProviderDeskView: View {
                     Text(healthTitle)
                     if let latest = summary.latestMirrorUpdate {
                         Text("·")
-                        Text("Latest mirror update \(latest, style: .relative)")
+                        Text("Latest mirror update \(RemoteProviderDeskSummary.agePhrase(since: latest))")
                     } else {
                         Text("· No mirrored sessions")
                     }
@@ -302,9 +302,12 @@ private struct ProviderSessionLedgerRow: View {
     private var title: String { session.payload.title ?? session.payload.id }
     private var repo: String { session.payload.meta?["repo"] ?? "No repository" }
     private var branch: String { session.payload.meta?["branch"] ?? "No branch" }
+    /// Shared with the repo section's session ordering. A default-options
+    /// `ISO8601DateFormatter` rejects the fractional-seconds form a
+    /// conforming provider may legally emit, which silently dropped the
+    /// "Created …" line for those rows — see `parsedCreatedAt`'s own comment.
     private var createdDate: Date? {
-        guard let raw = session.payload.createdAt else { return nil }
-        return ISO8601DateFormatter().date(from: raw)
+        RepoSectionView.parsedCreatedAt(session.payload.createdAt)
     }
 
     var body: some View {
@@ -332,7 +335,7 @@ private struct ProviderSessionLedgerRow: View {
                 .lineLimit(1)
             stateBlock
                 .frame(width: 190, alignment: .leading)
-            Text(session.lastSeen, style: .relative)
+            Text(RemoteProviderDeskSummary.agePhrase(since: session.lastSeen))
                 .frame(width: 88, alignment: .trailing)
                 .foregroundStyle(.secondary)
         }
@@ -371,7 +374,7 @@ private struct ProviderSessionLedgerRow: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
             if let createdDate {
-                Text("Created \(createdDate, style: .relative)")
+                Text("Created \(RemoteProviderDeskSummary.agePhrase(since: createdDate))")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -395,15 +398,19 @@ private struct ProviderSessionLedgerRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             } else {
-                Text("Updated \(session.lastSeen, style: .relative)")
+                Text("Updated \(RemoteProviderDeskSummary.agePhrase(since: session.lastSeen))")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
         }
     }
 
+    /// `RemoteSessionStatePresentation.terminalLabel` already returns a
+    /// self-describing "Terminal: …" phrase, so the mirror-only `gone`
+    /// condition carries the same prefix rather than reading as a bare
+    /// "Gone" beside a fully-qualified agent label.
     private var terminalLabel: String {
-        session.gone ? "Gone" : RemoteSessionStatePresentation.terminalLabel(session.payload.state)
+        session.gone ? "Terminal: Gone" : RemoteSessionStatePresentation.terminalLabel(session.payload.state)
     }
 
     private var stateTint: Color {
@@ -424,8 +431,12 @@ private struct ProviderSessionLedgerRow: View {
             : Color.primary.opacity(0.025)
     }
 
+    /// Both presentation strings are already prefixed ("Terminal: Running",
+    /// "Agent: Working"), so adding "terminal"/"agent" here made VoiceOver
+    /// read "terminal Terminal: Running, agent Agent: Working".
     private var accessibilitySummary: String {
         let agent = RemoteSessionStatePresentation.agentLabel(session.payload.agentState)
-        return "\(title), \(repo), \(branch), terminal \(terminalLabel), agent \(agent)"
+        return "\(title), \(repo), \(branch), \(terminalLabel), \(agent), "
+            + "updated \(RemoteProviderDeskSummary.agePhrase(since: session.lastSeen))"
     }
 }
