@@ -69,7 +69,7 @@ Operating (human operators):
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
 - **appoint / relieve** – bind or unbind an operator-chosen supervisor
-- **automation** – the standing scope: which projects supervision acts for
+- **automation** – the standing scope of TBD's own attention
 - **sweep customize** – take ownership of a project's sweep program
 
 Detection (the sweep program; stable JSON and exit codes):
@@ -201,11 +201,14 @@ tbd supervise automation set <project> in|out|follow-default
 tbd supervise automation list
 ```
 
-The standing scope: which projects supervision will act for at all. Default
-stance ships as `in`. For a project resolved `out`, TBD refuses rather than
-abstains — no default tick, brief submissions refused at the pipe, no prompt
-cases, no desk — while its facts still appear in the readout and the
-account.
+The standing scope of TBD's own attention. Default stance ships as `in`.
+For a project resolved `out`, TBD's defaults stand down — no default tick,
+no prompt cases, no desk, so a submitted briefing has no supervisor to
+reach — while its facts still appear in the readout and the account. Scope,
+never protection: public commands stay public, so keeping supervision away
+from specific terminals is the sweep program's concern (its exclusions can
+be per-terminal, in its own files); hard per-session protection at the
+acting verbs is a deferred design.
 
 ## tbd supervise sweep customize
 

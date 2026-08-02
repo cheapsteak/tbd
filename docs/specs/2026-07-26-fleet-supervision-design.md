@@ -1685,10 +1685,20 @@ through its CLI twins, is the entire operator surface for v1 (§10).
 
 Which projects the supervisor watches is an operator setting, not a design
 constant, and it is **scope configuration** — the standing answer to "which
-projects may supervision act for at all." Out means TBD refuses, not that
-nobody looked: an out project gets no default tick, its brief submissions
-are refused at the pipe, no prompt case is cut for it, and no desk is ever
-spawned for it.
+projects does TBD's own attention cover." For an out project, TBD's compiled
+defaults stand down: no default tick runs, no prompt case is cut, and no
+desk is spawned — so a briefing submitted for it has no supervisor to reach,
+and the pipe returns the same machine-readable no-arrangement result it uses
+whenever delivery has nowhere to go. **Membership is scope, never
+protection.** It builds no wall: the public actuations stay public
+(`terminal.send`, `tbd terminal wake`), so a mark here could never keep
+anything's hands off a terminal, and pretending otherwise would be a gate in
+everything but name (§16's bet, kept). What actually keeps supervision away
+from work an operator does not want touched sits upstream, in user-land: the
+sweep program decides what it briefs about, and its exclusions live in its
+own files at whatever grain the project wants — per-terminal, finer than any
+project mark. Hard per-session protection, enforced inside the acting verbs,
+is the deferred never-touch flag (§15).
 **Membership sits at the project level because the project is the acting unit**:
 a desk works for a project, so "should the daemon be working here" is a question
 about a project, and marking half a declared project out would mean a desk
@@ -1704,8 +1714,8 @@ supervising repos it is meant to leave alone. It has two pieces:
   Singletons are marked by their repo's implicit project name, so per-repo
   membership is still exactly one mark per repo when nothing is declared.
 
-A project that resolves to *out* produces no cases, so no briefings, so no
-desk is ever spawned for it. It still appears in the readout and the account —
+A project that resolves to *out* gets none of TBD's own attention — no
+tick, no prompt cases, no desk. It still appears in the readout and the account —
 observability is never withheld, and "project X needed attention but is out of
 supervision" is the honest report.
 
