@@ -17,13 +17,10 @@ private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote
 /// below the repo `ForEach` in `SidebarView` (not above — position shouldn't
 /// make remoteness focal).
 ///
-/// A provider's header (and rows) are hidden entirely when it has nothing
-/// left to show here — see `shouldShowHeader` for the one exception (an
-/// unhealthy provider stays visible even with zero unmatched rows, so its
-/// health glyph can't go dark just because grouping absorbed every session).
-/// The whole section renders nothing when there are no registered providers
-/// at all — see `AppState.remoteSectionVisible(providers:)`, which
-/// `SidebarView` checks before mounting this view.
+/// Every registered provider keeps a header here even when all of its sessions
+/// are grouped under repositories. The header is now the stable entry point to
+/// its Provider Desk. The whole section renders nothing when no providers are
+/// registered — see `AppState.remoteSectionVisible(providers:)`.
 struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
 
@@ -31,7 +28,11 @@ struct RemoteSectionView: View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
         ForEach(
             appState.remoteProviders.filter {
-                RemoteSectionView.shouldShowHeader(provider: $0, sessions: appState.remoteSessions, knownRepoIDs: knownRepoIDs)
+                RemoteSectionView.shouldShowHeader(
+                    provider: $0,
+                    sessions: appState.remoteSessions,
+                    knownRepoIDs: knownRepoIDs
+                )
             },
             id: \.config.name
         ) { provider in
@@ -46,19 +47,12 @@ struct RemoteSectionView: View {
         }
     }
 
-    /// Whether to show a provider's header+rows in this section: yes when it
-    /// has at least one unmatched session to list, OR its health isn't
-    /// `.ok`. An unhealthy provider (auth expired, unreachable, contract
-    /// error) must stay visible even when every one of its sessions happens
-    /// to be matched into a repo section — otherwise flipping every session
-    /// of a broken provider into "matched" would make its health banner
-    /// disappear at exactly the moment it matters most. A fully-matched,
-    /// fully-healthy provider has nothing left to say here, so it renders
-    /// nothing rather than an empty floating header.
+    /// Providers are first-class selectable places, so a registered provider
+    /// always keeps a header regardless of health or session grouping.
     nonisolated static func shouldShowHeader(
-        provider: RemoteProviderStatus, sessions allSessions: [RemoteSessionInfo], knownRepoIDs: Set<UUID>
+        provider _: RemoteProviderStatus, sessions _: [RemoteSessionInfo], knownRepoIDs _: Set<UUID>
     ) -> Bool {
-        provider.health != .ok || !sessions(in: allSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs).isEmpty
+        true
     }
 
     /// Repo ids treated as "has its own rendered section" when deciding
@@ -164,15 +158,16 @@ enum RemoteProviderStatusPresentation {
 /// Styled consistently with `RepoSectionView`'s header (12pt semibold name,
 /// 22pt bottom-aligned row) — a provider is the section-level analogue of a
 /// repo, so it wears the same weight of chrome rather than
-/// `ScratchSectionView`'s `.headline`. No tap/selection on the row itself —
-/// there's no provider-level detail view (Task 10 only routes session
-/// selections). Provider health never dims the rows below it: per the
-/// contract, an unreachable provider never means its sessions are dead, only
-/// that the local mirror may be stale — health is section-level state shown
-/// here, the same way a `.missing` repo dims only its own header/chevron in
-/// `RepoSectionView`, not an unrelated signal painted onto every row.
+/// `ScratchSectionView`'s `.headline`. The name is a keyboard-accessible
+/// button that opens the Provider Desk. Provider health never dims the rows
+/// below it: per the contract, an unreachable provider never means its
+/// sessions are dead, only that the local mirror may be stale — health is
+/// section-level state shown here, the same way a `.missing` repo dims only
+/// its own header/chevron in `RepoSectionView`, not an unrelated signal
+/// painted onto every row.
 struct RemoteProviderHeaderRow: View {
     let provider: RemoteProviderStatus
+    @EnvironmentObject var appState: AppState
     @State private var showingCreateSheet = false
     /// Whether the auth CTA popover (opened from the `.needsAuth` indicator)
     /// is showing.
@@ -189,12 +184,26 @@ struct RemoteProviderHeaderRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: -1) {
             HStack(spacing: 4) {
-                Text(provider.describe?.name ?? provider.config.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                // The name spans the row's free width instead of a trailing
+                // `Spacer()`, so the whole empty stretch is the desk's hit
+                // target rather than dead chrome.
+                Button {
+                    appState.selectRemoteProvider(provider.config.name)
+                } label: {
+                    Text(provider.describe?.name ?? provider.config.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(
+                            appState.selectedRemoteProvider == provider.config.name
+                                ? HierarchicalShapeStyle.primary
+                                : HierarchicalShapeStyle.secondary
+                        )
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
                 healthSuffix
-                Spacer()
                 Button {
                     showingCreateSheet = true
                 } label: {
@@ -222,7 +231,11 @@ struct RemoteProviderHeaderRow: View {
         .frame(minHeight: 22, alignment: .bottom)
         .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
+        .listRowBackground(
+            appState.selectedRemoteProvider == provider.config.name
+                ? Color.accentColor.opacity(0.13)
+                : Color.clear
+        )
         .sheet(isPresented: $showingCreateSheet) {
             RemoteCreateSheet(provider: provider.config, describe: provider.describe, repoPrefill: nil)
         }

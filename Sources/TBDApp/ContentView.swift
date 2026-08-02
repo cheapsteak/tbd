@@ -313,13 +313,24 @@ struct ContentView: View {
 // MARK: - DetailSectionHostPager
 
 /// NSViewControllerRepresentable hosting `ContentView`'s entire `detail:`
-/// content as exactly two `NSTabViewController` tab items: `.remote` (the
+/// content as exactly three `NSTabViewController` tab items: `.remote` (the
 /// sticky `RemoteSessionDetailView` host — mounted once a remote session
-/// has ever been selected and NEVER removed afterward) and `.other`
+/// has ever been selected and NEVER removed afterward), `.providerDesk`
+/// (the read-only `RemoteProviderDeskView`), and `.other`
 /// (whichever worktree/repo/scratch/empty/disconnected content currently
 /// applies — cheap to recreate on every switch, exactly as before; local
 /// worktree reattach is already instant via the daemon's own tmux sessions,
 /// so that half never needed keep-alive).
+///
+/// The Provider Desk is a SEPARATE tab rather than a second thing the
+/// `.remote` tab can render, and that is load-bearing: swapping the
+/// `.remote` slot's root view between `RemoteSessionDetailView` and the
+/// desk would structurally remove the detail view, dismantling the
+/// `RemoteAttachPager` it hosts and tearing down EVERY live attach
+/// connection — precisely the teardown the next paragraph explains this
+/// whole pager exists to prevent. Selecting a provider is a read-only
+/// glance at the fleet; it must not cost a full SSM/ssh reconnect on the
+/// way back.
 ///
 /// This exists because navigating OUT of remote-session mode (selecting a
 /// worktree/repo/scratch section) used to unmount `RemoteSessionDetailView`
@@ -353,6 +364,13 @@ struct ContentView: View {
 /// never reassigned: the same "stable identity, reactive interior" shape
 /// `WorktreePager`/`RemoteAttachPager` already use for their own tab items.
 struct DetailSectionHostPager: NSViewControllerRepresentable {
+    /// Which of the three tab items should be in front.
+    enum DetailTab: String, Equatable {
+        case remote
+        case providerDesk
+        case other
+    }
+
     @Binding var showFilePanel: Bool
     @Binding var filePanelWidth: Double
 
@@ -360,8 +378,9 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
 
-    private static let remoteTabID = "remote"
-    private static let otherTabID = "other"
+    private static let remoteTabID = DetailTab.remote.rawValue
+    private static let providerDeskTabID = DetailTab.providerDesk.rawValue
+    private static let otherTabID = DetailTab.other.rawValue
 
     func makeNSViewController(context: Context) -> NSTabViewController {
         let vc = NSTabViewController()
@@ -384,6 +403,17 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
             vc.addTabViewItem(item)
         }
 
+        if !currentIDs.contains(Self.providerDeskTabID) {
+            let host = NSHostingController(
+                rootView: ProviderDeskHostSlot()
+                    .environmentObject(appState)
+                    .environmentObject(appearance)
+            )
+            let item = NSTabViewItem(viewController: host)
+            item.identifier = Self.providerDeskTabID
+            vc.addTabViewItem(item)
+        }
+
         if !currentIDs.contains(Self.otherTabID) {
             let host = NSHostingController(
                 rootView: OtherSectionContent(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
@@ -395,10 +425,11 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
             vc.addTabViewItem(item)
         }
 
-        let showingRemote = Self.showsRemoteTab(
-            isConnected: appState.isConnected, selectedRemoteSession: appState.selectedRemoteSession
-        )
-        let targetID = showingRemote ? Self.remoteTabID : Self.otherTabID
+        let targetID = Self.targetTab(
+            isConnected: appState.isConnected,
+            selectedRemoteSession: appState.selectedRemoteSession,
+            selectedRemoteProvider: appState.selectedRemoteProvider
+        ).rawValue
         if let idx = vc.tabViewItems.firstIndex(where: { $0.identifier as? String == targetID }),
            vc.selectedTabViewItemIndex != idx {
             vc.selectedTabViewItemIndex = idx
@@ -410,10 +441,20 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
     /// `OtherSectionContent` renders the disconnected message itself, so
     /// this just makes sure that's the tab actually in front while
     /// disconnected, regardless of whatever remote session was selected
-    /// before the daemon dropped. Pure and `nonisolated` so it's directly
-    /// unit-testable without an `NSTabViewController`.
-    nonisolated static func showsRemoteTab(isConnected: Bool, selectedRemoteSession: RemoteSessionSelection?) -> Bool {
-        isConnected && selectedRemoteSession != nil
+    /// before the daemon dropped. A session selection outranks a provider
+    /// selection; the two are already mutually exclusive in `AppState`, so
+    /// the order only decides an unreachable tie deterministically. Pure and
+    /// `nonisolated` so it's directly unit-testable without an
+    /// `NSTabViewController`.
+    nonisolated static func targetTab(
+        isConnected: Bool,
+        selectedRemoteSession: RemoteSessionSelection?,
+        selectedRemoteProvider: String?
+    ) -> DetailTab {
+        guard isConnected else { return .other }
+        if selectedRemoteSession != nil { return .remote }
+        if selectedRemoteProvider != nil { return .providerDesk }
+        return .other
     }
 }
 
@@ -431,6 +472,28 @@ private struct RemoteSessionHostSlot: View {
     var body: some View {
         if let selection = appState.remoteSessionHostSelection {
             RemoteSessionDetailView(selection: selection)
+        } else {
+            EmptyView()
+        }
+    }
+}
+
+/// The `.providerDesk` tab's content. Internally reactive for the same
+/// reason `RemoteSessionHostSlot` is — `DetailSectionHostPager` creates this
+/// `NSHostingController` once and never reassigns its `rootView`.
+///
+/// Renders nothing when the selected provider is no longer in the roster.
+/// `AppState.refreshRemote()` clears `selectedRemoteProvider` when a
+/// provider disappears from a successful inventory, so this is a transient
+/// window rather than a resting state — and the desk has no honest content
+/// to show for a provider TBD no longer knows about.
+private struct ProviderDeskHostSlot: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if let name = appState.selectedRemoteProvider,
+           let provider = appState.remoteProviders.first(where: { $0.config.name == name }) {
+            RemoteProviderDeskView(provider: provider)
         } else {
             EmptyView()
         }
