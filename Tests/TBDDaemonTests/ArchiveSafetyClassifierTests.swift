@@ -264,10 +264,19 @@ struct ArchiveSafetyClassifierTests {
       ))
   }
 
-  @Test func explicitForceRetainsItsArchiveOverride() async throws {
+  /// Drives force all the way through physical removal on a worktree the
+  /// classifier refuses. Asserting only against `beginArchiveWorktree` would
+  /// prove nothing — that phase is read-only and mutates nothing whether force
+  /// is set or not, so it passes even if force stopped bypassing the gate.
+  @Test func explicitForceRemovesAWorktreeTheClassifierWouldBlock() async throws {
     let fixture = try await makePublishedFixture(name: "force")
     defer { fixture.cleanup() }
     try write("unique", to: fixture.worktree.appendingPathComponent("unique.txt"))
+
+    // Precondition: without force, this exact worktree is refused.
+    let blocked = await classify(fixture)
+    #expect(!blocked.isEligible)
+    #expect(blocked.uniqueUnpublishedWork.map(\.path) == ["unique.txt"])
 
     let db = try TBDDatabase(inMemory: true)
     let repo = try await db.repos.create(
@@ -289,10 +298,58 @@ struct ArchiveSafetyClassifierTests {
       hooks: HookResolver()
     )
 
-    _ = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id, force: true)
+    let pair = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id, force: true)
+    try await lifecycle.completeArchiveWorktree(
+      worktree: pair.0, repo: pair.1, force: true
+    )
+
+    #expect(try await db.worktrees.get(id: worktree.id)?.status == .archived)
+    #expect(!FileManager.default.fileExists(atPath: fixture.worktree.path))
+  }
+
+  /// The same fixture without force must refuse and leave everything in place,
+  /// so the test above attributes removal to force rather than to the fixture.
+  @Test func withoutForceTheSameWorktreeIsRefusedAndUntouched() async throws {
+    let fixture = try await makePublishedFixture(name: "noforce")
+    defer { fixture.cleanup() }
+    try write("unique", to: fixture.worktree.appendingPathComponent("unique.txt"))
+
+    let db = try TBDDatabase(inMemory: true)
+    let repo = try await db.repos.create(
+      path: fixture.repo.path,
+      displayName: "acme",
+      defaultBranch: "main"
+    )
+    let worktree = try await db.worktrees.create(
+      repoID: repo.id,
+      name: "noforce",
+      branch: fixture.branch,
+      path: fixture.worktree.path,
+      tmuxServer: "tbd-test"
+    )
+    let lifecycle = WorktreeLifecycle(
+      db: db,
+      git: GitManager(),
+      tmux: TmuxManager(dryRun: true),
+      hooks: HookResolver()
+    )
+
+    await #expect(throws: WorktreeLifecycleError.self) {
+      _ = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id)
+    }
 
     #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
     #expect(FileManager.default.fileExists(atPath: fixture.worktree.path))
+  }
+
+  /// The refusal has to carry its own way out — the app archives without force
+  /// and exposes no override control, so this message is a GUI user's only
+  /// route to the escape hatch.
+  @Test func archiveRefusalNamesTheForceEscapeHatch() {
+    let message = WorktreeLifecycleError.archiveUnsafe("unique unpublished work: a.txt").description
+
+    #expect(message.contains("unique unpublished work: a.txt"))
+    #expect(message.contains("--force"))
   }
 
   @Test func removalFailureNeverPublishesArchivedState() async throws {

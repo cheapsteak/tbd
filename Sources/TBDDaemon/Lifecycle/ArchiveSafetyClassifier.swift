@@ -147,7 +147,7 @@ public struct ArchiveSafetyClassifier: Sendable {
       trustedAttestation.worktreeID == worktreeID,
       let currentHead = try? await git.headSHA(worktreePath: worktreePath),
       currentHead == trustedAttestation.headSHA,
-      manifestEntry?.status == "??" || manifestEntry?.status == "!!",
+      manifestEntry?.status == "??",
       let advisoryData = regularFileData(
         rootPath: worktreePath, relativePath: Self.manifestRelativePath
       ),
@@ -223,7 +223,7 @@ public struct ArchiveSafetyClassifier: Sendable {
 
     switch artifact.kind {
     case .runtime:
-      guard entry.status == "??" || entry.status == "!!" else {
+      guard entry.status == "??" else {
         return ArchiveArtifactFinding(
           path: entry.path,
           category: .uniqueUnpublishedWork,
