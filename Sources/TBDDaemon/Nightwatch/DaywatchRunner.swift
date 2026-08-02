@@ -191,6 +191,7 @@ public actor DaywatchRunner {
 
             if let desker = deskSessionManager, let deskID = deskWorktreeID {
                 await desker.postShiftWrapUp(worktreeID: deskID)
+                await desker.releaseJudgeLease(worktreeID: deskID)
             }
             deskWorktreeID = nil
 
@@ -241,6 +242,13 @@ public actor DaywatchRunner {
                     logger.warning("Desk session ensure failed on tick retry (first failure): \(error.localizedDescription, privacy: .public)")
                 }
             }
+        }
+
+        // Lease maintenance is model-free and runs on every scheduler heartbeat,
+        // including ticks that queue no judgment and therefore send no nudge.
+        if let desker = deskSessionManager, let deskID = deskWorktreeID,
+           effectiveMode != .off {
+            await desker.maintainJudgeLease(worktreeID: deskID)
         }
 
         // Run one tick

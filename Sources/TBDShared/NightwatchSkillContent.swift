@@ -142,8 +142,9 @@ they are wrong; this rule wins.)
 1000k Opus window that forced a relay roughly every two hours, so the desk spent its shift
 handing off instead of judging. `handoff.py --check` is the authority — don't eyeball it.)
 Do not "flag for respawn" and keep working, and
-do NOT use `tbd terminal close --all` — **that command does not exist** (there is no
-`tbd terminal close` subcommand at all; the only real close is killing the tmux window).
+do NOT use `tbd terminal close --all` — **that command does not exist**. The relay uses
+the supported single-terminal `tbd terminal close --terminal <id>`, which preserves
+Closed Terminals history and never touches independently spawned child work.
 The working relay is `scripts/handoff.py`:
 
 ```
@@ -263,7 +264,7 @@ Usage:
 Exit 0 always (a wake plan is informational); per-item status is in the output
 and queue/wake-plan.json.
 """
-import subprocess, os, re, json, time, sys
+import subprocess, os, re, json, time, sys, glob
 
 HOME = os.path.expanduser("~")
 DB = f"{HOME}/tbd/state.db"
@@ -287,6 +288,35 @@ def sh(args, t=20, cwd=None):
 def gh(args, t=25, cwd=None):
     # gh transits the cache proxy via the shell function, not env — plain exec is direct.
     return sh(["gh", *args], t=t, cwd=cwd)
+
+
+def lease_credential_file(tid):
+    root = os.environ.get("TBD_HOME") or os.path.expanduser("~/tbd")
+    matches = glob.glob(os.path.join(
+        root, "runtime", "nightwatch-leases", f"{tid}-*.json"))
+    if len(matches) != 1:
+        sys.exit(f"refusing mutation: expected one capability file, found {len(matches)}")
+    return matches[0]
+
+
+def require_judge_lease():
+    """Renew exact desk authority immediately before one mutable wake."""
+    tid, wid = os.environ.get("TBD_TERMINAL_ID"), os.environ.get("TBD_WORKTREE_ID")
+    if not tid or not wid:
+        sys.exit("refusing wake: missing TBD terminal/worktree identity")
+    status, rc = sh(["tbd", "nightwatch", "lease", "status", "--worktree", wid])
+    try:
+        lease = (json.loads(status) or {}).get("lease") if rc == 0 else None
+    except Exception:
+        lease = None
+    if not lease or not lease.get("valid") or lease.get("terminalID") != tid:
+        sys.exit("refusing wake: this terminal does not hold the valid judge lease")
+    credential = lease_credential_file(tid)
+    _, rc = sh([
+        "tbd", "nightwatch", "lease", "renew", "--credential-file", credential,
+    ])
+    if rc != 0:
+        sys.exit("refusing wake: judge lease renewal failed")
 
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -559,6 +589,7 @@ def main():
         print(f"  ▸ {it['name']} ({it['tid'][:8]}): {v['classification']} — "
               + ("; ".join(v["facts"])[:110] or "-"))
         if act:
+            require_judge_lease()
             # The wake text rides `tbd terminal wake --prompt` as an argv to
             # `claude --resume` — atomic with the respawn. NEVER `terminal
             # send`: send pastes into whatever the pane currently runs (a bare
@@ -1084,6 +1115,14 @@ DEFAULT_THRESHOLD = 600_000
 SUCCESSOR_MODEL = "opus"
 
 
+def lease_credential_file(tid):
+    root = pathlib.Path(os.environ.get("TBD_HOME") or os.path.expanduser("~/tbd"))
+    matches = list((root / "runtime" / "nightwatch-leases").glob(f"{tid}-*.json"))
+    if len(matches) != 1:
+        sys.exit(f"refusing mutation: expected one capability file, found {len(matches)}")
+    return str(matches[0])
+
+
 def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
@@ -1173,10 +1212,28 @@ to you rather than getting truncated mid-shift.
 
 FIRST, before anything else:
 1. Read the handoff document: {doc_path}
-2. Close the predecessor — it is idle and waiting for you to do this:
+2. WAIT until the daemon-issued capability both exists AND renews. The file is
+   prepared before the database transfer, so existence alone is not authority;
+   this bounded loop covers that small commit race and also works if the
+   predecessor's follow-up message never arrives:
+     python3 - <<'PY'
+     import glob, os, subprocess, time
+     root = os.environ.get("TBD_HOME") or os.path.expanduser("~/tbd")
+     ok = False
+     for _ in range(60):
+         paths = glob.glob(os.path.join(root, "runtime", "nightwatch-leases", os.environ["TBD_TERMINAL_ID"] + "-*.json"))
+         if len(paths) == 1 and subprocess.call(["tbd", "nightwatch", "lease", "renew", "--credential-file", paths[0]]) == 0:
+             ok = True
+             break
+         time.sleep(1)
+     raise SystemExit(0 if ok else 2)
+     PY
+   Do not merge, apply, archive, wake/nudge, spawn, or close the predecessor
+   before that command passes.
+3. Close the predecessor — it is idle and waiting for you to do this:
      python3 "{pathlib.Path(__file__).resolve()}" --close-predecessor {pred_tid}
    (predecessor terminal {pred_tid}, tmux window {pred_window} on server {server})
-3. Confirm in your first message what you picked up and what you closed.
+4. Confirm in your first message what you picked up and what you closed.
 
 STANDING INSTRUCTION — this applies to YOU now, and to every session you spawn:
 When your own context passes {threshold:,} tokens, do not push through it. Run
@@ -1196,6 +1253,22 @@ def cmd_act(args):
     server = tmux_server()
     used = context_tokens(row.get("transcriptPath", ""))
     ts = int(time.time())
+
+    credential = lease_credential_file(tid)
+    lease_status = _run(["tbd", "nightwatch", "lease", "status", "--worktree", wid])
+    if lease_status.returncode != 0:
+        sys.exit(f"cannot verify judge lease before handoff: {lease_status.stderr.strip()}")
+    try:
+        current_lease = (json.loads(lease_status.stdout) or {}).get("lease") or {}
+    except json.JSONDecodeError:
+        sys.exit("cannot verify judge lease before handoff: unparseable status")
+    if not current_lease.get("valid") or current_lease.get("terminalID") != tid:
+        sys.exit("refusing handoff: this terminal does not hold the valid judge lease")
+    renewal = _run([
+        "tbd", "nightwatch", "lease", "renew", "--credential-file", credential,
+    ])
+    if renewal.returncode != 0:
+        sys.exit(f"refusing handoff: judge lease renewal failed: {renewal.stderr.strip()}")
 
     notes = pathlib.Path(args.notes_file).read_text() if args.notes_file else ""
     if not notes.strip():
@@ -1240,14 +1313,37 @@ Transcript: {row.get('transcriptPath')}
     except json.JSONDecodeError:
         new_id = spawn.stdout.strip() or "?"
 
+    transfer = _run([
+        "tbd", "nightwatch", "lease", "transfer",
+        "--credential-file", credential,
+        "--to-terminal", new_id,
+    ])
+    if transfer.returncode != 0:
+        sys.exit(f"lease transfer FAILED; predecessor remains authoritative and successor must stay read-only: {transfer.stderr.strip()}")
+    try:
+        transfer_result = json.loads(transfer.stdout)
+        successor_lease = transfer_result["lease"]
+        successor_credential = transfer_result["credentialFile"]
+    except json.JSONDecodeError:
+        sys.exit("lease transferred but response was unparseable; both sessions must stop mutating")
+
+    renew = f"tbd nightwatch lease renew --credential-file {successor_credential}"
+    delivery = _run([
+        "tbd", "terminal", "send", "--terminal", new_id, "--submit", "--text",
+        "Exclusive judge lease transferred to you. Before every mutable action run: " + renew,
+    ])
+    if delivery.returncode != 0:
+        print("warning: successor notification failed; its prewritten capability file remains recoverable", file=sys.stderr)
+
     print(f"handoff written: {doc}")
     print(f"successor spawned: {new_id} (model={SUCCESSOR_MODEL})")
+    print(f"judge lease transferred: generation {successor_lease['generation']}")
     print("go idle now — the successor closes this terminal once it has read the doc.")
     return 0
 
 
 def cmd_close(args):
-    """Close a predecessor terminal by killing its tmux window."""
+    """Close one predecessor through TBD so transcript/history are preserved."""
     target = args.close_predecessor
     r = _run(["tbd", "terminal", "list", os.environ.get("TBD_WORKTREE_ID", ""), "--json"])
     # A FAILED lookup is not an absent terminal. Collapsing the two would report
@@ -1266,14 +1362,22 @@ def cmd_close(args):
     if target == os.environ.get("TBD_TERMINAL_ID"):
         sys.exit("refusing to close myself — pass the PREDECESSOR's terminal id")
 
-    window = row.get("tmuxWindowID")
-    server = tmux_server()
-    if not window or not server:
-        sys.exit(f"cannot resolve tmux window/server for {target}")
-    kill = _run(["tmux", "-L", server, "kill-window", "-t", window])
-    if kill.returncode != 0 and "can't find" not in (kill.stderr or ""):
-        sys.exit(f"kill-window failed: {kill.stderr.strip()}")
-    print(f"closed predecessor {target} (window {window} on {server})")
+    # Closing a terminal is a mutable desk action too. The successor must prove
+    # it owns the transferred capability before force-closing its predecessor.
+    self_tid = os.environ.get("TBD_TERMINAL_ID", "")
+    credential = lease_credential_file(self_tid)
+    renewal = _run([
+        "tbd", "nightwatch", "lease", "renew", "--credential-file", credential,
+    ])
+    if renewal.returncode != 0:
+        sys.exit("refusing to close predecessor: this terminal does not hold the judge lease")
+
+    close = _run([
+        "tbd", "terminal", "close", "--terminal", target, "--force", "--json",
+    ])
+    if close.returncode != 0:
+        sys.exit(f"terminal close failed: {close.stderr.strip()}")
+    print(f"closed predecessor {target} through TBD (history preserved)")
     return 0
 
 
@@ -1384,7 +1488,7 @@ Default is dry-run (prints the plan, touches nothing). `--prs` also gates open P
 (makes gh calls — skip during a GitHub-rate crunch). Dedupes + clears the queue on a
 successful --act drain.
 """
-import subprocess, os, json, time, sys
+import subprocess, os, json, time, sys, glob
 
 HOME = os.path.expanduser("~")
 DB = f"{HOME}/tbd/state.db"
@@ -1395,6 +1499,36 @@ REPO = "longeye-ai/monorepo"
 def sh(args, t=20):
     try: return subprocess.run(args, capture_output=True, text=True, timeout=t).stdout
     except Exception: return ""
+
+def lease_credential_file(tid):
+    root = os.environ.get("TBD_HOME") or os.path.expanduser("~/tbd")
+    matches = glob.glob(os.path.join(
+        root, "runtime", "nightwatch-leases", f"{tid}-*.json"))
+    if len(matches) != 1:
+        sys.exit(f"refusing mutation: expected one capability file, found {len(matches)}")
+    return matches[0]
+
+
+def require_judge_lease():
+    """Renew exact desk authority immediately before one mutable dispatch."""
+    tid, wid = os.environ.get("TBD_TERMINAL_ID"), os.environ.get("TBD_WORKTREE_ID")
+    if not tid or not wid:
+        sys.exit("refusing dispatch: missing TBD terminal/worktree identity")
+    try:
+        status = subprocess.run(
+            ["tbd", "nightwatch", "lease", "status", "--worktree", wid],
+            capture_output=True, text=True, timeout=20)
+        lease = (json.loads(status.stdout) or {}).get("lease") if status.returncode == 0 else None
+    except Exception:
+        lease = None
+    if not lease or not lease.get("valid") or lease.get("terminalID") != tid:
+        sys.exit("refusing dispatch: this terminal does not hold the valid judge lease")
+    credential = lease_credential_file(tid)
+    renewal = subprocess.run([
+        "tbd", "nightwatch", "lease", "renew", "--credential-file", credential,
+    ], capture_output=True, text=True, timeout=20)
+    if renewal.returncode != 0:
+        sys.exit("refusing dispatch: judge lease renewal failed")
 
 def gh(*a, t=20):
     for k in ("HTTPS_PROXY","HTTP_PROXY","https_proxy","http_proxy"): os.environ.pop(k, None)
@@ -1414,6 +1548,7 @@ def saturated(rep):
 def dispatch(tid, text, act):
     """Run the repo's bound skill in the owner's terminal (or describe it in dry-run)."""
     if not act or not tid: return False
+    require_judge_lease()
     sh(["tbd", "terminal", "send", "--terminal", tid, "--submit", "--text", text])
     return True
 
@@ -1502,6 +1637,7 @@ def main():
         for x in for_adam: f.write(f"- {x}\n")
     print(f"\nactions dispatched: {acted}   human items → queue/for-adam.md ({len(for_adam)})")
     if act and not sat:
+        require_judge_lease()
         open(qf, "w").close(); print("drained decisions.jsonl")
     else:
         print("(dry-run or saturated — queue left intact)")

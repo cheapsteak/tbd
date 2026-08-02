@@ -979,12 +979,17 @@ private struct TabBarItem: View {
     }
 
     private var tabLabel: String {
-        if let label = tab.label, !label.isEmpty {
-            return label
+        let roleSuffix: String = switch terminal?.watchDeskRole {
+        case .judge: " · Judge"
+        case .readOnlyCoordinator: " · Read-only"
+        case nil: ""
         }
-        switch tab.content {
+        let base: String
+        if let label = tab.label, !label.isEmpty {
+            base = label
+        } else { switch tab.content {
         case .terminal:
-            return AutoTabLabelResolver.terminalLabel(
+            base = AutoTabLabelResolver.terminalLabel(
                 terminal: terminal,
                 fallbackIndex: index,
                 modelProfiles: appState.modelProfiles,
@@ -992,18 +997,20 @@ private struct TabBarItem: View {
                 worktreeTerminals: appState.terminals[worktreeID] ?? []
             )
         case .webview(_, let url):
-            return url.host ?? "Web"
+            base = url.host ?? "Web"
         case .codeViewer(_, let path):
-            return URL(fileURLWithPath: path).lastPathComponent
+            base = URL(fileURLWithPath: path).lastPathComponent
         case .note(let noteID):
             let allNotes = appState.notes.values.flatMap { $0 }
             if let title = allNotes.first(where: { $0.id == noteID })?.title, !title.isEmpty {
-                return title
+                base = title
+            } else {
+                base = "Note \(index + 1)"
             }
-            return "Note \(index + 1)"
         case .liveTranscript:
-            return "Transcript"
-        }
+            base = "Transcript"
+        }}
+        return base + roleSuffix
     }
 }
 
