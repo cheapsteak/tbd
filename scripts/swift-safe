@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Run SwiftPM behind a machine-global admission lock and bounded job count.
+
+Every TBD worktree shares the same default lock under ``~/tbd/runtime``.  This
+prevents otherwise-independent Claude sessions from each starting a full
+Swift compiler swarm on the same laptop.  The file may remain on disk: flock
+ownership is kernel-managed and is released when this process exits.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+
+DEFAULT_JOBS = 2
+MAX_JOBS = 4
+DEFAULT_TIMEOUT_SECONDS = 1_800.0
+COMPILE_SUBCOMMANDS = {"build", "run", "test"}
+SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS | {"package"}
+
+
+def _positive_number(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be a positive number, got {raw!r}")
+    if value <= 0:
+        raise SystemExit(f"{name} must be positive, got {raw!r}")
+    return value
+
+
+def _positive_integer(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be a positive integer, got {raw!r}")
+    if value <= 0:
+        raise SystemExit(f"{name} must be positive, got {raw!r}")
+    return value
+
+
+def _job_limit() -> int:
+    value = _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
+    if value > MAX_JOBS and os.environ.get("TBD_SWIFT_ALLOW_HIGH_JOBS") != "1":
+        raise SystemExit(
+            f"TBD_SWIFT_JOBS={value} exceeds the safe local ceiling {MAX_JOBS}; "
+            "set TBD_SWIFT_ALLOW_HIGH_JOBS=1 only for an isolated machine"
+        )
+    return value
+
+
+def _requested_jobs(arguments: list[str]) -> int | None:
+    for index, argument in enumerate(arguments):
+        if argument in {"-j", "--jobs"}:
+            if index + 1 >= len(arguments):
+                raise SystemExit(f"{argument} requires a numeric value")
+            try:
+                return int(arguments[index + 1])
+            except ValueError:
+                raise SystemExit(f"{argument} requires a numeric value")
+        if argument.startswith("--jobs="):
+            try:
+                return int(argument.split("=", 1)[1])
+            except ValueError:
+                raise SystemExit("--jobs requires a numeric value")
+        if argument.startswith("-j") and len(argument) > 2:
+            try:
+                return int(argument[2:])
+            except ValueError:
+                continue
+    return None
+
+
+def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
+    result = [subcommand, *arguments]
+    if subcommand not in COMPILE_SUBCOMMANDS:
+        return result
+
+    limit = _job_limit()
+    requested = _requested_jobs(arguments)
+    if requested is None:
+        return [*result, "--jobs", str(limit)]
+    if requested <= 0:
+        raise SystemExit("SwiftPM --jobs must be positive")
+    if requested > limit and os.environ.get("TBD_SWIFT_ALLOW_HIGH_JOBS") != "1":
+        raise SystemExit(
+            f"requested SwiftPM --jobs {requested} exceeds TBD_SWIFT_JOBS={limit}; "
+            "lower the command or explicitly set TBD_SWIFT_ALLOW_HIGH_JOBS=1"
+        )
+    return result
+
+
+def _lock_path() -> Path:
+    explicit = os.environ.get("TBD_SWIFT_LOCK_PATH")
+    if explicit:
+        return Path(explicit).expanduser()
+    tbd_home = Path(os.environ.get("TBD_HOME", Path.home() / "tbd")).expanduser()
+    return tbd_home / "runtime" / "swift-build.lock"
+
+
+def _acquire(lock_file, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    announced = False
+    while True:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if not announced:
+                print(
+                    "swift-safe: another TBD worktree is compiling; waiting for "
+                    "the shared build slot",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                announced = True
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
+
+
+def main(arguments: list[str]) -> int:
+    if not arguments or arguments[0] not in SUPPORTED_SUBCOMMANDS:
+        supported = "|".join(sorted(SUPPORTED_SUBCOMMANDS))
+        print(
+            f"usage: scripts/swift-safe <{supported}> [swift arguments...]",
+            file=sys.stderr,
+        )
+        return 64
+
+    subcommand, *swift_arguments = arguments
+    bounded = _bounded_arguments(subcommand, swift_arguments)
+    swift = os.environ.get("TBD_SWIFT_BIN") or shutil.which("swift")
+    if not swift:
+        print("swift-safe: swift executable not found", file=sys.stderr)
+        return 69
+
+    path = _lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timeout = _positive_number(
+        "TBD_SWIFT_LOCK_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
+    )
+
+    with path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            _acquire(lock_file, timeout)
+        except TimeoutError:
+            print(
+                f"swift-safe: timed out after {timeout:g}s waiting for {path}",
+                file=sys.stderr,
+            )
+            return 75
+
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(
+            f"pid={os.getpid()}\ncwd={os.getcwd()}\ncommand=swift {' '.join(bounded)}\n"
+        )
+        lock_file.flush()
+        os.fsync(lock_file.fileno())
+        return subprocess.run([swift, *bounded], check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

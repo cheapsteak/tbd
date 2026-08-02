@@ -198,7 +198,8 @@ run_target() {
     load_before="$(loadavg)"
     local rc=0
     # shellcheck disable=SC2086 # $filter is a deliberately word-split arg list
-    run_with_deadline "$ITERATION_DEADLINE_S" "$log" swift test $filter || rc=$?
+    run_with_deadline "$ITERATION_DEADLINE_S" "$log" \
+      "$REPO_ROOT/scripts/swift-safe" test $filter || rc=$?
     verdict="$(judge_iteration "$rc" "$log" "$floor")"
     if [[ "$verdict" == PASS* ]]; then
       pass_counts+=("${verdict#PASS }")
@@ -266,8 +267,9 @@ main() {
   # Build ONCE up front so the first iteration's timing is not dominated by the
   # compile. `swift build` alone does NOT build test targets — `--build-tests` does.
   echo
-  echo "building test targets (swift build --build-tests -j 2)…"
-  if ! run_with_deadline 1800 "$work_dir/build.log" swift build --build-tests -j 2; then
+  echo "building test targets (swift-safe build --build-tests -j 2)…"
+  if ! run_with_deadline 1800 "$work_dir/build.log" \
+    "$REPO_ROOT/scripts/swift-safe" build --build-tests -j 2; then
     echo "nightly-flake-stress: BUILD FAILED — see $work_dir/build.log" >&2
     tail -30 "$work_dir/build.log" >&2
     exit 2
