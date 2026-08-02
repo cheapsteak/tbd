@@ -18,8 +18,11 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Always commit after completing work. Don't wait to be asked.
 - Use conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
 - Banned words — never use these in code or in PR titles, descriptions, or commit messages: "blessed", "golden"
-- Verify your changes compile (`swift build`) before committing.
-- Run `swift test` if you changed daemon or shared code.
+- Verify your changes compile (`scripts/swift-safe build`) before committing.
+- Run `scripts/swift-safe test` if you changed daemon or shared code. The wrapper
+  serializes SwiftPM across TBD worktrees and defaults to two compiler jobs;
+  raw `swift build/test/run` is blocked by the repo guardrail because
+  concurrent default `-j12` builds can exhaust this development machine.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
 ### Large or risky new behavior ships behind a default-off flag
@@ -132,8 +135,8 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 
 ## Quick Reference
 
-- **Build**: `swift build`
-- **Test**: `swift test`
+- **Build**: `scripts/swift-safe build`
+- **Test**: `scripts/swift-safe test`
 - **Restart**: `scripts/restart.sh`
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:
