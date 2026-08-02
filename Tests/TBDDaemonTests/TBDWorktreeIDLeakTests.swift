@@ -41,9 +41,14 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
     }
 }
 
+private let codexDryRunExecutable = "/opt/tbd-test/bin/codex"
+
 private func containsCodexProfileLaunch(_ body: String) -> Bool {
-    body.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
-        || body.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
+    let executable = SystemPromptBuilder.shellEscape(codexDryRunExecutable)
+    return body.contains(
+        "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile tbd --dangerously-bypass-approvals-and-sandbox")
+        || body.contains(
+            "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
 }
 
 private let codexTestHomePath: String = {

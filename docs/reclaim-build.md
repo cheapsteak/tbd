@@ -120,13 +120,33 @@ A scratchpad is **kept** when either:
 
 Everything else is removed by default. Use `--dry-run` to preview. See the Env vars section above for `SWEEP_BASE`, `SWEEP_LSOF_CMD`, and `SWEEP_DAYS`.
 
+## Swift build admission
+
+Local SwiftPM `build`, `test`, and `run` compilation goes through
+`scripts/swift-safe`. It holds a
+kernel-managed, machine-global lock at `~/tbd/runtime/swift-build.lock`, so a
+fleet of TBD worktrees cannot compile simultaneously. Compile commands default
+to two jobs and rejects an explicit job count above that configured limit unless
+a developer opts out. Non-compiling `swift package` metadata and resolution
+commands do not enter the governor.
+
+- `TBD_SWIFT_JOBS` sets the default and maximum job count (default `2`).
+- `TBD_SWIFT_LOCK_TIMEOUT_SECONDS` sets the wait timeout (default `1800`).
+- `TBD_SWIFT_LOCK_PATH` overrides the shared lock path for isolated testing.
+- `TBD_SWIFT_ALLOW_HIGH_JOBS=1` permits an explicit higher job count on an
+  otherwise idle machine.
+
+The repository guardrail rejects raw `swift build`, `swift test`, and `swift
+run` commands issued by agents. CI and non-compiling package commands remain
+unaffected.
+
 ## Shared module cache
 
-`scripts/restart.sh` passes every `swift build` through a **shared clang/Swift
-module cache** at `$HOME/Library/Caches/tbd/swift-module-cache`:
+`scripts/restart.sh` passes every governed Swift build through a **shared
+clang/Swift module cache** at `$HOME/Library/Caches/tbd/swift-module-cache`:
 
 ```sh
-swift build -Xswiftc -module-cache-path -Xswiftc "$SHARED" -Xcc -fmodules-cache-path="$SHARED"
+scripts/swift-safe build -Xswiftc -module-cache-path -Xswiftc "$SHARED" -Xcc -fmodules-cache-path="$SHARED"
 ```
 
 Without it, every worktree's `.build` accumulates its own ~640 MB
@@ -145,8 +165,8 @@ Notes:
   writers; parallel builds from multiple worktrees against the shared cache
   were tested with zero lock errors.
 - **Stickiness (expected, not a bug).** SwiftPM bakes the cache path into
-  `.build/debug.yaml` at plan time. A plain `swift build` after a flagged one
-  silently keeps using the shared cache — and conversely, the first build
+  `.build/debug.yaml` at plan time. A later build after a flagged one silently
+  keeps using the shared cache — and conversely, the first build
   after a manifest re-plan only picks the shared cache up if it runs with the
   flags (i.e. via `restart.sh`). Flag alternation does not trigger
   recompilation; worst case is a ~14 s re-plan.

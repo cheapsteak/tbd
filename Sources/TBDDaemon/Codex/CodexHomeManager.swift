@@ -203,7 +203,18 @@ enum CodexProfileWriter {
 
     static func ensurePluginEnabled(in toml: String) -> String {
         let header = #"[plugins."\#(CodexPlugin.pluginKey)"]"#
+        return ensureSettings(
+            in: toml,
+            header: header,
+            settings: [("enabled", "true")]
+        )
+    }
 
+    private static func ensureSettings(
+        in toml: String,
+        header: String,
+        settings: [(key: String, value: String)]
+    ) -> String {
         // Normalize line endings to `\n` before splitting. A CRLF-terminated
         // `tbd.config.toml` would otherwise leave a trailing `\r` on every
         // line: `CharacterSet.whitespaces` does NOT include `\r`, so the
@@ -240,11 +251,12 @@ enum CodexProfileWriter {
             if !updated.isEmpty {
                 updated += "\n"
             }
-            updated += "\(header)\nenabled = true\n"
+            let settingLines = settings.map { "\($0.key) = \($0.value)" }
+            updated += ([header] + settingLines).joined(separator: "\n") + "\n"
             return updated
         }
 
-        let nextSectionIndex = lines[(headerIndex + 1)...]
+        var nextSectionIndex = lines[(headerIndex + 1)...]
             .firstIndex { line in
                 // A section header is a line that trims to `[...]` and is not
                 // a key/value assignment — reject lines containing `=` so a
@@ -254,21 +266,216 @@ enum CodexProfileWriter {
                 return trimmed.hasPrefix("[") && trimmed.hasSuffix("]") && !trimmed.contains("=")
             } ?? lines.endIndex
 
-        if let enabledIndex = lines[(headerIndex + 1)..<nextSectionIndex]
-            .firstIndex(where: { line in
-                // Match the exact `enabled` key, not prefixes like
-                // `enabled_features` which would otherwise be clobbered.
-                let key = line.trimmingCharacters(in: .whitespaces)
-                    .prefix { $0 != "=" }
-                    .trimmingCharacters(in: .whitespaces)
-                return key == "enabled"
-            }) {
-            lines[enabledIndex] = "enabled = true"
-        } else {
-            lines.insert("enabled = true", at: headerIndex + 1)
+        var missingSettings: [(key: String, value: String)] = []
+        for setting in settings {
+            let matchingIndices = lines[(headerIndex + 1)..<nextSectionIndex]
+                .indices
+                .filter { index in
+                    // Match the exact key, not prefixes like
+                    // `enabled_features` which would otherwise be clobbered.
+                    let key = lines[index].trimmingCharacters(in: .whitespaces)
+                        .prefix { $0 != "=" }
+                        .trimmingCharacters(in: .whitespaces)
+                    return key == setting.key
+                }
+
+            guard let firstIndex = matchingIndices.first else {
+                missingSettings.append(setting)
+                continue
+            }
+
+            lines[firstIndex] = "\(setting.key) = \(setting.value)"
+            for duplicateIndex in matchingIndices.dropFirst().reversed() {
+                lines.remove(at: duplicateIndex)
+                nextSectionIndex -= 1
+            }
+        }
+
+        if !missingSettings.isEmpty {
+            lines.insert(
+                contentsOf: missingSettings.map { "\($0.key) = \($0.value)" },
+                at: headerIndex + 1
+            )
         }
 
         return lines.joined(separator: "\n") + (hadTrailingNewline ? "\n" : "")
+    }
+}
+
+enum CodexExecutableResolutionError: LocalizedError, Equatable {
+    case invalidOverride(environmentKey: String, value: String, reason: String)
+    case notFound(searchPath: String, fallbackPath: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidOverride(let environmentKey, let value, let reason):
+            return """
+                Invalid \(environmentKey) override "\(value)": \(reason). Set \
+                \(environmentKey) to the absolute path of an executable Codex \
+                CLI, or unset it, then restart TBD.
+                """
+        case .notFound(let searchPath, let fallbackPath):
+            let renderedSearchPath = searchPath.isEmpty ? "(empty)" : searchPath
+            return """
+                Could not find an executable Codex CLI. Searched PATH \
+                (\(renderedSearchPath)) and \(fallbackPath). Set \
+                \(CodexExecutableResolver.executableOverrideEnvironmentKey) to \
+                an absolute Codex executable path, install or update \
+                ChatGPT.app, or add the Codex CLI to PATH, then restart TBD.
+                """
+        }
+    }
+}
+
+/// Resolves the Codex CLI before TBD creates a tmux window or terminal row.
+///
+/// A configured `TBD_CODEX_EXECUTABLE` absolute path wins, followed by every
+/// absolute PATH entry in order. Relative and empty PATH entries are ignored:
+/// resolving them against the daemon's current directory could execute an
+/// untrusted worktree-local `codex`. ChatGPT.app's bundled CLI is the fallback because
+/// GUI-launched daemons often have a minimal PATH that cannot name it even
+/// though the app (and the user's existing global Codex login) is installed.
+/// The returned path is always absolute so the later interactive shell does
+/// not repeat PATH lookup with a different environment.
+enum CodexExecutableResolver {
+    static let executableOverrideEnvironmentKey = "TBD_CODEX_EXECUTABLE"
+    static let chatGPTBundlePath = "/Applications/ChatGPT.app/Contents/Resources/codex"
+
+    static func resolve(
+        configuredOverride: String? = ProcessInfo.processInfo.environment["TBD_CODEX_EXECUTABLE"],
+        searchPath: String = ProcessInfo.processInfo.environment["PATH"] ?? "",
+        currentDirectory: String = FileManager.default.currentDirectoryPath,
+        fallbackPath: String = chatGPTBundlePath,
+        isExecutable: (String) -> Bool = {
+            isUsableExecutable(atPath: $0)
+        }
+    ) throws -> String {
+        let currentDirectoryURL = URL(
+            fileURLWithPath: currentDirectory,
+            isDirectory: true
+        ).standardizedFileURL
+
+        func absolutePath(_ path: String) -> String {
+            if path.hasPrefix("/") {
+                return URL(fileURLWithPath: path).standardizedFileURL.path
+            }
+            return URL(
+                fileURLWithPath: path,
+                relativeTo: currentDirectoryURL
+            ).standardizedFileURL.path
+        }
+
+        var seen = Set<String>()
+        if let configuredOverride, !configuredOverride.isEmpty {
+            guard (configuredOverride as NSString).isAbsolutePath else {
+                throw CodexExecutableResolutionError.invalidOverride(
+                    environmentKey: executableOverrideEnvironmentKey,
+                    value: configuredOverride,
+                    reason: "the path must be absolute"
+                )
+            }
+
+            let absoluteOverride = absolutePath(configuredOverride)
+            guard isExecutable(absoluteOverride) else {
+                throw CodexExecutableResolutionError.invalidOverride(
+                    environmentKey: executableOverrideEnvironmentKey,
+                    value: configuredOverride,
+                    reason: "the path is not executable"
+                )
+            }
+            return absoluteOverride
+        }
+
+        let pathEntries = searchPath.split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        )
+        for entry in pathEntries {
+            let directory = String(entry)
+            guard !directory.isEmpty,
+                  (directory as NSString).isAbsolutePath else {
+                continue
+            }
+            let candidate = absolutePath(
+                (directory as NSString).appendingPathComponent("codex")
+            )
+            guard seen.insert(candidate).inserted else { continue }
+            if isExecutable(candidate) {
+                return candidate
+            }
+        }
+
+        let absoluteFallback = absolutePath(fallbackPath)
+        if seen.insert(absoluteFallback).inserted, isExecutable(absoluteFallback) {
+            return absoluteFallback
+        }
+
+        throw CodexExecutableResolutionError.notFound(
+            searchPath: searchPath,
+            fallbackPath: absoluteFallback
+        )
+    }
+
+    /// Best-effort lookup for non-launching features such as usage display.
+    ///
+    /// Spawn paths must call the throwing `resolve` API so an invalid override
+    /// or missing CLI reaches the user as an actionable error. Usage probing
+    /// can degrade to an unavailable state, and also checks common absolute
+    /// user/package-manager locations that a launchd PATH may omit.
+    static func resolveIfAvailable(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        isExecutable: (String) -> Bool = {
+            isUsableExecutable(atPath: $0)
+        }
+    ) -> String? {
+        let fallbackDirectories = [
+            "\(homeDirectory)/.local/bin",
+            "\(homeDirectory)/.volta/bin",
+            "\(homeDirectory)/.cargo/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        let augmentedSearchPath = ([environment["PATH"]].compactMap { $0 }
+            + fallbackDirectories).joined(separator: ":")
+
+        return try? resolve(
+            configuredOverride: environment[executableOverrideEnvironmentKey],
+            searchPath: augmentedSearchPath,
+            fallbackPath: chatGPTBundlePath,
+            isExecutable: isExecutable
+        )
+    }
+
+    private static func isUsableExecutable(atPath path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: path, isDirectory: &isDirectory
+        ), !isDirectory.boolValue else {
+            return false
+        }
+        return FileManager.default.isExecutableFile(atPath: path)
+    }
+}
+
+struct CodexLaunchPreparation: Sendable {
+    let executablePath: String
+    let codexHome: URL
+
+    static func prepare(
+        executableResolver: @Sendable () throws -> String,
+        homeEnsurer: @Sendable () throws -> URL
+    ) throws -> CodexLaunchPreparation {
+        // Keep this order explicit: executable resolution is read-only and
+        // should fail before the profile writer touches the global Codex home.
+        let executablePath = try executableResolver()
+        let codexHome = try homeEnsurer()
+        return CodexLaunchPreparation(
+            executablePath: executablePath,
+            codexHome: codexHome
+        )
     }
 }
 
@@ -285,13 +492,40 @@ enum CodexSpawnCommandBuilder {
         build(initialPrompt: initialPrompt, profileFlag: detectedProfileFlag)
     }
 
+    static func command(executablePath: String) -> String {
+        let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
+            commandOutput(arguments: arguments, timeout: 3)
+        }
+        return baseCommand(executablePath: executablePath, profileFlag: profileFlag)
+    }
+
+    static func build(
+        initialPrompt: String?,
+        resumeThreadID: String? = nil,
+        executablePath: String
+    ) -> String {
+        let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
+            commandOutput(arguments: arguments, timeout: 3)
+        }
+        return build(
+            initialPrompt: initialPrompt,
+            resumeThreadID: resumeThreadID,
+            executablePath: executablePath,
+            profileFlag: profileFlag
+        )
+    }
+
     static func build(
         initialPrompt: String?,
         codexHelpOutput: String? = nil,
-        codexVersionOutput: String? = nil
+        codexVersionOutput: String? = nil,
+        resumeThreadID: String? = nil,
+        executablePath: String = "codex"
     ) -> String {
         build(
             initialPrompt: initialPrompt,
+            resumeThreadID: resumeThreadID,
+            executablePath: executablePath,
             profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput)
         )
     }
@@ -304,8 +538,35 @@ enum CodexSpawnCommandBuilder {
         return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
     }
 
+    static func build(
+        initialPrompt: String?,
+        resumeThreadID: String?,
+        executablePath: String,
+        profileFlag: String
+    ) -> String {
+        let command = baseCommand(
+            executablePath: executablePath,
+            profileFlag: profileFlag,
+            resumeThreadID: resumeThreadID)
+        guard let initialPrompt, !initialPrompt.isEmpty else {
+            return command
+        }
+        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+    }
+
     private static func baseCommand(profileFlag: String) -> String {
         return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
+    }
+
+    private static func baseCommand(
+        executablePath: String,
+        profileFlag: String,
+        resumeThreadID: String? = nil
+    ) -> String {
+        let executable = SystemPromptBuilder.shellEscape(executablePath)
+        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
+        guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
+        return "\(base) resume \(SystemPromptBuilder.shellEscape(resumeThreadID))"
     }
 
     static func profileFlag(codexHelpOutput: String?, codexVersionOutput: String?) -> String {
@@ -334,6 +595,21 @@ enum CodexSpawnCommandBuilder {
         return profileFlag(
             codexHelpOutput: helpOutput,
             codexVersionOutput: commandOutput(["codex", "--version"])
+        )
+    }
+
+    static func detectProfileFlag(
+        executablePath: String,
+        commandOutput: ([String]) -> String?
+    ) -> String {
+        let helpOutput = commandOutput([executablePath, "--help"])
+        if let helpOutput, helpOutput.contains("--profile-v2") || helpOutput.contains("--profile") {
+            return profileFlag(codexHelpOutput: helpOutput, codexVersionOutput: nil)
+        }
+
+        return profileFlag(
+            codexHelpOutput: helpOutput,
+            codexVersionOutput: commandOutput([executablePath, "--version"])
         )
     }
 

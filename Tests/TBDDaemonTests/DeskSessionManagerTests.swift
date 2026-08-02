@@ -403,8 +403,22 @@ extension TBDHomeSerialized {
             await manager.nudgeDeskSession(worktreeID: desk.id, act: true)
 
             let written = try String(contentsOf: instructions, encoding: .utf8)
-            #expect(written == NightwatchDeskPrompts.judgePrompt(mode: .nightwatch, skillDir: skillDir),
-                    "instructions file does not match the nightwatch judge prompt the pointer promises")
+            #expect(written.hasPrefix(NightwatchDeskPrompts.judgePrompt(mode: .nightwatch, skillDir: skillDir)),
+                    "instructions file does not begin with the nightwatch judge prompt the pointer promises")
+            #expect(written.contains("## Exclusive judge lease (mandatory)"))
+            #expect(written.contains("tbd nightwatch lease renew"))
+            let lease = try #require(
+                try await db.watchDeskLeases.status(worktreeID: desk.id))
+            #expect(!written.contains(lease.token.uuidString),
+                    "shared Watch Desk instructions must never disclose the capability")
+            let credentialPaths = WatchDeskLeaseCredentialFile.paths(
+                terminalID: lease.terminalID)
+            #expect(credentialPaths.count == 1)
+            let credentialPath = try #require(credentialPaths.first)
+            #expect(FileManager.default.fileExists(atPath: credentialPath))
+            #expect(!credentialPath.contains(lease.token.uuidString))
+            let attributes = try FileManager.default.attributesOfItem(atPath: credentialPath)
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
             #expect(written.contains("you MAY run `gh pr merge"),
                     "act=true wrote the daywatch body; the judge would be told it may not merge")
         }
@@ -870,6 +884,11 @@ extension TBDHomeSerialized {
                 worktreeID: desk.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
                 label: TerminalLabel.claudeCode)
 
+            // Explicit ownership, not recency, selects the mutable judge when
+            // more than one live candidate exists.
+            _ = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: newest.id)
+
             // Asserted, not assumed: if the clock ever ties these two, the recency
             // assertion below proves nothing, so fail where the cause is legible.
             #expect(newest.createdAt > oldest.createdAt, "fixture must yield distinct createdAt")
@@ -1035,6 +1054,96 @@ extension TBDHomeSerialized {
                 Array(f.recorder.pastedPanes.dropFirst(before)) == [replacement.tmuxPaneID],
                 "recovery must nudge the replacement, never the shell-backed stale row"
             )
+        }
+
+        @Test("two live unowned judge candidates fail closed and notify once")
+        func twoLiveCandidatesFailClosed() async throws {
+            let f = try makeDeskFixture(tag: "judge-contention")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
+            _ = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@other", tmuxPaneID: "%other",
+                label: TerminalLabel.claudeCode, kind: .claude)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(Array(f.recorder.pastedPanes.dropFirst(before)).isEmpty)
+            let notifications = try await f.db.notifications.unread(worktreeID: desk.id)
+            #expect(notifications.filter { $0.message?.contains("multiple live judge") == true }.count == 1)
+        }
+
+        @Test("successor spawned before transfer stays read-only and predecessor remains judge")
+        func spawnBeforeTransferKeepsPredecessor() async throws {
+            let f = try makeDeskFixture(tag: "judge-half-handoff")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            let lease = try #require(
+                try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            let owner = try #require(try await f.db.terminals.get(id: lease.terminalID))
+            let successor = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@half", tmuxPaneID: "%half",
+                label: TerminalLabel.codex, kind: .codex)
+            f.commands.set("codex", for: successor.tmuxPaneID)
+
+            let laterManager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: { f.recorder.record($0) },
+                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path)
+            _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
+            let before = f.recorder.pastedPanes.count
+            await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(Array(f.recorder.pastedPanes.dropFirst(before)) == [owner.tmuxPaneID])
+            #expect(
+                try await f.db.terminals.get(id: successor.id)?.watchDeskRole
+                    == .readOnlyCoordinator)
+            #expect(
+                try await f.db.watchDeskLeases.status(worktreeID: desk.id)?.terminalID
+                    == owner.id)
+        }
+
+        @Test("dead lease owner is fenced and the sole live successor takes a higher generation")
+        func deadOwnerRecovery() async throws {
+            let f = try makeDeskFixture(tag: "judge-owner-loss")
+            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            let first = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            let owner = try #require(try await f.db.terminals.get(id: first.terminalID))
+            f.dead.markDead(owner.tmuxWindowID)
+            let successor = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@successor", tmuxPaneID: "%successor",
+                label: TerminalLabel.claudeCode, kind: .claude)
+
+            // Avoid the ordinary ten-minute nudge overlap hiding owner-loss recovery.
+            let laterManager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: { f.recorder.record($0) },
+                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path)
+            _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
+            await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let recovered = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            #expect(recovered.terminalID == successor.id)
+            #expect(recovered.generation == first.generation + 1)
         }
     }
 }

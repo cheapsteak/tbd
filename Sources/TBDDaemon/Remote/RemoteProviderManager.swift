@@ -1,6 +1,6 @@
 import Foundation
-import os
 import TBDShared
+import os
 
 private let remoteLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
@@ -18,7 +18,19 @@ public actor RemoteProviderManager {
 
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
-    private var health: [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
+    private var health:
+        [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
+    /// Most recent complete inventory accepted for each provider. Kept
+    /// independently from generic verb health: a successful `log`/`attach`
+    /// proves that verb worked, not that the cached inventory is current.
+    private var lastSuccessfulSnapshotAt: [String: Date] = [:]
+    /// Providers whose persisted freshness row could not be READ. This is not
+    /// the same condition as "no successful snapshot was ever recorded": there,
+    /// the daemon knows the mirror was never authoritative and deliberately
+    /// fails open (see `hasStaleSnapshot`); here it knows nothing at all, so it
+    /// must not spend that ignorance on a mutation. Cleared as soon as a read
+    /// succeeds or a live snapshot lands.
+    private var snapshotFreshnessUnreadable: Set<String> = []
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
     /// Guards `spawnPollLoops`'s compound stopAll()+startLoop() sequence
@@ -32,14 +44,26 @@ public actor RemoteProviderManager {
     /// `shutdown()`'s doc comment for the race this closes.
     private var shuttingDown = false
 
-    init(db: TBDDatabase, subscriptions: StateSubscriptionManager,
-         runner: any RemoteProviderInvoking, registryURL: URL,
-         clock: any Clock<Duration> = ContinuousClock()) {
+    init(
+        db: TBDDatabase, subscriptions: StateSubscriptionManager,
+        runner: any RemoteProviderInvoking, registryURL: URL,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         self.db = db
         self.subscriptions = subscriptions
         self.runner = runner
         self.registryURL = registryURL
         self.clock = clock
+        // RPC becomes available before `start()` runs, so seed the registry
+        // synchronously. The first status or mutation-gate read can then recover
+        // persisted freshness instead of briefly treating an existing mirror as
+        // current while the initial provider poll is pending.
+        if let configs = try? RemoteProviderRegistry.load(from: registryURL) {
+            for config in configs {
+                providers[config.name] = config
+                health[config.name] = (.ok, nil, nil)
+            }
+        }
     }
 
     /// Full boot path: load the registry, describe every provider, then
@@ -66,12 +90,14 @@ public actor RemoteProviderManager {
         do {
             configs = try RemoteProviderRegistry.load(from: registryURL)
         } catch {
-            remoteLogger.error("provider registry unreadable: \(String(describing: error), privacy: .public)")
+            remoteLogger.error(
+                "provider registry unreadable: \(String(describing: error), privacy: .public)")
             return
         }
         for config in configs {
             guard !Task.isCancelled else { return }
             registerIfNeeded(config)
+            await recoverLastSuccessfulSnapshotAtIfNeeded(provider: config.name, markStale: true)
             await describeProvider(config)
         }
         subscriptions.broadcast(delta: .remoteSessionsChanged)
@@ -90,7 +116,9 @@ public actor RemoteProviderManager {
         do {
             result = try await runner.run(config, verb: ["describe"], stdin: nil, timeout: 10)
         } catch {
-            remoteLogger.error("describe \(config.name, privacy: .public) couldn't run: \(String(describing: error), privacy: .public)")
+            remoteLogger.error(
+                "describe \(config.name, privacy: .public) couldn't run: \(String(describing: error), privacy: .public)"
+            )
             setHealth(provider: config.name, to: (.error, "couldn't run describe: \(error)", nil))
             return
         }
@@ -99,7 +127,8 @@ public actor RemoteProviderManager {
             return
         }
         guard let describe = try? result.decoded(ProviderDescribe.self) else {
-            setHealth(provider: config.name, to: (.error, "describe returned an unparseable response", nil))
+            setHealth(
+                provider: config.name, to: (.error, "describe returned an unparseable response", nil))
             return
         }
         guard describe.contractVersions.contains(1) else {
@@ -225,30 +254,42 @@ public actor RemoteProviderManager {
         do {
             let result = try await runner.run(provider, verb: ["list"], stdin: nil, timeout: 30)
             if let failure = result.failureClass {
-                recordFailure(provider: provider.name, class: failure, result: result)
+                await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
             }
             let envelope = try result.decoded(RemoteSessionListEnvelope.self)
-            try await apply(snapshot: envelope.sessions, provider: provider.name)
-            markHealthy(provider: provider.name)
+            let snapshotAt = Date()
+            try await apply(snapshot: envelope.sessions, provider: provider.name, now: snapshotAt)
         } catch {
-            remoteLogger.debug("poll \(provider.name, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            remoteLogger.debug(
+                "poll \(provider.name, privacy: .public) failed: \(String(describing: error), privacy: .public)"
+            )
+            await recoverLastSuccessfulSnapshotAtIfNeeded(provider: provider.name)
             setHealth(provider: provider.name, to: (.stale, String(describing: error), nil))
         }
     }
 
     /// Shared by the poll path and the events snapshot path (Task 6).
-    func apply(snapshot sessions: [RemoteSessionPayload], provider: String) async throws {
+    func apply(snapshot sessions: [RemoteSessionPayload], provider: String, now: Date = Date())
+        async throws
+    {
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sessions, now: Date())
+            provider: provider, sessions: sessions, now: now)
+        lastSuccessfulSnapshotAt[provider] = now
+        // A live snapshot supersedes whatever the persisted row would have
+        // said, so an earlier unreadable read no longer gates anything.
+        snapshotFreshnessUnreadable.remove(provider)
+        markHealthy(provider: provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
         for session in outcome.attention {
-            subscriptions.broadcast(delta: .remoteSessionAttention(RemoteSessionAttentionDelta(
-                provider: provider, sessionID: session.id, title: session.title,
-                kind: session.agentState.rawValue, reason: session.agentStateReason,
-                exitCode: session.exitCode)))
+            subscriptions.broadcast(
+                delta: .remoteSessionAttention(
+                    RemoteSessionAttentionDelta(
+                        provider: provider, sessionID: session.id, title: session.title,
+                        kind: session.agentState.rawValue, reason: session.agentStateReason,
+                        exitCode: session.exitCode)))
         }
     }
 
@@ -262,17 +303,20 @@ public actor RemoteProviderManager {
                 provider: provider, session: session, now: Date())
         } catch {
             remoteLogger.error(
-                "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)")
+                "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
             return
         }
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
         for session in outcome.attention {
-            subscriptions.broadcast(delta: .remoteSessionAttention(RemoteSessionAttentionDelta(
-                provider: provider, sessionID: session.id, title: session.title,
-                kind: session.agentState.rawValue, reason: session.agentStateReason,
-                exitCode: session.exitCode)))
+            subscriptions.broadcast(
+                delta: .remoteSessionAttention(
+                    RemoteSessionAttentionDelta(
+                        provider: provider, sessionID: session.id, title: session.title,
+                        kind: session.agentState.rawValue, reason: session.agentStateReason,
+                        exitCode: session.exitCode)))
         }
     }
 
@@ -286,7 +330,8 @@ public actor RemoteProviderManager {
                 provider: provider, sessionID: sessionID)
         } catch {
             remoteLogger.error(
-                "events removal failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(String(describing: error), privacy: .public)")
+                "events removal failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
             return
         }
         if changed {
@@ -301,16 +346,16 @@ public actor RemoteProviderManager {
         supervisors[name] != nil
     }
 
-    func invoke(providerName: String, verb: [String], stdin: Data?,
-                timeout: TimeInterval) async throws -> ProviderResult {
+    func invoke(
+        providerName: String, verb: [String], stdin: Data?,
+        timeout: TimeInterval
+    ) async throws -> ProviderResult {
         guard let config = providers[providerName] ?? loadAdHoc(named: providerName) else {
             throw RemoteProviderError.unknownProvider(providerName)
         }
         let result = try await runner.run(config, verb: verb, stdin: stdin, timeout: timeout)
         if let failure = result.failureClass {
             recordFailure(provider: providerName, class: failure, result: result)
-        } else {
-            markHealthy(provider: providerName)
         }
         return result
     }
@@ -319,7 +364,8 @@ public actor RemoteProviderManager {
     /// from the registry file.
     private func loadAdHoc(named name: String) -> RemoteProviderConfig? {
         guard let configs = try? RemoteProviderRegistry.load(from: registryURL),
-              let config = configs.first(where: { $0.name == name }) else { return nil }
+            let config = configs.first(where: { $0.name == name })
+        else { return nil }
         registerIfNeeded(config)
         return config
     }
@@ -333,15 +379,41 @@ public actor RemoteProviderManager {
         if health[config.name] == nil { health[config.name] = (.ok, nil, nil) }
     }
 
-    func providerStatuses() -> [RemoteProviderStatus] {
-        providers.values.sorted { $0.name < $1.name }.map { config in
+    func providerStatuses() async -> [RemoteProviderStatus] {
+        for name in providers.keys {
+            await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
+        }
+        return providers.values.sorted { $0.name < $1.name }.map { config in
             let h = health[config.name] ?? (.ok, nil, nil)
             return RemoteProviderStatus(
                 config: config, describe: describes[config.name],
-                health: h.state, errorMessage: h.message,
+                health: h.state,
+                errorMessage: Self.boundedDisplayMessage(
+                    h.message,
+                    hasSuccessfulSnapshot: lastSuccessfulSnapshotAt[config.name] != nil
+                ),
                 remediationLabel: h.remediation?.label,
-                remediationCommand: h.remediation?.command)
+                remediationCommand: h.remediation?.command,
+                lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[config.name],
+                freshnessUnreadable: snapshotFreshnessUnreadable.contains(config.name))
         }
+    }
+
+    /// Whether mutations that depend on the cached inventory should be
+    /// suppressed. Read-only inspection (`attach`, `log`) remains useful
+    /// during an inventory outage; create/stop/send/rename do not have a
+    /// trustworthy current-state basis once a previously-good snapshot is
+    /// stale.
+    func hasStaleSnapshot(provider name: String) async -> Bool {
+        await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
+        // Same rule the wire DTO and every UI call site use, so the mutation
+        // gate and the display projection cannot disagree. Fails open only on
+        // positive knowledge that no snapshot was ever accepted; an unreadable
+        // read carries no such proof and gates.
+        return RemoteProviderStatus.isStaleSnapshot(
+            health: health[name]?.state ?? .ok,
+            lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[name],
+            freshnessUnreadable: snapshotFreshnessUnreadable.contains(name))
     }
 
     /// Correlates a locally-spawned `attach` exit (the app execs the provider
@@ -376,7 +448,9 @@ public actor RemoteProviderManager {
         guard let config = providers[name] ?? loadAdHoc(named: name) else {
             throw RemoteProviderError.unknownProvider(name)
         }
-        guard ProviderFailureClass.classify(exitCode: exitCode, error: nil) == .authNeeded else { return }
+        guard ProviderFailureClass.classify(exitCode: exitCode, error: nil) == .authNeeded else {
+            return
+        }
         let previous = health[name]
         let inheritable = previous?.state == .needsAuth ? previous : nil
         setHealth(provider: name, to: (.needsAuth, inheritable?.message, inheritable?.remediation))
@@ -384,8 +458,10 @@ public actor RemoteProviderManager {
         await pollOnce(provider: config)
     }
 
-    private func recordFailure(provider: String, class failureClass: ProviderFailureClass,
-                               result: ProviderResult) {
+    private func recordFailure(
+        provider: String, class failureClass: ProviderFailureClass,
+        result: ProviderResult
+    ) {
         let error = result.decodedError
         switch failureClass {
         case .authNeeded:
@@ -415,16 +491,102 @@ public actor RemoteProviderManager {
             // describe THIS invocation and go stale the moment it changes.
             let previous = health[provider]
             let inheritable = previous?.state == .needsAuth ? previous : nil
-            setHealth(provider: provider, to: (
-                .needsAuth,
-                error?.message ?? inheritable?.message,
-                error?.remediation ?? inheritable?.remediation
-            ))
+            setHealth(
+                provider: provider,
+                to: (
+                    .needsAuth,
+                    error?.message ?? inheritable?.message,
+                    error?.remediation ?? inheritable?.remediation
+                ))
         case .transient:
             setHealth(provider: provider, to: (.stale, error?.message ?? result.stderr, nil))
         case .permanent, .contractBug:
             setHealth(provider: provider, to: (.error, error?.message ?? result.stderr, nil))
         }
+    }
+
+    /// Poll failures need one extra piece of bookkeeping beyond generic
+    /// provider failures: if this manager restarted after the last success,
+    /// recover that timestamp from the mirror's last-seen rows before
+    /// publishing stale health. This keeps a persisted cached snapshot from
+    /// becoming confidently timeless after a daemon restart.
+    private func recordPollFailure(
+        provider: String, class failureClass: ProviderFailureClass,
+        result: ProviderResult
+    ) async {
+        await recoverLastSuccessfulSnapshotAtIfNeeded(provider: provider)
+        recordFailure(provider: provider, class: failureClass, result: result)
+    }
+
+    private func recoverLastSuccessfulSnapshotAtIfNeeded(
+        provider: String,
+        markStale: Bool = false
+    ) async {
+        guard lastSuccessfulSnapshotAt[provider] == nil else { return }
+        let recovered: Date?
+        do {
+            recovered = try await db.remoteSessions.lastSuccessfulSnapshotAt(provider: provider)
+        } catch {
+            // Unreadable, not absent. Record the distinction so the mutation
+            // gate can fail closed, and say so in the surfaced health text —
+            // "could not be read" is a different user-facing condition from
+            // "has not refreshed".
+            snapshotFreshnessUnreadable.insert(provider)
+            remoteLogger.error(
+                """
+                freshness recovery failed for provider \(provider, privacy: .public): \
+                \(String(describing: error), privacy: .public)
+                """)
+            if markStale, health[provider]?.state == .ok {
+                setHealth(
+                    provider: provider,
+                    to: (
+                        .stale,
+                        "Provider freshness state could not be read.",
+                        nil
+                    ))
+            }
+            return
+        }
+        snapshotFreshnessUnreadable.remove(provider)
+        guard let recovered else { return }
+        lastSuccessfulSnapshotAt[provider] = recovered
+        if markStale, health[provider]?.state == .ok {
+            setHealth(
+                provider: provider,
+                to: (
+                    .stale,
+                    "Provider inventory has not refreshed since daemon restart.",
+                    nil
+                ))
+        }
+    }
+
+    /// The provider may return the entire truncated inventory inside its
+    /// error message. Keep the manager's internal health record unchanged for
+    /// diagnostics, but never put an unbounded wall of JSON on the RPC/UI
+    /// wire. The known
+    /// truncation shape receives safe copy rather than leaking a prompt from
+    /// the beginning of the embedded payload.
+    static func boundedDisplayMessage(
+        _ message: String?,
+        hasSuccessfulSnapshot: Bool = true,
+        limit: Int = 240
+    ) -> String? {
+        guard let message else { return nil }
+        if message.localizedCaseInsensitiveContains("--output truncated--")
+            || message.localizedCaseInsensitiveContains("unparseable remote output")
+        {
+            if hasSuccessfulSnapshot {
+                return
+                    "Provider inventory was truncated or malformed; showing the last successful snapshot."
+            }
+            return
+                "Provider inventory was truncated or malformed; no successful snapshot is available yet."
+        }
+        guard message.count > limit else { return message }
+        let kept = max(0, limit - 1)
+        return String(message.prefix(kept)) + "…"
     }
 
     private func markHealthy(provider: String) {
@@ -445,8 +607,10 @@ public actor RemoteProviderManager {
     /// Equally deliberately, it does NOT broadcast unconditionally: a
     /// healthy provider re-setting `(.ok, nil, nil)` every 60s poll would
     /// otherwise put a delta on the wire per provider per minute forever.
-    private func setHealth(provider: String,
-                           to new: (ProviderHealth, String?, ProviderRemediation?)) {
+    private func setHealth(
+        provider: String,
+        to new: (ProviderHealth, String?, ProviderRemediation?)
+    ) {
         let old = health[provider]
         health[provider] = new
         if old?.state != new.0 || old?.message != new.1 || old?.remediation != new.2 {

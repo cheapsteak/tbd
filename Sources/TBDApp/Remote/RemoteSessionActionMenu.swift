@@ -92,10 +92,14 @@ enum RemoteSessionActionMenu {
     ///
     /// The pin toggle is offered in BOTH branches, right beside Copy Session
     /// ID, because it shares Copy's defining property: it is a purely local
-    /// action needing no provider verb and no declared capability. A pinned
+    /// action needing no provider verb and no declared capability. When the
+    /// provider inventory is stale, inspection/local actions remain while
+    /// provider mutations are omitted. A pinned
     /// session that goes `gone` must stay unpinnable without the user having
     /// to dismiss it, which is why the collapsed branch carries it too.
-    static func items(capabilities: [String], gone: Bool, isPinned: Bool) -> [Item] {
+    static func items(
+        capabilities: [String], gone: Bool, snapshotFresh: Bool = true, isPinned: Bool
+    ) -> [Item] {
         let pinAction = isPinned
             ? Action(kind: .unpin, title: unpinLabel)
             : Action(kind: .pin, title: pinLabel)
@@ -108,22 +112,27 @@ enum RemoteSessionActionMenu {
             ]
         }
 
-        var actions: [Action] = [Action(kind: .rename, title: renameLabel)]
+        var actions: [Action] = []
+        if snapshotFresh {
+            actions.append(Action(kind: .rename, title: renameLabel))
+        }
         if capabilities.contains(attachCapability) {
             actions.append(Action(kind: .attach, title: attachLabel))
         }
         if capabilities.contains(logCapability) {
             actions.append(Action(kind: .viewLog, title: viewLogLabel))
         }
-        if capabilities.contains(sendCapability) {
+        if snapshotFresh, capabilities.contains(sendCapability) {
             actions.append(Action(kind: .sendText, title: sendTextLabel))
         }
         actions.append(Action(kind: .copySessionID, title: copySessionIDLabel))
         actions.append(pinAction)
 
         var items = actions.map(Item.action)
-        items.append(.divider)
-        items.append(.action(Action(kind: .stop, title: stopLabel, role: .destructive)))
+        if snapshotFresh {
+            items.append(.divider)
+            items.append(.action(Action(kind: .stop, title: stopLabel, role: .destructive)))
+        }
         return items
     }
 }

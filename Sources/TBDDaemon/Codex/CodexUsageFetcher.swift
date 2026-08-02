@@ -46,43 +46,8 @@ enum CodexUsageParser {
         return [result.rateLimits]
     }
 }
-
 enum CodexUsageFetchError: Error {
     case appServer(String)
-}
-
-/// Resolves the Codex CLI without relying on LaunchServices/launchd to provide
-/// an interactive-shell PATH. Existing PATH order wins, followed by the common
-/// user and package-manager install locations used on macOS.
-enum CodexExecutableResolver {
-    static func resolve(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
-        isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)
-    ) -> String? {
-        let pathDirectories = (environment["PATH"] ?? "")
-            .split(separator: ":", omittingEmptySubsequences: true)
-            .map(String.init)
-        let fallbackDirectories = [
-            "\(homeDirectory)/.local/bin",
-            "\(homeDirectory)/.volta/bin",
-            "\(homeDirectory)/.cargo/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-        ]
-        var seen = Set<String>()
-        for directory in pathDirectories + fallbackDirectories where seen.insert(directory).inserted {
-            let candidate = URL(fileURLWithPath: directory, isDirectory: true)
-                .appendingPathComponent("codex", isDirectory: false)
-                .path
-            if isExecutable(candidate) {
-                return candidate
-            }
-        }
-        return nil
-    }
 }
 
 /// Runs a short-lived Codex app-server session and performs the documented
@@ -110,7 +75,7 @@ struct CodexUsageFetcher: Sendable {
     }
 
     func fetch() async -> CodexUsageResult {
-        guard let executable = executable ?? CodexExecutableResolver.resolve() else {
+        guard let executable = executable ?? CodexExecutableResolver.resolveIfAvailable() else {
             return CodexUsageResult(unavailableReason: "Codex CLI unavailable")
         }
         let cancellation = CodexUsageCancellationRelay()

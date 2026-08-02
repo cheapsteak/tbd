@@ -17,13 +17,10 @@ private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote
 /// below the repo `ForEach` in `SidebarView` (not above — position shouldn't
 /// make remoteness focal).
 ///
-/// A provider's header (and rows) are hidden entirely when it has nothing
-/// left to show here — see `shouldShowHeader` for the one exception (an
-/// unhealthy provider stays visible even with zero unmatched rows, so its
-/// health glyph can't go dark just because grouping absorbed every session).
-/// The whole section renders nothing when there are no registered providers
-/// at all — see `AppState.remoteSectionVisible(providers:)`, which
-/// `SidebarView` checks before mounting this view.
+/// Every registered provider keeps a header here even when all of its sessions
+/// are grouped under repositories. The header is now the stable entry point to
+/// its Provider Desk. The whole section renders nothing when no providers are
+/// registered — see `AppState.remoteSectionVisible(providers:)`.
 struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
 
@@ -31,7 +28,11 @@ struct RemoteSectionView: View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
         ForEach(
             appState.remoteProviders.filter {
-                RemoteSectionView.shouldShowHeader(provider: $0, sessions: appState.remoteSessions, knownRepoIDs: knownRepoIDs)
+                RemoteSectionView.shouldShowHeader(
+                    provider: $0,
+                    sessions: appState.remoteSessions,
+                    knownRepoIDs: knownRepoIDs
+                )
             },
             id: \.config.name
         ) { provider in
@@ -46,19 +47,12 @@ struct RemoteSectionView: View {
         }
     }
 
-    /// Whether to show a provider's header+rows in this section: yes when it
-    /// has at least one unmatched session to list, OR its health isn't
-    /// `.ok`. An unhealthy provider (auth expired, unreachable, contract
-    /// error) must stay visible even when every one of its sessions happens
-    /// to be matched into a repo section — otherwise flipping every session
-    /// of a broken provider into "matched" would make its health banner
-    /// disappear at exactly the moment it matters most. A fully-matched,
-    /// fully-healthy provider has nothing left to say here, so it renders
-    /// nothing rather than an empty floating header.
+    /// Providers are first-class selectable places, so a registered provider
+    /// always keeps a header regardless of health or session grouping.
     nonisolated static func shouldShowHeader(
-        provider: RemoteProviderStatus, sessions allSessions: [RemoteSessionInfo], knownRepoIDs: Set<UUID>
+        provider _: RemoteProviderStatus, sessions _: [RemoteSessionInfo], knownRepoIDs _: Set<UUID>
     ) -> Bool {
-        provider.health != .ok || !sessions(in: allSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs).isEmpty
+        true
     }
 
     /// Repo ids treated as "has its own rendered section" when deciding
@@ -129,6 +123,34 @@ struct RemoteSectionView: View {
     }
 }
 
+/// Compact, testable status copy shared by the provider header and detail
+/// pane. `RemoteProviderManager` already bounds `errorMessage` before it
+/// crosses RPC; this composes that message with the last complete inventory
+/// age so the UI states what is stale, not merely that something failed.
+enum RemoteProviderStatusPresentation {
+    nonisolated static func issueSummary(
+        _ status: RemoteProviderStatus, now: Date = Date()
+    ) -> String? {
+        guard status.health != .ok else { return nil }
+        let message = status.errorMessage ?? fallback(for: status.health)
+        guard let lastSuccess = status.lastSuccessfulSnapshotAt else {
+            return "\(message) · no successful snapshot yet"
+        }
+        let age = ProfileUsagePresentation.ageText(since: lastSuccess, now: now)
+        let agePhrase = age == "just now" ? "last good just now" : "last good \(age) ago"
+        return "\(message) · \(agePhrase)"
+    }
+
+    private nonisolated static func fallback(for health: ProviderHealth) -> String {
+        switch health {
+        case .ok: return "Provider healthy"
+        case .stale: return "Inventory unavailable"
+        case .needsAuth: return "Authentication needed"
+        case .error: return "Provider error"
+        }
+    }
+}
+
 /// One provider's section header: name + a health-suffix icon when the
 /// provider isn't fully healthy, plus a `+` to create a new session on this
 /// provider (Task 10 — opens `RemoteCreateSheet` with no repo prefill; the
@@ -136,15 +158,16 @@ struct RemoteSectionView: View {
 /// Styled consistently with `RepoSectionView`'s header (12pt semibold name,
 /// 22pt bottom-aligned row) — a provider is the section-level analogue of a
 /// repo, so it wears the same weight of chrome rather than
-/// `ScratchSectionView`'s `.headline`. No tap/selection on the row itself —
-/// there's no provider-level detail view (Task 10 only routes session
-/// selections). Provider health never dims the rows below it: per the
-/// contract, an unreachable provider never means its sessions are dead, only
-/// that the local mirror may be stale — health is section-level state shown
-/// here, the same way a `.missing` repo dims only its own header/chevron in
-/// `RepoSectionView`, not an unrelated signal painted onto every row.
+/// `ScratchSectionView`'s `.headline`. The name is a keyboard-accessible
+/// button that opens the Provider Desk. Provider health never dims the rows
+/// below it: per the contract, an unreachable provider never means its
+/// sessions are dead, only that the local mirror may be stale — health is
+/// section-level state shown here, the same way a `.missing` repo dims only
+/// its own header/chevron in `RepoSectionView`, not an unrelated signal
+/// painted onto every row.
 struct RemoteProviderHeaderRow: View {
     let provider: RemoteProviderStatus
+    @EnvironmentObject var appState: AppState
     @State private var showingCreateSheet = false
     /// Whether the auth CTA popover (opened from the `.needsAuth` indicator)
     /// is showing.
@@ -154,30 +177,65 @@ struct RemoteProviderHeaderRow: View {
     /// popover can't host a sheet of its own.
     @State private var runningRemediation: RemoteRemediationRun?
 
+    private var issueSummary: String? {
+        RemoteProviderStatusPresentation.issueSummary(provider)
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
-            Text(provider.describe?.name ?? provider.config.name)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            healthSuffix
-            Spacer()
-            Button {
-                showingCreateSheet = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16, height: 16)
-                    .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: -1) {
+            HStack(spacing: 4) {
+                // The name spans the row's free width instead of a trailing
+                // `Spacer()`, so the whole empty stretch is the desk's hit
+                // target rather than dead chrome.
+                Button {
+                    appState.selectRemoteProvider(provider.config.name)
+                } label: {
+                    Text(provider.describe?.name ?? provider.config.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(
+                            appState.selectedRemoteProvider == provider.config.name
+                                ? HierarchicalShapeStyle.primary
+                                : HierarchicalShapeStyle.secondary
+                        )
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
+                healthSuffix
+                Button {
+                    showingCreateSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(provider.hasStaleSnapshot)
+                .help(provider.hasStaleSnapshot
+                      ? "Inventory is stale; refresh must recover before creating sessions"
+                      : "New \(provider.describe?.name ?? provider.config.name) session")
             }
-            .buttonStyle(.plain)
-            .help("New \(provider.describe?.name ?? provider.config.name) session")
+            if let issueSummary {
+                Text(issueSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(issueSummary)
+            }
         }
-        .frame(height: 22, alignment: .bottom)
+        .frame(minHeight: 22, alignment: .bottom)
         .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
+        .listRowBackground(
+            appState.selectedRemoteProvider == provider.config.name
+                ? Color.accentColor.opacity(0.13)
+                : Color.clear
+        )
         .sheet(isPresented: $showingCreateSheet) {
             RemoteCreateSheet(provider: provider.config, describe: provider.describe, repoPrefill: nil)
         }
@@ -209,7 +267,7 @@ struct RemoteProviderHeaderRow: View {
             Image(systemName: "clock.badge.exclamationmark")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .help("Provider unreachable — sessions may be stale")
+                .help(issueSummary ?? "Provider unreachable — sessions may be stale")
         case .needsAuth:
             // The indicator is a BUTTON here (unlike the other health cases,
             // which are passive): needing authentication is the one health
@@ -246,7 +304,7 @@ struct RemoteProviderHeaderRow: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 11))
                 .foregroundStyle(SuffixRowIndicator.error.color)
-                .help(provider.errorMessage ?? "Provider error")
+                .help(issueSummary ?? provider.errorMessage ?? "Provider error")
         case .ok:
             EmptyView()
         }
@@ -322,8 +380,8 @@ struct RemoteSessionRowView: View {
     /// the provider is unknown/unregistered — an edge case (the session's
     /// own provider vanished from the roster) that shouldn't paint every
     /// row with a staleness note it can't actually reason about.
-    private var providerHealth: ProviderHealth {
-        appState.remoteProviders.first { $0.config.name == session.provider }?.health ?? .ok
+    private var providerStatus: RemoteProviderStatus? {
+        appState.remoteProviders.first { $0.config.name == session.provider }
     }
 
     /// Pure `agentState` + unread-entry → suffix-slot mapping. Split out
@@ -468,7 +526,9 @@ struct RemoteSessionRowView: View {
                     if let caption = RemoteSessionRowView.caption(
                         state: session.payload.state, agentState: session.payload.agentState,
                         gone: session.gone, exitCode: session.payload.exitCode,
-                        staleness: RemoteSessionRowView.stalenessCaption(health: providerHealth, lastSeen: session.lastSeen)
+                        staleness: RemoteSessionRowView.stalenessCaption(
+                            health: providerStatus?.health ?? .ok,
+                            lastSuccessfulSnapshotAt: providerStatus?.lastSuccessfulSnapshotAt ?? session.lastSeen)
                     ) {
                         Text(caption)
                             .font(.caption)
@@ -495,10 +555,11 @@ struct RemoteSessionRowView: View {
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         }
         .contextMenu {
-            let capabilities = appState.remoteProviders
-                .first { $0.config.name == session.provider }?.describe?.capabilities ?? []
+            let provider = appState.remoteProviders.first { $0.config.name == session.provider }
+            let capabilities = provider?.describe?.capabilities ?? []
             let items = RemoteSessionActionMenu.items(
                 capabilities: capabilities, gone: session.gone,
+                snapshotFresh: provider?.hasStaleSnapshot != true,
                 // Read from the mirror rather than this row's captured
                 // `session`, so a dock copy and a section copy of the same
                 // session always offer the same verb.
@@ -624,9 +685,11 @@ struct RemoteSessionRowView: View {
     /// this codebase already has ("just now"/"3m"/"2h"/"1d") — rather than
     /// inventing a second one. Returns nil when healthy so a fully-working
     /// provider's rows never carry the extra text.
-    nonisolated static func stalenessCaption(health: ProviderHealth, lastSeen: Date, now: Date = Date()) -> String? {
+    nonisolated static func stalenessCaption(
+        health: ProviderHealth, lastSuccessfulSnapshotAt: Date, now: Date = Date()
+    ) -> String? {
         guard health != .ok else { return nil }
-        let age = ProfileUsagePresentation.ageText(since: lastSeen, now: now)
+        let age = ProfileUsagePresentation.ageText(since: lastSuccessfulSnapshotAt, now: now)
         // `ageText`'s "just now" already reads as a complete phrase (see its
         // own callers in `ProfileUsagePresentation`) — appending "ago" to it
         // would read as "as of just now ago". Every other bucket ("3m",

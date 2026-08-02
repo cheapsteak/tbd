@@ -34,8 +34,11 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Banned words — never use these in code or in PR titles, descriptions, or commit messages: "blessed", "golden"
 - No prose tables in markdown docs — use lists (bolded lead term, en-dash, prose; nested bullets when a row has several fields). A table is acceptable only when its cells are mostly short numerical or scannable values: counts, defaults, thresholds, old→new line numbers. Prose crammed into cells gets squished and unreadable.
 - Spec and doc edits must leave a document that stands alone for a first-time reader. Never write revision history into prose: no "Amended \<date\>" notes, no "an earlier draft…" retracing, no reversal narratives — rewrite the superseded passage to state the current design as if it were always so; git history is the archive. Keep **evidence** ("field measurement showed X"), drop **chronology** ("removed \<date\> after review Y"). A rejected-alternatives section is welcome as timeless why-not rationale — written as rationale, never as a revision log.
-- Verify your changes compile (`swift build`) before committing.
-- Run `swift test` if you changed daemon or shared code.
+- Verify your changes compile (`scripts/swift-safe build`) before committing.
+- Run `scripts/swift-safe test` if you changed daemon or shared code. The wrapper
+  serializes SwiftPM across TBD worktrees and defaults to two compiler jobs;
+  raw `swift build/test/run` is blocked by the repo guardrail because
+  concurrent default `-j12` builds can exhaust this development machine.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
 ### Compile only what user-land cannot do well
@@ -152,8 +155,8 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 
 ## Quick Reference
 
-- **Build**: `swift build`
-- **Test**: `swift test`
+- **Build**: `scripts/swift-safe build`
+- **Test**: `scripts/swift-safe test`
 - **Restart**: `scripts/restart.sh`
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:
