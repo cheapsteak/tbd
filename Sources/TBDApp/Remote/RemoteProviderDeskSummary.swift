@@ -40,6 +40,33 @@ struct RemoteProviderDeskSummary: Equatable {
         return age == "just now" ? age : "\(age) ago"
     }
 
+    /// What the desk is allowed to claim about freshness.
+    ///
+    /// `RemoteProviderStatus.lastSuccessfulSnapshotAt` is the provider-wide
+    /// fact — the last COMPLETE inventory the mirror accepted — so it is the
+    /// honest answer whenever the daemon has one, and it is what the sidebar
+    /// caption and the session detail pane already quote. Per-row `lastSeen`
+    /// is only a lower bound derived from whichever rows happened to appear:
+    /// it cannot tell a successful EMPTY snapshot from no snapshot at all,
+    /// and a provider whose rows all stopped being reported would keep
+    /// quoting an age that no longer describes any inventory.
+    ///
+    /// The row-derived value stays as a labelled fallback (an older daemon
+    /// sends no snapshot timestamp), but it is never called an inventory.
+    nonisolated static func freshnessLabel(
+        lastSuccessfulSnapshotAt: Date?,
+        latestMirrorUpdate: Date?,
+        now: Date = Date()
+    ) -> String {
+        if let snapshot = lastSuccessfulSnapshotAt {
+            return "Inventory as of \(agePhrase(since: snapshot, now: now))"
+        }
+        if let latest = latestMirrorUpdate {
+            return "Latest mirror update \(agePhrase(since: latest, now: now))"
+        }
+        return "No successful inventory yet"
+    }
+
     init(provider: String, sessions allSessions: [RemoteSessionInfo]) {
         sessions = allSessions
             .filter { $0.provider == provider && !$0.dismissed }

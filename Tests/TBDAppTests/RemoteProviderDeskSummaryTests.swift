@@ -90,6 +90,50 @@ struct RemoteProviderDeskSummaryTests {
             since: now.addingTimeInterval(-3 * 86_400), now: now) == "3d ago")
     }
 
+    @Test("freshness prefers the provider-wide inventory timestamp over row lastSeen")
+    func freshnessPrefersTheSuccessfulSnapshot() {
+        let now = Date(timeIntervalSince1970: 100_000)
+
+        // The trap #571 exists to close: rows can look recent while the last
+        // COMPLETE inventory is hours old. The desk must quote the inventory.
+        #expect(RemoteProviderDeskSummary.freshnessLabel(
+            lastSuccessfulSnapshotAt: now.addingTimeInterval(-2 * 3600),
+            latestMirrorUpdate: now.addingTimeInterval(-60),
+            now: now
+        ) == "Inventory as of 2h ago")
+    }
+
+    @Test("freshness falls back to row lastSeen without calling it an inventory")
+    func freshnessFallsBackToMirrorRows() {
+        let now = Date(timeIntervalSince1970: 100_000)
+
+        #expect(RemoteProviderDeskSummary.freshnessLabel(
+            lastSuccessfulSnapshotAt: nil,
+            latestMirrorUpdate: now.addingTimeInterval(-5 * 60),
+            now: now
+        ) == "Latest mirror update 5m ago")
+    }
+
+    @Test("freshness invents no timestamp when nothing has ever succeeded")
+    func freshnessInventsNothing() {
+        #expect(RemoteProviderDeskSummary.freshnessLabel(
+            lastSuccessfulSnapshotAt: nil, latestMirrorUpdate: nil
+        ) == "No successful inventory yet")
+    }
+
+    /// A successful EMPTY snapshot is exactly the case row `lastSeen` cannot
+    /// represent: zero rows to derive an age from, yet the inventory is current.
+    @Test("an empty but successful inventory still reports its own freshness")
+    func emptySuccessfulInventoryReportsFreshness() {
+        let now = Date(timeIntervalSince1970: 100_000)
+
+        #expect(RemoteProviderDeskSummary.freshnessLabel(
+            lastSuccessfulSnapshotAt: now.addingTimeInterval(-30),
+            latestMirrorUpdate: nil,
+            now: now
+        ) == "Inventory as of just now")
+    }
+
     private func session(
         id: String,
         provider: String? = nil,

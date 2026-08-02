@@ -53,12 +53,8 @@ struct RemoteProviderDeskView: View {
                     .font(.system(size: 24, weight: .semibold, design: .rounded))
                 HStack(spacing: 7) {
                     Text(healthTitle)
-                    if let latest = summary.latestMirrorUpdate {
-                        Text("·")
-                        Text("Latest mirror update \(RemoteProviderDeskSummary.agePhrase(since: latest))")
-                    } else {
-                        Text("· No mirrored sessions")
-                    }
+                    Text("·")
+                    Text(freshnessLabel)
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -175,9 +171,14 @@ struct RemoteProviderDeskView: View {
                     Image(systemName: "rectangle.stack.badge.minus")
                         .font(.system(size: 28))
                         .foregroundStyle(.tertiary)
-                    Text("No mirrored sessions")
+                    Text(provider.hasStaleSnapshot ? "No sessions in the last good inventory" : "No mirrored sessions")
                         .font(.headline)
-                    Text("Use the + button beside \(displayName) in the sidebar to create one.")
+                    // Don't send the user to a control this provider's own
+                    // state has disabled: `RemoteProviderHeaderRow` gates `+`
+                    // on `hasStaleSnapshot` until a full inventory recovers.
+                    Text(provider.hasStaleSnapshot
+                         ? "This provider's inventory is stale, so creating sessions is unavailable until a refresh succeeds."
+                         : "Use the + button beside \(displayName) in the sidebar to create one.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -203,6 +204,13 @@ struct RemoteProviderDeskView: View {
                 }
             }
         }
+    }
+
+    private var freshnessLabel: String {
+        RemoteProviderDeskSummary.freshnessLabel(
+            lastSuccessfulSnapshotAt: provider.lastSuccessfulSnapshotAt,
+            latestMirrorUpdate: summary.latestMirrorUpdate
+        )
     }
 
     private var healthTitle: String {

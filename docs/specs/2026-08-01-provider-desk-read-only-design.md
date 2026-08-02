@@ -65,10 +65,23 @@ rows. Counts are pure projections:
 terminal state in the terminal totals. Provider health never rewrites a
 session's state.
 
-The existing mirror exposes `lastSeen` per session but no provider-wide
-`observed_at`. The desk labels the newest session `lastSeen` as **Latest mirror
-update**. It does not call that time a provider refresh or health check. Empty
-providers display “No mirrored sessions” rather than inventing a timestamp.
+Freshness comes from `RemoteProviderStatus.lastSuccessfulSnapshotAt` — the
+provider-wide timestamp of the last complete inventory the mirror accepted,
+added by #571 — shown as **Inventory as of 2h ago**. This is the same fact the
+sidebar caption and session detail pane quote, so no two surfaces can disagree
+about how stale a provider is.
+
+Per-session `lastSeen` is only a fallback for a daemon old enough not to send
+that timestamp, and it is labelled **Latest mirror update** rather than being
+called an inventory. It is deliberately not the primary source: it is a lower
+bound over whichever rows happened to appear, so it cannot tell a successful
+*empty* snapshot from no snapshot at all, and a provider whose rows all stopped
+being reported would keep quoting an age that describes no inventory. When
+neither exists the desk says “No successful inventory yet” rather than
+inventing a timestamp.
+
+Because #571 also gates session creation on `hasStaleSnapshot`, the empty state
+stops pointing at the sidebar `+` while that gate is closed.
 
 Provider health copy comes from `RemoteProviderStatus`:
 
