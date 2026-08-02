@@ -7,8 +7,7 @@ Status: documents the `tbd supervise` surface specified by
 [`docs/specs/2026-07-26-fleet-supervision-design.md`](specs/2026-07-26-fleet-supervision-design.md)
 (§10 is normative for names and shapes) and the
 [sweep-program sub-document](specs/2026-08-01-fleet-supervision-sweep-program-design.md);
-implementation lands by the
-[migration plan](specs/2026-07-26-fleet-supervision-migration.md). JSON output
+the migration from the current implementation is planned separately. JSON output
 shown here is illustrative of the schema family until the schemas ship.
 
 ## Synopsis
