@@ -24,6 +24,13 @@ public actor RemoteProviderManager {
     /// independently from generic verb health: a successful `log`/`attach`
     /// proves that verb worked, not that the cached inventory is current.
     private var lastSuccessfulSnapshotAt: [String: Date] = [:]
+    /// Providers whose persisted freshness row could not be READ. This is not
+    /// the same condition as "no successful snapshot was ever recorded": there,
+    /// the daemon knows the mirror was never authoritative and deliberately
+    /// fails open (see `hasStaleSnapshot`); here it knows nothing at all, so it
+    /// must not spend that ignorance on a mutation. Cleared as soon as a read
+    /// succeeds or a live snapshot lands.
+    private var snapshotFreshnessUnreadable: Set<String> = []
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
     /// Guards `spawnPollLoops`'s compound stopAll()+startLoop() sequence
@@ -269,6 +276,9 @@ public actor RemoteProviderManager {
         let outcome = try await db.remoteSessions.applySnapshot(
             provider: provider, sessions: sessions, now: now)
         lastSuccessfulSnapshotAt[provider] = now
+        // A live snapshot supersedes whatever the persisted row would have
+        // said, so an earlier unreadable read no longer gates anything.
+        snapshotFreshnessUnreadable.remove(provider)
         markHealthy(provider: provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
@@ -395,6 +405,11 @@ public actor RemoteProviderManager {
     /// stale.
     func hasStaleSnapshot(provider name: String) async -> Bool {
         await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
+        // Unreadable freshness fails CLOSED. The fail-open branch below is
+        // justified only by positive knowledge that no snapshot was ever
+        // accepted; a failed read carries no such proof, so it must not be
+        // allowed to look like one.
+        if snapshotFreshnessUnreadable.contains(name) { return true }
         guard lastSuccessfulSnapshotAt[name] != nil else { return false }
         return health[name]?.state != .ok
     }
@@ -506,17 +521,42 @@ public actor RemoteProviderManager {
         markStale: Bool = false
     ) async {
         guard lastSuccessfulSnapshotAt[provider] == nil else { return }
-        if let recovered = try? await db.remoteSessions.lastSuccessfulSnapshotAt(provider: provider) {
-            lastSuccessfulSnapshotAt[provider] = recovered
+        let recovered: Date?
+        do {
+            recovered = try await db.remoteSessions.lastSuccessfulSnapshotAt(provider: provider)
+        } catch {
+            // Unreadable, not absent. Record the distinction so the mutation
+            // gate can fail closed, and say so in the surfaced health text —
+            // "could not be read" is a different user-facing condition from
+            // "has not refreshed".
+            snapshotFreshnessUnreadable.insert(provider)
+            remoteLogger.error(
+                """
+                freshness recovery failed for provider \(provider, privacy: .public): \
+                \(String(describing: error), privacy: .public)
+                """)
             if markStale, health[provider]?.state == .ok {
                 setHealth(
                     provider: provider,
                     to: (
                         .stale,
-                        "Provider inventory has not refreshed since daemon restart.",
+                        "Provider freshness state could not be read.",
                         nil
                     ))
             }
+            return
+        }
+        snapshotFreshnessUnreadable.remove(provider)
+        guard let recovered else { return }
+        lastSuccessfulSnapshotAt[provider] = recovered
+        if markStale, health[provider]?.state == .ok {
+            setHealth(
+                provider: provider,
+                to: (
+                    .stale,
+                    "Provider inventory has not refreshed since daemon restart.",
+                    nil
+                ))
         }
     }
 

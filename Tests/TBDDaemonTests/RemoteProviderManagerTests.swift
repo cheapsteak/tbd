@@ -608,6 +608,64 @@ struct RemoteProviderManagerTests {
         }
     }
 
+    /// Tier 1. An unreadable freshness row must gate mutations, because the
+    /// daemon cannot prove the cached mirror was never authoritative. Contrast
+    /// `eventUpsertCannotMasqueradeAsFullSnapshotAfterRestart`, where the read
+    /// SUCCEEDS and returns "never" — that is positive knowledge and is allowed
+    /// to fail open. Dropping `tbd_meta` makes the SELECT throw, which is the
+    /// only way to reach the catch branch through the real store.
+    @Test func unreadableFreshnessStateGatesMutationsInsteadOfFailingOpen() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let m = manager(
+            FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]))
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .stale)
+        // No timestamp is claimed — the daemon must not invent an age it
+        // could not read.
+        #expect(status?.lastSuccessfulSnapshotAt == nil)
+    }
+
+    /// Tier 1. The unreadable state is not sticky: it is a cache of one failed
+    /// read, so a later successful snapshot must clear the gate rather than
+    /// wedging the provider until daemon restart.
+    @Test func unreadableFreshnessStateClearsOnceASnapshotSucceeds() async throws {
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let m = manager(
+            FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]))
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "CREATE TABLE tbd_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
+        }
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(id: "a", state: .running)],
+            provider: "fake",
+            now: Date(timeIntervalSince1970: 1_700_000_500))
+
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+        let status = await m.providerStatuses().first
+        #expect(status?.health == .ok)
+        #expect(status?.lastSuccessfulSnapshotAt == Date(timeIntervalSince1970: 1_700_000_500))
+    }
+
     @Test func failureAfterManagerRestartRecoversLastSuccessTimeFromMirror() async throws {
         let lastGood = Date(timeIntervalSince1970: 1_700_000_000)
         _ = try await db.remoteSessions.applySnapshot(
