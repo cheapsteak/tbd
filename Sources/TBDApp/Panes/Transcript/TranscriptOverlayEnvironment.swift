@@ -14,12 +14,12 @@ extension EnvironmentValues {
         set { self[OpenTranscriptOverlayKey.self] = newValue }
     }
 
-    var toggleTranscriptActivityGroup: (@MainActor (String) -> Void)? {
+    var toggleTranscriptActivityGroup: (@MainActor (String, Bool) -> Void)? {
         get { self[ToggleTranscriptActivityGroupKey.self] }
         set { self[ToggleTranscriptActivityGroupKey.self] = newValue }
     }
 }
 
 struct ToggleTranscriptActivityGroupKey: EnvironmentKey {
-    static let defaultValue: (@MainActor (String) -> Void)? = nil
+    static let defaultValue: (@MainActor (String, Bool) -> Void)? = nil
 }

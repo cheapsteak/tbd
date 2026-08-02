@@ -189,6 +189,24 @@ projection and rail components.
   transition serves disclosure; no ambient animation runs.
 - Truncated paths retain tooltips and accessibility values with the full text.
 
+### 8.1 Implementation note — keyboard reach fell short of the requirement
+
+Added 2026-08-01 during acceptance review, against the shipped implementation.
+
+The keyboard bullet above is only half met, and the gap is inherited rather than introduced.
+Session-index entries and the inspector button are real SwiftUI `Button`s, so they are focusable
+and activatable — though only once macOS Keyboard Navigation (Full Keyboard Access) is enabled,
+which is off by default. **Activity-group disclosure rows are not reachable by focus traversal at
+all.** They render in the `NSTableView` path, which sets `selectionHighlightStyle = .none` and
+implements no key handling, so there is no focus ring to move and nothing for Return to activate.
+Those rows stay operable by pointer and by VoiceOver, via
+`ActivityRowCellView.accessibilityPerformPress`.
+
+Pre-existing transcript rows had the same limitation, so this is not a regression — but the
+requirement is not satisfied and should not be read as satisfied. Closing it means giving the
+transcript table a real focus and selection model, which is its own change against a load-bearing
+renderer and belongs in its own spec.
+
 ## 9. Performance and failure behavior
 
 The projection runs once per transcript update, outside row bodies. It walks the item list in

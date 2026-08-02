@@ -39,7 +39,7 @@ struct TableTranscriptPaneView: View {
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row.
     @State private var scrollToBottomToken: Int = 0
-    @State private var toggledActivityGroupIDs: Set<String> = []
+    @State private var activityGroupExpansion: [String: Bool] = [:]
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
@@ -99,7 +99,7 @@ struct TableTranscriptPaneView: View {
             recordWatchdogContext(count: newCount)
         }
         .onChange(of: currentSessionID) { _, _ in
-            toggledActivityGroupIDs.removeAll()
+            activityGroupExpansion.removeAll()
         }
         .onDisappear { clearWatchdogContext() }
     }
@@ -174,12 +174,12 @@ struct TableTranscriptPaneView: View {
     private var tableTranscript: some View {
         let presentation = TranscriptPresentation.build(
             items: displayedMessages,
-            toggledGroupIDs: toggledActivityGroupIDs
+            expansionOverrides: activityGroupExpansion
         )
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
-            toggleActivityGroup: toggleActivityGroup,
+            toggleActivityGroup: setActivityGroup,
             appState: appState
         )
         SessionWorkbenchView(
@@ -204,12 +204,8 @@ struct TableTranscriptPaneView: View {
         }
     }
 
-    private func toggleActivityGroup(_ groupID: String) {
-        if toggledActivityGroupIDs.contains(groupID) {
-            toggledActivityGroupIDs.remove(groupID)
-        } else {
-            toggledActivityGroupIDs.insert(groupID)
-        }
+    private func setActivityGroup(_ id: String, expanded: Bool) {
+        activityGroupExpansion[id] = expanded
     }
 
     // MARK: - Jump-to-Bottom

@@ -648,7 +648,7 @@ struct TableTranscriptView: NSViewRepresentable {
             let onOpen: (() -> Void)?
             if case .activityGroupSummary(let summary) = node.kind {
                 let toggleGroup = context.toggleActivityGroup
-                onOpen = { toggleGroup?(summary.id) }
+                onOpen = { toggleGroup?(summary.id, !summary.isExpanded) }
             } else {
                 // The formatter only ever sets `openTargetID` (subagent drill-in
                 // was removed); a nil target is a no-op.

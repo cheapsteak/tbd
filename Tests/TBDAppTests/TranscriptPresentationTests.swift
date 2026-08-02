@@ -36,7 +36,7 @@ struct TranscriptPresentationTests {
 
         let presentation = TranscriptPresentation.build(
             items: items,
-            toggledGroupIDs: ["t1#activity-group"]
+            expansionOverrides: ["t1#activity-group": true]
         )
 
         #expect(presentation.nodes.map(\.id) == ["t1#activity-group", "t1", "t2"])
@@ -81,7 +81,7 @@ struct TranscriptPresentationTests {
 
         let collapsedFailure = TranscriptPresentation.build(
             items: [failure],
-            toggledGroupIDs: ["bad#activity-group"]
+            expansionOverrides: ["bad#activity-group": false]
         )
         guard case .activityGroupSummary(let collapsedSummary) = collapsedFailure.nodes[0].kind else {
             Issue.record("expected collapsed attention summary")
@@ -138,6 +138,125 @@ struct TranscriptPresentationTests {
     func widthPolicy() {
         #expect(SessionIndexDisplayMode.resolve(width: 979) == .inspector)
         #expect(SessionIndexDisplayMode.resolve(width: 980) == .inlineRail)
+    }
+
+    @Test("explicitly expanded group stays expanded when a failure later arrives")
+    func expandedGroupStaysExpandedWhenFailureArrives() {
+        let pendingTool = tool("t1", "Bash", #"{"command":"sleep 10"}"#)
+
+        // First build: pending tool (not expanded by default since no error/question)
+        let firstPresentation = TranscriptPresentation.build(
+            items: [pendingTool],
+            expansionOverrides: ["t1#activity-group": true]
+        )
+
+        guard case .activityGroupSummary(let firstSummary) = firstPresentation.nodes[0].kind else {
+            Issue.record("expected activity group summary")
+            return
+        }
+        #expect(firstSummary.isExpanded)
+        #expect(firstSummary.errorCount == 0)
+
+        // Second build: same tool now has an error
+        let failedTool = TranscriptItem.toolCall(
+            id: "t1", name: "Bash", inputJSON: #"{"command":"sleep 10"}"#,
+            inputTruncatedTo: nil,
+            result: ToolResult(text: "failed", truncatedTo: nil, isError: true),
+            subagent: nil, timestamp: nil
+        )
+
+        let secondPresentation = TranscriptPresentation.build(
+            items: [failedTool],
+            expansionOverrides: ["t1#activity-group": true]
+        )
+
+        guard case .activityGroupSummary(let secondSummary) = secondPresentation.nodes[0].kind else {
+            Issue.record("expected activity group summary after failure")
+            return
+        }
+        // The user's explicit expansion should be preserved
+        #expect(secondSummary.isExpanded)
+        #expect(secondSummary.errorCount == 1)
+        #expect(secondSummary.statusLabel == "1 failed")
+    }
+
+    @Test("explicitly collapsed failure group stays collapsed when a second failure arrives")
+    func collapsedFailureGroupStaysCollapsed() {
+        let firstFailure = TranscriptItem.toolCall(
+            id: "t1", name: "Bash", inputJSON: #"{"command":"exit 1"}"#,
+            inputTruncatedTo: nil,
+            result: ToolResult(text: "failed", truncatedTo: nil, isError: true),
+            subagent: nil, timestamp: nil
+        )
+
+        // First build: one failure (expanded by default), but we override to collapsed
+        let firstPresentation = TranscriptPresentation.build(
+            items: [firstFailure],
+            expansionOverrides: ["t1#activity-group": false]
+        )
+
+        guard case .activityGroupSummary(let firstSummary) = firstPresentation.nodes[0].kind else {
+            Issue.record("expected activity group summary")
+            return
+        }
+        #expect(!firstSummary.isExpanded)
+        #expect(firstSummary.errorCount == 1)
+
+        // Second build: add another failure
+        let secondFailure = TranscriptItem.toolCall(
+            id: "t2", name: "Read", inputJSON: #"{"file_path":"missing.txt"}"#,
+            inputTruncatedTo: nil,
+            result: ToolResult(text: "not found", truncatedTo: nil, isError: true),
+            subagent: nil, timestamp: nil
+        )
+
+        let secondPresentation = TranscriptPresentation.build(
+            items: [firstFailure, secondFailure],
+            expansionOverrides: ["t1#activity-group": false]
+        )
+
+        guard case .activityGroupSummary(let secondSummary) = secondPresentation.nodes[0].kind else {
+            Issue.record("expected activity group summary after second failure")
+            return
+        }
+        // The user's explicit collapse should be preserved despite now having 2 errors
+        #expect(!secondSummary.isExpanded)
+        #expect(secondSummary.errorCount == 2)
+        #expect(secondSummary.statusLabel == "2 failed")
+    }
+
+    @Test("no override falls back to default expansion behavior")
+    func noOverrideFallsBackToDefault() {
+        // Test with a plain group (no error, no question) - should collapse by default
+        let plainItems = [
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#)
+        ]
+        let plainPresentation = TranscriptPresentation.build(
+            items: plainItems,
+            expansionOverrides: [:]
+        )
+        guard case .activityGroupSummary(let plainSummary) = plainPresentation.nodes[0].kind else {
+            Issue.record("expected plain activity group")
+            return
+        }
+        #expect(!plainSummary.isExpanded)
+
+        // Test with a failing group - should expand by default
+        let failure = TranscriptItem.toolCall(
+            id: "f1", name: "Bash", inputJSON: #"{"command":"exit 1"}"#,
+            inputTruncatedTo: nil,
+            result: ToolResult(text: "failed", truncatedTo: nil, isError: true),
+            subagent: nil, timestamp: nil
+        )
+        let failurePresentation = TranscriptPresentation.build(
+            items: [failure],
+            expansionOverrides: [:]
+        )
+        guard case .activityGroupSummary(let failureSummary) = failurePresentation.nodes[0].kind else {
+            Issue.record("expected failure activity group")
+            return
+        }
+        #expect(failureSummary.isExpanded)
     }
 
     private func tool(_ id: String, _ name: String, _ input: String) -> TranscriptItem {

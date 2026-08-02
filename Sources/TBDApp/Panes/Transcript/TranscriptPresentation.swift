@@ -101,7 +101,7 @@ struct TranscriptPresentation {
 
     nonisolated static func build(
         items: [TranscriptItem],
-        toggledGroupIDs: Set<String> = []
+        expansionOverrides: [String: Bool] = [:]
     ) -> TranscriptPresentation {
         let baseNodes = transcriptRenderNodes(from: items)
         var projected: [TranscriptRenderNode] = []
@@ -119,7 +119,7 @@ struct TranscriptPresentation {
                 if isPending(node) { total += 1 }
             }
             let defaultsExpanded = requiresResponse || errorCount > 0
-            let isExpanded = toggledGroupIDs.contains(groupID) ? !defaultsExpanded : defaultsExpanded
+            let isExpanded = expansionOverrides[groupID] ?? defaultsExpanded
             let summary = ActivityGroupSummary(
                 id: groupID,
                 itemCount: pendingActivity.count,

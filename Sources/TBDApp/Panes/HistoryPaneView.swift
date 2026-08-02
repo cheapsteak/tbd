@@ -368,7 +368,7 @@ struct SessionTranscriptView: View {
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row (NSTableView renderer path).
     @State private var scrollToBottomToken: Int = 0
-    @State private var toggledActivityGroupIDs: Set<String> = []
+    @State private var activityGroupExpansion: [String: Bool] = [:]
 
     @State private var isFreshBranchReviveInFlight = false
 
@@ -447,7 +447,7 @@ struct SessionTranscriptView: View {
             } else {
                 let presentation = TranscriptPresentation.build(
                     items: messages,
-                    toggledGroupIDs: toggledActivityGroupIDs
+                    expansionOverrides: activityGroupExpansion
                 )
                 SessionWorkbenchView(
                     sections: presentation.indexSections,
@@ -457,7 +457,7 @@ struct SessionTranscriptView: View {
                         context: TranscriptCardContext(
                             terminalID: nil,
                             openTranscriptOverlay: openTranscriptItem,
-                            toggleActivityGroup: toggleActivityGroup,
+                            toggleActivityGroup: setActivityGroup,
                             appState: appState
                         ),
                         atBottom: $atBottom,
@@ -507,6 +507,9 @@ struct SessionTranscriptView: View {
                         snap.paneLabel = nil
                     }
                 }
+                .onChange(of: sessionId) { _, _ in
+                    activityGroupExpansion.removeAll()
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -520,12 +523,8 @@ struct SessionTranscriptView: View {
         )
     }
 
-    private func toggleActivityGroup(_ groupID: String) {
-        if toggledActivityGroupIDs.contains(groupID) {
-            toggledActivityGroupIDs.remove(groupID)
-        } else {
-            toggledActivityGroupIDs.insert(groupID)
-        }
+    private func setActivityGroup(_ id: String, expanded: Bool) {
+        activityGroupExpansion[id] = expanded
     }
 
     @ViewBuilder

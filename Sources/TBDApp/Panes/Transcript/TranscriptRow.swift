@@ -130,7 +130,7 @@ struct ActivityGroupSummaryRow: View {
 
     var body: some View {
         Button {
-            toggleGroup?(summary.id)
+            toggleGroup?(summary.id, !summary.isExpanded)
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
