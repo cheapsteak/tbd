@@ -318,6 +318,10 @@ and P1-5's work-order delivery are seams later slices fill:
     session in a reused pane — by the time a desk acts minutes later, so
     liveness and identity are the transport's synchronous checks at the moment
     of the act (slice 4, design §12, §15).
+  - **The readout's output shape is a documented public contract from this
+    slice on** — it is what the project-authored sweep program reads
+    ([sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)
+    §3).
 
   Pure observability; safe to ship while the old system runs because it acts on
   nothing.
@@ -337,9 +341,9 @@ and P1-5's work-order delivery are seams later slices fill:
   - **Off is a pause; only an explicit close ends a shift** (design §3, §9).
     Turning the switch on with no shift open creates the shift, its directory,
     and the opening line. Turning it off writes a **paused** lifecycle line and
-    stops the sweep cutting work orders; the shift stays open and the record
-    keeps filling. Turning it back on writes a **resumed** line and hastens a
-    tick, so work is cut from current state and never from pre-pause state.
+    closes the brief pipe, so no submission becomes a briefing; the shift stays open and the record
+    keeps filling. Turning it back on writes a **resumed** line and hastens the
+    default tick, so briefings are cut from current state and never from pre-pause state.
     `tbd supervise shift close` is the only thing that ends a shift; issued
     with the switch still on it finalizes the record and opens a fresh shift in
     the same gesture. Issued with the switch off it simply finalizes the
@@ -361,36 +365,39 @@ and P1-5's work-order delivery are seams later slices fill:
     singleton; slice 3's loader only adds declared groupings on top.
   - **The `lifecycle` kind covers open, pause, resume, close, mode change, and
     desk recycle** — one kind behind every line design §9 describes.
-  - **The account is five views over the one ledger** (design §6): done
-    (actions with their outcomes), open (unresolved escalations), needs-you
-    (the escalation batch, each project's proposals doc linked beside it),
-    went-wrong (anomalies), and now-binding (decisions). Each is a plain query
+  - **The account's views are queries over the one ledger** (design §6): done
+    (actions with their outcomes), unconfirmed (actions past their deadline
+    with no confirming outcome), went-wrong (anomalies), and the notes —
+    question pointers included, each project's proposals doc linked beside
+    them. Each is a plain query
     — filter by kind, window by `ts`, group by project — so the renderer builds
-    all five or the account is incomplete; slice 5's panel displays them and
+    every view or the account is incomplete; slice 5's panel displays them and
     re-derives none of them. **Quiet ticks write nothing**: sweep liveness is
     one status field, not forty lines an hour.
   - **A restart resumes the shift from the record, never forks it** (design §7,
     §9). The active shift is derivable from the ledger alone: the newest shift
     with no closing line. On startup the daemon resumes it in whatever state
     the switch persists — running if on, paused if off — with the same ID and
-    directory, and rebuilds the escalation-queue projection by replaying the
+    directory, and replays the
     file. A half-finished teardown resumes idempotently from its durable steps.
     **No timer is persisted**, because everything a timer encodes derives from
     a durable line's timestamp; the overdue-observation half of that replay
     lands with delivery in slice 4.
-  - Shift open spawns no desks by design (design §9 — desks are lazy, born on
+  - Shift open spawns no desks by design (design §9 — hosted desks are lazy, born on
     their project's first case in slice 4), so this slice's shift opens,
     pauses, resumes, and closes on its own. Shift
-    close gains its dispose-every-desk step in slice 4, when there are desks
+    close gains its dispose-every-hosted-desk step in slice 4, when there are desks
     to dispose.
   - CLI: `tbd supervise on`, `off`, `shift close`, `status`.
-- **Slice 3 — verbs, `supervision.json`, queue** (design §3, §5, §8, §10).
+- **Slice 3 — verbs and `supervision.json`** (design §3, §5, §8, §10).
   Nothing here is gated (design §3) — but ungated is not unchecked, and the
   actuation preconditions below are exactly that difference.
   - **The verbs as RPC, none of them gated**: `drive`, `wake`, `pause`,
-    `escalate`, `note`. `drive` takes exactly one payload flag per call,
+    `note`. `drive` takes exactly one payload flag per call,
     `--text` or `--keys` (design §3); there is no `answer` verb, no separate
-    key-sending verb, and no `learn` verb. The dialog dismissal that makes
+    key-sending verb, no `learn` verb, and no `escalate` verb — raising a
+    question to a human is conduct on the playbook-named question route, not
+    a record kind (design §8). The dialog dismissal that makes
     `--text` work is delivery-adapter behavior landing with the adapter in
     slice 4 (design §2). Around each verb the daemon writes the action line
     itself — payload verbatim, active mode, and the state snapshot that
@@ -401,21 +408,25 @@ and P1-5's work-order delivery are seams later slices fill:
     content: there is no send-time re-verification of a `--text` payload's
     claims, because freshness is the desk's discipline (design §3, §15, P0-8).
     **Do not build a posture check, a rule lookup, a proposal conversion, or a
-    content check** — there are none (design §3), and the ledger has **nine**
-    kinds: action, outcome, lifecycle, enrollment, escalation, resolution,
-    decision, anomaly, note.
+    content check** — there are none (design §3), and the ledger has **seven**
+    kinds (design §6): action, outcome, delivery, lifecycle, enrollment,
+    anomaly, note. There is no escalation queue, no `resolution` or
+    `decision` kind, and no `resolve` command — the record attests acts only
+    (design §8).
   - **The actuation preconditions are this slice's safety deliverable**
     (design §3, §4 step 6). Ungated speaks to conduct; preconditions speak to
     mechanics. Inside every acting verb call — after the desk decided, before
     any keystroke — the daemon rechecks against *current* state: the switch is
     on, a shift is active, the target lies inside the calling desk's project,
-    and the target is neither rate-limited nor under a capacity hold. Each is a
+    the target is neither rate-limited nor under a capacity hold, no
+    intervention is already in flight for the target, and no re-check is
+    pending (design §3). Each is a
     yes/no fact the operator or the machine already owns; none reads the
     payload or judges the act. A failed precondition **types nothing**, returns
     an ordinary CLI error naming the condition, and writes a refusal outcome
     referencing the action line, so the morning shows near-misses and an
     operator learns their controls bind. This is what makes selection real
-    rather than advisory: judgment takes minutes, so a work order's facts are
+    rather than advisory: judgment takes minutes, so a briefing's facts are
     already stale at act time, and an off flipped at 2:03 must beat a drive
     decided from a 2:02 order and issued at 2:07.
     - Target liveness and identity are deliberately **not** on this list — they
@@ -445,8 +456,8 @@ and P1-5's work-order delivery are seams later slices fill:
     level, and the per-project **mode selections**. No `rules` array, no scopes,
     no stances. Membership has an observable behavior on each branch, and both
     get tests (design §8): a project resolving to **out** produces no cases, so
-    no work orders, so no desk is ever spawned for it — yet it still appears in
-    the fact sweep and the account, because observability is never withheld and
+    no briefings, so no desk is ever spawned for it — yet it still appears in
+    the readout and the account, because observability is never withheld and
     "project X needed attention but is out of supervision" is the honest
     report; a project resolving to **in** takes the ordinary path. Test the
     degenerate case explicitly too: with an empty `projects`
@@ -456,77 +467,73 @@ and P1-5's work-order delivery are seams later slices fill:
     desk whose project definition changed is recycled through the §9 replacement
     path (design §5), so the loader must expose "which projects changed" and not
     just the new state; that recycle lands with desks in slice 4. A mode change
-    needs no recycle — conduct arrives with the next work order.
-  - **Mode selection and resolution**: `tbd supervise mode <project> <name>`
+    needs no recycle — the next briefing's header names the new selection.
+  - **Mode selection**: `tbd supervise mode <project> <name>`
     writes the selection and a ledger line; `tbd supervise mode <project>`
-    shows the active mode and the choices that project's resolved playbook
-    defines. Resolving a mode means reading the named section out of that
-    playbook (design §3, §5); a selection naming a section the playbook does
-    not define is an operator error to report at set time, and at work-order
-    time falls back to `attended` with an anomaly line rather than silently
-    running unconducted.
-  - **The queue**: the escalation projection over the ledger, plus one
-    operator command — `tbd supervise queue [--resolved|--all]
-    [--project …]` to read and `tbd supervise resolve <id>
-    --approve|--reject|--answer` to act (design §10). All three flags construct
-    the same `resolution` kind differing only in `result`, so build one RPC
-    rather than three near-identical commands. That `result` carries four
-    values rather than three: the daemon writes `expired` itself (design §6),
-    so the kind needs room for an outcome no operator gesture produces. The two
-    `queue` filters are the whole read surface: **there is no `--type`
-    filter**, because there is no proposal kind to filter by (design §6).
-    `--scope` attaches to `resolve` itself, and its values are **temporal
-    only** — `this-once|this-shift`, with no per-project or per-repo variant
-    (design §10). Every resolution reaches the owning desk in its next work
-    order, a rejection's optional one-line explanation among them — carried,
-    not merely stored; `--scope this-shift` additionally writes a
-    `decision` line, and **work-order composition must carry the shift's
-    active decisions** (design §8) — that delivery, not any gate, is what
-    satisfies P1-5. Composition itself lands in slice 4, so the obligation is
-    recorded here rather than discovered there. `resolve` is operator-only and
-    must not be reachable from a desk, which keeps resolutions off the
-    self-report path (design §10).
-  - **Decisions are shift-lived, and that bounds what gets built.** A decision
-    lives in its shift's ledger and nowhere else: no `decisions.jsonl`, no
-    durable decision store, no `--scope always`, and no `decisions list` or
-    `decisions revoke` commands — a decision ends with the shift, so there is
-    nothing to list across shifts and nothing to revoke that outlives one
-    (design §8). An answer worth keeping reaches the project's playbook by
-    reviewed PR through the capture flow (design §8, slice 4).
+    shows the active mode and the declared choices. Selection is validated against
+    the declared mode list in `supervision.json` (design §8) — TBD never
+    parses the playbook; a declared name the playbook says nothing about is
+    playbook silence, handled by the desk like all silence.
+  - **Nothing queue-shaped ships in this slice or any other.** There is no
+    escalation projection, no `queue` or `resolve` command, no `decision`
+    store or projection into briefings: questions and answers ride the
+    playbook-named route and the sweep program's own files, with P1-5 and the
+    consent half of P1-7 classified Enabled (requirements doc, design §8).
+    The `note` verb's pointer discipline is playbook content, not machinery.
   - **Proposals are prose, and this slice builds nothing for them.** No
     `proposal` ledger kind, no approve/reject pipeline, no execution path for
-    an approval, no queue filter (design §6, §15). A desk that holds back on
-    something consequential writes markdown into
+    an approval (design §6, §15). A desk that holds back on something
+    consequential writes markdown into
     `~/tbd/shifts/<shift-id>/proposals/<project>.md` and files a one-line
     `note` beside it — "proposal filed: …, see the doc" — which is how the
     morning account knows the doc is worth opening. TBD compiles the file's
     location and, in slice 5, the app showing it with its path; entry
-    composition is the project's playbook choice, and acting on a proposal is a
-    human act in the world.
-- **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12). Wake
-  decision from facts, work-order composition **grouped by project** and, within
-  each order, **ordered pinned-first** (the pin state worktrees already carry)
-  then by case age, which that project's supervisor works top-down — the whole
-  of P1-3, and it costs no new schema (design §5) — the sweep's two stop-checks
-  compiled in beside the rate-limit and capacity reasons not to act (an
-  intervention already in flight, and a re-check pending; design §1, §4 step 2),
-  desks as
-  first-class sessions **one per project, spawned lazily on that project's first
-  case and all disposed at shift close**, each **tracked by ID rather than by
-  display string** (the old Watch Desk was found by its display string, and that
-  identification mode was an accident rather than a requirement),
-  the compiled **desk→project
+    composition is the project's playbook choice, and acting on a proposal is
+    a human act in the world.
+- **Slice 4 — supervisors and delivery** (design §4, §5, §9, §12, and the
+  [sweep-program sub-document](2026-08-01-fleet-supervision-sweep-program-design.md)).
+  The case-detection surface: the **three public sweep surfaces** — the
+  `supervise readout` query, the `supervise brief` pipe (text on stdin, the
+  identity-blind per-project rate limit, the pinned paused exit code, empty
+  submission as quiet contact), and the `supervise ledger` query — plus the
+  daemon's default tick running the shipped reference sweep program (with
+  the `sweep.script` override and the "Customize sweep…" copy-once gesture),
+  and the contact-window watchdog with its anomaly lines and its
+  operator notification on persistent silence, armed only while supervision
+  is on and a shift is open. Desk briefing: the playbook installed
+  as standing conduct at desk launch through the agent-kind adapter — a
+  supervisor-capability requirement, with no embed fallback of any kind
+  (design §9, sub-document §8) — the compiled header on every delivered
+  briefing carrying the active mode's name and any superseding conduct delta
+  on mid-shift edits, and the `delivery` ledger line with delivered-text and
+  conduct hashes. Then per-project briefing delivery, supervisors as
+  first-class sessions **one per project** — the hosted desk spawned lazily
+  on that project's first case and disposed at shift close, or the operator's
+  appointed session where a binding stands (design §9) — each **tracked by ID
+  rather than by display string** (the old Watch Desk was found by its display
+  string, an accident rather than a requirement) — the compiled
+  **desk→project
   addressing check** (a verb whose target is outside the calling desk's project
-  is refused as a routing error — correctness, not authority, design §3; this
-  is the addressing arm of slice 3's preconditions, testable at last now that a
-  calling desk exists),
+  is refused as a routing error — correctness, not authority, design §3; the
+  check reads the project name injected into the desk's spawn environment,
+  or into the appointment relaunch's environment,
+  design §5), the **appoint/relieve gestures** (design §9, §10): the
+  supervisor-capability qualification check refusing unqualified agent kinds
+  at the gesture with the reason, the idle-waiting relaunch that resumes the
+  same conversation with the layer installed and `TBD_PROJECT` injected, the
+  symmetric relief, the `supervisors` binding in `supervision.json` (design
+  §8) with lifecycle ledger lines for both gestures, the hosted default
+  standing down while a binding stands, and the forked dead-man remediation
+  (hosted: replacement within the reroll budget; appointed: operator
+  notification only, never an automatic restart; a dangling binding: loud
+  anomaly, no silent takeover),
   `terminal.send` delivery for
   the fleet, the Channels adapter for desks behind its own default-off flag with
   automatic degrade and a **per-desk-spawn handshake** (not per shift), the
-  ledger-marker acknowledgement re-check, **per-desk** context recycling
-  preferred at **50% of the session's effective window** with staged flush
-  nudges at 50/60/70% fullness (design §13), the **project tag on every ledger
-  line**, and the playbook
+  ledger-marker acknowledgement re-check, **per-desk** context recycling at
+  the design's fractional thresholds (50% of the effective window, flush
+  nudges at 50/60/70% — design §9, hosted desks only), the **project tag on
+  every ledger line**, and the playbook
   resolver — three-tier `supervision.md` resolution run **per project** (the
   operator's project-level copy → the project's designated repo file → the
   shipped default), which includes adding `.agents/` as a level to the existing
@@ -539,7 +546,7 @@ and P1-5's work-order delivery are seams later slices fill:
   design §5 names — what stuck means, the smallest intervention that restores
   progress, escalate rather than guess, one intervention per agent per wake,
   the first move on a question is often to ask for better-reasoned options,
-  an operator's chat answer gets recorded from the queue so it sticks, prompts
+  an operator's chat answer gets written to the project's question route so it sticks, prompts
   guarding merges or credentials deserve a human, external state is re-derived
   live in the same breath as the send, and a request is read backward until it
   makes sense — plus the two baseline mode sections, `attended` and
@@ -638,8 +645,8 @@ and P1-5's work-order delivery are seams later slices fill:
   the hook itself stays an unconditional dumb reporter and is not touched — so
   that a pending question with a shift active and the terminal's project in
   automation becomes a case for that project's desk and hastens an immediate
-  mini-tick for that terminal; work
-  orders carrying the question payload verbatim out of `PendingQuestionStore`,
+  mini-tick for that terminal; the prompt-case delivery carrying the question
+ payload verbatim out of `PendingQuestionStore`,
   and that same payload verbatim as the state snapshot on the `drive` action
   line that answers it — reading the snapshot is what lets account views label
   a line as an answer rather than an unprompted nudge, which is why no separate
@@ -690,7 +697,7 @@ and P1-5's work-order delivery are seams later slices fill:
   machinery to build here. Two non-blocking notes for
   whoever picks this up: pending questions
   have no CLI read surface today (`terminal.transcript` is RPC-only, and the
-  work-order carriage is what makes a read surface unnecessary — a
+  briefing carriage is what makes a read surface unnecessary — a
   `tbd`-side reader would be a debugging nicety, not a dependency); and
   subagent-raised questions are deliberately dropped by the payload parser
   (`isSubagentTranscript`), so they never become cases. Whether that stays is a
@@ -712,7 +719,8 @@ and P1-5's work-order delivery are seams later slices fill:
     transport because `terminal.send` is a *generic* primitive — humans,
     scripts, and hooks all call it — and supervision must not be the only
     consumer that gets honest delivery. Everything in design §12 (the
-    ledger-marker acknowledgement, retry-once, anomaly-and-escalate) is built
+    ledger-marker acknowledgement, retry-once, the loud anomaly on repeated
+    silence) is built
     on the assumption that a failed send is *reported* as one.
   - **The same act-time check covers issue #384.** Target identity is verified
     inside the send call, milliseconds before the keystroke — pane IDs are
@@ -737,7 +745,7 @@ and P1-5's work-order delivery are seams later slices fill:
   where a human has unsent composer text submits **the human's words together
   with the desk's**, as one message from the human, into an agent that acts
   without asking. Three things bound how often that happens and none of them
-  protects that specific session: the sweep only messages stuck-or-idle
+  protects that specific session: supervision only messages stuck-or-idle
   sessions, the off switch stops delivery while the operator works, and the
   subsystem ships default-off. The per-session never-touch flag that *would*
   protect it is deferred to its own design pass (design §15), and the actuation
@@ -770,70 +778,22 @@ and P1-5's work-order delivery are seams later slices fill:
   only from positive non-delivery and never from *undetermined*. An action with
   no confirming outcome by its deadline renders as unconfirmed at query time,
   which is also the whole restart story.
-- **Slice 5 — operator surfaces** (design §10). The Fleet Supervision settings
-  tab — the **projects section** (declare a multi-repo project, pick members,
-  designate the policy source, and list ungrouped repos as the singletons they
-  are), the per-project **modes** section (active mode plus the choices its
-  playbook defines; no selection shows `attended` as the default rather than a
-  choice), and the per-project membership section, all three of them views of
-  the one `supervision.json` and all three following the house
-  file-backed-settings pattern — tilde-abbreviated path shown, copy button,
-  manual edits respected, with `RepoHooksSettingsView` as the precedent to copy
-  (design §10) — plus the account panel as
-  inbox, rendering the five views slice 2's renderer already produces and
-  re-deriving none of them, and showing every desk's escalations in
-  one project-labeled queue with each project's proposals doc linked beside it
-  and shown with its tilde-abbreviated path (design §6, §10). Each escalation
-  carries the exact item, the exact command, the recommendation, an answer box,
-  and Approve / Reject / Answer buttons over the one `resolve` RPC, with the
-  scope choice — this once or this shift — attached to the answer the operator
-  is already giving. There is deliberately **no rules-inspection surface**: the
-  question it would answer is answered by the account, where every action line
-  carries the mode it ran under and the snapshot that justified it.
-  - CLI parity for every control — and the whole `tbd supervise` surface is
-    pinned as a normative list in design §10, so this slice's exit check is
-    that every command in that list exists with that name and shape, and that
-    nothing outside it shipped. Present and easy to forget: `shift close` is a
-    first-class command, not a side effect of the switch. Absent and easy to
-    smuggle back in: no `rules` commands, no `posture`, no `learn`, no
-    `approve-a-prompt`, no `decisions list` or `decisions revoke`, no `--type`
-    on `queue`, no per-desk lifecycle commands (spawn, recycle, dispose — desks
-    are daemon self-maintenance), and no per-project on/off (that is an
-    automation mark). Regrouping is
-    `project move <repo> --to <project|singleton>` — no add/remove pair,
-    because the pair can express states "exactly one project per repo" forbids.
-- **Slice 6 — hardening and the outside surfaces** (design §11, §13, §14). It
-  is independent of slices 3–5: everything here needs only the switch and
-  `tbd supervise status` from slice 2, so it can be picked up in parallel with
-  them.
-  - **Capacity holds**, which also fill in the hold arm of slice 3's actuation
-    preconditions, so that seam's second branch becomes testable here — and
-    beside them **the per-profile usage surface** the holds already rest on:
-    the usage and rate-limit facts the daemon holds today, exposed on a public,
-    machine-readable surface so a program TBD does not run can hold on its own
-    (requirements P1-1's Enabled half). That surface does not exist today; it is
-    the first concrete API request the conformance test has produced.
-  - **Runaway detection** on compiled global counters (30 turns in the window,
-    90 minutes with no commits; crossing one creates a case and never an
-    automatic pause).
-  - **The reference wake program** (requirements P1-2, and the
-    [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)).
-    Ship the script, and ship it with a **seed-once install path**: copied in
-    once and never rewritten over an operator's edits, which is the whole
-    ownership fix — the old script's defect was never its location. Shipping it
-    also settles what it stands on. The reference script may use only documented
-    public surfaces, so it *is* the conformance test: a fact it cannot obtain
-    that way is a failed check and a scoped API request, never a private read.
-    And the surfaces it uses become contract — listing output shapes,
-    `hibernateReason` values, wake semantics and exit codes stop being
-    incidental CLI output and are versioned interfaces from that moment on.
-  - **The optional heartbeat**: a `status.json` written in the shift directory
-    on every sweep tick, carrying the switch, each project's active mode, and
-    the last-sweep timestamp, with a `launchd` watchdog that alerts and never
-    acts. It is the watchdog's input and nothing else's — the public status
-    surface a wake program reads to exit quietly when supervision is off is
-    `tbd supervise status` (slice 2, design §3). The heartbeat (P3-1) may be
-    deferred past cutover without blocking it.
+- **Slice 5 — operator surfaces** (design §10). For v1 the operator surface
+  is `supervision.json` itself plus its CLI twins — app presentation of the
+  selections is deliberately deferred to its own design pass, so this slice
+  ships **no settings screens**. What it does ship: the account panel
+  rendering the live `account.md` with each project's proposals doc linked
+  beside it (design §6, §10), and CLI completeness — the whole
+  `tbd supervise` surface is pinned as a normative list in design §10, so this
+  slice's exit check is that every command in that list exists with that name
+  and shape, and that nothing outside it shipped — in particular no `rules`
+  commands, no `posture` command, and no `queue`, `resolve`, `escalate`, or
+  `approve` commands. Regrouping is
+  `project move <repo> --to <project|singleton>` — no add/remove pair, because
+  the pair can express states "exactly one project per repo" forbids.
+- **Slice 6 — hardening** (design §11, §13, §14). Capacity holds, runaway
+  detection, the optional heartbeat. The heartbeat (P3-1) may be deferred past
+  cutover without blocking it.
 
 Soak discipline: after slice 4, run real shifts on the new system with projects
 on the `attended` mode (the interlock means the old system is off for those
@@ -845,7 +805,7 @@ all: the singleton collapse and the grouped case are different code paths throug
 the resolver, the addressing check, and desk spawning, and only the first is
 covered by every other shift by default. A night in which two projects both had
 cases is the cheapest evidence that per-project desks, project addressing, and
-the shared queue actually hold.
+the shared record actually hold.
 
 Three record boundaries want exercising during the soak rather than waiting for
 an incident to produce them, because each is cheap to stage and expensive to
@@ -883,7 +843,8 @@ from real shifts, not against code review:
     it never closes.
   - **P0-3 is evidenced against its descoped form**: the requirements doc
     records that TBD builds no mode enforcement and no verb gate, so what must
-    be green is that a mode's conduct is delivered in every work order, that
+    be green is that the playbook stands as the supervisor's launch-time
+    conduct layer with the active mode named on every briefing, that
     every action line records the mode it ran under, and that the account shows
     an act within seconds of it happening — not that any act was prevented.
   - **P0-8 is evidenced as authored discipline plus one compiled obligation.**
@@ -908,15 +869,16 @@ from real shifts, not against code review:
     the listings, the switch from `tbd supervise status`, actuation through
     `tbd terminal wake --prompt` and its existing race safety — deciding,
     composing, and scheduling itself, seeded once and never clobbered.
-  - **P1-5 is evidenced as *instruction delivery*, and as shift-lived**: a
-    `--scope this-shift` resolution must reach later work orders and the desk
-    must stop asking, and the answer must be gone when the shift closes, with
-    no durable store behind it (design §8).
+  - **P1-5 and the consent half of P1-7 are evidenced against their Enabled
+    form**: an operator answer written on the project's question route
+    demonstrably reaches later briefings through the sweep program, and the
+    desk stops asking (design §8) — no queue, resolve machinery, or decision
+    projection exists to evidence.
 - **Three properties are checked by deliberate exercise, not by waiting.** Each
   is silent when it works, so none of them will show up in a soak account on
   its own:
   - **The preconditions bind against a stale work order.** Flip the switch off
-    at 2:03 and issue a drive decided from a 2:02 order at 2:07: nothing is
+    at 2:03 and issue a drive decided from a 2:02 briefing at 2:07: nothing is
     typed, the CLI returns an error naming the condition, and a refusal outcome
     referencing the action line lands in the record (design §3, §4 step 6).
   - **The crash window produces no unrecorded act.** Kill the daemon between
@@ -950,10 +912,10 @@ nothing to harvest, §3), archive that worktree by hand, and run shifts only
 on the new system. Nothing in the old system needs to be deleted for cutover
 to be complete — deletion is a separate slice so that a disappointing first
 week can roll back with three gestures: `supervision_enabled` off,
-`tbd supervise shift close` so the record ends cleanly instead of lingering
-paused with its desks alive, and `nightwatch_mode` back on. The middle gesture
-is not optional — the interlock refuses the third one while a shift is open
-(§1).
+`tbd supervise shift close` — off is a pause, not an ending, and a
+merely-paused shift still owns an open record with its desks alive — and
+`nightwatch_mode` back on. The middle gesture is not optional: the interlock
+refuses the third while a shift is open (§1).
 
 ## 6. Deletion
 

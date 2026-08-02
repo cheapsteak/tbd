@@ -93,13 +93,16 @@ one piece at a time, each argued on its own evidence. This is the
 brief's own standing bias ("prefer the extension point") given a ratchet: the outside
 position is the default, and every move inward is deliberate.
 
-An Enabled guarantee also has a proof artifact. **The shipped reference implementation —
-today, the wake program's reference script — may use only documented public surfaces.**
+An Enabled guarantee also has a proof artifact. **The shipped reference implementations —
+today, the wake program's and the sweep program's reference scripts — may use only
+documented public surfaces.**
 A fact it cannot obtain that way is a failed conformance check and a concrete, scoped API
 request; that is the mechanism by which TBD's surface grows, pulled by a real consumer
 rather than pushed by speculation. The corollary is a cost accepted here rather than
 discovered later: the surfaces an Enabled story depends on — listing output shapes,
-`hibernateReason` values, wake semantics, exit codes — stop being incidental CLI output
+`hibernateReason` values, wake semantics, exit codes, and the supervision sweep
+surfaces (the readout and ledger-query schemas, the brief pipe's semantics and
+exit codes) — stop being incidental CLI output
 and become a contract that migration and future change must respect.
 
 ### P0 — without these the subsystem has no point
@@ -108,9 +111,13 @@ and become a contract that migration and future change must respect.
   fleet and intervening on my behalf, so that a stuck or idle agent doesn't sit dead for
   hours because nobody noticed. What must be singular is my experience of it: one switch,
   one record, one morning report, one place to look. The judgment layer underneath may
-  shard by policy scope (the design's one-desk-per-project invariant) — how many sessions
+  shard by policy scope (the design's one-supervisor-per-project invariant) — how many
+  sessions
   do the judging is the design's choice, provided a quiet fleet costs nothing and the
-  account stays whole.
+  account stays whole. A project's supervisor may be the TBD-hosted desk (the shipped
+  default) or an existing session the operator appoints into the role (design §9); the
+  guarantees — identity, standing conduct, briefing delivery, the daemon-written record —
+  are identical in either arrangement.
 - **P0-2 [both]** As an operator, I want a single supervision switch — on / off —
   persisted in the daemon and settable from the app and the CLI, so that I can hand over or
   take back the fleet with one gesture, and a daemon restart resumes the same state without
@@ -140,7 +147,8 @@ and become a contract that migration and future change must respect.
   follow conduct instructions and are already resistant to prompt injection, and TBD declines
   to build a second anti-injection layer on top of them. What replaces enforcement is
   instruction plus visibility: a mode is authored conduct prose telling the desk what to act
-  on, propose, and escalate; the daemon delivers that conduct in every work order, records
+  on, propose, and escalate; the daemon installs that conduct as the desk's standing layer
+  at spawn and names the active mode on every briefing it delivers, records
   which mode was active on every action line, and writes each action to the ledger the
   instant it happens, with the account rendering it beside the operator. So the label's
   promise is honest rather than enforced — "attended" instructs and shows you, it does not
@@ -151,6 +159,10 @@ and become a contract that migration and future change must respect.
 - **P0-4 [both]** As an operator, I want the supervisor to be a visible, first-class session
   I can open, read, and type into at any time, so that supervision is inspectable and
   steerable, never a black box running somewhere I can't see.
+
+  This holds in both supervisor arrangements: the hosted desk is spawned as exactly such a
+  session, and an appointed supervisor is by definition one already — a TBD-managed session
+  in a tab the operator can open, watch, and type into (design §9).
 - **P0-5 [both]** As the daemon, I want to answer what any managed agent is doing right now —
   working, idle, awaiting input, rate-limited, gone — cheaply enough to ask about every agent
   every cycle, and again a minute later, without a model call and without reading rendered
@@ -205,7 +217,7 @@ and become a contract that migration and future change must respect.
   spec.
 
   *What is **Built** is narrow, and is stated here exactly. Fresh work facts carrying
-  source and observed-at in every work order (design §2). Public surfaces a desk or a
+  source and observed-at on the readout (design §2). Public surfaces a desk or a
   program can re-derive from — a desk is a full agent session and can run `gh` and `git`
   itself. The ledger recording every dispatched message verbatim (design §6), so a stale
   premise is visible in the account the moment it ships: visibility, not prevention. And
@@ -231,6 +243,13 @@ and become a contract that migration and future change must respect.
 - **P0-10 [A]** As an operator, I want questions the supervisor cannot resolve escalated in
   small, specific batches — exact item, exact proposed command, a recommendation — so that
   the morning's decision queue is answerable in minutes, not an interrogation.
+
+  *This story is **Enabled**, not Built, and "queue" names the operator's experience, not a
+  structure TBD holds. Questions travel by the project's playbook-named route (design §8);
+  the batching discipline — exact item, exact command, a recommendation, at most a few per
+  ask — is playbook conduct, carried by the shipped playbook. TBD's guarantees underneath
+  are the acts record and delivery; the answerable-in-minutes morning is authored, and an
+  operator who wants one place to look points every project's route at the same place.*
 
 ### P1 — the difference between working and trustworthy
 
@@ -287,6 +306,11 @@ and become a contract that migration and future change must respect.
   [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).
 - **P1-3 [both]** As an operator, I want worktrees whose progress matters most looked at
   first, so that the important work gets attention early in every pass.
+
+  *This story is **Enabled**, not Built. Pin state rides the readout with every other
+  fact; ordering within a briefing is the sweep program's composition, and the shipped
+  reference program briefs pinned worktrees first. TBD supplies the fact; the priority it
+  encodes is the program's to honor.*
 - **P1-4 [both]** As a repo maintainer, I want my repo's supervision policy — what counts as
   stuck, what interventions are appropriate, house rules the supervisor must follow —
   authored as an artifact in or beside my repo and resolved through TBD's existing
@@ -323,6 +347,22 @@ and become a contract that migration and future change must respect.
   state and work facts, which feed the account.*
 - **P1-5 [both]** As an operator, I want decisions I have already made remembered durably
   for the rest of the shift, so that I am never re-asked a question I answered an hour ago.
+
+  *This story is **Enabled**, not Built. Never-re-ask is authored discipline. The
+  project's playbook names where its questions go — a channel, an issue, a file the
+  operator already reads; the desk asks there; the operator answers there; and the
+  project's sweep program reads the answers and carries them into future briefings, with
+  its own files as the durable memory of what has been asked and answered. TBD's half of
+  the loop is the ledger query (`tbd supervise ledger`): the program can see every
+  briefing TBD delivered and every act that followed, so "already raised, not yet acted
+  on" is a cheap lookup. The shipped reference sweep program demonstrates the discipline
+  end to end and is its conformance artifact. The honest cost, stated plainly: TBD's
+  compiled record proves every act — payload, timestamp, outcome — but not approvals.
+  Whether an answer preceded an act lives in the project's own artifacts; an act that
+  should have had one behind it is not mechanically flaggable as missing it, and evidence
+  not captured at the time cannot be reconstructed later. The compiled escalation queue
+  that would have made answers forgery-proof is a rejected alternative — with its revisit
+  conditions — in design §8.*
 - **P1-6 [A]** As an operator, I want the supervisor to re-check an agent shortly after
   intervening (on the order of a minute, not the next full cycle), so that an agent that
   advanced to a confirmation prompt doesn't hang there for fifteen minutes.
@@ -346,6 +386,20 @@ and become a contract that migration and future change must respect.
   mid-shift daemon restart resumes overdue observations from the record rather than
   carrying recovery state; what to do about a stale unconfirmed action is playbook
   judgment, not compiled repair.
+
+  *This story splits along the Built/Enabled line. The acting half is **Built**, exactly
+  as the ladder above states: the daemon writes every action line itself, so a false act
+  claim cannot enter the record. The consent half — operator answers arriving with
+  machine-attested authorship, so an approval can never be desk self-report — is
+  **Enabled**, and the honest cost is stated openly: the compiled record attests acts
+  only (payload, timestamp, outcome), and consent is not a line kind in it. Answers live
+  on the project's playbook-named question route; a desk's transcription of one ("the
+  operator said yes in chat") is exactly self-report, and the design accepts that rather
+  than building the machinery that would attest it — the compiled escalation queue and
+  the approval-stamp verb are rejected alternatives in design §8, each with the failure
+  signature that would justify revisiting. What can never happen is a false claim about
+  what was *done*; what the record cannot prove is that a human agreed beforehand, and an
+  act that should have had approval is not mechanically flaggable.*
 
 ### P2 — maturity
 
