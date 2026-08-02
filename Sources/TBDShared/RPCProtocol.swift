@@ -213,6 +213,12 @@ public enum RPCMethod {
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
+    public static let nightwatchLeaseStatus = "nightwatch.lease.status"
+    public static let nightwatchLeaseAcquire = "nightwatch.lease.acquire"
+    public static let nightwatchLeaseValidate = "nightwatch.lease.validate"
+    public static let nightwatchLeaseRenew = "nightwatch.lease.renew"
+    public static let nightwatchLeaseTransfer = "nightwatch.lease.transfer"
+    public static let nightwatchLeaseRelease = "nightwatch.lease.release"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
@@ -236,6 +242,89 @@ public enum RPCMethod {
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
     public static let panelImportLegacy = "panel.importLegacy"
+}
+
+public struct NightwatchLeaseStatusParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct NightwatchLeaseAcquireParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let terminalID: UUID
+    public init(worktreeID: UUID, terminalID: UUID) {
+        self.worktreeID = worktreeID
+        self.terminalID = terminalID
+    }
+}
+
+public struct NightwatchLeaseCredentialsParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let terminalID: UUID
+    public let token: UUID
+    public let generation: Int64
+    public init(worktreeID: UUID, terminalID: UUID, token: UUID, generation: Int64) {
+        self.worktreeID = worktreeID; self.terminalID = terminalID
+        self.token = token; self.generation = generation
+    }
+}
+
+public struct NightwatchLeaseTransferParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let fromTerminalID: UUID
+    public let toTerminalID: UUID
+    public let token: UUID
+    public let generation: Int64
+    public init(
+        worktreeID: UUID, fromTerminalID: UUID, toTerminalID: UUID,
+        token: UUID, generation: Int64
+    ) {
+        self.worktreeID = worktreeID; self.fromTerminalID = fromTerminalID
+        self.toTerminalID = toTerminalID; self.token = token
+        self.generation = generation
+    }
+}
+
+public struct NightwatchLeaseStatusResult: Codable, Sendable {
+    public let held: Bool
+    public let lease: WatchDeskLeaseSnapshot?
+    public init(held: Bool, lease: WatchDeskLeaseSnapshot?) {
+        self.held = held; self.lease = lease
+    }
+}
+
+public struct WatchDeskLeaseSnapshot: Codable, Sendable {
+    public let worktreeID: UUID
+    public let terminalID: UUID
+    public let generation: Int64
+    public let acquiredAt: Date
+    public let renewedAt: Date
+    public let expiresAt: Date
+    public let valid: Bool
+    public let role: WatchDeskRole
+    /// `role` defaults to the powerless role for the same reason
+    /// `WatchDeskRole`'s decoder falls back to it: an unstated role must never
+    /// be reported as mutable authority. Callers that know the lease is valid
+    /// pass `.judge` explicitly.
+    public init(
+        worktreeID: UUID, terminalID: UUID, generation: Int64,
+        acquiredAt: Date, renewedAt: Date, expiresAt: Date, valid: Bool,
+        role: WatchDeskRole = .readOnlyCoordinator
+    ) {
+        self.worktreeID = worktreeID; self.terminalID = terminalID
+        self.generation = generation; self.acquiredAt = acquiredAt
+        self.renewedAt = renewedAt; self.expiresAt = expiresAt; self.valid = valid
+        self.role = role
+    }
+}
+
+public struct NightwatchLeaseAcquisitionResult: Codable, Sendable {
+    public let lease: WatchDeskLeaseSnapshot
+    public let credentialFile: String
+    public init(lease: WatchDeskLeaseSnapshot, credentialFile: String) {
+        self.lease = lease
+        self.credentialFile = credentialFile
+    }
 }
 
 // MARK: - Branch Listing
