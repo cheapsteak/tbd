@@ -399,7 +399,7 @@ that keep the record one hop from off-record threads ("question posted to
   Hand-editable; the entire operator surface beyond this CLI.
 - `~/tbd/supervision/projects/<name>/sweep.py` – the project's own sweep
   program, if customized.
-- `~/tbd/supervision/<shift>/` – per-shift ledger and the generated
+- `~/tbd/shifts/<shift-id>/` – per-shift ledger and the generated
   `account.md`.
 - `.agents/supervision.md` (in each repo) – the playbook; resolved per
   project through the standard tiers.
