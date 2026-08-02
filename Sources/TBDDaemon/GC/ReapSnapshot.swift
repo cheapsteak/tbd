@@ -40,6 +40,10 @@ public struct ReapSnapshot: Sendable {
     /// name. Because GC has no trusted out-of-worktree bootstrap registration
     /// yet, an in-worktree manifest remains advisory and all dirt is preserved.
     ///
+    /// Ignored paths are neither classified nor staged. A snapshot ref is
+    /// permanently reachable, so force-adding build trees would grow the
+    /// user's repository without preserving any work.
+    ///
     /// Throws on any git failure. The caller must treat a throw as "keep the
     /// worktree" — this function never returns having deleted anything.
     public func snapshotIfNeeded(
@@ -59,11 +63,7 @@ public struct ReapSnapshot: Sendable {
         let ref = "refs/tbd/snapshots/\(worktreeName)-\(stamp)"
 
         if dirty {
-            let forcePaths = try await git.ignoredFilePaths(worktreePath: worktreePath)
-            let tree = try await git.stageAllAndWriteTree(
-                worktreePath: worktreePath,
-                forcePaths: forcePaths
-            )
+            let tree = try await git.stageAllAndWriteTree(worktreePath: worktreePath)
             let commit = try await git.commitTree(
                 repoPath: repoPath, tree: tree, parent: headSHA,
                 message: "TBD reap snapshot: \(worktreePath) @ \(stamp)"

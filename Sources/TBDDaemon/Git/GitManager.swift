@@ -253,9 +253,17 @@ public struct GitManager: Sendable {
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Returns every tracked, untracked, and ignored file without git's quoted
+    /// Returns every tracked and untracked dirty file without git's quoted
     /// path encoding. Any malformed record throws so destructive callers fail
     /// toward keeping the worktree.
+    ///
+    /// Ignored paths are deliberately excluded. `.gitignore` is the user's own
+    /// declaration that those bytes are reproducible, and folding them in
+    /// would make every worktree that has ever been built ineligible for
+    /// archive while committing its build tree to a snapshot ref. Bootstrap
+    /// scaffolding (`.agents`, `.codex`, hooks, `AGENTS.md`) is not ignored by
+    /// convention, so it still arrives here as untracked `??` and remains
+    /// subject to the full provenance check.
     public func worktreeStatusEntries(worktreePath: String) async throws -> [GitWorktreeStatusEntry] {
         let data = try await runData(
             arguments: [
@@ -272,7 +280,7 @@ public struct GitManager: Sendable {
             )
         }
 
-        var entries = try output.split(separator: "\0", omittingEmptySubsequences: true).map { record in
+        return try output.split(separator: "\0", omittingEmptySubsequences: true).map { record in
             guard record.utf8.count >= 4 else {
                 throw GitError(
                     command: "git status --porcelain=v1 -z --untracked-files=all",
@@ -297,42 +305,6 @@ public struct GitManager: Sendable {
                 )
             }
             return GitWorktreeStatusEntry(status: String(record[..<statusEnd]), path: path)
-        }
-
-        // `git status` deliberately omits ignored files. Enumerate them as
-        // files (not collapsed directories), because force-removing a
-        // worktree deletes ignored content too.
-        entries.append(contentsOf: try await ignoredFilePaths(worktreePath: worktreePath).map {
-            GitWorktreeStatusEntry(status: "!!", path: $0)
-        })
-        return entries
-    }
-
-    /// Returns ignored files individually. Snapshot callers use the same list
-    /// to force-add bytes that ordinary `git add -A` deliberately omits.
-    public func ignoredFilePaths(worktreePath: String) async throws -> [String] {
-        let ignoredData = try await runData(
-            arguments: ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
-            at: worktreePath
-        )
-        guard let ignoredOutput = String(data: ignoredData, encoding: .utf8) else {
-            throw GitError(
-                command: "git ls-files --others --ignored --exclude-standard -z",
-                exitCode: -1,
-                stderr: "ignored-file output was not valid UTF-8"
-            )
-        }
-        return try ignoredOutput.split(
-            separator: "\0", omittingEmptySubsequences: true
-        ).map { path in
-            guard !path.isEmpty else {
-                throw GitError(
-                    command: "git ls-files --others --ignored --exclude-standard -z",
-                    exitCode: -1,
-                    stderr: "ignored-file record had an empty path"
-                )
-            }
-            return String(path)
         }
     }
 
@@ -698,14 +670,11 @@ public struct GitManager: Sendable {
     /// Stages every change in the worktree (`git add -A`) and writes the
     /// resulting index as a tree object, returning its SHA.
     ///
-    /// This intentionally mutates the worktree's real index rather than
-    /// using a scratch `GIT_INDEX_FILE` — the worktree is orphaned and about
-    /// to be deleted by the GC sweep, so there's no working state left to
-    /// preserve.
-    public func stageAllAndWriteTree(
-        worktreePath: String,
-        forcePaths: [String] = []
-    ) async throws -> String {
+    /// Staging runs against a per-call scratch `GIT_INDEX_FILE`, so a snapshot
+    /// never disturbs the worktree's real index even if another actor is still
+    /// using it. `git add -A` omits ignored paths, which is intended: snapshots
+    /// preserve work, not reproducible build output.
+    public func stageAllAndWriteTree(worktreePath: String) async throws -> String {
         let scratchIndex = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-reap-index-\(UUID().uuidString)").path
         defer { try? FileManager.default.removeItem(atPath: scratchIndex) }
@@ -714,13 +683,6 @@ public struct GitManager: Sendable {
 
         _ = try await run(arguments: ["read-tree", "HEAD"], at: worktreePath, environment: environment)
         _ = try await run(arguments: ["add", "-A"], at: worktreePath, environment: environment)
-        if !forcePaths.isEmpty {
-            _ = try await run(
-                arguments: ["add", "-f", "--"] + forcePaths,
-                at: worktreePath,
-                environment: environment
-            )
-        }
         let output = try await run(
             arguments: ["write-tree"], at: worktreePath, environment: environment
         )

@@ -64,29 +64,38 @@ public struct ArchiveSafetyReport: Sendable, Equatable {
     !reviewableGeneratedOutput.isEmpty || !uniqueUnpublishedWork.isEmpty
   }
 
+  /// Largest number of individual paths any one category contributes to
+  /// `blockingSummary`. This string reaches a GUI alert through an RPC error,
+  /// so an unbounded join would put a scan-sized payload on that path.
+  static let summaryPathLimit = 20
+
   /// One alert-sized summary. Runtime residue collapses to a count; paths
-  /// that require judgment remain visible.
+  /// that require judgment remain visible up to `summaryPathLimit`, after
+  /// which the remainder collapses to a count so the message stays readable.
   public var blockingSummary: String {
     var parts: [String] = []
     if !runtimeResidue.isEmpty {
       parts.append("generated runtime residue: \(runtimeResidue.count) verified path(s)")
     }
     if !reviewableGeneratedOutput.isEmpty {
-      parts.append(
-        "reviewable generated output: "
-          + reviewableGeneratedOutput.map(\.path).sorted().joined(separator: ", ")
-      )
+      parts.append("reviewable generated output: " + Self.pathList(reviewableGeneratedOutput))
     }
     if !uniqueUnpublishedWork.isEmpty {
-      parts.append(
-        "unique unpublished work: "
-          + uniqueUnpublishedWork.map(\.path).sorted().joined(separator: ", ")
-      )
+      parts.append("unique unpublished work: " + Self.pathList(uniqueUnpublishedWork))
     }
     if !headIsPublished {
       parts.append("unique unpublished work: HEAD is not reachable from a remote-tracking branch")
     }
     return parts.joined(separator: "; ")
+  }
+
+  /// Sorted paths, truncated to `summaryPathLimit` with a trailing count so a
+  /// worktree carrying thousands of dirty files still yields a usable message.
+  private static func pathList(_ findings: [ArchiveArtifactFinding]) -> String {
+    let paths = findings.map(\.path).sorted()
+    guard paths.count > summaryPathLimit else { return paths.joined(separator: ", ") }
+    let shown = paths.prefix(summaryPathLimit).joined(separator: ", ")
+    return "\(shown), and \(paths.count - summaryPathLimit) more"
   }
 }
 

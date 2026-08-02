@@ -46,13 +46,27 @@ The producer must stop modifying tracked repository files when it can use an out
 
 ## Classification
 
-The classifier reads every tracked and untracked dirty path with `git status --porcelain=v1 -z --untracked-files=all`, disables rename detection so each record names one path, and separately enumerates ignored files with `git ls-files --others --ignored --exclude-standard -z`. Ignored paths cannot be omitted because forced worktree removal deletes them too. It produces three groups:
+The classifier reads every tracked and untracked dirty path with `git status --porcelain=v1 -z --untracked-files=all` and disables rename detection so each record names one path. It produces three groups:
 
 1. **Generated runtime residue**: exact `runtime` entries, exact `trackedMutation` entries with a verified base digest, and the valid manifest itself.
 2. **Reviewable generated output**: exact `generatedOutput` entries. Drift in a generated entry moves it to unique unpublished work.
 3. **Unique unpublished work**: any dirty path outside the manifest, any digest or status mismatch, any unsafe file type, or all dirt when provenance cannot be verified.
 
-The report collapses runtime residue into one count. It lists reviewable and unique paths individually so an archive error identifies what a person must inspect.
+The report collapses runtime residue into one count. It lists reviewable and unique paths individually so an archive error identifies what a person must inspect, truncating each category at twenty paths because this string reaches a GUI alert through an RPC error.
+
+### Ignored paths are outside the boundary
+
+The classifier does not enumerate ignored files, and snapshots do not force-add them. `.gitignore` is the user's own standing declaration that those bytes are reproducible, and it is the only signal available: nothing in Git distinguishes a build tree from an ignored file someone would want back.
+
+Folding them in was considered and rejected. It fails closed in the wrong direction — the honest cost is not "slightly stricter" but three concrete harms measured on this repository's own worktree, which holds 11,453 ignored files totalling 668 MB:
+
+- Non-force archive becomes impossible for any worktree that has ever been built. The app has no force affordance at all; `--force` exists only in the CLI, so the primary interface would offer an action that always fails.
+- The refusal message would carry every one of those paths through an RPC error into an alert.
+- GC would commit the entire build tree into `refs/tbd/snapshots/…`. Snapshot refs stay reachable, so `git gc` never prunes them and the user's repository grows by hundreds of megabytes per reaped worktree while preserving no work.
+
+Excluding them costs nothing this design was built to buy. Bootstrap scaffolding — `.agents`, `.codex`, `.Codex`, hooks, `AGENTS.md` — is not gitignored by convention, so it still arrives as untracked `??` and remains subject to the full provenance check. An ignored file has been removed along with its worktree since long before this change; that behavior is unchanged, not newly introduced.
+
+The alternative to this exclusion is not a stricter system but a bypassed one: an archive that always refuses trains every user to reach for `--force`, which skips the unpublished-commit check this work exists to enforce.
 
 ## Archive eligibility
 
@@ -72,7 +86,7 @@ Archive rechecks the target by worktree ID and path immediately before classific
 
 ## Cleanup behavior
 
-The provenance classifier is a shared daemon component rather than an archive-only path heuristic. Until trusted registration is integrated, GC treats every advisory overlay as preservation-required. Snapshot creation uses a scratch `GIT_INDEX_FILE`, so it never stages the user's real index; ignored blocker paths are force-added to the snapshot tree. GC compares status before and after snapshot and rechecks registration, lock, HEAD, and live CWD after snapshot immediately before deletion. This change does not weaken its grace, snapshot, or target-verification gates.
+The provenance classifier is a shared daemon component rather than an archive-only path heuristic. Until trusted registration is integrated, GC treats every advisory overlay as preservation-required. Snapshot creation uses a scratch `GIT_INDEX_FILE`, so it never stages the user's real index, and stages with `git add -A`, which omits ignored paths for the reasons above. GC compares status before and after snapshot and rechecks registration, lock, HEAD, and live CWD after snapshot immediately before deletion. This change does not weaken its grace, snapshot, or target-verification gates.
 
 ## Tests
 

@@ -17,8 +17,11 @@ struct ReapSnapshotTests {
         )
         defer { try? FileManager.default.removeItem(at: tmp) }
         let root = URL(fileURLWithPath: wt)
-        try Data(".agents/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
-        try await shell("git add .gitignore && git commit -m ignore-runtime", at: root)
+        // The overlay is left untracked rather than gitignored. Ignored paths
+        // are outside the classifier's boundary entirely, so an ignored
+        // overlay would prove nothing about advisory-manifest handling.
+        try Data("build-cache/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        try await shell("git add .gitignore && git commit -m ignore-build-cache", at: root)
         try writeRuntimeOverlay(root: root, contents: Data("generated".utf8))
 
         let git = GitManager()
@@ -41,8 +44,8 @@ struct ReapSnapshotTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let root = URL(fileURLWithPath: wt)
         try writeRuntimeOverlay(root: root, contents: Data("generated".utf8))
-        try Data(".agents/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
-        try await shell("git add .gitignore && git commit -m ignore-runtime", at: root)
+        try Data("build-cache/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        try await shell("git add .gitignore && git commit -m ignore-build-cache", at: root)
         try Data("user-edited".utf8).write(to: root.appendingPathComponent(".agents/skills/demo/SKILL.md"))
         let indexBefore = try await runGit(["diff", "--cached", "--name-only"], at: root)
 
@@ -86,7 +89,9 @@ struct ReapSnapshotTests {
 
         let lsTree = try await runGit(["ls-tree", "-r", "--name-only", resolvedRef], at: repo)
         #expect(lsTree.contains("untracked.txt"))
-        #expect(lsTree.contains("ignored.txt"))
+        // A snapshot ref is permanently reachable, so ignored bytes stay out
+        // of it — otherwise every reap would commit the worktree's build tree.
+        #expect(!lsTree.contains("ignored.txt"))
     }
 
     // MARK: (b) Clean + branch-reachable -> nil, no ref.
