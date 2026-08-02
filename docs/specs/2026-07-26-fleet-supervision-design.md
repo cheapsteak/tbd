@@ -489,13 +489,16 @@ reporter — no supervision check on the agent side, ever. It reports; the daemo
 knows whether a shift is running and already receives every event. The fork
 lives in the daemon's
 RPC handler: when a shift is active and the terminal's project resolves in
-automation (§8), a pending question becomes a case, and the event **hastens an
-immediate mini-tick for that terminal** instead of waiting for the next sweep.
-Same pure decision function, triggered by an event rather than the clock, so
-the daemon still drives the loop (§1). The case goes to the desk that owns the
-terminal's project (§5) — the same desk that would have received it from an
-ordinary tick, holding the same one playbook. **The briefing carries the
-question payload verbatim out of the daemon's store**, so the supervisor fetches
+automation (§8), a pending question becomes a case and is **delivered
+immediately**, bypassing the sweep program entirely (sweep-program
+sub-document §2): the trigger is a reported fact that needs no theory of
+work, and the transcript is blind while the picker is open, so waiting for
+anyone's next evaluation would waste the only live signal. This is the one
+delivery TBD composes itself — deliberately minimal, **the question payload
+verbatim out of the daemon's store** under the compiled header — where every
+other briefing is the sweep program's prose. It goes to the desk that owns
+the terminal's project (§5), spawned lazily if none exists, holding the same
+one playbook, and the supervisor fetches
 nothing — which dissolves the need for any new read surface. Nothing is
 ledgered for the question itself; facts are not ledger lines. The question
 snapshot rides in the `drive` action's line as the state that justified it,
@@ -505,7 +508,8 @@ supervisor punts (§8), with a `note` pointing at where it went.
 **Permission prompts reach a desk the same way.** The `Notification` event
 (above) rides the identical pipeline: an unconditional dumb-reporter hook, the
 daemon holding the fact, and — with a shift active and the terminal's project in
-automation — a **case** plus an event-hastened mini-tick. One pipeline, two
+automation — a **case**, delivered immediately through the same compiled
+carve-out. One pipeline, two
 sources; the only difference is what the case carries and therefore what
 judgment it warrants.
 
@@ -783,10 +787,6 @@ addressing — the record itself never refuses more than that.
   - `--keys` sends named keys the desk chose after reading the screen. Keys
     assert nothing, so no premise can be stale; the ledger line carries the
     screen capture the desk read instead (§2, §6).
-- **`wake`** — unpark and resume a parked session. A judgment act: routine
-  waking belongs to the project's
-  [wake program](2026-07-26-fleet-supervision-wake-program.md), not to any
-  desk.
 - **`pause`** — halt a runaway session (§13).
 - **`note`** — attributed prose into the account. Also the soft
   cross-reference for questions: when a desk raises something on the
@@ -1284,7 +1284,7 @@ attention — it never changes what any verb is allowed to do.
 - `~/tbd/shifts/<shift-id>/ledger.jsonl` — an append-only file with one
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
-  **action** records a drive, wake, or pause, including the payload, the state
+  **action** records a drive or pause, including the payload, the state
   snapshot that justified it, and the active mode. A separate
   **outcome** line references the action's ID and records what was observed.
   **lifecycle** records shift open, pause, resume, shift close, mode changes,
@@ -1684,8 +1684,11 @@ through its CLI twins, is the entire operator surface for v1 (§10).
 ### Project automation membership (operator-configurable)
 
 Which projects the supervisor watches is an operator setting, not a design
-constant, and it is **sweep configuration** — an input-side answer to "which
-projects generate cases."
+constant, and it is **scope configuration** — the standing answer to "which
+projects may supervision act for at all." Out means TBD refuses, not that
+nobody looked: an out project gets no default tick, its brief submissions
+are refused at the pipe, no prompt case is cut for it, and no desk is ever
+spawned for it.
 **Membership sits at the project level because the project is the acting unit**:
 a desk works for a project, so "should the daemon be working here" is a question
 about a project, and marking half a declared project out would mean a desk
@@ -1885,7 +1888,7 @@ four things:
 - **briefing delivery** — a delivery adapter the daemon can push briefings
   through (§12);
 - **CLI reachability for the verbs** — the session can call
-  `tbd supervise drive|wake|pause|note` (§3).
+  `tbd supervise drive|pause|note` (§3).
 
 The Claude Code adapter qualifies today; the Codex adapter qualifies when it
 lands. Appointing a session of any other kind is refused at the gesture, with
@@ -2020,7 +2023,7 @@ does not go without a liveness contract, and the contract is compiled.
 is *supposed* to be idle most of the night; it is event-woken, not polling —
 rerolling any desk idle for an hour would churn healthy quiet desks for
 nothing. The meaningful silence is a briefing delivered at time T with **no
-ledger line from that desk** by T plus the deadline (§13) — no drive, wake,
+ledger line from that desk** by T plus the deadline (§13) — no drive,
 pause, or note. Every desk act is already a daemon-written ledger
 line, so ledger silence *is* unresponsiveness, and no new observation channel
 is needed. The second arm bounds the working state: a desk `working`
@@ -2176,7 +2179,6 @@ spawn-injected identity.
 ```
 tbd supervise drive --terminal <id> --text "…"
 tbd supervise drive --terminal <id> --keys "…"
-tbd supervise wake  --worktree <id>
 tbd supervise pause --terminal <id> [--reason "…"]
 ```
 
@@ -2186,9 +2188,7 @@ a dialog the adapter clears it first, but **only a dialog the daemon
 machine-knows** — an unidentified one makes the delivery refuse and write an
 anomaly (§2). `drive --keys` sends named keys the desk chose after reading the
 screen: the ledger line records the capture it read, and sends
-are paced (§2, §6). `wake` unparks a parked session — a judgment act; routine
-waking is the
-[wake program's](2026-07-26-fleet-supervision-wake-program.md). `pause` halts
+are paced (§2, §6). `pause` halts
 a runaway (§13). Exactly one payload flag per call.
 
 **Desk verbs — recording** (ledger line only).
@@ -2257,6 +2257,16 @@ tbd supervise sweep customize <project>   # copy the shipped program, write the 
 
 - **`learn`** — no machine-appended memory tier; same-shift memory is a `note`,
   cross-shift memory is a reviewed playbook PR (§8).
+- **`wake`** — no supervise-tier unpark verb. Parked sessions are the wake
+  program's half outright (§4, the
+  [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)),
+  the actuation already exists as public surface (`tbd terminal wake`), and
+  every path that could put a parked session in front of a desk is authored
+  away — a duplicate verb would be machinery whose consumer path was cut,
+  the same argument that declined `approve` (§8). A desk that believes a
+  parked session should wake says so on the project's question route; the
+  shipped playbook's conduct is to raise it there, never to reach around the
+  record with the public actuation.
 - **`escalate`, `queue`, `resolve`** — the compiled record attests acts only
   (§8). A desk that needs a human writes to the playbook-named question route
   and notes the pointer; the operator answers there; the sweep program

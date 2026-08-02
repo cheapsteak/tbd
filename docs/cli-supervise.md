@@ -28,7 +28,6 @@ tbd supervise brief   --project <name>            # briefing text on stdin
 tbd supervise ledger  --project <name> --since <t>
 
 tbd supervise drive --terminal <id> --text "…" | --keys "…"
-tbd supervise wake  --worktree <id>
 tbd supervise pause --terminal <id> [--reason "…"]
 tbd supervise note  --text "…" [--ref <line-id>]
 ```
@@ -70,7 +69,7 @@ Operating (human operators):
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
 - **appoint / relieve** – bind or unbind an operator-chosen supervisor
-- **automation** – which projects generate cases at all
+- **automation** – the standing scope: which projects supervision acts for
 - **sweep customize** – take ownership of a project's sweep program
 
 Detection (the sweep program; stable JSON and exit codes):
@@ -83,7 +82,6 @@ Acting (supervisor sessions; each writes a ledger line and schedules a
 60-second re-check):
 
 - **drive** – deliver a message or named keys into an agent's session
-- **wake** – unpark a parked session, as a judgment act
 - **pause** – halt a runaway session
 
 Recording:
@@ -203,9 +201,11 @@ tbd supervise automation set <project> in|out|follow-default
 tbd supervise automation list
 ```
 
-Which projects generate cases at all. Default stance ships as `in`. A
-project resolved `out` produces no briefings and never spawns a desk; its
-facts still appear in the readout and the account.
+The standing scope: which projects supervision will act for at all. Default
+stance ships as `in`. For a project resolved `out`, TBD refuses rather than
+abstains — no default tick, brief submissions refused at the pipe, no prompt
+cases, no desk — while its facts still appear in the readout and the
+account.
 
 ## tbd supervise sweep customize
 
@@ -298,7 +298,7 @@ $ tbd supervise brief --project acme-platform < /dev/null
 tbd supervise ledger --project <name> --since <t>
 ```
 
-Read-only. TBD's own record for the project since `<t>`: acts (drive, wake,
+Read-only. TBD's own record for the project since `<t>`: acts (drive and
 pause) with payload hashes, their observed outcomes, briefing deliveries,
 lifecycle events, notes, anomalies. This is how a sweep program closes its
 loop — seeing what TBD did since its last evaluation — and how anything else
@@ -347,17 +347,6 @@ $ tbd supervise drive --terminal t17 --text "PR #522 review comments are in; add
 # Answer a question TBD machine-knows is on screen
 $ tbd supervise drive --terminal t23 --text "Option 2. The migration must stay append-only."
 ```
-
-## tbd supervise wake
-
-```
-tbd supervise wake --worktree <id>
-```
-
-Unparks a parked session — a judgment act for exceptional cases. Routine
-waking of parked sessions belongs to the project's
-[wake program](specs/2026-07-26-fleet-supervision-wake-program.md), not the
-supervisor. Same preconditions and recording as `drive`.
 
 ## tbd supervise pause
 
