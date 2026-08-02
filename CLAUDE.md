@@ -8,15 +8,19 @@ Use the `tbd-project` skill for architecture, conventions, and file reference.
 
 **This repository is public, and TBD is used by people across different organizations.** Never commit private context — real employer, org, repo, host, account, person, or ticket names, internal URLs, or machine-specific paths (use `acme` / `acme-prod` placeholders). **Whatever a session is working on elsewhere — product features, roadmaps, ticket and task descriptions — is likely confidential to that org and must not leak here**, in docs, specs, tests, fixtures, or commit messages. Never build or document for one repo, one project, or one person's workflow: features, defaults, and docs must generalize.
 
-## Nightwatch is being replaced — feature freeze
+## Nightwatch is being replaced — two paths until cutover
 
 The fleet-supervision subsystem ("Nightwatch"/"Daywatch") is being redesigned
-from scratch and a migration to the new design is ongoing. The target design is
+from scratch. The target design is
 [`docs/specs/2026-07-26-fleet-supervision-design.md`](docs/specs/2026-07-26-fleet-supervision-design.md)
 (requirements: [`docs/specs/2026-07-26-fleet-supervision-requirements.md`](docs/specs/2026-07-26-fleet-supervision-requirements.md)).
-Until the migration is complete, do **not** add new features to the existing
-Nightwatch implementation — bug fixes only. New supervision behavior belongs in
-the new design's structures, not the code being replaced.
+The redesign builds a second path alongside the existing implementation;
+cutover happens when the new path holds up, and both paths are live until
+then. New supervision features should ideally land in both: in the existing
+implementation where they're needed now, and in the new design's structures —
+where the new-path half is usually user-land (a playbook, sweep-program, or
+wake-program change) rather than compiled (see "Compile only what user-land
+cannot do well" below).
 
 ## Main Session Agent
 
