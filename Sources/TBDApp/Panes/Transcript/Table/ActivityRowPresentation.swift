@@ -191,6 +191,12 @@ enum ActivityRowFormatter {
             return patternTool(id: id, label: "Glob", icon: "folder", inputJSON: inputJSON, timestamp: timestamp)
         case "Task", "Agent":
             return agentTool(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp)
+        case "WebFetch":
+            return webTool(id: id, label: "WebFetch", icon: "globe",
+                           inputJSON: inputJSON, result: result, timestamp: timestamp)
+        case "WebSearch":
+            return webTool(id: id, label: "WebSearch", icon: "magnifyingglass",
+                           inputJSON: inputJSON, result: result, timestamp: timestamp)
         case "AskUserQuestion":
             return nil
         default:
@@ -355,6 +361,47 @@ enum ActivityRowFormatter {
     private struct PatternInput: Decodable {
         let pattern: String
         let path: String?
+    }
+
+    /// `WebFetch` carries `url`, `WebSearch` carries `query`. Both optional so a
+    /// malformed or unexpected payload degrades to the bare label rather than
+    /// dropping the row.
+    private struct WebInput: Decodable {
+        let url: String?
+        let query: String?
+    }
+
+    /// Web tools used to fall through to `genericTool`, which never receives
+    /// `inputJSON` — so the row rendered as a bare "WebFetch" with no indication
+    /// of what was fetched, even though the session index reads the target from
+    /// this same payload. Surfacing it here keeps the transcript and the index
+    /// telling the same story.
+    private static func webTool(
+        id: String, label: String, icon: String, inputJSON: String,
+        result: ToolResult?, timestamp: Date?
+    ) -> ActivityRowPresentation {
+        let parsed = decode(WebInput.self, inputJSON)
+        let target = parsed?.url ?? parsed?.query
+        var segments: [ActivityRowSegment] = [
+            ActivityRowSegment(text: label, style: .primary)
+        ]
+        if let target, !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.append(ActivityRowSegment(text: target, style: .secondary))
+        }
+        var badges: [ActivityRowBadge] = []
+        if result?.isError == true {
+            badges.append(ActivityRowBadge(text: "error", kind: .error))
+        }
+        return ActivityRowPresentation(
+            iconSystemName: icon,
+            titleSegments: segments,
+            timestamp: timestamp,
+            isError: result?.isError == true,
+            badges: badges,
+            openTargetID: id,
+            titleTruncation: .byTruncatingMiddle,
+            titleTooltip: target
+        )
     }
 
     private static func patternTool(
