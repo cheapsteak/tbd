@@ -136,6 +136,19 @@ and color and starts expanded. Items that require a human response also remain e
 Expansion is ephemeral pane state. A transcript poll preserves expansion for a group whose stable
 identity remains unchanged.
 
+**Open wording question (raised 2026-08-01 in review).** This paragraph says a failed group
+"starts expanded" but that response-required items "also remain expanded" — and *starts* versus
+*remains* can be read as two different strengths of guarantee. The implementation treats both the
+same: an explicit user collapse is honored and survives polling, for failures and for
+`AskUserQuestion` alike. That was true before the expansion-state fix below and is unchanged by
+it; the fix only stopped a *changing default* from silently overriding the user's choice.
+
+Nothing becomes unreachable either way — the disclosure chevron stays visible and the question is
+answered by typing into the terminal, not through the card. The alternative reading, in which a
+response-required group cannot be collapsed at all, would leave a chevron that refuses to work.
+Recorded here rather than decided: if "remain" was meant as a hard guarantee, that is a product
+call for the spec's author, and the code should then special-case `requiresResponse`.
+
 ### 6.3 Session index
 
 The rail omits empty sections and uses these truthful categories:
