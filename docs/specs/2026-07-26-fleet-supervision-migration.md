@@ -341,8 +341,10 @@ only — no slice needs a later one:
   `terminal.send` delivery for
   the fleet, the Channels adapter for desks behind its own default-off flag with
   automatic degrade and a **per-desk-spawn handshake** (not per shift), the
-  ledger-marker acknowledgement re-check, **per-desk** context recycling at the
-  250k threshold, the **project tag on every ledger line**, and the playbook
+  ledger-marker acknowledgement re-check, **per-desk** context recycling at
+  the design's fractional thresholds (50% of the effective window, flush
+  nudges at 50/60/70% — design §9, hosted desks only), the **project tag on
+  every ledger line**, and the playbook
   resolver — three-tier `supervision.md` resolution run **per project** (the
   operator's project-level copy → the project's designated repo file → the
   shipped default), which includes adding `.agents/` as a level to the existing
@@ -487,8 +489,12 @@ off for the last time, harvest the desk worktree once more (final `queue/`
 state and any last field learnings), archive it by hand, and run shifts only
 on the new system. Nothing in the old system needs to be deleted for cutover
 to be complete — deletion is a separate slice so that a disappointing first
-week can roll back by flipping two switches: `supervision_enabled` off, and
-`nightwatch_mode` back on.
+week can roll back by three gestures: **close the new system's shift**
+(`tbd supervise shift close` — off is a pause, not an ending, and a
+merely-paused shift still owns an open record; flipping the old system on
+under it would put two supervisors on one fleet with the record of the
+second still open), then `supervision_enabled` off, then `nightwatch_mode`
+back on.
 
 ## 6. Deletion
 

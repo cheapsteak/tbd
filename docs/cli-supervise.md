@@ -277,8 +277,10 @@ found nothing" that keeps the project's liveness contact fresh without
 delivering anything.
 
 Refusals: while supervision is off or no shift is open, exits **75**
-(temporary; retry after the switch returns — still counted as liveness
-contact). Submissions beyond the per-project rate limit (one briefing per 2
+(temporary; retry when supervision resumes). The contact window is disarmed
+while supervision is paused, so a refused submission neither counts as
+liveness contact nor needs to — no contact is owed during a pause.
+Submissions beyond the per-project rate limit (one briefing per 2
 minutes) or the size bound (256 KiB) are refused with the condition named.
 
 ### Examples
