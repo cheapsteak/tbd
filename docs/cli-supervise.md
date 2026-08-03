@@ -13,14 +13,13 @@ shown here is illustrative of the schema family until the schemas ship.
 ## Synopsis
 
 ```
-tbd supervise on | off
+tbd supervise on | off [<project>]
 tbd supervise shift close
 tbd supervise status [--json]
 tbd supervise mode <project> [<mode-name>]
 tbd supervise project <list|create|delete|move> …
 tbd supervise appoint <project> --terminal <id>
 tbd supervise relieve <project>
-tbd supervise scope <default|set|list> …
 tbd supervise sweep customize <project>
 
 tbd supervise readout --project <name>
@@ -36,7 +35,8 @@ tbd supervise note  --text "…" [--ref <line-id>]
 
 Supervision watches a fleet of agent sessions and intervenes through a
 **supervisor** — itself an agent session — one per **project** (a repo, or a
-declared group of repos). One global switch turns supervision on and off; an
+declared group of repos). It is turned on per project — every project
+starts off — and the bare `on`/`off` is the fleet-wide brake; an
 open **shift** is the unit of the record, and every act lands in an
 append-only **ledger** the daemon writes.
 
@@ -63,13 +63,13 @@ branch on.
 
 Operating (human operators):
 
-- **on / off** – open or resume a shift; pause acting without closing it
+- **on / off** – with a project: turn its supervision on or off (all start
+  off); bare: the fleet brake — pause everything, marks untouched
 - **shift close** – finalize the account, dispose hosted desks
 - **status** – switch, shift, and per-project supervision state
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
 - **appoint / relieve** – bind or unbind an operator-chosen supervisor
-- **scope** – which projects TBD's own attention covers
 - **sweep customize** – take ownership of a project's sweep program
 
 Detection (the sweep program; stable JSON and exit codes):
@@ -94,7 +94,7 @@ Recording:
 ```
 # Hand the fleet over for the night
 $ tbd supervise on
-shift opened (2026-08-02, 3 projects in scope)
+shift opened (2026-08-02, 3 projects on)
 
 # What is supervision doing right now?
 $ tbd supervise status
@@ -116,15 +116,29 @@ appointed: session t42 supervises "tbd" (relaunched with playbook layer)
 ## tbd supervise on / off
 
 ```
-tbd supervise on
-tbd supervise off
+tbd supervise on  [<project>]
+tbd supervise off [<project>]
 ```
 
-`on` opens a shift if none is open and resumes the paused one otherwise.
-`off` pauses TBD's authority to act — briefings stop being accepted, acting
-verbs refuse from that instant — without closing the shift or disposing any
-supervisor. Toggling is cheap in both directions; the record's boundary is
-`shift close`, not the switch.
+With a project: the standing per-project mark. Every project starts off;
+`on <project>` brings it under supervision — the tick runs for it, prompt
+cases reach its supervisor, its desk may spawn — and `off <project>` clears
+the mark (an untouched project and a turned-off one are the same state).
+The acting verbs recheck the mark at the moment of the act, so turning a
+project off mid-shift stops even a drive its supervisor already decided.
+Coverage, never protection: public commands stay public; keeping supervision
+away from specific terminals is the sweep program's concern (its exclusions
+can be per-terminal, in its own files), and hard per-session protection at
+the acting verbs is a deferred design. An off project's facts still appear
+in the readout and the account — observability is never withheld.
+
+Bare: the fleet brake. `on` opens a shift if none is open and resumes the
+paused one otherwise; `off` pauses TBD's authority to act everywhere —
+briefings refused, acting verbs refuse from that instant — without closing
+the shift, disposing any supervisor, or touching the per-project marks, so
+releasing the brake restores exactly the coverage that stood. The switch is
+a daemon config column shipped default-off. Toggling is cheap in both
+directions; the record's boundary is `shift close`, not the switch.
 
 ## tbd supervise shift close
 
@@ -192,29 +206,6 @@ Both write the binding into `supervision.json` and a lifecycle line into the
 ledger. An appointed supervisor outlives shifts and is never disposed,
 recycled, or restarted by TBD; if it goes dark or its session disappears,
 TBD notifies the operator and does not silently substitute the hosted desk.
-
-## tbd supervise scope
-
-```
-tbd supervise scope default in|out
-tbd supervise scope set <project> in|out|follow-default
-tbd supervise scope list
-```
-
-The standing scope of TBD's own attention and of its own acting — the
-per-project form of off, complete: an out mark stops the tick, the prompt
-cases, and the desk, and the acting verbs recheck it at the moment of the
-act, so marking out mid-shift beats a drive already decided. The global
-switch is one bit ANDed over every mark, kept for the atomic fleet-wide
-brake. "On for these, off for those" is the switch on plus scope marks.
-Default stance ships as `in`.
-For a project resolved `out`, TBD's defaults stand down — no default tick,
-no prompt cases, no desk, so a submitted briefing has no supervisor to
-reach — while its facts still appear in the readout and the account. Scope,
-never protection: public commands stay public, so keeping supervision away
-from specific terminals is the sweep program's concern (its exclusions can
-be per-terminal, in its own files); hard per-session protection at the
-acting verbs is a deferred design.
 
 ## tbd supervise sweep customize
 
@@ -336,7 +327,7 @@ payload; it records it verbatim and schedules the 60-second re-check.
 
 Preconditions, checked at the moment of the act — a refusal names the
 condition and is recorded: supervision on, shift open, target inside the
-calling supervisor's project and that project in scope, target not
+calling supervisor's project and that project turned on, target not
 rate-limited, no intervention
 already in flight for the target, no pending re-check. The transport then
 verifies the pane is alive and is the session it claims to be; a dead or
@@ -393,7 +384,7 @@ that keep the record one hop from off-record threads ("question posted to
 ## Files
 
 - `~/tbd/supervision/supervision.json` – projects, mode declarations and
-  selections, scope marks, supervisor bindings, sweep configuration.
+  selections, the per-project on marks, supervisor bindings, sweep configuration.
   Hand-editable; the entire operator surface beyond this CLI.
 - `~/tbd/supervision/projects/<name>/sweep.py` – the project's own sweep
   program, if customized.
