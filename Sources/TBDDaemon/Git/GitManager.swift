@@ -332,6 +332,33 @@ public struct GitManager: Sendable {
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether HEAD survives removing this worktree.
+    ///
+    /// Normally that means a remote-tracking branch holds it. A repository
+    /// with no remote configured has no such thing, and demanding one would
+    /// refuse every archive in a local-only repo forever — the exact
+    /// always-refuses failure this design argues against. There the bar drops
+    /// to "some local branch contains HEAD", which is the honest question for
+    /// that repo: `git worktree remove` keeps the branch, so a commit on one
+    /// stays reachable afterwards. A detached HEAD on no branch still fails.
+    ///
+    /// Any git failure returns false, so eligibility fails toward preservation.
+    public func isHeadPublished(worktreePath: String) async -> Bool {
+        guard let remotes = try? await run(arguments: ["remote"], at: worktreePath) else {
+            return false
+        }
+        guard remotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return await isHeadReachableFromAnyRemote(worktreePath: worktreePath)
+        }
+        guard let local = try? await run(
+            arguments: ["branch", "--contains", "HEAD", "--format=%(refname)"],
+            at: worktreePath
+        ) else {
+            return false
+        }
+        return !local.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Returns a map of short ref name → tip SHA covering all local branches
     /// and `origin/*` remote-tracking branches, in a single subprocess.
     ///

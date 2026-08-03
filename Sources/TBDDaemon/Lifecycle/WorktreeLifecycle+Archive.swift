@@ -84,7 +84,9 @@ extension WorktreeLifecycle {
                 )
             }
             guard report.isEligible else {
-                throw WorktreeLifecycleError.archiveUnsafe(report.blockingSummary)
+                throw WorktreeLifecycleError.archiveUnsafe(
+                    name: worktree.name, detail: report.blockingSummary
+                )
             }
         }
 
@@ -124,19 +126,31 @@ extension WorktreeLifecycle {
                 }
             )
             if let hookPath = archiveHookPath {
-                _ = try await hooks.execute(
-                    hookPath: hookPath,
-                    cwd: worktree.path,
-                    env: [
-                        "TBD_EVENT": "archive",
-                        "TBD_WORKTREE_ID": worktree.id.uuidString,
-                        "TBD_WORKTREE_NAME": worktree.name,
-                        "TBD_WORKTREE_PATH": worktree.path,
-                        "TBD_REPO_PATH": repo.path,
-                        "TBD_BRANCH": worktree.branch,
-                    ],
-                    timeout: 60
-                )
+                // A failing hook stops the archive — it may be the thing that
+                // preserves work elsewhere, so proceeding past it would be
+                // unsafe. It is reported as its own error rather than as a
+                // safety refusal: the user's script is what broke, and the
+                // blocking-summary phrasing would send them to `--force`,
+                // which skips every content and publication check as well.
+                do {
+                    _ = try await hooks.execute(
+                        hookPath: hookPath,
+                        cwd: worktree.path,
+                        env: [
+                            "TBD_EVENT": "archive",
+                            "TBD_WORKTREE_ID": worktree.id.uuidString,
+                            "TBD_WORKTREE_NAME": worktree.name,
+                            "TBD_WORKTREE_PATH": worktree.path,
+                            "TBD_REPO_PATH": repo.path,
+                            "TBD_BRANCH": worktree.branch,
+                        ],
+                        timeout: 60
+                    )
+                } catch {
+                    throw WorktreeLifecycleError.archiveHookFailed(
+                        name: worktree.name, detail: String(describing: error)
+                    )
+                }
             }
         }
 
@@ -172,7 +186,9 @@ extension WorktreeLifecycle {
                 )
             }
             guard report.isEligible else {
-                throw WorktreeLifecycleError.archiveUnsafe(report.blockingSummary)
+                throw WorktreeLifecycleError.archiveUnsafe(
+                    name: worktree.name, detail: report.blockingSummary
+                )
             }
         }
 

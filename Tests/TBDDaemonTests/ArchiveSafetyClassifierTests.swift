@@ -342,14 +342,82 @@ struct ArchiveSafetyClassifierTests {
     #expect(FileManager.default.fileExists(atPath: fixture.worktree.path))
   }
 
-  /// The refusal has to carry its own way out — the app archives without force
-  /// and exposes no override control, so this message is a GUI user's only
-  /// route to the escape hatch.
-  @Test func archiveRefusalNamesTheForceEscapeHatch() {
-    let message = WorktreeLifecycleError.archiveUnsafe("unique unpublished work: a.txt").description
+  /// The refusal has to carry its own way out — the app's Archive action never
+  /// forces and exposes no override control, so this message is a GUI user's
+  /// only route to the escape hatch. It names the real worktree, because a
+  /// literal `<name>` is not a command anyone can run.
+  @Test func archiveRefusalNamesTheWorktreeAndTheForceEscapeHatch() {
+    let message = WorktreeLifecycleError
+      .archiveUnsafe(name: "acme-feature", detail: "unique unpublished work: a.txt")
+      .description
 
     #expect(message.contains("unique unpublished work: a.txt"))
-    #expect(message.contains("--force"))
+    #expect(message.contains("tbd worktree archive acme-feature --force"))
+    #expect(!message.contains("<name>"))
+  }
+
+  /// A failing hook is the user's own script breaking, not a safety refusal.
+  /// Reporting it as one would send an ordinary scripting bug to `--force`,
+  /// the single flag that also skips every content and publication check.
+  @Test func hookFailureIsReportedSeparatelyFromASafetyRefusal() {
+    let hook = WorktreeLifecycleError
+      .archiveHookFailed(name: "acme-feature", detail: "exited 1")
+      .description
+    let unsafe = WorktreeLifecycleError
+      .archiveUnsafe(name: "acme-feature", detail: "unique unpublished work: a.txt")
+      .description
+
+    #expect(hook.contains("Archive hook failed"))
+    #expect(hook.contains("exited 1"))
+    #expect(!hook.contains("Archive blocked"))
+    #expect(hook != unsafe)
+  }
+
+  /// A repository with no remote configured must still be archivable. Requiring
+  /// a remote-tracking branch there refuses every archive forever, which is the
+  /// always-refuses failure this design argues against — and `git worktree
+  /// remove` keeps the branch, so the commits survive either way.
+  @Test func localOnlyRepoWithNoRemoteIsStillEligible() async throws {
+    let (temp, repo) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let worktree = temp.appendingPathComponent("wt-local")
+    try await shell("git worktree add -b test/local '\(worktree.path)' main", at: repo)
+
+    let report = await ArchiveSafetyClassifier(git: GitManager())
+      .classify(worktreePath: worktree.path)
+
+    #expect(report.headIsPublished)
+    #expect(report.isEligible)
+  }
+
+  /// The no-remote fallback relaxes only the publication question. Content
+  /// still has to be clean, or the gate would be trivially bypassable by
+  /// deleting a remote.
+  @Test func localOnlyRepoStillBlocksOnDirtyContent() async throws {
+    let (temp, repo) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let worktree = temp.appendingPathComponent("wt-local-dirty")
+    try await shell("git worktree add -b test/local-dirty '\(worktree.path)' main", at: repo)
+    try write("unique unpublished bytes", to: worktree.appendingPathComponent("notes.txt"))
+
+    let report = await ArchiveSafetyClassifier(git: GitManager())
+      .classify(worktreePath: worktree.path)
+
+    #expect(report.headIsPublished)
+    #expect(!report.isEligible)
+    #expect(report.uniqueUnpublishedWork.map(\.path) == ["notes.txt"])
+  }
+
+  /// The common case carries no manifest at all. Naming a missing bootstrap
+  /// attestation there describes machinery the user has never encountered.
+  @Test func plainDirtyContentGetsAPlainReason() async throws {
+    let fixture = try await makePublishedFixture(name: "plain-reason")
+    defer { fixture.cleanup() }
+    try write("draft", to: fixture.worktree.appendingPathComponent("notes.txt"))
+
+    let report = await classify(fixture)
+
+    #expect(report.uniqueUnpublishedWork.map(\.reason) == ["uncommitted or untracked content"])
   }
 
   @Test func removalFailureNeverPublishesArchivedState() async throws {

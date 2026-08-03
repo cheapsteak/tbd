@@ -60,7 +60,7 @@ The classifier does not enumerate ignored files, and snapshots do not force-add 
 
 Folding them in was considered and rejected. It fails closed in the wrong direction — the honest cost is not "slightly stricter" but three concrete harms measured on this repository's own worktree, which holds 11,453 ignored files totalling 668 MB:
 
-- Non-force archive becomes impossible for any worktree that has ever been built. The app has no force affordance at all; `--force` exists only in the CLI, so the primary interface would offer an action that always fails.
+- Non-force archive becomes impossible for any worktree that has ever been built. The app's own Archive action never forces, so the primary interface would offer an action that always fails. (The app is not entirely force-free: "Remove repo from list" passes `force: activeWorktreeCount > 0` and cascades a forced archive over every active worktree. That path is unlabelled, all-or-nothing, and its confirmation text claims files on disk are untouched — it is not a usable override for archiving one worktree, and it is tracked as a separate defect.)
 - The refusal message would carry every one of those paths through an RPC error into an alert.
 - GC would commit the entire build tree into `refs/tbd/snapshots/…`. Snapshot refs stay reachable, so `git gc` never prunes them and the user's repository grows by hundreds of megabytes per reaped worktree while preserving no work.
 
@@ -76,7 +76,23 @@ The archive hook then runs, metadata needed for restoration is captured, and cla
 
 - no reviewable generated output exists;
 - no unique unpublished work exists; and
-- `HEAD` is reachable from at least one remote-tracking branch.
+- `HEAD` survives the worktree's removal.
+
+### What "survives removal" means without a remote
+
+Normally the third condition is "reachable from a remote-tracking branch". A repository with no remote configured has no such branch, and demanding one would refuse every archive there forever — including a spotless, fully committed worktree. That is the always-refuses failure this document argues against two sections above, so the condition is stated in terms of the property it is actually protecting.
+
+Where no remote is configured, the bar drops to "some local branch contains `HEAD`". That is the honest question for such a repository: `git worktree remove` keeps the branch, so a commit sitting on one is still reachable after the directory is gone. A detached `HEAD` on no branch still blocks, because nothing would point at it afterwards.
+
+The relaxation is scoped to publication alone. Content eligibility is unchanged, so deleting a remote cannot be used to wave dirty work through. Any Git failure anywhere in the check returns false, so it fails toward preservation.
+
+Note what this check is worth: it protects *discoverability*, not reachability. Archive keeps the branch either way, so unpushed commits are not destroyed by removal — they merely become harder to find. That is why plain `git worktree remove` refuses on dirty content but not on unpushed commits.
+
+### A failing archive hook is not a safety refusal
+
+The hook stops the archive when it fails — it may be the very thing preserving work elsewhere, so continuing past it would be unsafe. But it is reported as its own error, naming the hook rather than a blocking summary.
+
+The distinction matters because the recovery differs. A safety refusal means "there is work here"; the way out is `--force`, and that is the right pointer. A hook failure means the user's own script is broken, and sending them to `--force` for it would route an ordinary scripting bug through the single flag that also skips every content and publication check — leaving them worse off than before this gate existed.
 
 This makes archive RPCs and merge-triggered archive synchronous through the hook, final verification, and removal. A caller may therefore wait for the archive hook's timeout budget (currently up to 60 seconds) plus Git removal latency. That deliberate UX cost is the price of returning success only after physical absence and of preventing a detached task from invalidating the final safety check.
 

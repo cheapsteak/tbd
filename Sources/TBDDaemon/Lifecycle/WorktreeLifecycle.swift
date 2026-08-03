@@ -12,7 +12,8 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
     case worktreeAlreadyActive(UUID)
     case createFailed(String)
     case invalidOperation(String)
-    case archiveUnsafe(String)
+    case archiveUnsafe(name: String, detail: String)
+    case archiveHookFailed(name: String, detail: String)
     case archiveRemovalFailed(String)
     case worktreePathAlreadyExists(String)
     case worktreeAlreadyRegistered(String)
@@ -34,11 +35,17 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
             return "Failed to create worktree: \(reason)"
         case .invalidOperation(let detail):
             return detail
-        case .archiveUnsafe(let detail):
-            // The recovery belongs in the message: the app archives without
-            // force and has no override control, so this string is a GUI
-            // user's only route to the escape hatch.
-            return "Archive blocked: \(detail). To discard this content anyway, run `tbd worktree archive <name> --force`."
+        case .archiveUnsafe(let name, let detail):
+            // The recovery belongs in the message: the app's Archive action
+            // never forces and offers no override control, so this string is a
+            // GUI user's only route to the escape hatch.
+            return "Archive blocked: \(detail). To discard this content anyway, run `tbd worktree archive \(name) --force`."
+        case .archiveHookFailed(let name, let detail):
+            // Deliberately NOT phrased as a safety refusal. A broken hook is
+            // the user's own script failing, and pointing them at --force for
+            // it would route an ordinary scripting bug through the one flag
+            // that skips every content and publication check.
+            return "Archive hook failed for \(name): \(detail). Fix the hook, or run `tbd worktree archive \(name) --force` to archive without running it."
         case .archiveRemovalFailed(let detail):
             return "Archive removal failed: \(detail)"
         case .worktreePathAlreadyExists(let path):
