@@ -174,7 +174,7 @@ does, synchronously:
 3. **Refuse while paused.** With the brake engaged, the pipe
    refuses with a distinct machine-readable paused result — a pinned exit
    code (§10) — so a program can tell "not now" from "broken"; a project
-   whose mark is off gets the no-arrangement result instead (design §8),
+   whose mark is off gets the `refused-off` result instead (design §8),
    the "not covered" answer rather than the "not now" one. Refusals
    while paused do not feed the watchdog (§6), and nothing is delivered.
 4. **Deliver.** A surviving briefing goes to the project's supervisor: the
@@ -741,7 +741,7 @@ refusal means.
   empty submission is never paced.
 - **Paused and off** — with the brake engaged, `brief` exits with the
   pinned paused code; for a project whose mark is off it returns the
-  no-arrangement result; either way it delivers nothing and does not feed
+  `refused-off` result; either way it delivers nothing and does not feed
   the watchdog; the
   default tick launches no runs while paused; a run in flight at the flip
   finishes within its timeout bound and its submission is refused; no

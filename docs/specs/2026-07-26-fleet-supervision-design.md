@@ -2299,7 +2299,7 @@ unanswered-briefing age — because the supervisor sits inside the sweep's
 perimeter (§9). `brief` is how cases reach a
 desk: composed briefing text on stdin, delivered under the compiled header
 after the per-project rate limit, refused with a pinned exit code while
-the brake is engaged and with the no-arrangement result for a project that
+the brake is engaged and with the `refused-off` result for a project that
 is off (§8), and counted as liveness contact
 either way (an empty submission is the attested "looked, found nothing").
 Its synchronous result is machine-readable and pinned as contract —
