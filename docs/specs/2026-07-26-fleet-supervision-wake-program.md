@@ -104,7 +104,8 @@ daemon — and outside the desk — entirely.**
   missed") in the program's own log. And for the one death mode nothing can
   self-report — a job unloaded, or never installed — a paired external
   watchdog: a trivial second cron alerting on a stale heartbeat file, or a
-  dead-man's URL pinged each run. The accepted residue is named in design
+  dead-man's URL pinged each run (`tbd notify` gives such a watchdog an
+  operator-notification path through TBD itself, design §10). The accepted residue is named in design
   §16: in the account, a dead wake program over parked sessions looks exactly
   like the legitimate no-program default. If field use shows that ambiguity
   biting, the pre-planned escape hatch is one file read — the account

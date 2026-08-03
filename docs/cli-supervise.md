@@ -75,7 +75,8 @@ Operating (human operators):
 
 Detection (the sweep program; stable JSON and exit codes):
 
-- **readout** – the project's live-agent facts and machinery state
+- **readout** – the project's live-agent facts, supervisor state, and
+  machinery state
 - **brief** – submit a composed briefing; empty input is a liveness heartbeat
 - **ledger** – TBD's own record of acts, outcomes, and deliveries
 
@@ -210,8 +211,11 @@ restarts for a moment.
 ordinary life; the hosted desk resumes lazily on the next briefing need.
 Both write the binding into `supervision.json` and a lifecycle line into the
 ledger. An appointed supervisor outlives every coverage toggle and is never disposed,
-recycled, or restarted by TBD; if it goes dark or its session disappears,
-TBD notifies the operator and does not silently substitute the hosted desk.
+recycled, or restarted by TBD; if its session disappears,
+TBD notifies the operator and does not silently substitute the hosted
+desk. Whether a live-but-silent appointed supervisor needs action is the
+sweep program's continuation policy — the shipped program pages rather
+than touching your session.
 
 ## tbd supervise sweep customize
 
@@ -233,8 +237,13 @@ tbd supervise readout --project <name>
 
 Read-only; prints and changes nothing else. The project's live-agent facts —
 session state with its source and observed-at, work facts, runaway counters,
-pin state, the not-to-act facts — plus machinery state: the brake, the
-project's mark, the active mode.
+pin state, the not-to-act facts — plus machinery state (the brake, the
+project's mark, the active mode) and the **supervisor section**: the
+supervisor's session state, last ledgered act, context fullness where
+known, and the age of any delivered briefing with no answering ledger
+line. The supervisor is in the sweep program's perimeter — whether its
+silence is failure, and what to do about it, is the program's judgment
+over these facts.
 
 ### Output
 
@@ -245,6 +254,9 @@ $ tbd supervise readout --project acme-platform
 {
   "schemaVersion": 1,
   "supervision": { "on": true, "brakeEngaged": false, "mode": "autonomous" },
+  "supervisor": { "arrangement": "hostedDesk", "terminal": "t81",
+                  "state": { "value": "idle", "source": "hook", "observedAt": "02:13:12Z" },
+                  "lastLedgeredAct": "02:04:51Z", "unansweredBriefingSince": null },
   "agents": [
     { "terminal": "t17",
       "state": { "value": "idle", "source": "hook", "observedAt": "02:13:40Z" },
@@ -276,10 +288,21 @@ tbd supervise brief --project <name>    # briefing text on stdin
 Submits a composed briefing for delivery to the project's supervisor. The
 text is delivered verbatim under a short compiled header (active mode name,
 any pending playbook update); TBD never parses it. Delivery is recorded in
-the ledger with the delivered text's hash and arms the unanswered-briefing
-deadline. An **empty submission is meaningful**: it is the attested "looked,
+the ledger with the delivered text's hash. An **empty submission is
+meaningful**: it is the attested "looked,
 found nothing" that keeps the project's liveness contact fresh without
 delivering anything.
+
+**One attempt, honest result, your policy.** TBD makes one full delivery
+attempt (internal transport fallback included) and never retries a
+briefing. The synchronous result is machine-readable and stable:
+`delivered`, `refused-paused` (exit 75), `refused-off`,
+`refused-rate-limit`, `refused-size`, `transport-failed`, or
+`no-live-supervisor`. What happens next — resubmit, replace the desk with
+`on` and resubmit, page with `tbd notify`, or wait for the next
+evaluation — is the submitting program's continuation policy; the shipped
+program handles `no-live-supervisor` by running `on` (ensure) and
+resubmitting in the same run.
 
 Refusals: while the fleet brake is engaged, exits **75**
 (temporary; retry when supervision resumes). A project whose mark is off is
@@ -381,6 +404,20 @@ that keep the record one hop from off-record threads ("question posted to
 #fleet-questions, answered 09:14"). A note is accepted even for a project
 just turned off — which is how the closing summary a stand-down requests
 lands after the mark clears.
+
+## Related: tbd notify
+
+```
+tbd notify --title "…" --body "…"
+```
+
+Raises an operator notification through TBD's own notification path — the
+same machinery TBD's built-in alerts use — attributed to the calling
+script. Not part of the `supervise` namespace because nothing about it is
+supervision-specific: sweep programs use it to page on their own judgment
+(a silent supervisor, an exhausted replacement budget), and any user-land
+watchdog may use it the same way. TBD's built-in notifications cover only
+facts TBD itself observed.
 
 ## Exit codes
 

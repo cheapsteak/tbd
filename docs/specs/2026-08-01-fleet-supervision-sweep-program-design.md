@@ -94,8 +94,10 @@ Compiled, always — the integrity-facing remit:
   count (design §5's honestly priced resource). The same facts appear in the
   readout, so a program can reason with them and decline to brief; the checks
   hold at the act regardless of whether it did.
-- **Every liveness contract** — desk dead-man's switch (design §9), act
-  re-check (design §12), sweep watchdog (§6).
+- **Every compiled liveness contract** — the act re-check (design §12) and
+  the sweep watchdog (§6). Desk liveness is deliberately not among them:
+  the supervisor sits inside this program's perimeter, its silence judged
+  by authored thresholds over TBD-timestamped facts (§5, design §9).
 
 **The briefing, decomposed by author**, is the worked example of this split.
 The playbook and mode conduct are the project's file; the briefing's prose is
@@ -137,7 +139,12 @@ prints the project's live-agent facts — session state with source and
 observed-at, work facts, runaway counters, worktree pin state, and the
 per-target not-to-act facts (an intervention in flight, a pending re-check, a
 rate limit) — plus the supervision machinery's own state: the brake, the
-project's mark (design §3, §8), and the project's active mode. A program can
+project's mark (design §3, §8), and the project's active mode. It also
+carries the **supervisor section**, because the supervisor is a session in
+this program's perimeter (design §9): the desk's session state, its last
+ledgered act, its context fullness where known, and the age of any
+delivered briefing with no answering desk line — the facts the program's
+continuation policy judges (§7). A program can
 therefore see for itself when a submission would be refused (§4). There is no
 open-cases section: what has already been briefed is the program's own memory
 (§7), not TBD's. An operator or any other script may read the readout freely
@@ -174,9 +181,13 @@ does, synchronously:
    since the project's `on` — design §5, §9),
    delivers through the agent-kind adapter, and writes the ledger's
    delivery line request-first, carrying the delivered text's hash and the
-   conduct hash (design §4 steps 3–4, §6, §12). Delivery arms the desk
-   dead-man's deadline: a briefing delivered at T with no ledger line from
-   that desk by the deadline is the switch's trigger (design §9).
+   conduct hash (design §4 steps 3–4, §6, §12). The synchronous result is
+   machine-readable and pinned as contract (§10): delivered,
+   refused-paused, refused-off, refused-rate-limit, refused-size,
+   transport-failed, or no-live-supervisor. TBD makes one full attempt —
+   adapter fallback included (design §12) — and never retries a briefing;
+   persistence is the program's, closing the loop through the result and
+   the ledger (§7, design §9).
 
 **An empty submission is still a submission.** A `brief` call with nothing on
 stdin is the attested "looked, found nothing": it updates the liveness
@@ -290,17 +301,20 @@ duties land on opposite sides of the compiled/authored line:
 - **Durations about the supervision machinery are compiled contracts.** Each
   measures silence against an expectation *the system itself created*, and
   none involves judgment:
-  - a **briefing** delivered at T with no ledger line from that desk by the
-    deadline — the desk dead-man's switch (design §9);
   - an **act** performed at T, verified about a minute later — the re-check
     (design §12);
   - a **declared contact window** with no submission inside it — the sweep
     watchdog (§6).
 
-The compiled clocks never point outward at the fleet. Every one of them
-points at the supervision system itself. The fleet's idleness is judgment;
-the machinery's idleness is integrity — if it went unmeasured, the record
-would lie by omission.
+The desk's own silence sits deliberately on the *authored* side of this
+line: a briefing unanswered past a threshold is the same kind of hypothesis
+as an agent idle past one, evaluated by this program over TBD-timestamped
+facts (the readout's supervisor section, §3) with continuation policy to
+match (§7, design §9). The compiled clocks never point outward at the
+fleet, and only one points at user-land at all — the contact window, the
+clock that rings when the watcher itself stops. The fleet's idleness is
+judgment; the machinery's idleness is integrity — if it went unmeasured,
+the record would lie by omission.
 
 ## 6. Detecting a dead sweep program
 
@@ -393,7 +407,10 @@ the record) applied, not overridden. The guarantee is stated as the
 conditional it is: **while TBD runs, silence in the record is meaningful.**
 Daemon liveness itself belongs to the layer that already owns it (launchd,
 and an operator's eyes on a visibly broken app). Projects may stack further
-watchdogs above TBD's; the compiled one is the floor, not the ceiling.
+watchdogs above TBD's; the compiled one is the floor, not the ceiling. And
+the window carries one more weight than fleet coverage: the desk's watcher
+is this program (design §9), so the clock that rings when the program stops
+is also what terminates the desk-watching regress.
 
 ## 7. The reference sweep program
 
@@ -417,20 +434,35 @@ the tool still owns it. A project takes ownership only when it wants to:
 What the program is, wherever it runs from:
 
 - **It carries the threshold numbers as named constants** — the
-  idle-intervention threshold, the runaway turn and no-progress windows
+  idle-intervention threshold, the runaway turn and no-progress windows,
+  the desk-overdue threshold, and the desk replacement budget
   (§10). Tuning is taking the customize copy and editing a constant in a
   file the project then owns. There is no per-repo threshold configuration
   surface in TBD and none deferred: numbers live in the program, which also
   preserves the design's one-column property (design §7) permanently — a
   number never becomes a config column.
 - **It is the conformance artifact** for all three public surfaces (§3),
-  alongside the reference wake script for its own: it may use only
-  `tbd supervise readout`, `tbd supervise brief`, and
-  `tbd supervise ledger`. A fact it cannot obtain that way is a failed
+  alongside the reference wake script for its own: it may use only public,
+  documented surfaces — `tbd supervise readout`, `tbd supervise brief`,
+  and `tbd supervise ledger` for its contract, plus the public actuations
+  its continuation policy composes with (`tbd supervise on`,
+  `tbd notify`; design §9, §10). A fact it cannot obtain that way is a failed
   conformance check and a scoped API request — the mechanism by which TBD's
   surface grows, pulled by a real consumer.
 - **It submits on every evaluation**, findings or none — an empty submission
   when quiet — satisfying §6's contact obligation.
+- **It supervises the supervisor** (design §9): each run checks the
+  readout's supervisor section, and its continuation policy is the shipped
+  default — a hosted desk with a briefing unanswered past the desk-overdue
+  threshold, or found dead at a delivery attempt (the no-live-supervisor
+  result), is replaced through `tbd supervise on` (ensure) and the case
+  resubmitted from current state; after the replacement budget's
+  consecutive replacements with no ledgered act between them, it stops and
+  pages through `tbd notify`; an appointed supervisor is never touched —
+  overdue there means a page, nothing more. A project's copy may nudge
+  first, fail over to another model or agent kind by spawning and
+  appointing, or rebind its budgets — continuation is authored like the
+  rest of the file.
 - **It demonstrates case memory as authored discipline.** Its own files
   record what it has briefed; before briefing an agent's situation it
   consults the ledger query for TBD-side activity since — a situation it
@@ -562,8 +594,10 @@ layer, transcripts and playbooks by path with hashes in the ledger.
 | Idle-intervention threshold | 40 min | §7 (shipped program constant) |
 | Runaway: turns in window | 30 turns | §7 (shipped program constant) |
 | Runaway: no-progress window | 90 min | §7 (shipped program constant) |
+| Desk-overdue threshold (briefing unanswered) | 60 min | §7 (shipped program constant) |
+| Desk replacement budget | 2 consecutive per project | §7 (shipped program constant) |
 
-The first eight are compiled constants; the last three ship as named
+The first eight are compiled constants; the rest ship as named
 constants in the reference sweep program and are listed here as its
 documented defaults, not as TBD's. The paused exit code follows sysexits'
 `EX_TEMPFAIL` (75): "not now, retry later," which is exactly what the
@@ -677,8 +711,18 @@ refusal means.
 - **Brief round-trip** — briefing text submitted for an effectively-on
   project is
   delivered verbatim under the compiled header; the delivery line carries
-  the delivered text's hash and the conduct hash; delivery arms the desk
-  dead-man's deadline.
+  the delivered text's hash and the conduct hash; the synchronous result
+  is `delivered`.
+- **Result vocabulary** — every refusal and failure returns its pinned
+  machine-readable result (refused-paused, refused-off, refused-rate-limit,
+  refused-size, transport-failed, no-live-supervisor); a submission for a
+  project whose desk has died returns no-live-supervisor with the failure
+  recorded, and TBD performs no replacement and no retry of its own.
+- **Desk supervision** — the readout's supervisor section reports session
+  state, last ledgered act, and unanswered-briefing age; the shipped
+  program replaces a dead hosted desk via ensure and resubmits; past the
+  replacement budget it pages and stops; an appointed supervisor is paged
+  about, never replaced.
 - **Quiet contact** — an empty submission updates the liveness record,
   delivers nothing, writes no ledger line, and is counted in the coverage
   summary on the lifecycle line that ends the span.

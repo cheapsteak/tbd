@@ -886,8 +886,11 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    agent, just as it would for any other session. Where the operator has
    appointed a supervisor for the project (§9), the briefing goes to that
    session. Otherwise it goes to the project's hosted desk, ensured live
-   since `on` (§9); if the desk died in the interim the
-   daemon replaces it first, and every spawn installs the
+   at `on` (§9); if the desk has died in the interim, the delivery fails
+   with the machine-readable no-live-supervisor result and the failure is
+   recorded — recovery is the submitting program's own next move, `on`
+   (ensure) then resubmit, which the shipped program does in the same run
+   (§9). Every spawn installs the
    project's playbook as the desk's standing conduct (sweep-program
    sub-document §8). Each supervisor is an ordinary, visible, TBD-managed
    session (P0-4) — the hosted desk in its own worktree, an appointed
@@ -976,21 +979,21 @@ Boundary cases:
   `note` with the pointer so the record shows a question is out. The operator
   answers at the route; the sweep program reads the answer and carries it
   into future briefings, so an answered question is not re-asked (P1-5, §8).
-- **Supervisor stuck or gone** → it is a session like any other; the same
-  machinery watches it. Detection is one story for both supervisor
-  arrangements: the dead-man's switch (§9) — a briefing with no ledger line
-  by the deadline, or a supervisor `working` past it with nothing ledgered.
-  Remediation forks by ownership. For a hosted desk, detecting a stuck desk
-  and only *reporting* it would be an anomaly addressed to an operator who is
-  asleep, so firing means replacement through §9's path, bounded by the
-  reroll budget. For an appointed supervisor, firing raises the operator
-  notification and nothing else — TBD never disposes of, restarts, or spawns
-  over the operator's own conversation (§9). The daemon continues to
-  collect mechanical facts throughout and makes no judgments; it never
-  pretends to provide the supervisor's judgment. When a reroll budget is
-  spent, or an appointed supervisor stays dark, the darkness covers its own
+- **Supervisor stuck or gone** → it is a session like any other, and the
+  same watcher covers it: **the supervisor sits inside the sweep program's
+  perimeter** (§9). The facts are one story for both supervisor
+  arrangements — the readout's supervisor section carries the desk's
+  session state, its last ledgered act, and the age of any unanswered
+  briefing, all TBD-timestamped — and what that silence means, and what to
+  do about it, is the program's continuation policy: an authored theory
+  with a shipped default (nudge or replace the recreatable hosted desk
+  through `on`, never touch the appointed session, page through `tbd
+  notify`), overridable like the rest of the program (§9). The daemon
+  continues to collect mechanical facts throughout and makes no judgments;
+  it never pretends to provide the supervisor's judgment. When a project's
+  supervisor stays dark, the darkness covers its own
   project only: other projects' supervisors are separate sessions and keep
-  working, and the anomaly line names which project lost its
+  working, and the record shows which project lost its
   judgment layer.
 
 ## 5. Supervision projects and where policy lives
@@ -1018,7 +1021,7 @@ The unit that makes that possible is the **supervision project**.
 - **Policy resolves per project** — one playbook per desk.
 - **One supervisor per project.** A project's supervisor is one session, and
   the operator selects which. The shipped default is the TBD-hosted **desk**:
-  ensured live while the project is on, standing down with its mark, disposed
+  ensured live at `on`, standing down with its mark, disposed
   only for cause (§9). The alternative is **appointment**: the operator binds an existing
   TBD-managed session as the project's supervisor (§9, §10), recorded as a
   per-project selection in `supervision.json` (§8); while a binding stands,
@@ -1409,10 +1412,10 @@ What each kind's payload carries:
   (§12).
 - **`delivery`** — a briefing delivered to a desk: the project, the delivered
   text's hash, and the conduct hash the desk stands on (sweep-program
-  sub-document §3, §9). Written request-first, before the adapter runs. A
-  briefing delivery arms the desk dead-man's deadline; a transition delivery
-  (§9) writes the same line and arms nothing — its answer is ceremony, not a
-  liveness proof. "What did this desk actually
+  sub-document §3, §9). Written request-first, before the adapter runs; the
+  claims ladder (§12) governs what it may assert, and the age of a delivery
+  with no answering desk line is a fact any watcher can compute from the
+  record — desk-silence judgment is the sweep program's (§9). "What did this desk actually
   receive, under what conduct" is answerable per briefing from this line.
 - **`anomaly`** — the category and the detail.
 - **`note`** — the author, the text, and optional references to other lines.
@@ -1807,10 +1810,9 @@ including an always-on operator, who never performs a boundary gesture at
 all. P2-2's deliberate handover survives as the two things it was actually
 made of: the coverage gestures themselves, and the ceremony below. Briefings
 do not survive a pause — anything still true reappears in a fresh briefing
-derived from current state — and dead-man deadlines (below) suspend while
-the brake is engaged or the project's mark is off, and rearm on release,
-because a briefing unanswered during a pause is the system's doing, not a
-dead desk.
+derived from current state — and a briefing left unanswered across a pause
+is the system's doing, not a dead desk, which any continuation policy sees
+plainly because the pause is on the record beside it (§6, below).
 
 ### The transition ceremony: edges are compiled, ceremony is authored
 
@@ -1825,8 +1827,8 @@ of the previous edge — so an off-hook can read the whole span it is closing
 with one `tbd supervise ledger --project <name> --since <t>` call. What the
 hook prints to stdout is delivered to the project's supervisor as a
 **transition delivery**: opaque bytes, bounded (§13), hashed into the
-delivery line, never parsed — and arming no dead-man deadline (§6), because
-its answer is ceremony, not a liveness proof. Empty stdout delivers
+delivery line, never parsed — and its answer is ceremony, so silence about
+it claims nothing. Empty stdout delivers
 nothing.
 
 The hook runs **after** the edge has taken effect, asynchronously, and is
@@ -1859,7 +1861,8 @@ the one way to send a desk substance.
   silently replaced by the hosted default. Otherwise: a live stood-down
   desk resumes as it stands, with the conduct reload folding in any playbook
   edits at the same moment (sub-document §8); a desk that died while stood
-  down — the one state its dormant deadline could not see — is detected
+  down — a death nothing was watching for, since a stood-down project's
+  sweep is not running — is detected
   here and replaced, a lifecycle line linking successor to predecessor; and
   a project that never had a desk gets one spawned. Spawn is cheap by
   construction: it installs the project's playbook as the standing conduct
@@ -1877,16 +1880,18 @@ the one way to send a desk substance.
 - **`off <project>` stands the desk down; it does not dispose of it.** The
   mark is a delivery precondition rechecked at act time (§3, §8), so a
   stood-down desk simply receives nothing — an idle session holding its
-  context at no token cost. Its dead-man deadline is dormant by
-  construction: the switch arms per delivered briefing (below), and nothing
-  is delivered. Context that cost real tokens to build is kept, not
+  context at no token cost. Nothing watches it while stood down — the
+  sweep is not running for an off project, and its idle silence would mean
+  nothing anyway; liveness is re-verified at the next `on`. Context that
+  cost real tokens to build is kept, not
   burned — and the durable guarantees never rest on it, because everything
   that matters is externalized as it happens (ledger, notes, proposals,
   routed questions), so persistence is an economy, never a dependency.
   Continuity still lives in artifacts; the desk's memory is a bonus the
   next `on` gets for free.
 - **Disposal happens only for cause.** The recycle path (below) replaces a
-  full desk; the dead-man's switch replaces a dark one; an operator may end
+  full desk; a continuation policy replaces a dark one — the sweep
+  program's judgment, actuated through `on` (below); an operator may end
   the session like any other session they own. No coverage gesture disposes
   a desk — which is what makes toggling cheap in both directions, the same
   property the brake has (§3). **An appointed supervisor outlives
@@ -1993,7 +1998,7 @@ nudges, fullness-triggered recycling — is **hosted-desk self-maintenance**:
 a hosted desk is disposable by construction, which is what makes tearing one
 down and respawning it a non-event. An appointed supervisor is the operator's
 own conversation, which TBD never tears down or restarts on its own (the
-dead-man's section below carries the same line for liveness); its context is
+desk-liveness section below carries the same line); its context is
 managed the way the operator manages any of their sessions, with
 auto-compaction bearing survival there as everywhere. Two mechanisms manage
 a hosted desk's context, and their
@@ -2021,11 +2026,12 @@ that exposes neither — a Codex-driven desk, today — runs with no thresholds,
 no flush nudges, and no fullness-triggered recycle, and nothing above breaks,
 because survival never rested on this machinery. The layers that must hold
 for every desk kind read the record, not the session's internals: the
-dead-man's switch watches briefings and ledger lines, and hosted-desk
+facts a continuation policy needs — deliveries, acts, and their ages — are
+ledger lines, and hosted-desk
 replacement
 briefs from the record, so both hold unchanged. Such a desk simply runs
-until it is stood down, recycled, or the dead-man's switch fires — replacement for a
-hosted desk, the operator notification for an appointed supervisor (below) —
+until it is stood down, recycled, or a continuation policy replaces it
+(below) —
 and the account
 shows its context as unknown rather than guessed.
 
@@ -2077,71 +2083,69 @@ never as a question to anyone. If a recycle ever loses something that mattered, 
 is an artifact-externalization bug to fix — the answer is "that should have
 been in the record," never "a human should have approved the recycle."
 
-### Desk liveness: the dead-man's switch
+### Desk liveness: the supervisor is in the sweep's perimeter
 
 Context is not the only way a desk fails, and field experience supplied the
 receipt: a desk can stall on its own question, wedge mid-turn, or sit silent
-with briefings queued — failing exactly like the agents it exists to catch, and an
-anomaly line addressed to an operator who is asleep is no answer. So the desk
-does not go without a liveness contract, and the contract is compiled.
+with a briefing unanswered — failing exactly like the agents it exists to
+catch. The design's answer is that it is watched exactly like them too:
+**the supervisor is a session inside the sweep program's perimeter**, and
+desk liveness is the continuation half of the program's authored theory —
+what silence means, when it becomes failure, whether to nudge, replace,
+fail over, or page. TBD's part is the same as everywhere else in this
+design: it keeps the facts, executes the actuations, and holds the one
+compiled clock.
 
-**The switch triggers on an unanswered briefing, never on idleness.** A desk
-is *supposed* to be idle most of the night; it is event-woken, not polling —
-rerolling any desk idle for an hour would churn healthy quiet desks for
-nothing. The meaningful silence is a briefing delivered at time T with **no
-ledger line from that desk** by T plus the deadline (§13) — no drive,
-pause, or note. Every desk act is already a daemon-written ledger
-line, so ledger silence *is* unresponsiveness, and no new observation channel
-is needed. Only briefings arm it: a transition delivery (§9) is ceremony
-and arms nothing, and a stood-down project delivers nothing at all, so its
-idle desk is dormant, not dark — its liveness is re-verified at the next
-`on` (§9). The second arm bounds the working state: a desk `working`
-continuously past the same deadline with nothing ledgered. Whether it is
-wedged or merely lost in thought stops mattering at the deadline — a desk
-holds cases, a case unanswered for an hour is the failure the switch exists to
-catch. Both arms are the
-P1-6 pattern generalized: every message the daemon sends anyone arms a
-deadline; only the clock differs. **Detection is one story for both
-supervisor arrangements** — the switch watches the record, not the session's
-internals, so a hosted desk and an appointed supervisor go dark by exactly the
-same measure. What firing *does* forks by ownership.
+**The facts are compiled; the deadline is not.** The readout's supervisor
+section carries the desk's session state, its last ledgered act, its
+context fullness where known, and the age of any delivered briefing with no
+answering desk line — every desk act is already a daemon-written ledger
+line, so ledger silence *is* unresponsiveness, computable by any reader
+with no new observation channel. "Briefing unanswered for an hour" is the
+same kind of statement as "idle for forty minutes": an authored threshold
+over TBD-timestamped facts, a shipped-program constant (sub-document §7)
+rather than compiled law. The shipped conduct triggers on an unanswered
+briefing or a desk `working` past the threshold with nothing ledgered —
+never on idleness, because a desk is *supposed* to be idle most of the
+night, and replacing quiet healthy desks would churn for nothing. A
+transition delivery is ceremony and counts for nothing here; a stood-down
+project's desk is dormant, not dark (above).
 
-**For a hosted desk, firing means replacement, not reporting.** Replacement
-costs a briefing, not work state. Anomaly line, then the
-replacement path above with the flush skipped — the desk is by definition not
-answering — and queued and unanswered briefings redeliver to the successor. A
-lifecycle line links the sessions, as with any recycle.
+**Continuation is authored, and the actuations are public.** The shipped
+program's policy: for a hosted desk — recreatable from playbook and record
+by construction — run `on` (ensure), which verifies the desk really is
+dead or wedged-beyond-use, replaces it with a lifecycle line linking
+successor to predecessor, and costs a briefing, not work state; then
+resubmit from current state (never replay the possibly-poisoned briefing —
+anything still true reappears in a fresh composition). After two
+consecutive replacements for the same project with no ledgered act between
+them (sub-document §7), stop and page through `tbd notify` — repeated
+futile acts go unnoticed precisely when nobody is watching, the five-nights
+shape. For an appointed supervisor the shipped policy never disposes,
+restarts, or spawns over the operator's own conversation: it pages, and
+nothing more — the binding stands, and the hosted default does not step in
+(a dark supervisor is not a relieved one — the dangling-binding rule
+above). A project's own copy may do what the shipped one declines to:
+nudge first through the public send, replace on a different model or agent
+kind by spawning a session and appointing it (replacement briefs from the
+record, so a cross-harness successor loses nothing durable), fail over on
+provider health, or bind its own budgets. Its correctness is its author's,
+like the wake program's — sufficiency, not guardrails.
 
-**For an appointed supervisor, firing means the operator notification, and
-never more.** TBD does not dispose of, restart, or spawn over the operator's
-own conversation — the session was chosen by a human, and remediation of it
-belongs to that human. The anomaly line and the notification are the whole
-compiled response; the binding stands, the project's cases hold, and the
-hosted default does not step in (a dark supervisor is not a relieved one —
-the dangling-binding rule above). A compiled resume-nudge for a dark
-appointed supervisor is deliberately not built (§15).
-
-**The reroll budget bounds the loop.** If the briefing itself is what wedges
-the desk — a pathological transcript, a poisoned case — the successor stalls
-identically, and an unbounded switch would reroll all night. After two
-consecutive stalled desks on the same project (§13), the daemon stops: the
-project is marked dark, its cases hold, and the anomaly line is the loudest
-thing in the account. The briefing that wedged both desks is parked, named
-in that anomaly line, and never silently redelivered — whatever in it is
-still true reappears in a fresh briefing composed from current state, the
-same principle a pause applies (§9). The budget's reset is an operator
-gesture: toggling the project off and on (§8) re-arms delivery and zeroes
-the count. This bound is insurance against machinery this section
-introduces, not a scar from a lived incident — the old system never rerolled
-a desk at all — but the shape has precedent one layer up: five nights of
-judge sessions escalating a restart for software that never existed. Repeated
-futile acts happen, and they go unnoticed precisely when nobody is watching.
-
-**No third role is needed, and the regress terminates.** Watching a desk
-requires no judgment — ledger silence and a timer are facts — so the desk's
-watcher is the compiled daemon, the same machinery that watches every other
-session. The daemon's own watcher is the out-of-band heartbeat (§14). Nothing
-above that is required.
+**What stays compiled is the floor, and it is fact-shaped.** The contact
+window (sub-document §6) is the clock that rings when the watcher itself
+stops — the desk's watcher is the sweep, and the sweep's watcher is
+compiled, so the regress terminates: sweep watches fleet and desk, contact
+window watches sweep, heartbeat watches daemon (§14). TBD's own acts and
+failures stay loud without judgment: a replacement performed at ensure, a
+spawn failure, a failed delivery, a dangling binding — each is an anomaly
+or lifecycle line and, where it is TBD's own machinery failing, a compiled
+notification. And the unanswered-briefing age is a displayed fact in
+status and the account, so a desk dark under a broken continuation policy
+is visible in the record even when nothing acted — the record never
+implies watchfulness nobody provided, which is the honest form of the
+guarantee the compiled switch used to make. The compiled dead-man's switch
+this replaces is recorded as a rejected alternative in §15.
 
 **Fleet agents are explicitly excluded from all of this.** Auto-compaction is
 fine for them too; no handoff templates, recycle flags, or compaction counters
@@ -2233,17 +2237,35 @@ as a button.
 §3:
 
 ```
-tbd supervise readout --project <name>               # read-only: live-agent facts + machinery state
+tbd supervise readout --project <name>               # read-only: live-agent + supervisor facts, machinery state
 tbd supervise brief   --project <name>               # briefing text on stdin; empty = quiet contact
 tbd supervise ledger  --project <name> --since <t>   # read-only: TBD's own record for the project
 ```
 
-`readout` and `ledger` print and change nothing. `brief` is how cases reach a
+`readout` and `ledger` print and change nothing; the readout includes the
+**supervisor section** — the desk's session state, last ledgered act, and
+unanswered-briefing age — because the supervisor sits inside the sweep's
+perimeter (§9). `brief` is how cases reach a
 desk: composed briefing text on stdin, delivered under the compiled header
 after the per-project rate limit, refused with a pinned exit code while
 the brake is engaged and with the no-arrangement result for a project that
 is off (§8), and counted as liveness contact
 either way (an empty submission is the attested "looked, found nothing").
+Its synchronous result is machine-readable and pinned as contract —
+delivered; refused-paused (exit 75); refused-off; refused-rate-limit;
+refused-size; transport-failed; no-live-supervisor — because TBD makes one
+full delivery attempt and never retries a briefing: persistence is the
+program's, branching on the result and the ledger (§9, §12).
+
+One general surface completes the program's toolkit without joining this
+namespace: **`tbd notify --title … --body …`** raises an operator
+notification through TBD's own notification path — the same machinery
+TBD's compiled alerts ride — attributed to the calling script. It is
+`tbd notify`, not `tbd supervise notify`, because nothing about it is
+supervision-specific: the wake program's external watchdog has the same
+need. TBD's compiled notifications narrow correspondingly to facts TBD
+itself observed — its own failures and its own acts — while judgment-driven
+pages are user-land's, through this verb.
 
 **Desk verbs — acting** (execute, ledger line, 60-second re-check). None is
 gated; each is addressed to the calling desk's project (§3, §5). Desk verbs
@@ -2470,6 +2492,14 @@ records one of four results as an outcome line referencing the action:
   with permissions bypassed is arbitrary instruction injection (§3), so
   delivering it twice is not a neutral event.
 
+That one full attempt — adapter fallback and the evidence-bounded single
+retry included — is the whole of TBD-side persistence for any send. Beyond
+it the outcome stands as recorded, and whether to try again belongs to the
+caller: a sweep program branches on its synchronous result and the ledger
+and resubmits under its own continuation policy (§9), and a desk reads its
+verb's error and judges (§3). TBD attempts once, honestly, and remembers;
+persistence is policy, and policy is authored.
+
 **No confirming outcome means not-delivered, at query time.** The account
 computes delivery status as the join of action and outcome: an action past its
 acknowledgement deadline with no confirming outcome renders as unconfirmed,
@@ -2628,8 +2658,8 @@ to hunt for the value that governs a behavior:
 | Supervisor recycle preference | 50% of the effective window, per desk | §9 |
 | Flush nudges | 50% / 60% / 70% fullness | §9 |
 | Unknown-denominator assumption | 200k, labeled | §2, §9 |
-| Dead-man deadline (briefing unanswered) | 60 min | §9 |
-| Reroll budget | 2 consecutive stalled desks per project | §9 |
+| Desk-overdue threshold (briefing unanswered) | 60 min | shipped sweep program (sub-doc §7) |
+| Desk replacement budget | 2 consecutive per project | shipped sweep program (sub-doc §7) |
 | Per-project briefing rate limit | 1 briefing / 2 min | sub-doc §3, §10 |
 | Paused-refusal exit code (`brief`) | 75 | sub-doc §3, §10 |
 | Transition-hook run timeout | 5 min | §9 |
@@ -2695,13 +2725,27 @@ to inaction at the largest scale.
   have one: a supervisor that merely *received* briefings, on unknown
   conduct, with unattributable verbs, would hollow out every property §5, §8,
   and §9 establish.
-- **A resume-nudge for dark appointed supervisors** — TBD resuming or nudging
-  an appointed supervisor that missed its dead-man deadline. Not built: the
-  session is the operator's own conversation, and the compiled response to
-  its silence is the anomaly line plus the operator notification, never an
-  automatic restart (§9). Revisit on field evidence — the failure signature
-  is appointed supervisors repeatedly going dark with the
-  notification arriving too late to matter, in the record, more than once.
+- **A compiled resume-nudge for dark appointed supervisors** — TBD resuming
+  or nudging an appointed supervisor its project's continuation policy
+  judged dark. Not built as compiled behavior: the session is the
+  operator's own conversation, and TBD itself never restarts it uninvited
+  (§9). A project that wants a nudge authors one — the send surface is
+  public, and its own sweep copy is the place (§9); what stays absent is
+  TBD doing it on its own initiative.
+- **A compiled desk dead-man's switch** — a daemon-owned deadline armed by
+  every briefing delivery, firing hosted-desk replacement or the appointed
+  notification at T plus sixty minutes. Superseded by the sweep perimeter
+  (§9): desk silence is judgment over TBD-timestamped facts (the readout's
+  supervisor section), the deadline is an authored threshold like idle-40,
+  and continuation is the program's policy actuated through public
+  surfaces (`on`, the send, `appoint`, `tbd notify`). What the compiled
+  switch uniquely guaranteed — a page at the deadline no matter what
+  user-land does — is traded for consistency, and the floor that remains
+  is fact-shaped: the contact window, TBD's notifications for its own
+  failures, and the unanswered-briefing age displayed in status and the
+  account. Revisit on evidence — the failure signature is desks dark for
+  hours under live sweeps whose desk conduct silently rotted, in the
+  record, more than once.
 - **A verdict enum / work-arc schema** — interpretations of work differ by
   repository, team, and person. A compiled classification would recreate the
   old system's defect. Stated as a principle in §2: TBD has no theory of
