@@ -120,6 +120,11 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   re-asserts the recorded verdict without spending a review. A new human comment does
   **not** defeat the skip in v1 (accepted: a human can re-request review by pushing or
   re-running the check).
+- **Skip fail-direction**: the skip fires only when the sticky fetch succeeded, both
+  markers parse, and the recorded verdict is exactly `APPROVE` or `REJECT`. Any other
+  state — fetch error, missing or malformed marker, unrecognized verdict — falls
+  through to a full review. The cheap direction to fail is toward spending a review,
+  never toward re-asserting a verdict we can't read.
 
 ### 3.6 PR discussion context (trimmed anti-hijack envelope)
 
@@ -181,7 +186,10 @@ Per the "large or risky new behavior ships default-off" convention, translated t
 
 1. **Shadow**: land as a separate workflow producing a non-required check
    (`claude-review-v2`) posting its own sticky comment. The existing `claude-review`
-   remains the required gate. Soak across several real PRs; compare verdicts.
+   remains the required gate. Soak across several real PRs; compare verdicts. The two
+   workflows must not share a sticky identity: the action's sticky matcher keys on the
+   posting App, so v2 posts through its own marker (and, if the matcher proves too
+   greedy, its own App) rather than updating the v1 comment in place.
 2. **Graduate**: swap the required check from `claude-review` to `claude-review-v2` in
    branch protection (a settings change, not a workflow change — no admin-merge trap),
    then retire the old workflow.
