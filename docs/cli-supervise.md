@@ -201,10 +201,13 @@ tbd supervise scope set <project> in|out|follow-default
 tbd supervise scope list
 ```
 
-The standing scope of TBD's own attention — the per-project half of on/off:
-the switch says whether supervision runs at all, scope says which projects it
-runs for, so "on for these, off for those" is the switch on plus scope
-marks. Default stance ships as `in`.
+The standing scope of TBD's own attention and of its own acting — the
+per-project form of off, complete: an out mark stops the tick, the prompt
+cases, and the desk, and the acting verbs recheck it at the moment of the
+act, so marking out mid-shift beats a drive already decided. The global
+switch is one bit ANDed over every mark, kept for the atomic fleet-wide
+brake. "On for these, off for those" is the switch on plus scope marks.
+Default stance ships as `in`.
 For a project resolved `out`, TBD's defaults stand down — no default tick,
 no prompt cases, no desk, so a submitted briefing has no supervisor to
 reach — while its facts still appear in the readout and the account. Scope,
@@ -333,7 +336,8 @@ payload; it records it verbatim and schedules the 60-second re-check.
 
 Preconditions, checked at the moment of the act — a refusal names the
 condition and is recorded: supervision on, shift open, target inside the
-calling supervisor's project, target not rate-limited, no intervention
+calling supervisor's project and that project in scope, target not
+rate-limited, no intervention
 already in flight for the target, no pending re-check. The transport then
 verifies the pane is alive and is the session it claims to be; a dead or
 wrong pane fails as a recorded delivery error. If the target is showing a

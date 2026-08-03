@@ -748,8 +748,9 @@ the daemon does around each one is accounting, never permission.
 **Ungated speaks to conduct; a short list of actuation preconditions speaks
 to mechanics.** Inside every acting verb call — after the desk decides,
 before any keystroke — the daemon rechecks against current state: the switch
-is on, a shift is active, the target lies inside the calling desk's project,
-the target is not rate-limited and not under a capacity hold, no intervention
+is on, a shift is active, the target lies inside the calling desk's project
+and that project is in scope (§8), the target is not rate-limited and not
+under a capacity hold, no intervention
 is already in flight for the target, and no act re-check is pending on it.
 The last two are the record's own bookkeeping — never double-treat before the
 first treatment is assessed (§12) — and they sit here, at the act, because
@@ -1697,7 +1698,14 @@ whenever delivery has nowhere to go. **Membership is scope, never
 protection.** It builds no wall: the public actuations stay public
 (`terminal.send`, `tbd terminal wake`), so a mark here could never keep
 anything's hands off a terminal, and pretending otherwise would be a gate in
-everything but name (§16's bet, kept). What actually keeps supervision away
+everything but name (§16's bet, kept). What the mark does bind is **TBD's
+own hand**: the acting verbs recheck scope at the moment of the act (§3), so
+marking a project out mid-shift beats a drive its desk decided a minute
+earlier — the same race the off switch wins, at per-project grain. Scope is
+the complete per-project form of "off": attention and TBD's own acting both.
+The global switch adds exactly one thing scope cannot express — the atomic
+fleet-wide brake, one bit ANDed over every mark, so "nothing acts anywhere,
+now" needs no enumeration and disturbs no configuration. What actually keeps supervision away
 from work an operator does not want touched sits upstream, in user-land: the
 sweep program decides what it briefs about, and its exclusions live in its
 own files at whatever grain the project wants — per-terminal, finer than any
