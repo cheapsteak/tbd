@@ -1,8 +1,8 @@
 """Stub-API end-to-end test of the claude-review-v2 session contract.
 
 Runs the REAL `claude` CLI headless against the stub model API
-(stub_server.py), in a throwaway sandboxed project, and asserts the actual
-session contract from docs/specs/2026-08-03-pr-review-fanout-design.md §4:
+(stub_server.py), in a throwaway sandboxed project (harness.py), and asserts
+the actual session contract from docs/specs/2026-08-03-pr-review-fanout-design.md §4:
 
 - the CLI executes scripted tool_use turns (writes the specialist findings file
   and review-result.json) rather than silently retrying,
@@ -11,25 +11,17 @@ session contract from docs/specs/2026-08-03-pr-review-fanout-design.md §4:
 - the real validate.py accepts the written files and computes the verdict.
 
 Zero tokens, fully deterministic. Skipped when no `claude` binary is on PATH,
-so CI without the toolchain cannot flake.
+so CI without the toolchain cannot flake. Sandbox isolation rules (hard-won)
+live in harness.py's module docstring.
 
-Isolation notes (hard-won, keep in sync with the spec):
-- Sandbox via HOME + CLAUDE_CONFIG_DIR, NOT --settings: --settings layers on
-  top of the runner's real global config and leaks it into the test.
-- <config>/.claude.json must pre-accept the trust dialog — an untrusted project
-  silently SKIPS project-settings hooks, and the Stop hook is the test subject.
-- The env is built from scratch (PATH passthrough only), which also keeps the
-  host's proxy variables away from the 127.0.0.1 stub.
-- TMPDIR is redirected into the sandbox: the Stop hook persists its nudge
-  counter under ${TMPDIR:-/tmp}, and a stale counter from a previous run would
-  let the hook give up early.
+This is the single-specialist baseline; the parallel fan-out and resume-loop
+scenarios build on it in test_fanout_contract.py and test_resume_loop.py.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -40,11 +32,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import harness  # noqa: E402
 from stub_server import StubServer, ToolCall, Turn, loop_advanced  # noqa: E402
-
-_PIPELINE_DIR = Path(__file__).resolve().parents[2]  # .github/workflows/claude-review-v2
-_STOP_HOOK = _PIPELINE_DIR / "hooks" / "stop-hook.sh"
-_VALIDATE = _PIPELINE_DIR / "validate.py"
 
 _MINOR_FINDING = {
     "id": "correctness-1",
@@ -65,102 +54,6 @@ _RESULT_DOC = {
 }
 
 
-def _git(project: Path, *args: str) -> None:
-    subprocess.run(
-        [
-            "git",
-            "-c", "user.name=stub",
-            "-c", "user.email=stub@acme.invalid",
-            *args,
-        ],
-        cwd=project,
-        check=True,
-        capture_output=True,
-        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
-    )
-
-
-def _make_project(sandbox: Path) -> Path:
-    """A throwaway git repo wired with the REAL Stop hook via project settings."""
-    project = sandbox / "project"
-    hooks_dir = project / ".claude" / "hooks"
-    hooks_dir.mkdir(parents=True)
-
-    # Copy the real hook in; the settings command points at the copy. The hook
-    # itself resolves review-result.json from ${CLAUDE_PROJECT_DIR:-$PWD},
-    # which Claude Code sets to the project root when invoking hooks.
-    shutil.copy(_STOP_HOOK, hooks_dir / "stop-hook.sh")
-    settings = {
-        "hooks": {
-            "Stop": [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-hook.sh"',
-                        }
-                    ]
-                }
-            ]
-        }
-    }
-    (project / ".claude" / "settings.json").write_text(
-        json.dumps(settings, indent=2), encoding="utf-8"
-    )
-
-    (project / "Sources").mkdir()
-    (project / "Sources" / "AcmeGreeter.swift").write_text(
-        'struct AcmeGreeter {\n    func greet() -> String { "hello acme" }\n}\n',
-        encoding="utf-8",
-    )
-    _git(project, "init", "-q")
-    _git(project, "add", "-A")
-    _git(project, "commit", "-q", "-m", "initial commit")
-    return project
-
-
-def _write_config(sandbox: Path, project: Path) -> None:
-    """Pre-accept every dialog the CLI would otherwise interactively raise.
-
-    hasTrustDialogAccepted matters most: an untrusted project silently skips
-    project-settings hooks, which would turn the Stop-hook assertion into a
-    false pass.
-    """
-    config_dir = sandbox / "config"
-    config_dir.mkdir(parents=True)
-    config = {
-        "hasTrustDialogAccepted": True,
-        "hasCompletedOnboarding": True,
-        "bypassPermissionsModeAccepted": True,
-        "projects": {
-            str(project): {
-                "hasTrustDialogAccepted": True,
-                "hasCompletedProjectOnboarding": True,
-            }
-        },
-    }
-    (config_dir / ".claude.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
-
-
-def _sandbox_env(sandbox: Path, base_url: str) -> dict[str, str]:
-    env = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(sandbox),
-        "CLAUDE_CONFIG_DIR": str(sandbox / "config"),
-        "ANTHROPIC_BASE_URL": base_url,
-        "ANTHROPIC_API_KEY": "stub-key",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "TMPDIR": str(sandbox / "tmp"),
-        "NO_PROXY": "127.0.0.1,localhost",
-        "TERM": "dumb",
-    }
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        # The CLI refuses bypassPermissions as root unless it knows it is in a
-        # throwaway sandbox (CI containers run as root).
-        env["IS_SANDBOX"] = "1"
-    return env
-
-
 @pytest.mark.skipif(
     shutil.which("claude") is None,
     reason="claude CLI not on PATH; stub e2e exercises the real binary",
@@ -168,9 +61,7 @@ def _sandbox_env(sandbox: Path, base_url: str) -> dict[str, str]:
 def test_session_contract_end_to_end() -> None:
     sandbox = Path(tempfile.mkdtemp(prefix="claude-review-v2-e2e-"))
     try:
-        (sandbox / "tmp").mkdir()
-        project = _make_project(sandbox)
-        _write_config(sandbox, project)
+        project = harness.make_sandbox(sandbox)
 
         turns = [
             Turn(
@@ -211,7 +102,7 @@ def test_session_contract_end_to_end() -> None:
                     "bypassPermissions",
                 ],
                 cwd=project,
-                env=_sandbox_env(sandbox, stub.base_url),
+                env=harness.sandbox_env(sandbox, stub.base_url),
                 capture_output=True,
                 text=True,
                 timeout=240,
@@ -243,13 +134,9 @@ def test_session_contract_end_to_end() -> None:
         # result file, so a parsing result file distinguishes the two.
         assert json.loads(result_path.read_text(encoding="utf-8")) == _RESULT_DOC
 
-        # (d) The stub modeled everything the CLI needed. One tolerated
-        # exception, observed against claude 2.1.220: the CLI sends a
-        # /api/hello connectivity preflight to the base URL and proceeds fine
-        # on the 404. It is not model traffic, so the stub stays strict
-        # (404 + record) and only this known preflight is excused here —
-        # count_tokens or any other unmodeled call still fails the test.
-        unexpected = [p for p in stub.capture.unexpected_paths if p != "/api/hello"]
+        # (d) The stub modeled everything the CLI needed (the known /api/hello
+        # preflight excepted — see harness.tolerated_unexpected_paths).
+        unexpected = harness.tolerated_unexpected_paths(stub.capture.unexpected_paths)
         assert unexpected == [], debug
 
         # (c) The REAL validate.py accepts the session's output end to end.
@@ -257,7 +144,7 @@ def test_session_contract_end_to_end() -> None:
             vproc = subprocess.run(
                 [
                     sys.executable,
-                    str(_VALIDATE),
+                    str(harness.VALIDATE),
                     "--specialist-files",
                     "findings-*.json",
                     "--result-file",

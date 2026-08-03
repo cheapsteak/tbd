@@ -13,14 +13,22 @@ executing nothing. A naive request count misreads that retry loop as progress,
 which is why `loop_advanced()` exists and why the SSE framing here is
 non-negotiable.
 
+Parallel fan-out scenarios use CONTENT-KEYED routing (`role_turns`): racing
+subagents make request order nondeterministic, so turns are keyed off a
+ROLE-<NAME> sentinel in each subagent's first message instead — see
+`first_message_text` for why messages[0] only.
+
 Stdlib only. The pure pieces (`Turn.stop_reason`, `sse_events`, `render_sse`,
-`loop_advanced`) are unit-tested without the CLI in test_stub_selftest.py.
+`loop_advanced`, `first_message_text`) are unit-tested without the CLI in
+test_stub_selftest.py.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -63,6 +71,14 @@ class Capture:
     raw_bodies: list[bytes] = field(default_factory=list)
     requests: list[dict | None] = field(default_factory=list)  # parsed JSON (None if unparseable)
     unexpected_paths: list[str] = field(default_factory=list)
+    # Content-keyed routing telemetry, aligned with raw_bodies: the route each
+    # request was served from (None = orchestrator/ordered turns) and a
+    # monotonic arrival timestamp (for interleaving/parallelism assertions).
+    routes: list[str | None] = field(default_factory=list)
+    timestamps: list[float] = field(default_factory=list)
+    # 1-based request indices whose client hung up before/while the response
+    # was being streamed (e.g. the CLI exited during a delayed role's sleep).
+    client_disconnects: list[int] = field(default_factory=list)
 
 
 def loop_advanced(capture: Capture) -> bool:
@@ -202,6 +218,56 @@ def render_sse(turn: Turn, request_idx: int) -> bytes:
     )
 
 
+# --- content-keyed routing ----------------------------------------------------
+
+
+def first_message_text(parsed: dict | None) -> str:
+    """Text of messages[0] only — the routing key for content-keyed mode.
+
+    Parallel subagents race for /v1/messages, so request-ORDER turn indexing is
+    nondeterministic across them. Each subagent's FIRST user message is its
+    Task prompt (carrying a ROLE-<NAME> sentinel) and stays messages[0] as its
+    conversation grows; the orchestrator's messages[0] is the -p prompt.
+    Scanning ONLY the first message keeps routing immune to sentinel echoes
+    elsewhere in the transcript — the orchestrator's own history carries every
+    sentinel inside its assistant Task tool_use blocks, so "sentinel anywhere
+    in the body" would misroute every orchestrator request after the fan-out.
+    """
+    if parsed is None:
+        return ""
+    messages = parsed.get("messages") or []
+    if not messages or not isinstance(messages[0], dict):
+        return ""
+    content = messages[0].get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""
+
+
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that doesn't print benign disconnect tracebacks.
+
+    The exiting CLI resets kept-alive connections; socketserver would print a
+    ConnectionResetError traceback between requests. Suppress only that class
+    of error — anything else still gets the default traceback.
+    """
+
+    # A handler thread sleeping in a role_delay must not block server_close.
+    daemon_threads = True
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
 # --- server ------------------------------------------------------------------
 
 
@@ -211,13 +277,32 @@ class StubServer:
     Context manager. Request N (1-based, /v1/messages only) is answered with
     turns[N-1]; overflow requests get Turn(text=STUB-TERMINAL) so a scenario
     never hangs. Everything observed lands in `.capture`.
+
+    Content-keyed routing: pass `role_turns`, a dict mapping a sentinel string
+    (e.g. "ROLE-CORRECTNESS") to that role's own turn list. A request whose
+    messages[0] text contains a sentinel is served from that role's list with
+    a PER-ROLE request index (see first_message_text for why messages[0]
+    only); requests matching no sentinel fall back to the ordered `turns`.
+    Tool-use ids stay globally unique (the id suffix uses a global counter).
+
+    `role_delays` maps a sentinel to seconds slept before answering that
+    role's FIRST request — simulates a slow specialist for process-boundary
+    scenarios (does the CLI wait for a pending background subagent at exit?).
     """
 
-    def __init__(self, turns: list[Turn]):
+    def __init__(
+        self,
+        turns: list[Turn],
+        role_turns: dict[str, list[Turn]] | None = None,
+        role_delays: dict[str, float] | None = None,
+    ):
         self.turns = list(turns)
+        self.role_turns = {key: list(value) for key, value in (role_turns or {}).items()}
+        self.role_delays = dict(role_delays or {})
         self.capture = Capture()
         self._lock = threading.Lock()
         self._request_count = 0
+        self._route_counts: dict[str | None, int] = {}
         stub = self
 
         class _Handler(BaseHTTPRequestHandler):
@@ -257,28 +342,54 @@ class StubServer:
                     self._record_unexpected(path)
                     self._send_404()
                     return
+                try:
+                    parsed: dict | None = json.loads(body)
+                except (ValueError, UnicodeDecodeError):
+                    parsed = None
+                # Route: sentinel in messages[0] text → that role's turn list
+                # (per-role index); no sentinel → the ordered orchestrator turns.
+                route: str | None = None
+                if stub.role_turns:
+                    key_text = first_message_text(parsed)
+                    for sentinel in sorted(stub.role_turns):
+                        if sentinel in key_text:
+                            route = sentinel
+                            break
                 with stub._lock:
                     stub._request_count += 1
-                    request_idx = stub._request_count
+                    request_idx = stub._request_count  # global — keeps ids unique
+                    stub._route_counts[route] = stub._route_counts.get(route, 0) + 1
+                    route_idx = stub._route_counts[route]
                     stub.capture.raw_bodies.append(body)
-                    try:
-                        stub.capture.requests.append(json.loads(body))
-                    except (ValueError, UnicodeDecodeError):
-                        stub.capture.requests.append(None)
-                if request_idx <= len(stub.turns):
-                    turn = stub.turns[request_idx - 1]
+                    stub.capture.requests.append(parsed)
+                    stub.capture.routes.append(route)
+                    stub.capture.timestamps.append(time.monotonic())
+                turn_list = stub.turns if route is None else stub.role_turns[route]
+                if route_idx <= len(turn_list):
+                    turn = turn_list[route_idx - 1]
                 else:
                     turn = Turn(text=_OVERFLOW_TEXT)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
-                for name, payload in sse_events(turn, request_idx):
-                    self._write_chunk(
-                        f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
-                    )
-                self._write_chunk(b"")  # chunked terminator: 0\r\n\r\n
+                delay = stub.role_delays.get(route) if route is not None else None
+                if delay and route_idx == 1:
+                    time.sleep(delay)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    for name, payload in sse_events(turn, request_idx):
+                        self._write_chunk(
+                            f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+                        )
+                    self._write_chunk(b"")  # chunked terminator: 0\r\n\r\n
+                except (BrokenPipeError, ConnectionResetError):
+                    # Client (an exiting CLI) hung up mid-stream — record, so
+                    # scenarios can assert whether a delayed response was
+                    # abandoned, and keep the connection from being reused.
+                    with stub._lock:
+                        stub.capture.client_disconnects.append(request_idx)
+                    self.close_connection = True
 
             def do_GET(self) -> None:
                 self._record_unexpected(urlsplit(self.path).path)
@@ -286,7 +397,7 @@ class StubServer:
 
             do_PUT = do_DELETE = do_PATCH = do_HEAD = do_GET
 
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._httpd = _QuietThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
 
     @property

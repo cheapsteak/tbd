@@ -2,7 +2,10 @@
 
 Pin the pieces the e2e leans on: SSE event framing/order, stop_reason mapping,
 unique tool ids, request→turn indexing (incl. overflow), the count_tokens/404
-recording, and loop_advanced rejecting the silent-retry signature.
+recording, loop_advanced rejecting the silent-retry signature, and
+content-keyed routing (sentinel match on messages[0] only, per-role indexing,
+ordered-turns fallback, per-role first-request delay, quiet disconnect
+handling).
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import http.client
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -19,6 +23,7 @@ from stub_server import (  # noqa: E402
     StubServer,
     ToolCall,
     Turn,
+    first_message_text,
     loop_advanced,
     render_sse,
     sse_events,
@@ -191,3 +196,124 @@ def test_query_string_does_not_defeat_path_match() -> None:
         status, _, body = _post(stub.base_url, "/v1/messages?beta=true", {"messages": []})
         assert status == 200 and b"beta-ok" in body
         assert stub.capture.unexpected_paths == []
+
+
+# --- content-keyed routing ----------------------------------------------------
+
+
+def _user_msg(text: str, blocks: bool = False) -> dict:
+    if blocks:
+        return {"role": "user", "content": [{"type": "text", "text": text}]}
+    return {"role": "user", "content": text}
+
+
+def test_first_message_text_reads_only_messages_zero() -> None:
+    parsed = {
+        "messages": [
+            _user_msg("the -p prompt, no sentinel"),
+            {"role": "assistant",
+             "content": [{"type": "tool_use", "id": "t", "name": "Task",
+                          "input": {"prompt": "ROLE-CORRECTNESS go"}}]},
+            _user_msg("ROLE-CORRECTNESS echoed in a later user message"),
+        ]
+    }
+    assert "ROLE-CORRECTNESS" not in first_message_text(parsed)
+    # Both string and text-block first messages are readable.
+    assert first_message_text({"messages": [_user_msg("ROLE-X hi")]}) == "ROLE-X hi"
+    assert first_message_text({"messages": [_user_msg("ROLE-X hi", blocks=True)]}) == "ROLE-X hi"
+    assert first_message_text(None) == ""
+    assert first_message_text({"messages": []}) == ""
+
+
+def _routed_stub() -> StubServer:
+    return StubServer(
+        [Turn(text="orch-1"), Turn(text="orch-2")],
+        role_turns={
+            "ROLE-ALPHA": [Turn(text="alpha-1"), Turn(text="alpha-2")],
+            "ROLE-BETA": [Turn(text="beta-1")],
+        },
+    )
+
+
+def test_routing_sentinel_match_and_per_role_indexing() -> None:
+    with _routed_stub() as stub:
+        # Interleave the two roles: each keeps its OWN request index.
+        for expected, first_msg in [
+            ("alpha-1", "ROLE-ALPHA do the thing"),
+            ("beta-1", "ROLE-BETA do the thing"),
+            ("alpha-2", "ROLE-ALPHA do the thing"),
+            ("STUB-TERMINAL", "ROLE-BETA do the thing"),  # beta overflows at 2
+        ]:
+            _, _, body = _post(
+                stub.base_url, "/v1/messages", {"messages": [_user_msg(first_msg)]}
+            )
+            assert expected.encode() in body, expected
+        assert stub.capture.routes == [
+            "ROLE-ALPHA", "ROLE-BETA", "ROLE-ALPHA", "ROLE-BETA",
+        ]
+
+
+def test_routing_falls_back_to_ordered_turns_without_sentinel() -> None:
+    with _routed_stub() as stub:
+        # No sentinel → orchestrator turns, still order-indexed; the roles'
+        # traffic in between must not advance the orchestrator's index.
+        _, _, body = _post(stub.base_url, "/v1/messages", {"messages": [_user_msg("hi")]})
+        assert b"orch-1" in body
+        _post(stub.base_url, "/v1/messages", {"messages": [_user_msg("ROLE-ALPHA x")]})
+        _, _, body = _post(stub.base_url, "/v1/messages", {"messages": [_user_msg("hi again")]})
+        assert b"orch-2" in body
+        assert stub.capture.routes == [None, "ROLE-ALPHA", None]
+
+
+def test_routing_ignores_sentinel_outside_first_message() -> None:
+    with _routed_stub() as stub:
+        # The orchestrator's history carries the sentinel in an assistant
+        # Task block — that must NOT reroute it off its ordered turns.
+        messages = [
+            _user_msg("the -p prompt"),
+            {"role": "assistant",
+             "content": [{"type": "tool_use", "id": "t", "name": "Task",
+                          "input": {"prompt": "ROLE-ALPHA go"}}]},
+            {"role": "user",
+             "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]},
+        ]
+        _, _, body = _post(stub.base_url, "/v1/messages", {"messages": messages})
+        assert b"orch-1" in body
+        assert stub.capture.routes == [None]
+
+
+def test_role_delay_applies_to_first_request_only() -> None:
+    delay = 0.4
+    stub = StubServer(
+        [],
+        role_turns={"ROLE-SLOW": [Turn(text="slow-1"), Turn(text="slow-2")]},
+        role_delays={"ROLE-SLOW": delay},
+    )
+    with stub:
+        request = {"messages": [_user_msg("ROLE-SLOW go")]}
+        start = time.monotonic()
+        _post(stub.base_url, "/v1/messages", request)
+        first_elapsed = time.monotonic() - start
+        start = time.monotonic()
+        _post(stub.base_url, "/v1/messages", request)
+        second_elapsed = time.monotonic() - start
+    assert first_elapsed >= delay, f"first request not delayed ({first_elapsed:.3f}s)"
+    # Only a lower bound is asserted for the delayed request; for the second,
+    # merely require it beat the delay (loose enough not to flake on slow CI).
+    assert second_elapsed < delay, f"delay leaked onto request 2 ({second_elapsed:.3f}s)"
+
+
+def test_quiet_server_suppresses_benign_disconnect_tracebacks(capsys) -> None:
+    with StubServer([]) as stub:
+        try:
+            raise ConnectionResetError("peer reset")
+        except ConnectionResetError:
+            stub._httpd.handle_error(None, ("127.0.0.1", 1))
+        benign = capsys.readouterr()
+        try:
+            raise ValueError("real bug")
+        except ValueError:
+            stub._httpd.handle_error(None, ("127.0.0.1", 1))
+        real = capsys.readouterr()
+    assert benign.err == "" and benign.out == ""
+    assert "ValueError" in real.err  # everything else still gets a traceback
