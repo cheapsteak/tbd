@@ -88,6 +88,14 @@ The relaxation is scoped to publication alone. Content eligibility is unchanged,
 
 Note what this check is worth: it protects *discoverability*, not reachability. Archive keeps the branch either way, so unpushed commits are not destroyed by removal — they merely become harder to find. That is why plain `git worktree remove` refuses on dirty content but not on unpushed commits.
 
+### Refuse in place, rather than snapshot and proceed
+
+Two designs were available for content that cannot be cleared. Archive refuses and changes nothing. The alternative — snapshot the dirty bytes somewhere durable, then remove the worktree — is what TBD's own GC reap path already does, and what several comparable tools do (auto-commit before removal, or snapshot everything and make it undoable).
+
+Refusal is chosen here for two reasons. It leaves the user's state exactly as they left it rather than manufacturing machine-authored commits they did not ask for and will later have to find and prune. And an archive is a deliberate human gesture on a specific worktree, unlike a GC sweep over worktrees nobody has touched in days: there is someone present to read the refusal and decide, which is precisely the condition under which asking beats guessing.
+
+The cost is UX friction, and it is real — a snapshot-then-archive middle path would dissolve most of it. That is the obvious follow-up if the gate proves too aggressive in practice, and it is a change of policy rather than of mechanism: the classifier already reports exactly which paths would need preserving, and `ReapSnapshot` already knows how to preserve them.
+
 ### A failing archive hook is not a safety refusal
 
 The hook stops the archive when it fails — it may be the very thing preserving work elsewhere, so continuing past it would be unsafe. But it is reported as its own error, naming the hook rather than a blocking summary.
