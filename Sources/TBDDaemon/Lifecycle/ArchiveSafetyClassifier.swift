@@ -120,7 +120,7 @@ public struct ArchiveSafetyClassifier: Sendable {
     if knownPublished {
       headIsPublished = true
     } else {
-      headIsPublished = await git.isHeadReachableFromAnyRemote(worktreePath: worktreePath)
+      headIsPublished = await git.isHeadPublished(worktreePath: worktreePath)
     }
     let entries: [GitWorktreeStatusEntry]
     do {
@@ -155,12 +155,20 @@ public struct ArchiveSafetyClassifier: Sendable {
       let manifest = loadManifest(data: trustedAttestation.manifestData),
       manifest.producerVersion == trustedAttestation.producerVersion
     else {
+      // The overwhelmingly common case is a worktree with ordinary
+      // uncommitted work and no manifest anywhere near it. Naming a missing
+      // bootstrap attestation there describes a mechanism the user has never
+      // heard of instead of the thing they actually have.
+      let reason =
+        manifestEntry == nil
+        ? "uncommitted or untracked content"
+        : "no matching trusted out-of-worktree bootstrap attestation"
       return ArchiveSafetyReport(
         findings: entries.map {
           ArchiveArtifactFinding(
             path: $0.path,
             category: .uniqueUnpublishedWork,
-            reason: "no matching trusted out-of-worktree bootstrap attestation"
+            reason: reason
           )
         },
         headIsPublished: headIsPublished
