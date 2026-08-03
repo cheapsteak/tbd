@@ -613,9 +613,9 @@ and it was too coarse to ratify — a bare `git` prefix would have waved through
 merge and auto-merge API calls a repo's `ask` rules deliberately gate. A list
 written in a vocabulary the tool invented, matched against text the tool
 scraped, is two guesses stacked. Note what the new rule does *not* rescue here:
-the send shares the typing with that machine, and nothing else. That machine was
-checked on 2026-07-27: `~/.fleet/` is absent, no process is running, and no
-`launchd` job remains.
+the send shares the typing with that machine, and nothing else. A field check
+of that machine found `~/.fleet/` absent, no process running, and no
+`launchd` job remaining.
 
 ## 3. Modes and the trust model (P0-2, P0-3)
 
@@ -1809,7 +1809,7 @@ The trace is the ledger's: the `on` line's roster snapshot and per-agent
 under watch, and since when* — enrollment as a first-class event, arrived at
 by recording the derivation rather than replacing it.
 
-### Prior art in the current system (and what #509 changed)
+### Prior art in the current system
 
 Before the redesign, the system represented these concepts in four ways. It had a
 hardcoded `STANDING_RULE` prompt string, which compiled one team's closeout
@@ -1822,8 +1822,11 @@ desk agent to consult `approved-prs.jsonl`, so it was binding only until the
 model forgot. And the desk's notes file served as both memory and action log,
 creating the "self-report" problem in P1-7.
 
-PR #509, merged on 2026-07-26, deleted the merge gate and its clearance and audit
-stores, because GitHub branch protection now decides whether a PR may merge. Two
+The merge gate and its clearance and audit stores are gone from the current
+system, because whether a PR may merge is the forge's decision: branch
+protection enforces approval-bound-to-content from outside the trust boundary
+of the machine running the agents, a claim no local gate can make
+(`docs/nightwatch.md` §1). Two
 of those four defects are worth carrying forward as warnings rather than as
 requirements. The `STANDING_RULE` string is why conduct is authored per project
 here instead of compiled (§3). The self-report problem is why the daemon writes
