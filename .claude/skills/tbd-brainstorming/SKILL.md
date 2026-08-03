@@ -50,6 +50,9 @@ While designing, surface these existing TBD rules where they apply (all in `CLAU
 - Database migrations must update the shared model (migration + GRDB record + Codable model, one commit).
 - New delays and timers take an injected clock.
 
+When deciding whether new behavior is compiled or user-land, run the placement battery in
+[`docs/theory-placement.md`](../../../docs/theory-placement.md).
+
 ## Anti-Pattern: "This Is Too Simple To Need A Design"
 
 Once work qualifies above, it goes through this process — however small the diff looks. Qualifying work is exactly where unexamined assumptions cause the most wasted work: a one-line default flip is a migration, a "tiny" flag is a config column. The design can be short (a few sentences), but you MUST present it and get approval.
