@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-result.schema.json",
+  "title": "Merged review result (review-result.json)",
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "disposition": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dispositionEntry" }
+    },
+    "comment_body": { "type": "string" }
+  },
+  "required": ["findings", "disposition", "comment_body"],
+  "additionalProperties": false,
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "severity": { "enum": ["HIGH", "MEDIUM", "MINOR"] },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "required": ["id", "file", "severity", "title"],
+      "additionalProperties": false
+    },
+    "dispositionEntry": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "enum": ["kept", "merged", "downgraded", "dropped"] },
+        "note": { "type": "string" }
+      },
+      "required": ["id", "action"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "action": { "enum": ["downgraded", "dropped"] } },
+            "required": ["action"]
+          },
+          "then": { "required": ["note"] }
+        }
+      ]
+    }
+  }
+}
