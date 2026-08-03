@@ -112,7 +112,10 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   the merge. The model never types the verdict. The existing Stop hook changes duty:
   instead of gating on `claude-verdict.txt` content, it refuses to end the session until
   `review-result.json` exists and parses. The enforce step's fail-closed behavior
-  (missing file ⇒ red check) carries over unchanged.
+  (missing file ⇒ red check) carries over unchanged. The validate script also
+  enforces specialist-set completeness (`--expected-specialists`): if any named
+  specialist never produced a findings file — e.g. the orchestrator merged before
+  all background specialists completed — it fails closed with no verdict written.
 - **Sticky markers**: the sticky comment carries
   `<!-- last-reviewed-patch-id: … -->` and `<!-- last-verdict: … -->` HTML comments.
 - **Skip**: the prepare script computes `git patch-id --stable` over
@@ -204,8 +207,19 @@ Per the "large or risky new behavior ships default-off" convention, translated t
 - **Discussion fingerprint** (new comments defeat the patch-id skip): add it the first
   time an author's clarifying comment goes unreviewed because the skip suppressed a
   round.
-- **Interactive PTY driver** (nudges, deadline steering, salvage of partial runs): add
-  only if fan-out reviews start exhausting the headless turn budget the way #364 did.
+- **Resume-based retry loop** (the first upgrade rung if reviews die incomplete): a
+  bounded workflow loop of run → check `review-result.json` → `claude -p --resume
+  <session_id>` with a corrective prompt. Verified against the real CLI: session state
+  persists under `CLAUDE_CONFIG_DIR` and resumed requests carry the full prior history;
+  the process does not exit while background specialists are pending, so their findings
+  files land before the post-exit check runs. Two mechanics are mandatory: reset the
+  Stop hook's nudge-counter file between invocations (a stale counter at the ceiling
+  silently disarms the hook — measured), and the corrective prompt must point at the
+  on-disk `findings-*.json`, whose content never enters the orchestrator's own
+  transcript. Add it the first time the shadow soak produces an incomplete review.
+- **Interactive PTY driver** (mid-flight nudges, deadline steering): the last-resort
+  rung, only if the resume loop above proves insufficient — e.g. sessions wedging
+  rather than ending, which a between-invocation loop cannot reach.
 - **Inline review comments**: the current gate deliberately posts a single sticky
   comment; v1 keeps that.
 

@@ -487,10 +487,15 @@ jobs:
         # list covers every specialist finding id, computes the verdict from the
         # merged findings' severities, and writes verdict.txt. Any failure exits
         # non-zero and no verdict is written — the gate fails closed.
+        # --expected-specialists makes completeness of the specialist set a script
+        # check, not prompt prose: if any of the three named specialists never
+        # produced a findings file (orchestrator merged early), validate fails
+        # closed instead of approving on a partial review.
         run: |
           set -uo pipefail
           if ! python3 .github/workflows/claude-review-v2/validate.py \
                  --specialist-files 'findings-*.json' \
+                 --expected-specialists 'correctness,concurrency,conventions' \
                  --result-file review-result.json; then
             echo "::error::Claude review v2 produced no valid result (missing/invalid findings or result file, or uncovered dispositions) — failing closed. Re-run the review."
             exit 1

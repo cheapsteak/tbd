@@ -4,6 +4,7 @@ hand-built tmp_path fixtures. No subprocess, no network."""
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ import pytest
 from validate import (
     SchemaValidationError,
     check_disposition,
+    main,
+    missing_specialists,
     validate_findings_file,
     validate_result_file,
     verdict_from_findings,
@@ -101,6 +104,48 @@ def test_disposition_extra_entries_are_not_flagged() -> None:
     # Coverage check only: a disposition entry for a finding we don't know
     # about is not this function's business.
     assert check_disposition(["a-1"], [_entry("a-1"), _entry("ghost-9")]) == []
+
+
+# --- missing_specialists ----------------------------------------------------
+
+
+def test_missing_specialists_all_present() -> None:
+    expected = ["correctness", "concurrency", "conventions"]
+    assert missing_specialists(expected, expected) == []
+
+
+def test_missing_specialists_one_missing() -> None:
+    expected = ["correctness", "concurrency", "conventions"]
+    seen = ["correctness", "conventions"]
+    assert missing_specialists(expected, seen) == ["concurrency"]
+
+
+def test_missing_specialists_two_missing_in_expected_order() -> None:
+    expected = ["correctness", "concurrency", "conventions"]
+    assert missing_specialists(expected, ["concurrency"]) == [
+        "correctness",
+        "conventions",
+    ]
+
+
+def test_missing_specialists_all_missing() -> None:
+    expected = ["correctness", "concurrency"]
+    assert missing_specialists(expected, []) == expected
+
+
+def test_missing_specialists_duplicates_in_seen_are_fine() -> None:
+    # Two findings files for the same specialist is last-write-wins upstream,
+    # not a completeness failure.
+    expected = ["correctness", "concurrency"]
+    seen = ["correctness", "correctness", "concurrency"]
+    assert missing_specialists(expected, seen) == []
+
+
+def test_missing_specialists_unexpected_seen_is_ignored() -> None:
+    # An extra specialist never expected doesn't satisfy (or break) the check.
+    expected = ["correctness"]
+    assert missing_specialists(expected, ["correctness", "acme-extra"]) == []
+    assert missing_specialists(expected, ["acme-extra"]) == ["correctness"]
 
 
 # --- schema validation ------------------------------------------------------
@@ -252,3 +297,119 @@ def test_unreadable_json_fails_with_filename(tmp_path: Path) -> None:
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(SchemaValidationError, match="findings-broken.json"):
         validate_findings_file(str(path))
+
+
+# --- main: --expected-specialists completeness (in-process, no subprocess) ---
+
+
+def _write_specialist_file(tmp_path: Path, name: str) -> None:
+    _write(
+        tmp_path / f"findings-{name}.json",
+        {"specialist": name, "findings": []},
+    )
+
+
+def _write_empty_result(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "review-result.json",
+        {"findings": [], "disposition": [], "comment_body": "## Review\nClean."},
+    )
+
+
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    expected_specialists: str | None,
+) -> int:
+    """Run main() against tmp_path fixtures; verdict.txt lands in tmp_path."""
+    argv = [
+        "validate.py",
+        "--specialist-files",
+        str(tmp_path / "findings-*.json"),
+        "--result-file",
+        str(tmp_path / "review-result.json"),
+    ]
+    if expected_specialists is not None:
+        argv += ["--expected-specialists", expected_specialists]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.chdir(tmp_path)
+    return main()
+
+
+def test_main_all_expected_specialists_present_passes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in ("correctness", "concurrency", "conventions"):
+        _write_specialist_file(tmp_path, name)
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(
+        monkeypatch, tmp_path, "correctness,concurrency,conventions"
+    )
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
+
+
+def test_main_one_missing_specialist_fails_and_names_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for name in ("correctness", "conventions"):
+        _write_specialist_file(tmp_path, name)
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(
+        monkeypatch, tmp_path, "correctness,concurrency,conventions"
+    )
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "concurrency" in err
+    assert "produced no findings file" in err
+    # Fail closed: a partial fan-out must never yield a verdict.
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_two_missing_specialists_both_named(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(
+        monkeypatch, tmp_path, "correctness,concurrency,conventions"
+    )
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "concurrency" in err
+    assert "conventions" in err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_flag_absent_keeps_old_behavior_single_file_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The e2e suite invokes validate.py with a single specialist and no
+    # --expected-specialists; that must keep passing.
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, None)
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
+
+
+def test_main_unexpected_extra_specialist_warns_but_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for name in ("correctness", "concurrency", "conventions", "acme-extra"):
+        _write_specialist_file(tmp_path, name)
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(
+        monkeypatch, tmp_path, "correctness,concurrency,conventions"
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "warning" in out
+    assert "acme-extra" in out
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"

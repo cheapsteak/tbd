@@ -5,6 +5,8 @@ Deterministic bookend that runs AFTER the model review session
 (docs/specs/2026-08-03-pr-review-fanout-design.md §3.2, §3.4, §3.5). It:
 
 - schema-validates every specialist findings file and the merged review-result,
+- with `--expected-specialists`, checks that every named specialist actually
+  produced a findings file (a partial fan-out must never read as a clean run),
 - checks the disposition list COVERS every specialist finding ID (presence only —
   the disposition's judgment is never evaluated here, spec §3.4),
 - computes the verdict from the merged findings' severities (the model never
@@ -57,6 +59,18 @@ def verdict_from_findings(findings: list[dict]) -> str:
         if severity in _REJECT_SEVERITIES:
             return "REJECT"
     return "APPROVE"
+
+
+def missing_specialists(expected: list[str], seen: list[str]) -> list[str]:
+    """Return expected specialist names with no findings file, in expected order.
+
+    Set membership only: duplicates in `seen` are fine (two files for the same
+    specialist is last-write-wins upstream, not this function's business), and
+    names in `seen` that were never expected are ignored here — main() reports
+    those as a warning, not a failure.
+    """
+    seen_set = set(seen)
+    return [name for name in expected if name not in seen_set]
 
 
 def check_disposition(
@@ -135,6 +149,15 @@ def main() -> int:
     parser.add_argument(
         "--result-file", required=True, help="path to review-result.json"
     )
+    parser.add_argument(
+        "--expected-specialists",
+        default=None,
+        help=(
+            "comma-separated specialist names that must each have produced a "
+            "findings file, e.g. 'correctness,concurrency,conventions'. "
+            "Omitted: no completeness check (any non-empty glob passes)."
+        ),
+    )
     args = parser.parse_args()
 
     failed = False
@@ -150,6 +173,7 @@ def main() -> int:
         failed = True
 
     specialist_ids: list[str] = []
+    seen_specialists: list[str] = []
     for path in specialist_paths:
         try:
             data = validate_findings_file(path)
@@ -157,8 +181,37 @@ def main() -> int:
             print(f"error: {exc}", file=sys.stderr)
             failed = True
             continue
+        seen_specialists.append(data["specialist"])
         specialist_ids.extend(finding["id"] for finding in data["findings"])
         print(f"ok: {path} ({len(data['findings'])} finding(s))")
+
+    if args.expected_specialists is not None:
+        expected = [
+            name.strip()
+            for name in args.expected_specialists.split(",")
+            if name.strip()
+        ]
+        missing = missing_specialists(expected, seen_specialists)
+        if missing:
+            # Fail closed: a specialist with no findings file means that whole
+            # review lens never ran (e.g. the orchestrator merged before all
+            # background specialists completed) — indistinguishable from a
+            # clean run without this check.
+            print(
+                "error: expected specialist(s) produced no findings file: "
+                f"{', '.join(missing)} — that review lens never ran "
+                "(orchestrator may have merged before all specialists "
+                "completed); failing closed",
+                file=sys.stderr,
+            )
+            failed = True
+        unexpected = sorted(set(seen_specialists) - set(expected))
+        if unexpected:
+            print(
+                "warning: findings file(s) from unexpected specialist(s): "
+                f"{', '.join(unexpected)} — not in --expected-specialists; "
+                "validated and merged as usual"
+            )
 
     result = None
     try:
