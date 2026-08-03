@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "findings.schema.json",
+  "title": "Specialist findings file (findings-<name>.json)",
+  "type": "object",
+  "properties": {
+    "specialist": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "required": ["specialist", "findings"],
+  "additionalProperties": false,
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "severity": { "enum": ["HIGH", "MEDIUM", "MINOR"] },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "required": ["id", "file", "severity", "title"],
+      "additionalProperties": false
+    }
+  }
+}
