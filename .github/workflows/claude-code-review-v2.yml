@@ -7,7 +7,7 @@
 #     and the check never reports.
 #
 # This is the v2 review pipeline (spec §3): deterministic bookend scripts around one
-# model session that fans out to three specialist subagents. During the shadow soak
+# model session that fans out to two specialist subagents. During the shadow soak
 # (spec §5) the `claude-review-v2` check is NOT required — `claude-review` (v1)
 # remains the merge gate. Graduation is a branch-protection settings change, not a
 # workflow change.
@@ -407,7 +407,7 @@ jobs:
           # validate.py computes it from the findings' severities.
           settings: ${{ github.workspace }}/.github/workflows/claude-review-v2/hooks/settings.json
           prompt: |
-            You are the ORCHESTRATOR of a fan-out code review of ${{ github.repository }}/pull/${{ github.event.pull_request.number }} (base branch: ${{ github.event.pull_request.base.ref }}). You spawn exactly three specialist subagents, merge their findings, post one review comment, and write one machine-read result file. A validation script — not you — computes the final verdict.
+            You are the ORCHESTRATOR of a fan-out code review of ${{ github.repository }}/pull/${{ github.event.pull_request.number }} (base branch: ${{ github.event.pull_request.base.ref }}). You spawn exactly two specialist subagents, merge their findings, post one review comment, and write one machine-read result file. A validation script — not you — computes the final verdict.
 
             ENVIRONMENT: The repository is checked out locally at the PR's head commit WITH FULL GIT HISTORY (all branches). Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. Get the diff from `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD` or `gh pr diff`; `git log` and `git blame` are available for history checks. Do not run `git fetch` — everything is already local. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
 
@@ -421,7 +421,7 @@ jobs:
             - Severity is HIGH, MEDIUM, or MINOR. High severity should NOT be measured as high relative to other feedback, but should try to use an objective scale.
             - An empty findings array is a valid result — do not invent findings to appear thorough.
 
-            STEP 1 — FAN OUT. Spawn EXACTLY three specialists via the Task tool, all three in parallel (one message, three Task calls). The Task tool results return IMMEDIATELY with launch acknowledgments — the specialists run in the background, and each one's completion arrives later as an automated background-task notification. A launch acknowledgment is NOT a specialist's output. Each specialist must be told: review the diff (`git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`); use only Read/Glob/Grep/git commands — run NO GitHub commands (no `gh`, no comment tools) and post nothing; write ONLY the file `findings-<name>.json` in the repository root with the Write tool, valid JSON per `.github/workflows/claude-review-v2/schemas/findings.schema.json`: `{"specialist": "<name>", "findings": [...]}` where each finding has required `id` (e.g. "<name>-1"), `file`, `severity` (HIGH/MEDIUM/MINOR), `title`, and should carry `line`, `body`, and `confidence` (0..1) whenever known. Include the SHARED REVIEW POLICY and the UNTRUSTED DATA NOTICE in each specialist prompt.
+            STEP 1 — FAN OUT. Spawn EXACTLY two specialists via the Task tool, both in parallel (one message, two Task calls). The Task tool results return IMMEDIATELY with launch acknowledgments — the specialists run in the background, and each one's completion arrives later as an automated background-task notification. A launch acknowledgment is NOT a specialist's output. Each specialist must be told: review the diff (`git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`); use only Read/Glob/Grep/git commands — run NO GitHub commands (no `gh`, no comment tools) and post nothing; write ONLY the file `findings-<name>.json` in the repository root with the Write tool, valid JSON per `.github/workflows/claude-review-v2/schemas/findings.schema.json`: `{"specialist": "<name>", "findings": [...]}` where each finding has required `id` (e.g. "<name>-1"), `file`, `severity` (HIGH/MEDIUM/MINOR), `title`, and should carry `line`, `body`, and `confidence` (0..1) whenever known. Include the SHARED REVIEW POLICY and the UNTRUSTED DATA NOTICE in each specialist prompt.
 
             Specialist (a) — `correctness`, writes findings-correctness.json: the logic of the diff — bugs, broken edge cases, incorrect error handling, claims the tests don't actually prove. Include the following section in its prompt:
 
@@ -435,9 +435,14 @@ jobs:
 
               Record the assumption table (claim → verified/refuted → file:line evidence) in a local notes file in the working directory (Write tool, not shell redirection; not /tmp/). Before recording a refuted premise as a finding, re-check the evidence — a misread grep is not a refutation; any premise you still judge refuted after that re-check must appear in your findings file. If the PR is not guard/safety-shaped, skip this section entirely — do not pad reviews of mechanical changes with it.
 
-            Specialist (b) — `concurrency`, writes findings-concurrency.json: NIO event-loop discipline (all ChannelHandlerContext property access — context.channel, context.pipeline — must happen on the channel's event loop, wrapped in `context.eventLoop.execute { ... }`, never pre-checked from another thread); actor isolation and Sendable correctness; the injected-clock rule (anything that sleeps, debounces, polls, or times out takes `clock: any Clock<Duration> = ContinuousClock()` as its last initializer parameter; persisted/compared timestamps use the Date seam instead — Duration is behavior, Date is data); and unbundled-executable constraints (TBDApp is a bare SPM executable, so bundle-requiring APIs — UNUserNotificationCenter.current(), Info.plist reads — crash or return nil unless guarded with `Bundle.main.bundleIdentifier != nil`). See the matching CLAUDE.md sections for each rule.
+              Concurrency and platform correctness is also in your scope:
+              - NIO event-loop discipline (all ChannelHandlerContext property access — context.channel, context.pipeline — must happen on the channel's event loop, wrapped in `context.eventLoop.execute { ... }`, never pre-checked from another thread)
+              - actor isolation and Sendable correctness
+              - the injected-clock rule (anything that sleeps, debounces, polls, or times out takes `clock: any Clock<Duration> = ContinuousClock()` as its last initializer parameter; persisted/compared timestamps use the Date seam instead — Duration is behavior, Date is data)
+              - unbundled-executable constraints (TBDApp is a bare SPM executable, so bundle-requiring APIs — UNUserNotificationCenter.current(), Info.plist reads — crash or return nil unless guarded with `Bundle.main.bundleIdentifier != nil`)
+              See the matching CLAUDE.md sections for each rule.
 
-            Specialist (c) — `conventions`, writes findings-conventions.json: the repository's CLAUDE.md rules. Include the following four paragraphs in its prompt:
+            Specialist (b) — `conventions`, writes findings-conventions.json: the repository's CLAUDE.md rules. Include the following five paragraphs in its prompt:
 
               Default-off flag requirement: a PR that introduces NEW autonomous or destructive behavior — anything that acts without a user gesture (background sweeps, timers, "auto-" anything), kills processes, deletes or mutates persisted state, or sends input to sessions — or that wholesale-replaces a load-bearing path (rendering, input routing, persistence) must gate that behavior behind a flag that defaults to OFF (see the CLAUDE.md section "Large or risky new behavior ships behind a default-off flag"). An ungated introduction with no justification in the PR description is High severity for autonomous or destructive behavior, Medium for a wholesale path replacement. A written justification can satisfy this (e.g. the behavior only runs on an explicit user action, or it extends behavior already behind a flag). Do not demand flags for bug fixes, small additive UI, refactors, changes to already-gated behavior, or DB schema migrations themselves (they cannot be flag-gated; the CLAUDE.md migration rules govern them) — flag sprawl is its own defect.
 
@@ -447,7 +452,9 @@ jobs:
 
               Migration triple-update: a PR that adds a DB column in Sources/TBDDaemon/Database/Database.swift must, in the same commit, (1) add the column with a `.defaults(to:)` value in a NEW sequentially-numbered migration (never modifying an existing one), (2) update the GRDB Record type in Sources/TBDDaemon/Database/, and (3) update the Codable model in Sources/TBDShared/Models.swift with the new field optional or defaulted so existing JSON/rows still decode. A missing leg is High severity. Spec-required changes: anything that is not a bug fix or a minor UI change should reference a committed spec in docs/specs/ (or explicitly say in the PR description why none is needed); flag its absence as Medium severity. If a change needs a feature flag, it needs a spec.
 
-            STEP 2 — MERGE. Wait until you have received the background-task completion notification for ALL THREE specialists before merging — do not merge on launch acknowledgments, and do not merge after only one or two completions. Only then read the three findings files. Deduplicate: findings from different specialists on the same file within about 3 lines of each other are the same finding — merge them, keeping the clearest title/body and the higher severity unless you have a stated reason to reconcile downward. Weigh the PR discussion (discussion-context.txt) here: a finding the author has already substantively addressed in discussion may be downgraded or dropped, with the reason recorded. Also drop findings you judge invalid or persnickety on re-examination, and keep a count of how many you dropped as invalid. Then use the Write tool to create `review-result.json` in the repository root, valid JSON per `.github/workflows/claude-review-v2/schemas/review-result.schema.json`, containing:
+              Theory placement: when the diff compiles a new fork, constant, threshold, or default that answers a question two reasonable projects could answer differently, that is a theory in the sense of docs/theory-placement.md — read that doc and run its placement battery before flagging. First distinguish a theory from its three non-theory neighbors, which compile freely: a fact (differing isn't reasonable), a mechanism (differing isn't meaningful — no project's convention changes what a dead tmux pane is), and an invariant (differing is corruption, not customization); telling them apart is most of the work, and theories usually arrive fused to a mechanism inside a noun. Flag as Medium severity a compiled theory that neither the PR description nor a committed spec shows a human chose — the failure this lens prevents is TBD holding a theory nobody chose, because the code happened to be where a decision landed; it is not the existence of compiled theories, and the doc names what legitimately stays compiled. Explicitly do not flag mechanisms, facts, invariants, or theories whose choice is documented.
+
+            STEP 2 — MERGE. Wait until you have received the background-task completion notification for BOTH specialists before merging — do not merge on launch acknowledgments, and do not merge after only one completion. Only then read the two findings files. Deduplicate: findings from different specialists on the same file within about 3 lines of each other are the same finding — merge them, keeping the clearest title/body and the higher severity unless you have a stated reason to reconcile downward. Weigh the PR discussion (discussion-context.txt) here: a finding the author has already substantively addressed in discussion may be downgraded or dropped, with the reason recorded. Also drop findings you judge invalid or persnickety on re-examination, and keep a count of how many you dropped as invalid. Then use the Write tool to create `review-result.json` in the repository root, valid JSON per `.github/workflows/claude-review-v2/schemas/review-result.schema.json`, containing:
             - `findings`: the merged findings array (same finding shape as the specialists').
             - `disposition`: one entry for EVERY specialist finding id — action `kept`, `merged`, `downgraded`, or `dropped`, with `note` REQUIRED for downgraded/dropped (the validation script fails the job if any specialist id is unaccounted for).
             - `comment_body`: the review comment markdown, described next.
@@ -468,7 +475,7 @@ jobs:
               List any tool calls that failed or were denied (e.g. "Write to /tmp/ blocked", "gh api denied") — across the specialists too, if they reported any. If none failed, say so. This helps us tune the workflow permissions and allowedTools over time.
               </details>
 
-            STEP 3 — POST. Post the exact `comment_body` text as the review comment using `mcp__github_comment__update_claude_comment`. Do NOT use `gh pr comment` — it creates comments this pipeline cannot find or update later. Do NOT submit a formal GitHub review (no `gh pr review`). Do NOT write verdict.txt or claude-verdict.txt — the verdict is computed by the validation script from review-result.json. Your outputs are exactly: the three specialists' findings files (written by them), review-result.json, and the posted comment. A stop hook will refuse to let the session end until review-result.json exists and parses as JSON.
+            STEP 3 — POST. Post the exact `comment_body` text as the review comment using `mcp__github_comment__update_claude_comment`. Do NOT use `gh pr comment` — it creates comments this pipeline cannot find or update later. Do NOT submit a formal GitHub review (no `gh pr review`). Do NOT write verdict.txt or claude-verdict.txt — the verdict is computed by the validation script from review-result.json. Your outputs are exactly: the two specialists' findings files (written by them), review-result.json, and the posted comment. A stop hook will refuse to let the session end until review-result.json exists and parses as JSON.
           # 100 matches v1's budget rationale: 80 was set after a large review
           # (#364) exhausted its turns without writing its result (which fails
           # closed); the fan-out orchestration and the correctness specialist's
@@ -488,14 +495,14 @@ jobs:
         # merged findings' severities, and writes verdict.txt. Any failure exits
         # non-zero and no verdict is written — the gate fails closed.
         # --expected-specialists makes completeness of the specialist set a script
-        # check, not prompt prose: if any of the three named specialists never
+        # check, not prompt prose: if either of the two named specialists never
         # produced a findings file (orchestrator merged early), validate fails
         # closed instead of approving on a partial review.
         run: |
           set -uo pipefail
           if ! python3 .github/workflows/claude-review-v2/validate.py \
                  --specialist-files 'findings-*.json' \
-                 --expected-specialists 'correctness,concurrency,conventions' \
+                 --expected-specialists 'correctness,conventions' \
                  --result-file review-result.json; then
             echo "::error::Claude review v2 produced no valid result (missing/invalid findings or result file, or uncovered dispositions) — failing closed. Re-run the review."
             exit 1

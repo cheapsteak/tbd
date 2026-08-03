@@ -11,7 +11,7 @@ Scenarios:
 
 - `test_session_contract.py` — single-specialist baseline (tool loop, findings
   file, `review-result.json`, Stop-hook release, computed verdict).
-- `test_fanout_contract.py` — three parallel Task specialists via
+- `test_fanout_contract.py` — two parallel Task specialists via
   content-keyed routing; asserts overlap (true parallelism), all four files,
   zero retries, no Stop-hook nudges, `validate.py --expected-specialists`.
 - `test_resume_loop.py` — the between-invocation retry loop: stall to the

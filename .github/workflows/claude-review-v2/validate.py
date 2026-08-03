@@ -154,7 +154,7 @@ def main() -> int:
         default=None,
         help=(
             "comma-separated specialist names that must each have produced a "
-            "findings file, e.g. 'correctness,concurrency,conventions'. "
+            "findings file, e.g. 'correctness,conventions'. "
             "Omitted: no completeness check (any non-empty glob passes)."
         ),
     )

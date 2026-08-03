@@ -44,7 +44,7 @@ import harness  # noqa: E402
 from stub_server import StubServer, ToolCall, Turn  # noqa: E402
 
 _FAST_ROLE = "correctness"
-_SLOW_ROLE = "concurrency"
+_SLOW_ROLE = "conventions"
 # Long enough that the nudge burn (~0.5s) demonstrably finishes first, short
 # enough to keep the suite quick.
 _SLOW_DELAY_SECONDS = 3.0

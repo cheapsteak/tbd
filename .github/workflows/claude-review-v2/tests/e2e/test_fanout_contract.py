@@ -1,9 +1,9 @@
-"""Stub-API e2e: three PARALLEL Task specialists under one headless session.
+"""Stub-API e2e: two PARALLEL Task specialists under one headless session.
 
 De-risks the spec's §7 open question (do parallel specialists fit one headless
-session?) with the real `claude` CLI: the orchestrator spawns the three real
+session?) with the real `claude` CLI: the orchestrator spawns the two real
 specialist roles in ONE assistant message, each subagent writes its findings
-file, and the orchestrator writes review-result.json covering all three.
+file, and the orchestrator writes review-result.json covering both.
 
 Because the racing subagents make request order nondeterministic, the stub
 runs in content-keyed routing mode (role sentinels; see
@@ -35,14 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness  # noqa: E402
 from stub_server import StubServer, ToolCall, Turn, loop_advanced  # noqa: E402
 
-_ROLES = ["correctness", "concurrency", "conventions"]
+_ROLES = ["correctness", "conventions"]
 
 
 def _result_doc() -> dict:
     return {
         "findings": [harness.minor_finding(role) for role in _ROLES],
         "disposition": [{"id": f"{role}-1", "action": "kept"} for role in _ROLES],
-        "comment_body": "Three MINOR findings from the specialist fan-out; nothing blocking.",
+        "comment_body": "Two MINOR findings from the specialist fan-out; nothing blocking.",
     }
 
 
@@ -57,7 +57,7 @@ def test_parallel_fanout_end_to_end() -> None:
 
         orchestrator_turns = [
             Turn(
-                text="Fanning out to three specialists in parallel.",
+                text="Fanning out to two specialists in parallel.",
                 tool_calls=[harness.task_call(role, project) for role in _ROLES],
             ),
             Turn(
@@ -105,7 +105,7 @@ def test_parallel_fanout_end_to_end() -> None:
         assert proc.returncode == 0, f"claude exited non-zero.\n{debug}"
         assert loop_advanced(cap), f"tool loop never advanced.\n{debug}"
 
-        # All four files landed.
+        # All three files landed.
         for name in [f"findings-{role}.json" for role in _ROLES] + ["review-result.json"]:
             assert (project / name).is_file(), f"{name} missing.\n{debug}"
         assert json.loads(
@@ -113,7 +113,7 @@ def test_parallel_fanout_end_to_end() -> None:
         ) == _result_doc()
 
         # Full parallelism: every role conversed (2 requests: Write, then its
-        # tool_result), and the three conversations OVERLAPPED — every role's
+        # tool_result), and the two conversations OVERLAPPED — every role's
         # first request arrived before any role finished. A sequential runner
         # (role B starts after role A completes) fails this.
         per_role_times: dict[str, list[float]] = {}
@@ -121,7 +121,7 @@ def test_parallel_fanout_end_to_end() -> None:
             if route is not None:
                 per_role_times.setdefault(route, []).append(ts)
         assert sorted(per_role_times) == sorted(role_turns), (
-            f"expected all three roles to converse.\n{debug}"
+            f"expected both roles to converse.\n{debug}"
         )
         for role_sentinel, times in per_role_times.items():
             assert len(times) == 2, (

@@ -110,34 +110,34 @@ def test_disposition_extra_entries_are_not_flagged() -> None:
 
 
 def test_missing_specialists_all_present() -> None:
-    expected = ["correctness", "concurrency", "conventions"]
+    expected = ["correctness", "conventions"]
     assert missing_specialists(expected, expected) == []
 
 
 def test_missing_specialists_one_missing() -> None:
-    expected = ["correctness", "concurrency", "conventions"]
-    seen = ["correctness", "conventions"]
-    assert missing_specialists(expected, seen) == ["concurrency"]
+    expected = ["correctness", "conventions"]
+    seen = ["correctness"]
+    assert missing_specialists(expected, seen) == ["conventions"]
 
 
 def test_missing_specialists_two_missing_in_expected_order() -> None:
-    expected = ["correctness", "concurrency", "conventions"]
-    assert missing_specialists(expected, ["concurrency"]) == [
+    expected = ["correctness", "conventions", "acme-lens"]
+    assert missing_specialists(expected, ["conventions"]) == [
         "correctness",
-        "conventions",
+        "acme-lens",
     ]
 
 
 def test_missing_specialists_all_missing() -> None:
-    expected = ["correctness", "concurrency"]
+    expected = ["correctness", "conventions"]
     assert missing_specialists(expected, []) == expected
 
 
 def test_missing_specialists_duplicates_in_seen_are_fine() -> None:
     # Two findings files for the same specialist is last-write-wins upstream,
     # not a completeness failure.
-    expected = ["correctness", "concurrency"]
-    seen = ["correctness", "correctness", "concurrency"]
+    expected = ["correctness", "conventions"]
+    seen = ["correctness", "correctness", "conventions"]
     assert missing_specialists(expected, seen) == []
 
 
@@ -339,12 +339,10 @@ def _run_main(
 def test_main_all_expected_specialists_present_passes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    for name in ("correctness", "concurrency", "conventions"):
+    for name in ("correctness", "conventions"):
         _write_specialist_file(tmp_path, name)
     _write_empty_result(tmp_path)
-    exit_code = _run_main(
-        monkeypatch, tmp_path, "correctness,concurrency,conventions"
-    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
     assert exit_code == 0
     assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
 
@@ -354,15 +352,12 @@ def test_main_one_missing_specialist_fails_and_names_it(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for name in ("correctness", "conventions"):
-        _write_specialist_file(tmp_path, name)
+    _write_specialist_file(tmp_path, "correctness")
     _write_empty_result(tmp_path)
-    exit_code = _run_main(
-        monkeypatch, tmp_path, "correctness,concurrency,conventions"
-    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
     assert exit_code == 1
     err = capsys.readouterr().err
-    assert "concurrency" in err
+    assert "conventions" in err
     assert "produced no findings file" in err
     # Fail closed: a partial fan-out must never yield a verdict.
     assert not (tmp_path / "verdict.txt").exists()
@@ -373,15 +368,17 @@ def test_main_two_missing_specialists_both_named(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # Generic multi-missing behavior: every absent name is reported, so the
+    # expected set here is deliberately wider than the production pair.
     _write_specialist_file(tmp_path, "correctness")
     _write_empty_result(tmp_path)
     exit_code = _run_main(
-        monkeypatch, tmp_path, "correctness,concurrency,conventions"
+        monkeypatch, tmp_path, "correctness,conventions,acme-lens"
     )
     assert exit_code == 1
     err = capsys.readouterr().err
-    assert "concurrency" in err
     assert "conventions" in err
+    assert "acme-lens" in err
     assert not (tmp_path / "verdict.txt").exists()
 
 
@@ -402,12 +399,10 @@ def test_main_unexpected_extra_specialist_warns_but_passes(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for name in ("correctness", "concurrency", "conventions", "acme-extra"):
+    for name in ("correctness", "conventions", "acme-extra"):
         _write_specialist_file(tmp_path, name)
     _write_empty_result(tmp_path)
-    exit_code = _run_main(
-        monkeypatch, tmp_path, "correctness,concurrency,conventions"
-    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "warning" in out

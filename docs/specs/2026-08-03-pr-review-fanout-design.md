@@ -31,12 +31,20 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
 
 ## 2. Decisions (human-answered brainstorm)
 
-| # | Question | Decision |
-|---|---|---|
-| 1 | Driver shape | **Headless session + subagent fan-out.** One headless review session orchestrates parallel specialist subagents (Task tool); each specialist writes a findings JSON file; the orchestrator merges them. No interactive PTY driver — that machinery (idle nudges, deadline steering, salvage) is for much longer sessions than this repo's PRs need. |
-| 2 | Guard against the merge step losing findings | **Prose, not machinery.** The merge prompt requires a per-finding *disposition list* (§3.4) instead of a deterministic post-merge reconciliation check. Upgrade trigger recorded in §6. |
-| 3 | Skip-if-unchanged | **Patch-id skip only.** Skip the re-review when `git patch-id` over the diff matches the marker in the prior sticky comment. No discussion-content fingerprint in v1 (§6). |
-| 4 | PR discussion context | **Yes, trimmed.** Fetch human discussion once, render it into a sanitized, fenced, untrusted-data block the reviewer weighs but may not take instructions from (§3.6). |
+- **Driver shape** — **headless session + subagent fan-out.** One headless review
+  session orchestrates parallel specialist subagents (Task tool); each specialist
+  writes a findings JSON file; the orchestrator merges them. No interactive PTY
+  driver — that machinery (idle nudges, deadline steering, salvage) is for much
+  longer sessions than this repo's PRs need.
+- **Guard against the merge step losing findings** — **prose, not machinery.** The
+  merge prompt requires a per-finding *disposition list* (§3.4) instead of a
+  deterministic post-merge reconciliation check. Upgrade trigger recorded in §6.
+- **Skip-if-unchanged** — **patch-id skip only.** Skip the re-review when
+  `git patch-id` over the diff matches the marker in the prior sticky comment. No
+  discussion-content fingerprint in v1 (§6).
+- **PR discussion context** — **yes, trimmed.** Fetch human discussion once, render
+  it into a sanitized, fenced, untrusted-data block the reviewer weighs but may not
+  take instructions from (§3.6).
 
 ## 3. Design
 
@@ -57,8 +65,8 @@ types the verdict token.
 Each specialist writes `findings-<name>.json`, schema-validated by the bookend scripts:
 
 ```json
-{ "specialist": "concurrency",
-  "findings": [ { "id": "concurrency-1", "file": "Sources/...", "line": 42,
+{ "specialist": "correctness",
+  "findings": [ { "id": "correctness-1", "file": "Sources/...", "line": 42,
                   "severity": "HIGH", "title": "...", "body": "...",
                   "confidence": 0.8 } ] }
 ```
@@ -68,14 +76,17 @@ scale, so the posted format doesn't change for readers). A JSON-schema file in t
 workflow directory is the single source of truth; validation failures list the offending
 file and field.
 
-Initial specialist set (3, deliberately small):
+Initial specialist set (2, deliberately small):
 
 - **correctness** — the diff's logic, plus the existing premise-audit instructions for
-  guard/safety-shaped PRs (moved here verbatim from the current prompt).
-- **concurrency & platform** — NIO event-loop discipline, actor isolation, clock/date
-  seams, unbundled-executable constraints.
+  guard/safety-shaped PRs (moved here verbatim from the current prompt), plus
+  concurrency & platform correctness: NIO event-loop discipline, actor isolation,
+  clock/date seams, unbundled-executable constraints.
 - **conventions** — CLAUDE.md rules: default-off flags, TUI screen-scraping,
-  public-repo leaks, migration triple-update, spec-required changes.
+  public-repo leaks, migration triple-update, spec-required changes, and the
+  theory-placement lens per `docs/theory-placement.md` (flag a compiled theory —
+  a fork, constant, threshold, or default two reasonable projects could answer
+  differently — that no PR description or committed spec shows a human chose).
 
 ### 3.3 Merge step
 
@@ -95,8 +106,8 @@ human decision was to try prose first.
 Instead, the merge prompt requires a disposition entry for *every* specialist finding:
 
 ```
-concurrency-1: kept (final-3)
-correctness-2: merged into concurrency-1 (same root cause)
+correctness-1: kept (final-3)
+correctness-2: merged into conventions-1 (same root cause)
 conventions-1: downgraded MEDIUM→MINOR — <reason>
 correctness-3: dropped — <reason>
 ```
