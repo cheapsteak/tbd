@@ -1,6 +1,7 @@
 # tbd supervise
 
-Operate fleet supervision: the switch and shift, per-project supervisors,
+Operate fleet supervision: per-project coverage and the fleet brake,
+supervisors,
 the sweep program's contract surfaces, and the verbs a supervisor acts with.
 
 Status: documents the `tbd supervise` surface specified by
@@ -14,7 +15,6 @@ shown here is illustrative of the schema family until the schemas ship.
 
 ```
 tbd supervise on | off [<project>]
-tbd supervise shift close
 tbd supervise status [--json]
 tbd supervise mode <project> [<mode-name>]
 tbd supervise project <list|create|delete|move> …
@@ -36,12 +36,13 @@ tbd supervise note  --text "…" [--ref <line-id>]
 Supervision watches a fleet of agent sessions and intervenes through a
 **supervisor** — itself an agent session — one per **project** (a repo, or a
 declared group of repos). It is turned on per project — every project
-starts off — and the bare `on`/`off` is the fleet-wide brake; an
-open **shift** is the unit of the record, and every act lands in an
-append-only **ledger** the daemon writes.
+starts off — and the bare `on`/`off` is the fleet-wide brake. Every act
+lands in one continuous append-only **ledger** the daemon writes; evening
+and morning views are windowed queries over it, and each `on`/`off` is
+itself a ledger line, so a project's covered spans are always on record.
 
 Each project's supervisor is either the **hosted desk** — a session TBD
-spawns lazily and disposes at shift close (the default; zero setup) — or an
+spawns and keeps for the project (the default; zero setup) — or an
 existing session the operator **appoints** into the role. Both stand on the
 project's **playbook** (`supervision.md`, installed as a standing prompt
 layer) and run under an operator-selected **mode**, which is conduct prose in
@@ -64,9 +65,9 @@ branch on.
 Operating (human operators):
 
 - **on / off** – with a project: turn its supervision on or off (all start
-  off); bare: the fleet brake — pause everything, marks untouched
-- **shift close** – finalize the account, dispose hosted desks
-- **status** – switch, shift, and per-project supervision state
+  off), running its transition hook; bare: the fleet brake — pause
+  everything, marks untouched
+- **status** – the brake and per-project supervision state
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
 - **appoint / relieve** – bind or unbind an operator-chosen supervisor
@@ -92,15 +93,15 @@ Recording:
 ## Common examples
 
 ```
-# Hand the fleet over for the night
-$ tbd supervise on
-shift opened (2026-08-02, 3 projects on)
+# Hand a project over for the night
+$ tbd supervise on acme-platform
+on: acme-platform (mode autonomous, hosted desk ready)
 
 # What is supervision doing right now?
 $ tbd supervise status
-supervision: on   shift: open since 22:04
-acme-platform   mode autonomous   supervisor: hosted desk   last sweep report 2m ago
-tbd             mode attended     supervisor: appointed (⌁ main session)   last sweep report 4m ago
+brake: released
+acme-platform   on since 22:04   mode autonomous   supervisor: hosted desk   last sweep report 2m ago
+tbd             on since 21:40   mode attended     supervisor: appointed (⌁ main session)   last sweep report 4m ago
 
 # Read the facts the way the sweep program does
 $ tbd supervise readout --project acme-platform
@@ -122,33 +123,37 @@ tbd supervise off [<project>]
 
 With a project: the standing per-project mark. Every project starts off;
 `on <project>` brings it under supervision — the tick runs for it, prompt
-cases reach its supervisor, its desk may spawn — and `off <project>` clears
+cases reach its supervisor, and its supervisor is ensured live (a hosted
+desk is spawned if the project has none, or resumed where one stands idle
+from an earlier span) — and `off <project>` clears
 the mark (an untouched project and a turned-off one are the same state).
 The acting verbs recheck the mark at the moment of the act, so turning a
-project off mid-shift stops even a drive its supervisor already decided.
+project off stops even a drive its supervisor already decided. `off`
+stands the hosted desk down but keeps its session — deliveries stop, the
+context is kept, and the next `on` resumes it rather than paying to rebuild
+it.
 Coverage, never protection: public commands stay public; keeping supervision
 away from specific terminals is the sweep program's concern (its exclusions
 can be per-terminal, in its own files), and hard per-session protection at
 the acting verbs is a deferred design. An off project's facts still appear
 in the readout and the account — observability is never withheld.
 
-Bare: the fleet brake. `on` opens a shift if none is open and resumes the
-paused one otherwise; `off` pauses TBD's authority to act everywhere —
-briefings refused, acting verbs refuse from that instant — without closing
-the shift, disposing any supervisor, or touching the per-project marks, so
-releasing the brake restores exactly the coverage that stood. The switch is
+Each transition also runs the project's **transition hook**, after the
+switch has taken effect and without ever blocking it: the shipped default —
+on `off`, a stand-down note asking the supervisor to ledger a closing
+summary of the span; on `on`, nothing — or the project's own script at
+`~/tbd/supervision/projects/<name>/transition.py`, whose stdout (if any) is
+delivered to the supervisor verbatim. A failing hook is recorded as an
+anomaly and never blocks the transition.
+
+Bare: the fleet brake. `off` pauses TBD's authority to act everywhere —
+briefings refused, acting verbs refuse from that instant — without
+disposing any supervisor or touching the per-project marks, so
+releasing the brake with `on` restores exactly the coverage that stood. The
+switch is
 a daemon config column shipped default-off. Toggling is cheap in both
-directions; the record's boundary is `shift close`, not the switch.
-
-## tbd supervise shift close
-
-```
-tbd supervise shift close
-```
-
-Finalizes the shift's account, requests a closing note from each live
-supervisor, disposes hosted desks (appointed supervisors are never disposed),
-and — with the switch still on — opens a fresh shift in the same gesture.
+directions; the record has no boundary to manage — the ledger is
+continuous, and views over it are windowed.
 
 ## tbd supervise status
 
@@ -156,7 +161,8 @@ and — with the switch still on — opens a fresh shift in the same gesture.
 tbd supervise status [--json]
 ```
 
-One line of global state (switch, shift), then one line per project: active
+One line of global state (the brake), then one line per project: on/off
+with the span's start, active
 mode, supervisor arrangement, last sweep contact age, and coverage — a
 project with no declared contact window and no tick shows `coverage unknown`.
 
@@ -203,7 +209,7 @@ restarts for a moment.
 `relieve` is the symmetric relaunch without either, returning the session to
 ordinary life; the hosted desk resumes lazily on the next briefing need.
 Both write the binding into `supervision.json` and a lifecycle line into the
-ledger. An appointed supervisor outlives shifts and is never disposed,
+ledger. An appointed supervisor outlives every coverage toggle and is never disposed,
 recycled, or restarted by TBD; if it goes dark or its session disappears,
 TBD notifies the operator and does not silently substitute the hosted desk.
 
@@ -227,8 +233,8 @@ tbd supervise readout --project <name>
 
 Read-only; prints and changes nothing else. The project's live-agent facts —
 session state with its source and observed-at, work facts, runaway counters,
-pin state, the not-to-act facts — plus machinery state: the switch, the
-shift, the active mode.
+pin state, the not-to-act facts — plus machinery state: the brake, the
+project's mark, the active mode.
 
 ### Output
 
@@ -238,7 +244,7 @@ JSON on stdout, `schemaVersion` at top level. Illustrative:
 $ tbd supervise readout --project acme-platform
 {
   "schemaVersion": 1,
-  "supervision": { "on": true, "shiftOpen": true, "mode": "autonomous" },
+  "supervision": { "on": true, "brakeEngaged": false, "mode": "autonomous" },
   "agents": [
     { "terminal": "t17",
       "state": { "value": "idle", "source": "hook", "observedAt": "02:13:40Z" },
@@ -275,10 +281,13 @@ deadline. An **empty submission is meaningful**: it is the attested "looked,
 found nothing" that keeps the project's liveness contact fresh without
 delivering anything.
 
-Refusals: while supervision is off or no shift is open, exits **75**
-(temporary; retry when supervision resumes). The contact window is disarmed
-while supervision is paused, so a refused submission neither counts as
-liveness contact nor needs to — no contact is owed during a pause.
+Refusals: while the fleet brake is engaged, exits **75**
+(temporary; retry when supervision resumes). A project whose mark is off is
+refused with an ordinary nonzero result naming the condition — off is a
+standing state, not a pause, and a program should stop submitting rather
+than retry. The contact window is disarmed in both cases, so a refused
+submission neither counts as
+liveness contact nor needs to — no contact is owed while coverage is closed.
 Submissions beyond the per-project rate limit (one briefing per 2
 minutes) or the size bound (256 KiB) are refused with the condition named.
 
@@ -326,7 +335,7 @@ session. Exactly one payload flag per call. The daemon does not read the
 payload; it records it verbatim and schedules the 60-second re-check.
 
 Preconditions, checked at the moment of the act — a refusal names the
-condition and is recorded: supervision on, shift open, target inside the
+condition and is recorded: the brake released, the target inside the
 calling supervisor's project and that project turned on, target not
 rate-limited, no intervention
 already in flight for the target, no pending re-check. The transport then
@@ -369,13 +378,17 @@ Appends attributed prose to the ledger — the one supervisor-authored line
 kind. A note can reference another line but can never change one. Use it for
 deliberate inaction ("agent t17 progressing, left alone") and for pointers
 that keep the record one hop from off-record threads ("question posted to
-#fleet-questions, answered 09:14").
+#fleet-questions, answered 09:14"). A note is accepted even for a project
+just turned off — which is how the closing summary a stand-down requests
+lands after the mark clears.
 
 ## Exit codes
 
 - **0** – success.
-- **75** – supervision paused or no shift open (`brief` only). Temporary by
-  contract: retry when supervision resumes. Stable; scripts may branch on it.
+- **75** – the fleet brake is engaged (`brief` only). Temporary by
+  contract: retry when supervision resumes. Stable; scripts may branch on
+  it. A project turned off is an ordinary nonzero refusal, not 75 — off is
+  standing, not temporary.
 - **other nonzero** – refusal or failure, with the condition named on
   stderr: usage errors, unmet preconditions, rate or size bounds, an
   unsupported agent kind at `appoint`. Codes other than 0 and 75 are not yet
@@ -388,8 +401,12 @@ that keep the record one hop from off-record threads ("question posted to
   Hand-editable; the entire operator surface beyond this CLI.
 - `~/tbd/supervision/projects/<name>/sweep.py` – the project's own sweep
   program, if customized.
-- `~/tbd/shifts/<shift-id>/` – per-shift ledger and the generated
-  `account.md`.
+- `~/tbd/supervision/projects/<name>/transition.py` – the project's own
+  transition hook, if present; its stdout is delivered to the supervisor at
+  each on/off edge.
+- `~/tbd/supervision/ledger.jsonl` – the continuous supervision record, with
+  the generated `account.md` beside it and each project's `proposals.md`
+  under its project directory.
 - `.agents/supervision.md` (in each repo) – the playbook; resolved per
   project through the standard tiers.
 

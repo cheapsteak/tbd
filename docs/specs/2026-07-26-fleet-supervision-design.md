@@ -34,9 +34,9 @@ places. Each place has its own test:
   include what counts as stuck, local rules, and what response a situation
   calls for. Team-specific behavior cannot be compiled. It also cannot be left
   for the supervisor to invent, because invented judgment cannot be reviewed,
-  versioned, or passed between shifts.
+  versioned, or passed between supervisors.
 - **The supervisor's reasoning** — only decisions that require reading text
-  produced during the current shift. These include choosing a context-aware
+  the fleet has just produced. These include choosing a context-aware
   next step from an agent's actual transcript (P0-7), sorting and wording
   escalations, and making judgment calls that policy explicitly assigns to the
   supervisor. A threshold or state calculation placed in the prompt is a fact
@@ -76,7 +76,7 @@ a quick audit:
 - **Mode enforcement (P0-3)** — **descoped** (§3). There is no enforcement: a
   mode is authored conduct, and what the daemon supplies is the record and the
   operator's selection of which mode is active.
-- **The shift/morning account** — compiled: a ledger written by the verb
+- **The account** — compiled: a ledger written by the verb
   handlers; views are queries; the supervisor adds attributed notes only (§6).
 - **The wake decision for parked sessions** — authored: a project-owned wake
   program outside the daemon (the
@@ -101,7 +101,7 @@ identity-blind check — the per-project briefing rate limit — prepends its
 compiled header (the active mode's name, any pending conduct delta), and
 delivers to that project's supervisor — the session the operator appointed
 where a binding stands, otherwise the TBD-hosted desk, spawned first if the
-project has none this shift (§5, §9). Delivering a briefing is the only thing
+project has none (§5, §9). Delivering a briefing is the only thing
 that ever starts a supervisor's turn (P0-6): a supervisor never polls or
 sweeps on its own, and never writes state or history directly. The daemon,
 for its part, never makes a judgment — it keeps the facts, paces the pipe,
@@ -486,10 +486,10 @@ nudge sparingly, in a sentence, without any vocabulary growing.
 
 **How the question becomes a case.** The hook stays an unconditional dumb
 reporter — no supervision check on the agent side, ever. It reports; the daemon
-knows whether a shift is running and already receives every event. The fork
+knows each project's coverage and already receives every event. The fork
 lives in the daemon's
-RPC handler: when a shift is active and the terminal's project is turned
-on (§8), a pending question becomes a case and is **delivered
+RPC handler: when the terminal's project is effectively on — its mark set
+and the brake released (§3, §8) — a pending question becomes a case and is **delivered
 immediately**, bypassing the sweep program entirely (sweep-program
 sub-document §2): the trigger is a reported fact that needs no theory of
 work, and the transcript is blind while the picker is open, so waiting for
@@ -507,7 +507,7 @@ supervisor punts (§8), with a `note` pointing at where it went.
 
 **Permission prompts reach a desk the same way.** The `Notification` event
 (above) rides the identical pipeline: an unconditional dumb-reporter hook, the
-daemon holding the fact, and — with a shift active and the terminal's project turned
+daemon holding the fact, and — with the terminal's project effectively
 on — a **case**, delivered immediately through the same compiled
 carve-out. One pipeline, two
 sources; the only difference is what the case carries and therefore what
@@ -523,14 +523,14 @@ becomes one is exactly the judgment the desk is there to make.
 
 **Store hygiene, and what a restart costs.** The pending store's time-to-live
 is a garbage-collection backstop for stranded entries, not a dialog's clock. It
-must never expire a still-live dialog during a shift: resolution comes from
+must never expire a still-live dialog: resolution comes from
 the transcript's `tool_result` record, not from elapsed time — and measured
 behavior says that record arrives on every resolution path: answer, Escape,
 even a tool denied by a hook (findings doc, §2 above). No hook event closes a
 dismissed dialog, so any store keyed on hook events alone would strand an
 entry on the single most common user gesture; the transcript record is the
 closing signal, and the GC covers only what measurement has not. The store staying memory-only is
-fine under §7's restart rule. A mid-shift daemon restart degrades honestly —
+fine under §7's restart rule. A daemon restart degrades honestly —
 the awaiting-input state persists, so the case still knows a question is
 pending, but its content is gone, and the case reports that loudly rather than
 quietly. The supervisor's options are then to dismiss and ask the agent to
@@ -652,11 +652,11 @@ carried for a hypothetical.
 One configuration column in the daemon, on or off — added by migration and
 **shipped off**, which is the house default-off-flag rule satisfied by the
 switch itself: no second flag hides behind it, and the soak is opt-in
-shifts. (The Channels delivery adapter additionally ships behind its own
+coverage. (The Channels delivery adapter additionally ships behind its own
 default-off flag, §12.) Settable from the app and the
 CLI, broadcast when it changes, surviving restart like every other daemon
 toggle. That is P0-2's one-gesture handover for the whole fleet, unchanged in
-substance: one gesture, one shift, one ledger, one account. The switch is
+substance: one gesture, one ledger, one account. The switch is
 the fleet **brake**, and only that: supervising anything also takes the
 per-project gesture (§8) — `tbd supervise on <project>` — because every
 project starts off and there is no default stance. A fleet switched on with
@@ -674,21 +674,21 @@ signaled — TBD stops only what TBD starts, sub-document §3, §4), and the
 actuation preconditions (above) refuse the acting verbs
 from that instant — a desk mid-thought when the switch flips can finish
 thinking, and its drive returns an ordinary error instead of touching
-anything. Everything else continues: desks stay alive and idle, the shift
-stays open, and the record keeps filling — enrollment, anomalies, and
+anything. Everything else continues: desks stay alive and idle, and the
+record keeps filling — enrollment, anomalies, and
 `note` still land, so a desk interrupted
 mid-judgment can still write down what it was about to do. Watching
-continues; touching stops. Flipping back on resumes the same shift with the
-same desks at full context: the daemon writes a resumed lifecycle line and
+continues; touching stops. Flipping back on resumes the
+same desks at full context: the daemon writes the release lifecycle line and
 hastens the default tick, so briefings are composed from current state, never from
 pre-pause state. Toggling is therefore cheap in both directions — which a
 control must be for an operator to actually reach for it.
 
-**Closing a shift is a separate, explicit operator action** — a record
-boundary, not a posture, and the two compose freely (§9, §10). Nothing
-closes a shift automatically: a shift left paused for a day renders loudly
-as exactly that, because a lingering state degrades to loud display, never
-to autonomous cleanup.
+**There is nothing to close.** The record has no boundary gesture: the
+ledger is continuous, views over it are windowed queries, and coverage
+spans are the marks' own lifecycle lines (§6, §9). A fleet left braked for
+a day renders loudly as exactly that, because a lingering state degrades to
+loud display, never to autonomous cleanup.
 
 **The switch's writ runs exactly as far as TBD's own processes.** It stops the
 sweep and the desks; it does not reach programs the operator schedules outside
@@ -734,7 +734,7 @@ The mechanics:
   `attended`, the conservative one.
 - **Selection is operator-only**: `tbd supervise mode <project> <mode-name>`, or
   the Settings tab (§10). It is stored in `supervision.json` (§8).
-- **Switching is legal at any time, including mid-shift.** It takes effect on
+- **Switching is legal at any time.** It takes effect on
   the next briefing, whose compiled header names the selection (the conduct
   itself stands in the desk's session layer, sub-document §8) — no desk
   recycle is needed. The switch writes a ledger line, and **every action line
@@ -757,8 +757,8 @@ the daemon does around each one is accounting, never permission.
 
 **Ungated speaks to conduct; a short list of actuation preconditions speaks
 to mechanics.** Inside every acting verb call — after the desk decides,
-before any keystroke — the daemon rechecks against current state: the switch
-is on, a shift is active, the target lies inside the calling desk's project
+before any keystroke — the daemon rechecks against current state: the brake
+is released, the target lies inside the calling desk's project
 and that project is turned on (§8), the target is not rate-limited and not
 under a capacity hold, no intervention
 is already in flight for the target, and no act re-check is pending on it.
@@ -783,8 +783,10 @@ removed: no rule matching, no content inspection, no posture judgment. The
 gate asked "may this desk do this *kind* of thing"; preconditions ask only
 "may anything be done *here, now*." The residual race is the milliseconds
 between check and keystroke. Preconditions bind the acting verbs; the record
-verb (`note`) requires only an active shift and correct
-addressing — the record itself never refuses more than that.
+verb (`note`) requires only correct
+addressing — the record itself never refuses more than that, and it stays
+open to a desk whose project has just been turned off, which is what lets a
+stood-down desk answer the stand-down note with its closing summary (§9).
 
 - **`drive`** — act on a fleet agent's session (the send path of §4 step 6), in
   one of two payload variants.
@@ -835,8 +837,8 @@ answering *is* the send path, and neither of its apparent differences needs one
 would encode a safety boundary that does not exist, since a message to an agent
 running with permissions bypassed is arbitrary instruction injection, so they
 are payload variants of `drive`. There is no `learn` verb and no
-machine-appended memory tier: same-shift memory is a `note`, and durable
-cross-shift knowledge is repo advisory content with a home and a change process
+machine-appended memory tier: near-term memory is a `note`, and durable
+knowledge is repo advisory content with a home and a change process
 already (§8). And there is no `escalate` verb: raising a question to a human
 is conduct, not a state transition in TBD's record — the desk writes the
 exact item, its proposed command, and its recommendation to wherever the
@@ -872,7 +874,7 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
    ranks nothing (sweep-program sub-document §3).
 3. **Deliver.** The daemon prepends the compiled header — the **name of the
    active mode** (§3; the conduct itself stands in the desk's session layer,
-   with mid-shift playbook edits carried as superseding deltas in this same
+   with playbook edits carried as superseding deltas in this same
    header, sweep-program sub-document §8) — writes the delivery line
    request-first with the delivered text's hash and the conduct hash (§6),
    and passes the briefing through. A pending prompt case travels the
@@ -883,9 +885,9 @@ Example flow in autonomous mode at 2:00 a.m. with forty agents:
 4. **Wake.** The daemon delivers the briefing through the adapter for that kind of
    agent, just as it would for any other session. Where the operator has
    appointed a supervisor for the project (§9), the briefing goes to that
-   session. Otherwise, if the project has no hosted desk yet this shift, the
-   daemon spawns one first — hosted desks are lazy, so a project that
-   stays quiet all night never gets one — and spawning installs the
+   session. Otherwise it goes to the project's hosted desk, ensured live
+   since `on` (§9); if the desk died in the interim the
+   daemon replaces it first, and every spawn installs the
    project's playbook as the desk's standing conduct (sweep-program
    sub-document §8). Each supervisor is an ordinary, visible, TBD-managed
    session (P0-4) — the hosted desk in its own worktree, an appointed
@@ -943,7 +945,7 @@ memory-and-process cost, and part of why a quiet project costing nothing
 matters. And context load moves in the desks' favor: a single fleet desk
 absorbing every project's cases, playbooks, and transcript reads concentrates
 the whole night in one context window — the shape most likely to hit a
-ceiling mid-shift — where sharding by project spreads it.
+ceiling overnight — where sharding by project spreads it.
 
 **Parked sessions are absent from this loop.** A compiled "outstanding work"
 fact list here — a global any-true verdict making a parked session a wake case,
@@ -955,16 +957,16 @@ the price. The reasoning, and what stands in its place, is the
 **One case arrives by event rather than by tick: a pending `AskUserQuestion`.**
 The `PreToolUse` hook already reports every one of them to the daemon
 unconditionally, with no supervision check on the agent side — the daemon knows
-whether a shift is running and sees every event anyway. The fork is in the
+each project's coverage and sees every event anyway. The fork is in the
 daemon's RPC handler:
-with a shift active and the terminal's repo turned on (§8), a pending
+with the terminal's repo's project effectively on (§8), a pending
 question becomes a case and **hastens an immediate mini-tick for that
 terminal**, running the same pure decision function the clock would have run
 minutes later. The delivered briefing carries the question payload verbatim from the
 daemon's store, so the supervisor fetches nothing and needs no new read
 surface. From there it is an ordinary case: judgment, then `drive` down the
 same audited delivery path as every other verb. Full mechanics, including the
-dismiss-and-reply actuation and what a mid-shift restart costs, are in §2's
+dismiss-and-reply actuation and what a daemon restart costs, are in §2's
 prompt-stalls subsection.
 
 Boundary cases:
@@ -1016,8 +1018,8 @@ The unit that makes that possible is the **supervision project**.
 - **Policy resolves per project** — one playbook per desk.
 - **One supervisor per project.** A project's supervisor is one session, and
   the operator selects which. The shipped default is the TBD-hosted **desk**:
-  spawned the first time the project has a case in a shift, disposed at shift
-  end (§9). The alternative is **appointment**: the operator binds an existing
+  ensured live while the project is on, standing down with its mark, disposed
+  only for cause (§9). The alternative is **appointment**: the operator binds an existing
   TBD-managed session as the project's supervisor (§9, §10), recorded as a
   per-project selection in `supervision.json` (§8); while a binding stands,
   the hosted default stands down for that project. Throughout these
@@ -1078,22 +1080,24 @@ trusted with the drawer, not with the vault.
 **What stays global.** The project is the unit of judgment and action. It is
 deliberately not the unit of everything:
 
-- **One on/off switch**, fleet-wide (§3). P0-2 asks for a single gesture to hand
-  the fleet over; per-project switches would be N gestures and N chances to
-  leave one on. Mode *selection* is per project — that is conduct, not
-  lifecycle.
-- **One shift, one `ledger.jsonl`, one `account.md`.** Every desk's acts,
+- **One brake**, fleet-wide (§3). P0-2 asks for a single gesture to hand
+  the fleet over or take it back, and the brake is that gesture: one bit
+  ANDed over the per-project marks (§8), writing none of them. Coverage
+  itself is per project — the marks — and mode *selection* is per project
+  too; what stays global is the stop.
+- **One `ledger.jsonl`, one `account.md`.** Every desk's acts,
   outcomes, and notes land in the same record, with each
   project's proposals doc (§6) linked beside it.
   The ledger envelope gains a project tag (§6), so every line says which desk
   acted and the account can *group* by project without being *split* by it.
 
-A shift per project was considered and rejected. It would multiply every
-lifecycle surface — shift IDs, directories, opening and closing lines,
-heartbeats, morning views — to express something membership already expresses:
-a project the operator does not want acted on is turned off (§8),
-which costs one mark and no new machinery. And an operator's morning does not
-decompose by project; it decomposes by what needs an answer.
+A ledger per project was considered and rejected. It would multiply every
+record surface — files, accounts, morning views — to express something the
+envelope's project tag already expresses, and an operator's morning does not
+decompose by project; it decomposes by what needs an answer. Per-project
+*coverage spans* need no per-project files either: every `on` and `off` is a
+lifecycle line, so a project's covered windows are a plain query over the
+one record (§6, §9).
 
 **Membership changes by `move`, never by add/remove.** Regrouping a repo is one
 command — `tbd supervise project move <repo> --to <project|singleton>`, with
@@ -1104,7 +1108,7 @@ place, so the pair can express states the model forbids and every caller would
 have to sequence them correctly. `move` cannot express them at all.
 
 **Project mutations take effect on the next tick.** A definition edited
-mid-shift is legal; it just does not retroactively change a desk that is already
+while its desk is live is legal; it just does not retroactively change a desk that is already
 running against the old shape. Any live hosted desk whose project definition
 changed is
 **recycled through §9's replacement path** — flush, tear down, respawn with the
@@ -1225,7 +1229,7 @@ spanning two policies — that is the invariant the project exists to create.
   Because those two facts can surface in different cases hours
   apart, the discipline has a second half: **an anomaly like a refused
   injection gets a ledgered note the moment it is seen, so the later,
-  plausible-looking request lands next to it** — the desk's shift memory is
+  plausible-looking request lands next to it** — the desk's session memory is
   what connects facts across cases. Deep reads cost real tokens and no
   discipline makes them free; the economy is §2's recurrence-is-a-signal
   stance — a repo whose agents keep hitting such prompts fixes its permission
@@ -1292,16 +1296,17 @@ attention — it never changes what any verb is allowed to do.
 
 **The ledger is the account; everything else is a view of it.**
 
-- `~/tbd/shifts/<shift-id>/ledger.jsonl` — an append-only file with one
+- `~/tbd/supervision/ledger.jsonl` — an append-only file with one
   JavaScript Object Notation (JSON) object per line, written **only by daemon
   code at the moment it acts**. It supports these line kinds:
   **action** records a drive or pause, including the payload, the state
   snapshot that justified it, and the active mode. A separate
   **outcome** line references the action's ID and records what was observed.
-  **lifecycle** records shift open, pause, resume, shift close, mode changes,
-  and desk recycles (§9). **enrollment** records an agent entering the supervision
-  perimeter mid-shift; the shift-open line carries the same fields for every
-  agent already present, as a roster snapshot. **delivery** records a briefing
+  **lifecycle** records a project turned on or off, the brake engaged or
+  released, mode changes, desk recycles, and appointment and relief (§9).
+  **enrollment** records an agent entering the supervision
+  perimeter while its project is on; a project's `on` line carries the same
+  fields for every agent already present, as a roster snapshot. **delivery** records a briefing
   delivered to a desk (sweep-program sub-document §3, §9).
   **anomaly** records an unknown state,
   a failed fetch, a dark supervisor, or a silent sweep program (a missed
@@ -1323,8 +1328,9 @@ attention — it never changes what any verb is allowed to do.
   never as done; and certainty the system did not have, because unknowns are
   anomalies, not values.
 - Quiet contact writes nothing (sweep-program sub-document §3). Sweep liveness
-  is one status field, not forty lines an hour; the shift-close line carries
-  the coverage summary.
+  is one status field, not forty lines an hour; the lifecycle line that ends
+  a project's coverage span — its `off`, or the brake — carries that span's
+  coverage summary (§9).
 - The ledger is also readable per project by the sweep program:
   `tbd supervise ledger --project <name> --since <t>` prints a project's
   actions, outcomes, deliveries, and anomalies — the loop-closer that lets a
@@ -1337,7 +1343,7 @@ attention — it never changes what any verb is allowed to do.
   Markdown is the record's presentation; JSON Lines (JSONL) is its source.
   Markdown cannot be the source because parsing prose back out of a display
   format would repeat the screen-scraping mistake in a file.
-- **End-of-shift and morning views are queries** over the shift's time window.
+- **Evening and morning views are queries** over a time window of the one record.
   The views are done (actions + outcomes), unconfirmed (actions past their
   deadline with no confirming outcome, §12), went-wrong (anomalies), and
   the notes — including the question pointers desks leave when they raise
@@ -1351,9 +1357,9 @@ happened, so it does not belong to the ledger's machinery: the ledger exists
 to guard facts against false claims, and a suggestion cannot be a false
 claim. When a desk holds back on something consequential (attended mode's
 signature move), it writes the suggestion into **that project's proposals
-doc** — a markdown file at `~/tbd/shifts/<shift-id>/proposals/<project>.md`,
-beside the ledger it relates to, surviving shift close like everything else
-in the shift directory. **How the doc is composed is the project's choice.**
+doc** — a markdown file at `~/tbd/supervision/projects/<name>/proposals.md`,
+in the project's directory beside its other authored files (§7), outliving
+every desk by construction. **How the doc is composed is the project's choice.**
 The shipped default playbook describes a sane default entry — what act, on
 which target, the exact message or keys, the reasoning, and, for anything
 screen-informed, the capture it rests on — and a project that wants its
@@ -1371,14 +1377,15 @@ There is no approve button, and nothing executes a proposal mechanically.
 ### Ledger line shape
 
 Every line shares one envelope —
-`{ "id", "ts", "shift", "mode", "project", "kind" }` — plus a payload
+`{ "id", "ts", "mode", "project", "kind" }` — plus a payload
 determined by its kind. The envelope is what makes the views in this section
-plain queries: filter by kind, window by `ts`, group by `shift` or by
+plain queries: filter by kind, window by `ts`, group by
 `project`. The project tag is what lets one shared ledger stay honest about
 which desk acted: with per-project desks (§5) the account groups by project
 without being split into per-project files. Lines the daemon writes on its own
-behalf rather than a desk's — shift open and close, sweep-level anomalies —
-carry a null project, which is the accurate answer and not a gap.
+behalf rather than a desk's — the brake's lifecycle lines, sweep-level anomalies —
+carry a null project, which is the accurate answer and not a gap; a
+project's own `on` and `off` lines carry its name.
 
 What each kind's payload carries:
 
@@ -1402,20 +1409,23 @@ What each kind's payload carries:
   (§12).
 - **`delivery`** — a briefing delivered to a desk: the project, the delivered
   text's hash, and the conduct hash the desk stands on (sweep-program
-  sub-document §3, §9). Written request-first, before the adapter runs, and
-  it arms the desk dead-man's deadline (§9). "What did this desk actually
+  sub-document §3, §9). Written request-first, before the adapter runs. A
+  briefing delivery arms the desk dead-man's deadline; a transition delivery
+  (§9) writes the same line and arms nothing — its answer is ceremony, not a
+  liveness proof. "What did this desk actually
   receive, under what conduct" is answerable per briefing from this line.
 - **`anomaly`** — the category and the detail.
 - **`note`** — the author, the text, and optional references to other lines.
-- **`lifecycle`** — opening, pause, resume, closing, mode change, or desk
-  recycle; this is
-  the kind behind every line §9 describes. The opening line's payload includes
-  the roster snapshot: one entry per agent already under supervision, with the
-  same fields an enrollment line carries.
+- **`lifecycle`** — a project turned on or off, the brake engaged or
+  released, a mode change, a desk recycle, or an appointment or relief; this is
+  the kind behind every line §9 describes. An `on` line's payload includes
+  the project's roster snapshot: one entry per agent already under supervision, with the
+  same fields an enrollment line carries. The line that ends a coverage
+  span carries that span's coverage summary (sweep-program sub-document §6).
 - **`enrollment`** — the agent's identity (worktree / terminal), its repo's
   resolved project, the spawn source, and the transcript path. Mechanical
   facts only, written by the daemon when a new agent enters a supervised
-  project's perimeter mid-shift; with the shift-open snapshot this makes "what
+  project's perimeter; with the `on` line's roster snapshot this makes "what
   was under watch, and since when" a plain query, and "was supervision even
   applying to X at 02:20" answerable after the fact. The transcript path is
   deliberate: its head is the agent's original assignment, so judgment reaches
@@ -1427,8 +1437,8 @@ What each kind's payload carries:
 Two representative lines, an action and the outcome that later references it:
 
 ```json
-{"id":"a3f1","ts":"2026-07-27T02:41:09Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook","observedAt":"2026-07-27T02:40:58Z"}}
-{"id":"a3f2","ts":"2026-07-27T02:42:11Z","shift":"s-0714","mode":"autonomous","project":"acme-web","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
+{"id":"a3f1","ts":"2026-07-27T02:41:09Z","mode":"autonomous","project":"acme-web","kind":"action","verb":"drive","target":{"worktree":"1B7E2C90","terminal":"6D40F3A1"},"message":"The rebase conflict is in Package.resolved …","state":{"session":"idle","source":"hook","observedAt":"2026-07-27T02:40:58Z"}}
+{"id":"a3f2","ts":"2026-07-27T02:42:11Z","mode":"autonomous","project":"acme-web","kind":"outcome","action":"a3f1","result":"landed-and-acting","observedAt":"2026-07-27T02:42:09Z"}
 ```
 
 Field lists beyond this are implementation detail and will grow. The envelope,
@@ -1442,17 +1452,19 @@ changed by concurrent actors, and appears live. **Append-only history** is
 never used to allow or block behavior; an error there produces an inaccurate
 account, not a wrong action. The third category is **human-authored process**.
 
-- **DB: the on/off switch. One config column. Nothing else
+- **DB: the fleet brake. One config column. Nothing else
   supervision-specific.** The daemon reads it. Both the app and CLI can set it,
   and all surfaces must see the same value immediately after a change — that is
   the purpose of the shared configuration object. Mode selections are *not*
   here; they are per-project operator choices in `supervision.json` (§8), which
   keeps this column a single fleet-wide gesture (P0-2).
-- **Shift directory** (`~/tbd/shifts/<shift-id>/`): `ledger.jsonl` +
-  `account.md` + `proposals/<project>.md`, the desk-authored prose of §6.
-  Every view over the record is a query of the ledger, rebuilt from the file
-  at startup, never a second store. The shift directory contains everything
-  needed for debugging or sharing.
+- **The supervision record** (`~/tbd/supervision/`): `ledger.jsonl` +
+  `account.md`, with each project's `proposals.md` — the desk-authored prose
+  of §6 — in its project directory below. Every view over the record is a
+  query of the ledger, rebuilt from the file at startup, never a second
+  store; rotating the ledger file is mechanical housekeeping (date-stamped
+  segments), never a record boundary. The record directory contains
+  everything needed for debugging or sharing.
 - **Durable files**, operator-owned and hand-editable:
   - `~/tbd/supervision/supervision.json` — the project definitions (§5),
     the per-project on marks, the per-project mode
@@ -1466,13 +1478,18 @@ account, not a wrong action. The third category is **human-authored process**.
     sweep program, written exactly once by the "Customize sweep…" gesture and
     never touched by the tool after (sweep-program sub-document §7). Absent
     for projects running the shipped program.
+  - `~/tbd/supervision/projects/<name>/transition.py` — a project's
+    transition hook, run at its coverage edges (§9). Its presence is the
+    override — no config key points at it — and it carries the same
+    seeded-once, never-rewritten ownership as the sweep program. Absent for
+    projects running the shipped default ceremony.
   The playbook tiers (§5) are also durable files — and the playbook is where
-  knowledge that must outlive a shift lives, changed by reviewed PR (§8).
+  knowledge that must outlive any one session lives, changed by reviewed PR (§8).
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the brief pipe's liveness bookkeeping. Timers may live in memory *because*
   everything they encode derives from the durable record — an action line's
-  timestamp fixes its observation deadline — so a daemon restart during a
-  shift costs cadence, never data. For the default tick that is a one-cycle delay.
+  timestamp fixes its observation deadline — so a daemon restart
+  costs cadence, never data. For the default tick that is a one-cycle delay.
   For re-checks, the startup ledger replay
   surfaces actions past their deadline with no outcome, and
   the daemon performs those observations then: the envelope is durable in the
@@ -1480,14 +1497,14 @@ account, not a wrong action. The third category is **human-authored process**.
   it runs, such actions render as unconfirmed by construction — the
   query-time rule, not a recovery sweep.
 
-Net property: **supervision adds one column to TBD's database** — the on/off
-switch. Everything else it knows is in files a human can open: one under
-`~/tbd/supervision/`, one directory per shift, and the playbooks in the repos
+Net property: **supervision adds one column to TBD's database** — the fleet
+brake. Everything else it knows is in files a human can open, under
+`~/tbd/supervision/` and in the playbooks in the repos
 themselves.
 
 ## 8. Remembered things: advice, selection, and the question route
 
-Two things persist between shifts inside TBD's own files, and a third
+Two things persist inside TBD's own files, and a third
 persists deliberately outside them. All three shape what a desk does — and
 none of them is a permission.
 
@@ -1563,36 +1580,37 @@ keeping because both could return on evidence:
   morning account where "did a human agree to this" is repeatedly
   unanswerable and the answer mattered.
 
-**Knowledge that should outlive the shift has exactly one home: the project's
+**Knowledge that should outlive the desk has exactly one home: the project's
 playbook, changed by a reviewed PR.** That path already exists — the capture
-flow (below) folds a shift's learnings into `.agents/supervision.md` — and an
+flow (below) folds the record's learnings into `.agents/supervision.md` — and an
 answer the operator finds themselves giving night after night is precisely
 a learning worth capturing; the shipped playbook says so, telling desks that
-an answer received two shifts running belongs in the capture suggestion.
+an answer received two nights running belongs in the capture suggestion.
 There is no separate durable decision store, because permanent instructions
 kept in a side file are policy nobody reviews — the playbook is where a
 project's standing answers live, in the open, with a change history.
 
-### How a shift's experience reaches the playbook (P2-1)
+### How experience reaches the playbook (P2-1)
 
 **There is no machine-appended learnings tier** — no raw prose the machine
 appends to a per-project `learnings.md` via a `learn` verb, carried into every
 future briefing and taking effect immediately. It would bridge two different
 needs that existing machinery serves better.
 
-**Within a shift, a learning is a `note`.** Notes are in the shift record, and
-the shift record is what every replacement desk is briefed from (§9) and what the
+**In the near term, a learning is a `note`.** Notes are in the record, and
+the record is what every replacement desk is briefed from (§9) and what the
 account renders. A desk that discovers at 1 a.m. that a repo's test suite needs a
 warm cache does not need a new file to tell its 4 a.m. successor — that was never
 the hard part.
 
-**Across shifts, a learning is repo advisory content, and that has a home and a
-change process already: the playbook, changed by a reviewed commit.** So at shift
-end, if learning-shaped notes exist, the desk's flush step (§9) **suggests
+**Durably, a learning is repo advisory content, and that has a home and a
+change process already: the playbook, changed by a reviewed commit.** So at
+stand-down — the default transition ceremony's closing request (§9) — and at
+every flush step, if learning-shaped notes exist, the desk **suggests
 spawning a capture worker** — an ordinary worker worktree, briefed to fold the
-shift's learnings into that project's `.agents/supervision.md` and open a PR.
-The suggestion is an entry in the project's proposals doc (§6); it survives
-shift end as a file on disk like the rest of the shift directory, and the
+record's learnings into that project's `.agents/supervision.md` and open a PR.
+The suggestion is an entry in the project's proposals doc (§6); it outlives
+the desk as a file on disk, and the
 operator acts on it in the morning
 alongside the rest. Supervision uses the machinery it supervises — a worktree, an
 agent, a PR, a review — rather than inventing a private channel for its own
@@ -1603,12 +1621,12 @@ keeping is promoted into the playbook by a human commit" names no mechanism
 unless the commit *is* the mechanism — here it is, and the curation step is
 ordinary PR review.
 
-**The trade-off, stated plainly.** Cross-shift learning costs PR latency, and it
+**The trade-off, stated plainly.** Durable learning costs PR latency, and it
 cannot take effect silently. Both are the point. Nothing becomes standing advice
 for a repo without a human reading the diff — the same authority principle as
 "repos advise; operators bind," applied to the tool's own output. The gap this
 leaves — a lesson learned tonight does not steer tonight's other desks — is
-covered by notes within a shift, and is not worth a file that every future
+covered by notes in the record, and is not worth a file that every future
 briefing must carry and no one ever reviews.
 
 ### The supervision file
@@ -1700,16 +1718,18 @@ There is no default stance and no watch-everything shipping posture — the
 house default-off rule applied at the grain where autonomy actually acts —
 and `off <project>` clears the mark, so an untouched project and a
 turned-off project are the same state. For an off project, TBD's compiled
-defaults stand down: no default tick runs, no prompt case is cut, and no
-desk is spawned — so a briefing submitted for it has no supervisor to reach,
-and the pipe returns the same machine-readable no-arrangement result it uses
+defaults stand down: no default tick runs, no prompt case is cut, no new
+desk is spawned, and nothing is delivered — a desk from an earlier span may
+persist, stood down with the mark (§9), but it receives nothing — so a
+briefing submitted for the project is refused with the same
+machine-readable result the pipe uses
 whenever delivery has nowhere to go. **The mark is coverage, never
 protection.** It builds no wall: the public actuations stay public
 (`terminal.send`, `tbd terminal wake`), so a mark here could never keep
 anything's hands off a terminal, and pretending otherwise would be a gate in
 everything but name (§16's bet, kept). What the mark does bind is **TBD's
 own hand**: the acting verbs recheck it at the moment of the act (§3), so
-turning a project off mid-shift beats a drive its desk decided a minute
+turning a project off beats a drive its desk decided a minute
 earlier — the same race the fleet switch wins, at per-project grain.
 The bare switch (§3) adds exactly one thing the marks cannot express — the atomic
 fleet-wide brake, one bit ANDed over every mark, so "nothing acts anywhere,
@@ -1733,10 +1753,10 @@ supervision" is the honest report.
 
 Coverage is also a recorded event, not only a resolved fact. Because
 membership derives — agent → repo → project → mark — a new agent spawned
-mid-shift is under supervision the moment it exists, with no config edit and
+into a covered project is under supervision the moment it exists, with no config edit and
 no desk chore; but nothing about that derivation leaves a trace by itself.
-The trace is the ledger's: the shift-open roster snapshot and per-agent
-mid-shift `enrollment` lines (§6) are what let the account answer *what was
+The trace is the ledger's: the `on` line's roster snapshot and per-agent
+`enrollment` lines (§6) are what let the account answer *what was
 under watch, and since when* — enrollment as a first-class event, arrived at
 by recording the derivation rather than replacing it.
 
@@ -1771,89 +1791,113 @@ design keeps the auditable part deliberately and drops the pretence of
 enforcement openly, which is the same trade the old system made by accident
 (§3, §16).
 
-## 9. Shift and supervisor lifecycle (P2-2)
+## 9. Coverage transitions and supervisor lifecycle (P2-2)
 
-- **A shift is born from the switch and ends only by explicit close.**
-  Turning supervision on with no shift open creates a shift ID, creates
-  `~/tbd/shifts/<id>/`, and writes the opening ledger line with the roster
-  snapshot (§6). It starts **no desks**: at shift open there is nothing yet
-  to supervise, and a desk exists to hold one project's cases. Turning the
-  switch off does **not** end the shift — it pauses it (§3): a paused
-  lifecycle line, desks alive and idle, the record still open. Turning it
-  back on writes a resumed line and hastens a tick. Briefings do not
-  survive a pause — anything still true reappears in a fresh briefing derived
-  from current state — and dead-man deadlines (below) suspend while paused
-  and rearm on resume, because a briefing unanswered during a pause is the
-  system's doing, not a dead desk. Only the explicit close action (§10) ends
-  a shift; issued with the switch still on, it finalizes the record and a
-  fresh shift opens in the same gesture — how an always-on operator gets
-  shift-sized accounts instead of one endless ledger. Every action line
-  records the mode it ran under.
-- **Hosted desks are born lazily, one per project, on that project's first
-  case.** A project with a quiet night never gets a desk at all (§4), and a
-  project with an appointed supervisor (below) never gets a hosted one: while
-  the binding stands, the hosted default stands down. Each hosted desk is a
-  scratch space tracked by ID rather than by its display string, receives the
-  supervision skill through the plugin mechanism, and is bound to its project at
-  its project for its whole life (§5). Its first delivered message is an opening
-  briefing: its project's active mode (the conduct itself installed as its
-  standing layer at spawn, sub-document §8), and a pointer to the previous
-  shift's account **for that project** — the daemon derives it by replaying
-  the previous shift's ledger and filtering on the project tag (§6). Open
-  questions never silently disappear when a shift ends: they live on the
-  project's question route and in the sweep program's files (§8), which
-  outlive every desk by construction — which is why the route and not the
-  desk is the durable home for anything needing a human, and why a question
-  whose project gets no case the next night still waits where the operator
-  reads.
-- **Shift end is a teardown with a caller — the explicit close action (§3,
-  §10) — and it disposes every hosted desk.** The
-  sequence is: stop the default tick and refuse the brief pipe → make a
-  time-limited request to each live supervisor
-  for a closing note **and, where the shift produced learning-shaped notes, a
-  capture suggestion in the proposals doc** (spawn a worker to fold them into
-  that project's
-  `.agents/supervision.md` as a PR — §8) → render the final `account.md` →
-  write the closing ledger line → dispose of each hosted desk by ending its
-  session and
-  deleting its scratch worktree. The capture suggestion outlives the desk that
-  raised it: the proposals doc is a file in the shift directory, so the
-  operator acts on it or drops it in the morning
-  like everything else. Notes add context but are not required; a dead
-  supervisor cannot
-  block closing, and neither can three of them. All durable data already lives
-  outside the desks. Desks accumulated in the old system because nothing
-  initiated cleanup. Here, the same operator action that ends the shift disposes
-  of every hosted desk the night created — a count the ledger knows, so none
-  can be missed. **An appointed supervisor outlives shifts.** Shift close
-  requests its closing note like any other supervisor's, and then leaves it
-  alone: the session is the operator's own conversation, and disposal is not
-  TBD's to perform. The binding and the installed conduct layer persist
-  across shifts until the operator relieves them (below).
-- **A daemon restart during a shift resumes it, never forks it.** The active
-  shift is derivable from the record alone: the newest shift whose ledger has
-  no closing line. On startup the daemon resumes that shift in whatever
-  state the switch persists — running if on, paused if off — with the same
-  ID, same directory, same desks, which are ordinary sessions and survive the
-  daemon, and runs the overdue-observation scan (§7, §12). A half-finished
-  teardown resumes idempotently from its durable steps. Only when no unclosed
-  shift exists does turning supervision on open a new one.
-- **Each shift starts a hosted desk fresh on purpose.** No resumed desk
-  context. Continuity lives in artifacts: the playbook, the operator's
-  selections, and earlier ledgers. The *system* learns; one session's context
-  does not. An appointed supervisor is the deliberate exception, and carrying
-  context across shifts is the point of choosing one: the operator appointed
-  it for what it knows, and owns that trade. If a hosted desk dies during a
-  shift, the daemon writes an anomaly line, creates a replacement for that
-  project in the same shift, and briefs it with its project's account so far;
-  a dead appointed supervisor is never replaced — the fork the dead-man's
-  switch section below states in full.
-- **Closed is meaningful**: after the close, no shift exists, no hosted desk
-  survives, and the shift's residue is fully on disk. Off without close is a
-  pause and renders as one; closed is the clean zero state — an appointed
-  supervisor still exists, because it always existed: it is an ordinary
-  session with a binding, not shift residue. There is no
-  in-between the record cannot name.
+### The record is continuous; coverage spans are the marks' own lines
+
+There is no shift object. The ledger is one append-only record (§6, §7), and
+every boundary a shift would have drawn is already drawn by lines the record
+carries anyway: `on <project>` writes a lifecycle line with that project's
+roster snapshot, `off <project>` writes one carrying the span's coverage
+summary, and the brake's engage and release are lifecycle lines of their own
+(§3, §6). A project's covered windows are therefore a plain query, evening
+and morning views are windowed queries over the same record (§6), and a
+night-sized account is what any reader gets by asking for a window —
+including an always-on operator, who never performs a boundary gesture at
+all. P2-2's deliberate handover survives as the two things it was actually
+made of: the coverage gestures themselves, and the ceremony below. Briefings
+do not survive a pause — anything still true reappears in a fresh briefing
+derived from current state — and dead-man deadlines (below) suspend while
+the brake is engaged or the project's mark is off, and rearm on release,
+because a briefing unanswered during a pause is the system's doing, not a
+dead desk.
+
+### The transition ceremony: edges are compiled, ceremony is authored
+
+Every effective-coverage edge — a project's mark turning on or off, or the
+brake changing what a standing mark amounts to — runs that project's
+**transition hook**: the shipped default, or the project's own at
+`~/tbd/supervision/projects/<name>/transition.py`, whose presence is the
+override (§7 — no config key points at it, and it carries the sweep
+program's seeded-once, never-rewritten ownership). The daemon invokes it
+with the event (`on`/`off`), the cause (`mark`/`brake`), and the timestamp
+of the previous edge — so an off-hook can read the whole span it is closing
+with one `tbd supervise ledger --project <name> --since <t>` call. What the
+hook prints to stdout is delivered to the project's supervisor as a
+**transition delivery**: opaque bytes, bounded (§13), hashed into the
+delivery line, never parsed — and arming no dead-man deadline (§6), because
+its answer is ceremony, not a liveness proof. Empty stdout delivers
+nothing.
+
+The hook runs **after** the edge has taken effect, asynchronously, and is
+best-effort: no transition ever waits on a user script, `off` in particular
+succeeds no matter what the script does, and a hook that fails or times out
+(§13) is an anomaly line, never a refusal. A daemon crash between the
+lifecycle line and the hook costs the ceremony, never the record. The brake
+fires each effectively-on project's hook with `brake` as the cause; a mark
+flipped while the brake is engaged fires nothing, because nothing
+effectively changed — though its lifecycle line is still written, so the
+record never depends on hooks.
+
+The shipped defaults: the off-hook composes a short stand-down note asking
+the desk to ledger a closing summary of the span — the handover ritual, and
+where learning-shaped notes become a capture suggestion (§8) — and the
+on-hook prints nothing, because an idle desk costs nothing until a message
+arrives and the next briefing already carries what is new. The stood-down
+desk can answer: `note` requires only correct addressing (§3), so the
+closing summary lands after the mark clears. This hook governs transition
+messages only — briefing composition stays the sweep program's, standing
+conduct stays the session layer's (sub-document §8), and `brief` remains
+the one way to send a desk substance.
+
+### Hosted desk lifecycle: ensured by `on`, standing down with the mark
+
+- **`on <project>` is ensure-desk.** Deliveries need a live supervisor, so
+  the gesture that opens coverage verifies one exists. Where an appointed
+  binding stands (below), the binding is untouched — a mark is coverage, a
+  binding is selection — and a dangling binding is reported loudly, never
+  silently replaced by the hosted default. Otherwise: a live stood-down
+  desk resumes as it stands, with the conduct reload folding in any playbook
+  edits at the same moment (sub-document §8); a desk that died while stood
+  down — the one state its dormant deadline could not see — is detected
+  here and replaced, a lifecycle line linking successor to predecessor; and
+  a project that never had a desk gets one spawned. Spawn is cheap by
+  construction: it installs the project's playbook as the standing conduct
+  layer (sub-document §8) and delivers nothing — the opening material (the
+  active mode, a pointer to the project's recent record window, derived by
+  replaying the ledger filtered on the project tag, §6) rides the first
+  briefing — so a quiet project's desk idles at zero token cost. Each
+  hosted desk is a scratch space tracked by ID rather than by its display
+  string, receives the supervision skill through the plugin mechanism, and
+  is bound to its project for its whole life (§5). Open questions never
+  depend on any desk's survival: they live on the project's question route
+  and in the sweep program's files (§8), which outlive every desk by
+  construction — which is why the route and not the desk is the durable
+  home for anything needing a human.
+- **`off <project>` stands the desk down; it does not dispose of it.** The
+  mark is a delivery precondition rechecked at act time (§3, §8), so a
+  stood-down desk simply receives nothing — an idle session holding its
+  context at no token cost. Its dead-man deadline is dormant by
+  construction: the switch arms per delivered briefing (below), and nothing
+  is delivered. Context that cost real tokens to build is kept, not
+  burned — and the durable guarantees never rest on it, because everything
+  that matters is externalized as it happens (ledger, notes, proposals,
+  routed questions), so persistence is an economy, never a dependency.
+  Continuity still lives in artifacts; the desk's memory is a bonus the
+  next `on` gets for free.
+- **Disposal happens only for cause.** The recycle path (below) replaces a
+  full desk; the dead-man's switch replaces a dark one; an operator may end
+  the session like any other session they own. No coverage gesture disposes
+  a desk — which is what makes toggling cheap in both directions, the same
+  property the brake has (§3). **An appointed supervisor outlives
+  everything here**: it is the operator's own conversation, and disposal is
+  never TBD's to perform; the binding and the installed conduct layer
+  persist until the operator relieves them (below).
+- **A daemon restart resumes coverage, never forks it.** The marks and the
+  brake are state, not history — `supervision.json` and the config column
+  persist them (§7) — so recovery is a read of two files, not a replay
+  decision. Desks are ordinary sessions and survive the daemon; the startup
+  ledger replay runs the overdue-observation scan (§7, §12).
 
 ### Appointment: an operator-chosen supervisor
 
@@ -1888,7 +1932,7 @@ ordinary life with its conversation intact.
 
 **One mechanism serves every conduct moment.** Resuming a session's process
 in place with a changed standing layer and environment is the same mechanism
-as the conduct reload that re-baselines a desk after a mid-shift playbook
+as the conduct reload that re-baselines a desk after a playbook
 edit (sweep-program sub-document §8) — and desk spawn is its fresh-start
 case, the same layer installed at first launch. Appointment is the reload with
 the
@@ -1959,12 +2003,12 @@ the expensive path and making the recycle machinery the thing standing between
 a desk and its context ceiling — would make recycling load-bearing: if it
 failed to fire, the desk would die at the ceiling, which is exactly how the
 desk that reviewed this design came to exist, spawned by hand from a
-predecessor that hit 200k mid-shift. So auto-compaction stays on for desks and
+predecessor that hit 200k overnight. So auto-compaction stays on for desks and
 is the guarantee: a desk
 can never hard-die from context alone, and what compaction loses is
 acceptable by this design's own doctrine, because everything durable is
 externalized as it happens (ledger, notes, account, routed questions). **A desk's
-handoff document already exists — it is the shift record.** Recycling is
+handoff document already exists — it is the record.** Recycling is
 preferred whenever it can run — a fresh desk with a clean briefing reasons
 better and costs less per turn than a compacted one — but nothing breaks if
 it never fires.
@@ -1979,8 +2023,8 @@ because survival never rested on this machinery. The layers that must hold
 for every desk kind read the record, not the session's internals: the
 dead-man's switch watches briefings and ledger lines, and hosted-desk
 replacement
-briefs from the shift record, so both hold unchanged. Such a desk simply runs
-until the shift closes or the dead-man's switch fires — replacement for a
+briefs from the record, so both hold unchanged. Such a desk simply runs
+until it is stood down, recycled, or the dead-man's switch fires — replacement for a
 hosted desk, the operator notification for an appointed supervisor (below) —
 and the account
 shows its context as unknown rather than guessed.
@@ -1989,8 +2033,8 @@ Thresholds are **fractions of the session's effective window**, never absolute
 token counts. The denominator comes from the statusline tee (§2); absolute
 numbers would be wrong on the next model, and the effective window is a
 session fact TBD receives rather than knows. As context grows the daemon
-sends staged **flush nudges** — bounded requests, same shape as the shift-end
-closing note: "anything in your head not yet in artifacts, write it now as
+sends staged **flush nudges** — bounded requests, same shape as the stand-down
+closing request (§9): "anything in your head not yet in artifacts, write it now as
 notes" — at rising fullness (§13), so that whenever a recycle or a compaction
 lands, the artifacts are already current. When the tee has supplied no
 denominator, the daemon nudges against the labeled 200k assumption (§2) —
@@ -2011,8 +2055,8 @@ The sequence, all daemon-driven:
    emptied the desk's head. If the supervisor is wedged, the recycle proceeds
    without it — that is exactly the crash path, which was already designed to
    be survivable.
-4. **Recycle** — tear down that desk's session, spawn fresh into the same shift
-   and the same project (spawning installs its one playbook as standing
+4. **Recycle** — tear down that desk's session, spawn fresh into the same
+   project (spawning installs its one playbook as standing
    conduct), and deliver the standard replacement briefing (the
    active mode, that project's account so far) **plus the predecessor's
    transcript path**. Anything that lived
@@ -2048,7 +2092,10 @@ nothing. The meaningful silence is a briefing delivered at time T with **no
 ledger line from that desk** by T plus the deadline (§13) — no drive,
 pause, or note. Every desk act is already a daemon-written ledger
 line, so ledger silence *is* unresponsiveness, and no new observation channel
-is needed. The second arm bounds the working state: a desk `working`
+is needed. Only briefings arm it: a transition delivery (§9) is ceremony
+and arms nothing, and a stood-down project delivers nothing at all, so its
+idle desk is dormant, not dark — its liveness is re-verified at the next
+`on` (§9). The second arm bounds the working state: a desk `working`
 continuously past the same deadline with nothing ledgered. Whether it is
 wedged or merely lost in thought stops mattering at the deadline — a desk
 holds cases, a case unanswered for an hour is the failure the switch exists to
@@ -2079,7 +2126,12 @@ the desk — a pathological transcript, a poisoned case — the successor stalls
 identically, and an unbounded switch would reroll all night. After two
 consecutive stalled desks on the same project (§13), the daemon stops: the
 project is marked dark, its cases hold, and the anomaly line is the loudest
-thing in the account. This bound is insurance against machinery this section
+thing in the account. The briefing that wedged both desks is parked, named
+in that anomaly line, and never silently redelivered — whatever in it is
+still true reappears in a fresh briefing composed from current state, the
+same principle a pause applies (§9). The budget's reset is an operator
+gesture: toggling the project off and on (§8) re-arms delivery and zeroes
+the count. This bound is insurance against machinery this section
 introduces, not a scar from a lived incident — the old system never rerolled
 a desk at all — but the shape has precedent one layer up: five nights of
 judge sessions escalating a restart for software that never existed. Repeated
@@ -2119,19 +2171,20 @@ Principle: **you take action where you already read the relevant information.**
   conversation. They steer the session but do not set policy. The two durable
   channels for rules are
   the playbook and its mode sections (§3); the chat is neither. If you type
-  something conduct-shaped that should outlast the shift, it belongs in the
+  something conduct-shaped that should outlast the conversation, it belongs in the
   playbook, and the desk may propose a capture PR that puts it there (§8).
 - **Chat steers; the route remembers.** These are not two homes for the same
   answer, and the difference is worth being exact about. An answer written on
   the project's question route is durable and legible to the whole loop: the
   sweep program reads it and carries it into future briefings (§8), and it
-  survives every desk recycle and shift close. Typing the same words into a
+  survives every desk recycle and stand-down. Typing the same words into a
   desk's tab does neither: a hosted desk's context is disposable *by design*
-  (it recycles mid-shift and starts fresh every shift, §9), and even an
+  (it recycles on fullness and is replaced when it goes dark, §9), and even an
   appointed supervisor's compacts on a schedule nobody chose, so a chat-only
   answer evaporates on a schedule the operator cannot see — and the desk may
   not exist when the answer is given at all, since questions are often
-  answered in the morning, after every hosted desk was disposed. The shipped
+  answered in the morning, when the desk that raised them may already have
+  been recycled or replaced. The shipped
   playbook closes the loop from the desk's side (§5): a desk told something
   in chat acts on it, writes the answer to the route, and says so with a
   `note`. One honesty boundary rides with this: a desk's transcription of a
@@ -2160,10 +2213,11 @@ Principle: **you take action where you already read the relevant information.**
   rules to inspect (§3). The question it existed to answer — "why did the daemon
   do that on its own?" — is answered better by the account: every action line
   carries the mode it ran under and the state snapshot that justified it.
-- **Morning flow**: open TBD → open the last shift's account → follow its
+- **Morning flow**: open TBD → open the account panel's morning view — a
+  windowed query over the record since you last read it (§6) → follow its
   question pointers to the route and answer them in minutes (P0-10), with
   the desk's exact item, proposed command, and recommendation already there.
-  An answer worth keeping past the shift is playbook material, and the
+  An answer worth keeping is playbook material, and the
   capture flow is how it gets there (§8).
 
 ### The CLI surface (normative)
@@ -2187,7 +2241,8 @@ tbd supervise ledger  --project <name> --since <t>   # read-only: TBD's own reco
 `readout` and `ledger` print and change nothing. `brief` is how cases reach a
 desk: composed briefing text on stdin, delivered under the compiled header
 after the per-project rate limit, refused with a pinned exit code while
-supervision is paused or no shift is open, and counted as liveness contact
+the brake is engaged and with the no-arrangement result for a project that
+is off (§8), and counted as liveness contact
 either way (an empty submission is the attested "looked, found nothing").
 
 **Desk verbs — acting** (execute, ledger line, 60-second re-check). None is
@@ -2219,18 +2274,17 @@ a runaway (§13). Exactly one payload flag per call.
 tbd supervise note --text "…" [--ref <line-id>]
 ```
 
-**Operator — the switch, the shift, and the modes.** Turning supervision on
-opens a shift if none is open, and resumes the paused one otherwise; turning
-it off pauses acting without closing anything (§3, §9). Closing the shift is
-its own explicit action: it finalizes the account and disposes the hosted
-desks, and with the switch still on a fresh shift opens in the same gesture
-(§9).
-Mode selection is per project and takes effect on the next briefing (§3).
+**Operator — on, off, and the modes.** Coverage is per project: every
+project starts off, `on <project>` is the standing mark that turns one on
+(and ensures its supervisor is live, §9), and `off <project>` clears it,
+each transition running the project's transition ceremony (§9). The bare
+forms are the fleet brake — one bit ANDed over every mark, writing none of
+them (§3, §8). Mode selection is per project and takes effect on the next
+briefing (§3).
 
 ```
-tbd supervise on
-tbd supervise off
-tbd supervise shift close
+tbd supervise on  [<project>]
+tbd supervise off [<project>]
 tbd supervise status
 tbd supervise mode <project> <mode-name>
 tbd supervise mode <project>            # show the active mode and the choices
@@ -2261,17 +2315,6 @@ conversation with the playbook layer installed and `TBD_PROJECT` injected.
 default (lazily, on the next briefing need). Both write the binding into
 `supervision.json` (§8) and append a lifecycle ledger line.
 
-**Operator — per-project on and off** (§8).
-
-```
-tbd supervise on  <project>
-tbd supervise off <project>
-```
-
-Every project starts off. `on <project>` is the standing mark that brings a
-project under supervision; `off <project>` clears it; the bare forms above
-are the fleet brake, ANDed over every mark and writing none of them.
-
 **Operator — the sweep** (sub-document §4, §7).
 
 ```
@@ -2280,8 +2323,14 @@ tbd supervise sweep customize <project>   # copy the shipped program, write the 
 
 **Deliberately absent**, each with its argument elsewhere in this document:
 
-- **`learn`** — no machine-appended memory tier; same-shift memory is a `note`,
-  cross-shift memory is a reviewed playbook PR (§8).
+- **`shift open`, `shift close`** — there is no shift object and no record
+  boundary gesture. The ledger is continuous; evening and morning views are
+  windowed queries (§6); coverage spans are the marks' own lifecycle lines;
+  and the handover ritual — the closing summary, the capture suggestion —
+  is the stand-down ceremony of `off <project>` (§9). A close verb would
+  re-reify as lifecycle what windows and marks already express.
+- **`learn`** — no machine-appended memory tier; near-term memory is a `note`,
+  durable memory is a reviewed playbook PR (§8).
 - **`wake`** — no supervise-tier unpark verb. Parked sessions are the wake
   program's half outright (§4, the
   [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md)),
@@ -2308,13 +2357,11 @@ tbd supervise sweep customize <project>   # copy the shipped program, write the 
 - **`approve-a-prompt`** — no blanket auto-grant of permission prompts exists,
   and nothing restores one under another name (§2).
 - **Per-desk lifecycle commands** (spawn, recycle, dispose) — hosted desks are
-  daemon self-maintenance, born on their project's first case and disposed at
-  shift close; there is nothing for an operator to drive (§9). `appoint` and
+  daemon self-maintenance, ensured live by `on`, standing down with the
+  mark, and disposed only for cause; there is nothing for an operator to
+  drive (§9). `appoint` and
   `relieve` are not the exception: they select *who* supervises — a binding
   gesture, like `mode` — and drive no hosted desk's lifecycle.
-- **Per-project on/off** — one switch, fleet-wide; "not this project" is an
-  per-project mark (§5, §8). Mode is per project, but mode is conduct, not
-  lifecycle (§3).
 - **Rules of any kind — allow, deny, approve-lists, prompt-approvals.** No verb
   is gated, so there is nothing to permit or forbid. The operator's controls are
   selection and visibility; the reasoning, and the bet it rests on, are in §3
@@ -2431,7 +2478,7 @@ never default to "landed," the way the wake verifier never defaulted to
 DONE — and it keeps every rung of the ladder honest: *requested* on the
 daemon's word, *dispatched* on the adapter's return, *landed* only on a
 machine observation. Because the rule lives in the query rather than in an
-appended repair, a mid-shift daemon restart cannot corrupt the record: an
+appended repair, a daemon restart cannot corrupt the record: an
 action whose observation never ran renders as unconfirmed by construction
 (§7). The observation itself is recoverable from the record alone — the
 action line's timestamp fixes the deadline, and the envelope is durable in
@@ -2486,11 +2533,11 @@ relaunch included** — the daemon performs a
 channel envelope. Confirmed → the channel is that desk's adapter. Not
 confirmed (consent declined, feature removed, registration silently failed) →
 `terminal.send` for that desk's lifetime, with one anomaly line noting degraded
-delivery. The handshake is per desk rather than per shift because desks are
+delivery. The handshake is per desk because desks are
 born and recycled independently (§9): the adapter is a property of a session,
 so each new session earns it, and one degraded desk says nothing about the
 others.
-Mid-shift, the acknowledgement path above extends naturally: a channel send
+Thereafter, the acknowledgement path above extends naturally: a channel send
 that fails acknowledgement twice is redelivered by typing and the adapter is
 marked degraded. The handshake decouples correctness from the channel's
 research-preview status entirely — the feature disappearing in an update
@@ -2585,6 +2632,8 @@ to hunt for the value that governs a behavior:
 | Reroll budget | 2 consecutive stalled desks per project | §9 |
 | Per-project briefing rate limit | 1 briefing / 2 min | sub-doc §3, §10 |
 | Paused-refusal exit code (`brief`) | 75 | sub-doc §3, §10 |
+| Transition-hook run timeout | 5 min | §9 |
+| Transition-hook output bound | 256 KiB | §9 |
 | Runaway: turns in window | 30 turns | shipped sweep program (sub-doc §7) |
 | Runaway: no-progress window | 90 min with no commits | shipped sweep program (sub-doc §7) |
 | Heartbeat staleness | 10 min | §14 |
@@ -2594,17 +2643,18 @@ shipped-program constants, which ship in the reference sweep program — and non
 is a config column.** That
 preserves §7's one-column property, which is a real property of the design and
 not an accounting convenience: the moment numbers become columns, "where is this
-system's state?" stops having a one-line answer. If real shifts prove a number
+system's state?" stops having a one-line answer. If field use proves a number
 wrong, promoting that one number to a config column is a conscious change to
 §7, argued on its own merits — the same stance taken toward per-repo threshold
 overrides (§15).
 
 ## 14. Out-of-band heartbeat (P3-1)
 
-On a fixed cadence of its own, the daemon writes a small `status.json` file in
-the shift directory. It contains whether supervision is on, each project's
+On a fixed cadence of its own, the daemon writes a small `status.json` file
+under `~/tbd/supervision/`. It contains the brake, each project's mark and
 active mode, and each project's last sweep contact. The watchdog is an
-optional `launchd` job with one rule: *if a shift claims to be active and the
+optional `launchd` job with one rule: *if any project claims to be
+effectively on and the
 status file has not changed in about 10 minutes, raise a notification.* It
 reads a file instead of the socket or DB, so a dead daemon cannot make the
 watchdog unavailable. The watchdog never acts on the fleet. It can only alert
@@ -2650,7 +2700,7 @@ to inaction at the largest scale.
   session is the operator's own conversation, and the compiled response to
   its silence is the anomaly line plus the operator notification, never an
   automatic restart (§9). Revisit on field evidence — the failure signature
-  is appointed supervisors repeatedly going dark mid-shift with the
+  is appointed supervisors repeatedly going dark with the
   notification arriving too late to matter, in the record, more than once.
 - **A verdict enum / work-arc schema** — interpretations of work differ by
   repository, team, and person. A compiled classification would recreate the
@@ -2799,10 +2849,10 @@ to inaction at the largest scale.
   ledger kind that fed it) — a per-project `learnings.md` the desk could append
   to, carried into every future briefing, taking effect with no review. Not
   built, because it bridges two needs that existing machinery serves better:
-  within a shift a learning is a `note` in the record every replacement desk is
-  briefed from, and across shifts it is repo advisory content, which already has
-  a home (the playbook) and a change process (a reviewed commit). Shift end
-  proposes a capture worker that opens that PR instead. The cost — PR latency,
+  in the near term a learning is a `note` in the record every replacement desk is
+  briefed from, and durably it is repo advisory content, which already has
+  a home (the playbook) and a change process (a reviewed commit). Stand-down
+  and the flush steps propose a capture worker that opens that PR instead. The cost — PR latency,
   and no silent adoption — is the feature. See §8.
 - **Separate verbs for answering, messaging, and key-sending** — all three are
   one `drive` with payload variants. Replying to a question is the send
@@ -2818,10 +2868,12 @@ to inaction at the largest scale.
   is an ad hoc judgment act through `drive`, and nothing about it accumulates.
   Recurrence is a signal to fix the repo's own permission config, not a workload
   to automate. See §2.
-- **Per-project shifts or ledgers** — the project is the unit of judgment,
-  conduct, and coverage (§8), not of lifecycle: one shift, ledger, and
-  account keep every record surface single, and one bare switch keeps P0-2's
-  one-gesture brake. "Not this project tonight" is `off <project>` (§8). See §5.
+- **Per-project ledgers** — the project is the unit of judgment,
+  conduct, and coverage (§8), not of the record: one ledger and one
+  account keep every record surface single, the envelope's project tag lets
+  views group without splitting (§6), and a project's coverage spans are
+  already its marks' lifecycle lines (§9). "Not this project tonight" is
+  `off <project>` (§8). See §5.
 - **A grouping layer in TBD's schema** — *project* is supervision
   configuration: a key in the operator's rules file, not a table, a UI noun, or
   a lifecycle other subsystems must respect. Graduating it is a conscious later
@@ -2836,7 +2888,7 @@ to inaction at the largest scale.
   that binds. A repo ships *modes* (§3), which are advice until an operator
   selects one; that selection is what "operators bind" means now.
 - **DB tables for the ledger or its views** — every view over the record is a
-  query of the shift's JSONL ledger, rebuilt from the file at startup.
+  query of the supervision JSONL ledger, rebuilt from the file at startup.
   Supervision adds one column to the database.
 - **A supervisor-authored account** — the record produces the summary. The
   supervisor can add context through attributed notes but cannot author the

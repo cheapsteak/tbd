@@ -87,11 +87,11 @@ daemon — and outside the desk — entirely.**
   wake.py always did — and it is the discipline for desk sends too. The
   daemon verifies nothing for anyone; freshness is authored on both sides of
   the process boundary. Wakes are recorded as the ordinary terminal operations
-  they already are; nothing here depends on a shift being open, and nothing
+  they already are; nothing here depends on supervision coverage, and nothing
   here writes supervision ledger lines.
 - **The program schedules itself, and watches itself.** Cadence is a
   requirement; daemon ownership of it is not. The reference script runs its
-  own loop — under launchd, or invoked at shift open — and a scheduler outside
+  own loop — under launchd, or however its operator starts it — and a scheduler outside
   the daemon survives the daemon being down, which is P3-1's shape obtained
   for free (detection survives; actuation still needs the daemon up, which is
   all P3-1 ever asked). Liveness is the author's, like the rest of the

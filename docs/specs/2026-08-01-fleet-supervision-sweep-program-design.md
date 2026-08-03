@@ -113,7 +113,7 @@ recurring desk briefing was a prompt template compiled into the binary
 (`NightwatchDeskPrompts.judgePrompt`,
 `Sources/TBDShared/NightwatchDeskPrompts.swift:91`; `docs/nightwatch.md` §5),
 mixing mechanism, policy, and a section literally titled "Field learnings —
-apply these rules" — conduct learned on real shifts that could only be taught
+apply these rules" — conduct learned on real nights that could only be taught
 by editing Swift and rebuilding. Every sentence of that content has an
 authored home; only the header and the record remain compiled.
 
@@ -136,8 +136,8 @@ current values printed for whoever is consuming them, implying no action. It
 prints the project's live-agent facts — session state with source and
 observed-at, work facts, runaway counters, worktree pin state, and the
 per-target not-to-act facts (an intervention in flight, a pending re-check, a
-rate limit) — plus the supervision machinery's own state: whether supervision
-is on, whether a shift is open, and the project's active mode. A program can
+rate limit) — plus the supervision machinery's own state: the brake, the
+project's mark (design §3, §8), and the project's active mode. A program can
 therefore see for itself when a submission would be refused (§4). There is no
 open-cases section: what has already been briefed is the program's own memory
 (§7), not TBD's. An operator or any other script may read the readout freely
@@ -160,16 +160,18 @@ does, synchronously:
    acting verbs' preconditions (design §3), where the target is explicit in
    the call (`--terminal <id>`) — the same check-at-the-act pattern that
    makes the off switch bind.
-3. **Refuse while paused.** With supervision off or no shift open, the pipe
+3. **Refuse while paused.** With the brake engaged, the pipe
    refuses with a distinct machine-readable paused result — a pinned exit
-   code (§10) — so a program can tell "not now" from "broken." Refusals
+   code (§10) — so a program can tell "not now" from "broken"; a project
+   whose mark is off gets the no-arrangement result instead (design §8),
+   the "not covered" answer rather than the "not now" one. Refusals
    while paused do not feed the watchdog (§6), and nothing is delivered.
 4. **Deliver.** A surviving briefing goes to the project's supervisor: the
    daemon
    prepends the compiled **header** — the active mode's name and any pending
    conduct delta (§8) — resolves the supervisor (the operator's appointed
-   session where a binding stands, otherwise the hosted desk, spawned lazily
-   if the project has none this shift — design §5, §9),
+   session where a binding stands, otherwise the hosted desk, ensured live
+   since the project's `on` — design §5, §9),
    delivers through the agent-kind adapter, and writes the ledger's
    delivery line request-first, carrying the delivered text's hash and the
    conduct hash (design §4 steps 3–4, §6, §12). Delivery arms the desk
@@ -180,7 +182,8 @@ does, synchronously:
 stdin is the attested "looked, found nothing": it updates the liveness
 record, delivers nothing, and writes no ledger line — the design's noise rule
 holds (design §6: quiet contact is one status field, not forty lines an
-hour); its durable trace is the shift-close line's coverage summary (§6). It
+hour); its durable trace is the coverage summary on the lifecycle line that
+ends the project's coverage span (§6, design §9). It
 is not a courtesy: it is what makes a quiet fleet distinguishable from a dead
 sensor. Pacing applies only to delivered briefings, never to quiet contact.
 
@@ -257,21 +260,22 @@ top-level `modes` map; design §8 shows the whole file.)
 When the daemon itself runs the program, failure detection is direct — a
 crash or timeout is observed as an exit condition and recorded (§6). When the
 project owns the triggers, failure detection is the watchdog's, by silence.
-Either way the shipped default means "flip the switch and supervision
+Either way the shipped default means "turn the project on and supervision
 works": no project starts with a scheduling chore, and the
 never-installed-schedule failure class does not exist for the default path.
 
-**Paused and off.** The switch's writ runs exactly as far as TBD's own
-processes (design §3). While supervision is off or paused, the default tick
-launches no new runs; a run already in flight finishes inside its timeout
+**Paused and off.** The brake's writ runs exactly as far as TBD's own
+processes (design §3). While a project's mark is off or the brake is
+engaged, the default tick
+launches no new runs for it; a run already in flight finishes inside its timeout
 bound (§10) and its submission is refused at the pipe with the paused result
 (§3). External programs are **never signaled or killed** — TBD stops only
 what TBD starts. Toward everything it does not run, TBD refuses at the
-boundary and advertises state: the readout carries the supervision and shift
-state (§3), so a courteous program can decline to run at all, and a program
+boundary and advertises state: the readout carries the brake and the
+project's mark (§3), so a courteous program can decline to run at all, and a program
 that submits anyway gets the machine-readable refusal. Refusals while paused
 do not feed the watchdog, whose contact window is armed only while
-supervision is on *and* a shift is open (§6).
+the project is effectively on — mark set, brake released (§6).
 
 ## 5. Liveness contracts: which durations are whose
 
@@ -309,8 +313,9 @@ cleanly distinguishable at the pipe:
 - **Briefings arriving** — the program ran and found work.
 - **Empty submissions arriving within the window** — the program ran and the
   fleet is genuinely quiet. Quiet contact updates the liveness record, never
-  the ledger (noise rule, §3); the shift-close line carries the coverage
-  summary, so the account can still say "checked 14 times, nothing found":
+  the ledger (noise rule, §3); the lifecycle line that ends the coverage
+  span carries the coverage
+  summary (design §9), so the account can still say "checked 14 times, nothing found":
   an *attested* calm night, durably.
 - **No contact past the declared window** — nobody looked. Dead cron, crashed
   script, uninstalled schedule — the daemon cannot tell which and does not
@@ -356,11 +361,12 @@ account, not by a liveness clock that is deliberately measuring only whether
 anyone looked.
 
 **The contact window** is the declared expectation silence is measured
-against. It is armed only while supervision is on and a shift is open (§4):
+against. It is armed only while the project is effectively on — mark set,
+brake released (§4):
 a pause disarms it, because silence the system itself requested is not a
 coverage gap. Each window is measured from the later of the last accepted
-contact and the moment the watchdog armed — a fresh shift owes no contact
-for time before it opened. While the default tick runs, the window defaults to a multiple
+contact and the moment the watchdog armed — a project owes no contact
+for time before its coverage opened. While the default tick runs, the window defaults to a multiple
 of the tick interval (§10) and the operator declares nothing. A project on
 an external schedule declares its own window in `supervision.json`. A
 project that declines even that — a purely event-driven program with no
@@ -393,7 +399,7 @@ watchdogs above TBD's; the compiled one is the floor, not the ceiling.
 
 The reference program ships **inside TBD's install, tool-owned**: the default
 tick runs the shipped copy directly, so every project has working supervision
-from the first shift with nothing authored, nothing configured, and nothing
+from its first `on` with nothing authored, nothing configured, and nothing
 written into project files — and the program improves with releases, because
 the tool still owns it. A project takes ownership only when it wants to:
 
@@ -457,7 +463,7 @@ instructions the operator chose it for (design §9).
 
 What this buys, in order of importance:
 
-- **Compaction cannot eat the conduct.** A long shift summarizes old turns;
+- **Compaction cannot eat the conduct.** A long night summarizes old turns;
   a playbook embedded in an early message can be compacted into mush by
   briefing fifteen. Standing layers are re-included by construction —
   verified for both shipped desk kinds (dated note, §13). Since deliberate
@@ -473,9 +479,9 @@ What this buys, in order of importance:
   said earlier.
 - **One copy per session**, prompt-cached, instead of one per briefing — on
   a busy night, tens of thousands of tokens of duplication removed from the
-  context window that the mid-shift ceiling already threatens.
+  context window that the fullness ceiling already threatens.
 
-**Mid-shift playbook edits** are the one thing a launch-time layer cannot
+**Playbook edits under a live desk** are the one thing a launch-time layer cannot
 carry, and the file cannot be re-read into a live session by either shipped
 agent kind (dated note, §13) — so the delta travels in the compiled header
 of the next delivered briefing: the changed text, marked as superseding the
@@ -486,7 +492,7 @@ supervisor-capable adapter has a **conduct reload** — relaunch the desk's
 session
 process *resuming the same conversation*, with the refreshed playbook as its
 standing layer (dated note, §13) — so the daemon schedules exactly that at
-the desk's next idle moment, and nothing of the shift's context is lost.
+the desk's next idle moment, and nothing of the session's context is lost.
 A replacement or reloaded desk launches with the current playbook,
 which is also why a replacement desk needs no special briefing path. The
 ledger records the conduct hash per delivery either way, so "what conduct
@@ -660,7 +666,7 @@ refusal means.
   with no consumer; revisit on field evidence.
 - **Re-delivering the playbook in every briefing** — robust and simple,
   and what the old system's nudge loop did with its whole compiled briefing,
-  but it funds the desk's most likely failure (the mid-shift context
+  but it funds the desk's most likely failure (the context
   ceiling) with pure duplication, and re-delivery is the anomaly against the
   design's own transcript-by-path rule. The standing layer plus header
   deltas (§8) keeps every property re-delivery had — mode switches on the
@@ -668,23 +674,27 @@ refusal means.
 
 ## 12. Testing
 
-- **Brief round-trip** — briefing text submitted against an open shift is
+- **Brief round-trip** — briefing text submitted for an effectively-on
+  project is
   delivered verbatim under the compiled header; the delivery line carries
   the delivered text's hash and the conduct hash; delivery arms the desk
   dead-man's deadline.
 - **Quiet contact** — an empty submission updates the liveness record,
-  delivers nothing, writes no ledger line, and is counted in the shift-close
-  coverage summary.
+  delivers nothing, writes no ledger line, and is counted in the coverage
+  summary on the lifecycle line that ends the span.
 - **Pacing** — a second briefing for the same project inside the rate-limit
   window is refused with the machine-readable result and still counts as
   contact; a briefing for a different project inside the same window is
   delivered (the limit is per project and blind to everything else); an
   empty submission is never paced.
-- **Paused** — with supervision off or no shift open, `brief` exits with the
-  pinned paused code, delivers nothing, and does not feed the watchdog; the
+- **Paused and off** — with the brake engaged, `brief` exits with the
+  pinned paused code; for a project whose mark is off it returns the
+  no-arrangement result; either way it delivers nothing and does not feed
+  the watchdog; the
   default tick launches no runs while paused; a run in flight at the flip
   finishes within its timeout bound and its submission is refused; no
-  external process is signaled. Both branches of the switch behave (per the
+  external process is signaled. Both branches of the brake and of the mark
+  behave (per the
   flag-branch rule).
 - **Verb preconditions** — a `drive` targeting a terminal with an
   intervention in flight, a pending re-check, or a rate limit is refused at
@@ -695,8 +705,8 @@ refusal means.
   appear.
 - **Watchdog** — a missed window writes the anomaly line; the configured
   consecutive count raises the operator notification; contact resets the
-  count; the window is disarmed while supervision is paused or no shift is
-  open; a project with `schedule: external` and no declared window renders
+  count; the window is disarmed while the project's mark is off or the
+  brake is engaged; a project with `schedule: external` and no declared window renders
   coverage unknown, and both branches of the schedule setting behave. On the
   daemon-run path: a crash, timeout, or nonzero exit of a tick run writes an
   immediate anomaly line without waiting for a window; consecutive failed
@@ -752,7 +762,7 @@ design's prose. Verified 2026-08-01.
   `AGENTS.md` in the desk worktree is the file-based alternative (loaded
   root-down, 32 KiB combined budget) but arrives as a user-role message.
   Caveats: the app-server is flagged experimental; `AGENTS.md` is cached per
-  session and **not re-read on file edits** — which is why mid-shift
+  session and **not re-read on file edits** — which is why live-desk
   playbook edits travel as briefing-header deltas (§8) rather than file
   writes; the former `experimental_instructions_file` key is renamed
   `model_instructions_file` and *replaces* base instructions — not the
