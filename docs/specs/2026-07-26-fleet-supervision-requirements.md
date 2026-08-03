@@ -141,7 +141,8 @@ and become a contract that migration and future change must respect.
   today the entire difference is one hint sentence in a prompt, and the conservative rule it
   states references a field the data doesn't even carry.)*
 
-  *Descoped by operator decision: **this story is not implemented as written.** TBD builds
+  *This story is **Descoped**, not Built — by operator decision, it is not
+  implemented as written. TBD builds
   no compiled verb gate — the mechanism that would have made the modes differ mechanically —
   declining it as over-engineering. The models running the supervisor desks are trusted to
   follow conduct instructions and are already resistant to prompt injection, and TBD declines
@@ -149,7 +150,7 @@ and become a contract that migration and future change must respect.
   instruction plus visibility: a mode is authored conduct prose telling the desk what to act
   on, propose, and escalate; the daemon installs that conduct as the desk's standing layer
   at spawn and names the active mode on every briefing it delivers, records
-  which mode was active on every action line, and writes each action to the ledger the
+  which mode was active on every act's row, and writes each act to the record the
   instant it happens, with the account rendering it beside the operator. So the label's
   promise is honest rather than enforced — "attended" instructs and shows you, it does not
   restrain. The concern this story raises (a mode label that is a false promise) is answered
@@ -194,7 +195,7 @@ and become a contract that migration and future change must respect.
   shipped playbook's universal: derive the facts live, in the same breath as the send. For a
   wake program it is the discipline the old wake.py already practiced ("re-derives truth AT
   WAKE TIME") with no daemon help, and the reference script demonstrates it. The daemon does
-  not re-verify a desk's `drive --text` claims, and does not inspect message content at all,
+  not re-verify the claims in a desk's text sends, and does not inspect message content at all,
   for anyone. Three findings put the obligation there. **The owner is authored, not
   compiled.** The running system never compiled this check: it lived entirely in authored
   content the desk executed itself — `wake.py` "re-derives truth AT WAKE TIME", and the
@@ -412,6 +413,12 @@ and become a contract that migration and future change must respect.
 - **P2-1 [both]** As the supervisor, I want standing rules I learn during operation ("this
   repo rejects unsigned commits") recorded somewhere durable that the tool never clobbers,
   so that each shift is smarter than the last.
+
+  *This story is **Enabled**, not Built. The durable home is the project's playbook,
+  changed by a reviewed capture PR — proposed by the desk at stand-down and flush time,
+  opened by an ordinary worker, adopted only through review — and nearer-term learnings
+  are journal entries in a file the tool never rewrites. TBD's compiled part is carriage
+  and display; there is no machine-appended memory tier (design §8).*
 - **P2-2 [both]** As an operator, I want ending a shift to be a deliberate, clean handover —
   summary posted, supervisor session disposed of or parked on purpose — so that watch-desk
   worktrees don't silently accumulate forever.
@@ -419,7 +426,7 @@ and become a contract that migration and future change must respect.
   advanced past an operator-authored allowlist of safe approvals — and never past anything
   else — so that a trivial "allow this read?" doesn't cost a night.
 
-  *As written, this story presumes a mechanism — matching an operator's
+  *This story is **Descoped**, not Built. As written, it presumes a mechanism — matching an operator's
   allowlist against a rendered dialog — that the design refuses, for the same reason it refuses
   to keystroke-drive the Channels consent prompt: it requires screen-scraping or blind key
   timing, and it defeats the dialog while leaving it in place. The design satisfies the
@@ -434,7 +441,7 @@ and become a contract that migration and future change must respect.
   nothing standing beside a repo's permission config and contradicting it — and never will.
   What still happens is *judgment*: a stalled prompt reaches the supervisor as a case (via
   Claude Code's `Notification` hook event), and answering it is an ad hoc act through the
-  `drive` verb, guided by its project's mode and playbook, which advise escalating when unsure and treat
+  public send (`tbd terminal send`), guided by its project's mode and playbook, which advise escalating when unsure and treat
   prompts guarding merges or credentials as deserving a human. Nothing about that act
   accumulates into a standing approval. Recurrence is the signal: when the account shows the
   same prompt driven night after night, the fix is a reviewed change to the repo's own
@@ -453,7 +460,8 @@ and become a contract that migration and future change must respect.
 - **P3-1 [A]** As an operator, I want an optional heartbeat that survives the daemon being
   down entirely, so the safety net doesn't share fate with the process it watches.
 
-  *The waking half of the safety net has this property by construction — the wake program
+  *This story is deliberately **Open** — neither Built nor Enabled yet. The
+  waking half of the safety net has this property by construction — the wake program
   (P1-2) schedules itself outside the daemon, so its detection loop survives the daemon
   being down (actuation still needs the daemon up, which is all this story ever asked).
   Live-session supervision — the sweep and the desks — still

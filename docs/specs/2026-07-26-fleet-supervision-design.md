@@ -970,10 +970,12 @@ unconditionally, with no supervision check on the agent side — the daemon know
 each project's coverage and sees every event anyway. The fork is in the
 daemon's RPC handler:
 with the terminal's repo's project effectively on (§8), a pending
-question becomes a case and **hastens an immediate mini-tick for that
-terminal**, running the same pure decision function the clock would have run
-minutes later. The delivered briefing carries the question payload verbatim from the
-daemon's store, so the supervisor fetches nothing and needs no new read
+question becomes a case and is **delivered immediately through the compiled
+fast path** (§2), bypassing the sweep program entirely: the trigger is a
+reported fact that needs no theory of work, and this is the one delivery
+TBD composes itself — the question payload verbatim from the
+daemon's store, under the compiled header — so the supervisor fetches
+nothing and needs no new read
 surface. From there it is an ordinary case: judgment, then the send down the
 same audited delivery path as every other act. Full mechanics, including the
 dismiss-and-reply actuation and what a daemon restart costs, are in §2's
