@@ -20,7 +20,7 @@ tbd supervise mode <project> [<mode-name>]
 tbd supervise project <list|create|delete|move> …
 tbd supervise appoint <project> --terminal <id>
 tbd supervise relieve <project>
-tbd supervise automation <default|set|list> …
+tbd supervise scope <default|set|list> …
 tbd supervise sweep customize <project>
 
 tbd supervise readout --project <name>
@@ -69,7 +69,7 @@ Operating (human operators):
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
 - **appoint / relieve** – bind or unbind an operator-chosen supervisor
-- **automation** – the standing scope of TBD's own attention
+- **scope** – which projects TBD's own attention covers
 - **sweep customize** – take ownership of a project's sweep program
 
 Detection (the sweep program; stable JSON and exit codes):
@@ -94,7 +94,7 @@ Recording:
 ```
 # Hand the fleet over for the night
 $ tbd supervise on
-shift opened (2026-08-02, 3 projects in automation)
+shift opened (2026-08-02, 3 projects in scope)
 
 # What is supervision doing right now?
 $ tbd supervise status
@@ -193,12 +193,12 @@ ledger. An appointed supervisor outlives shifts and is never disposed,
 recycled, or restarted by TBD; if it goes dark or its session disappears,
 TBD notifies the operator and does not silently substitute the hosted desk.
 
-## tbd supervise automation
+## tbd supervise scope
 
 ```
-tbd supervise automation default in|out
-tbd supervise automation set <project> in|out|follow-default
-tbd supervise automation list
+tbd supervise scope default in|out
+tbd supervise scope set <project> in|out|follow-default
+tbd supervise scope list
 ```
 
 The standing scope of TBD's own attention. Default stance ships as `in`.
@@ -386,7 +386,7 @@ that keep the record one hop from off-record threads ("question posted to
 ## Files
 
 - `~/tbd/supervision/supervision.json` – projects, mode declarations and
-  selections, automation marks, supervisor bindings, sweep configuration.
+  selections, scope marks, supervisor bindings, sweep configuration.
   Hand-editable; the entire operator surface beyond this CLI.
 - `~/tbd/supervision/projects/<name>/sweep.py` – the project's own sweep
   program, if customized.

@@ -489,7 +489,7 @@ reporter — no supervision check on the agent side, ever. It reports; the daemo
 knows whether a shift is running and already receives every event. The fork
 lives in the daemon's
 RPC handler: when a shift is active and the terminal's project resolves in
-automation (§8), a pending question becomes a case and is **delivered
+scope (§8), a pending question becomes a case and is **delivered
 immediately**, bypassing the sweep program entirely (sweep-program
 sub-document §2): the trigger is a reported fact that needs no theory of
 work, and the transcript is blind while the picker is open, so waiting for
@@ -508,7 +508,7 @@ supervisor punts (§8), with a `note` pointing at where it went.
 **Permission prompts reach a desk the same way.** The `Notification` event
 (above) rides the identical pipeline: an unconditional dumb-reporter hook, the
 daemon holding the fact, and — with a shift active and the terminal's project in
-automation — a **case**, delivered immediately through the same compiled
+scope — a **case**, delivered immediately through the same compiled
 carve-out. One pipeline, two
 sources; the only difference is what the case carries and therefore what
 judgment it warrants.
@@ -635,7 +635,7 @@ are in answers most questions about where a behavior belongs:
 capability wall between a desk and its verbs: no allow rules, no deny rules, no
 proposal conversion, no gate. The operator's controls are **selection** — is
 supervision on, which mode each project runs, which projects are in
-automation — and **visibility**: every act is a ledger
+scope — and **visibility**: every act is a ledger
 line the moment it happens, and the account renders it beside you.
 
 This is a bet, and §16 records it as one so a future operator who gets burned
@@ -946,7 +946,7 @@ The `PreToolUse` hook already reports every one of them to the daemon
 unconditionally, with no supervision check on the agent side — the daemon knows
 whether a shift is running and sees every event anyway. The fork is in the
 daemon's RPC handler:
-with a shift active and the terminal's repo in automation (§8), a pending
+with a shift active and the terminal's repo in scope (§8), a pending
 question becomes a case and **hastens an immediate mini-tick for that
 terminal**, running the same pure decision function the clock would have run
 minutes later. The delivered briefing carries the question payload verbatim from the
@@ -1080,7 +1080,7 @@ deliberately not the unit of everything:
 A shift per project was considered and rejected. It would multiply every
 lifecycle surface — shift IDs, directories, opening and closing lines,
 heartbeats, morning views — to express something membership already expresses:
-a project the operator does not want acted on is marked out of automation (§8),
+a project the operator does not want acted on is marked out of scope (§8),
 which costs one mark and no new machinery. And an operator's morning does not
 decompose by project; it decomposes by what needs an answer.
 
@@ -1243,7 +1243,7 @@ script's output is advice to a model, never an input to compiled behavior.
 **`supervision.json` holds selections, not policy.** There is no *policy* file
 the daemon enforces — no overrides for consequential verbs, no never-act lists,
 no thresholds. The operator's `supervision.json` (§8) holds only the operator's
-selections: project topology, automation membership, and per-project mode
+selections: project topology, scope marks, and per-project mode
 choices. What would-be policy content there is lives in three places instead:
 
 1. **Compiled conservative defaults** cover a brand-new repo safely.
@@ -1444,7 +1444,7 @@ account, not a wrong action. The third category is **human-authored process**.
   needed for debugging or sharing.
 - **Durable files**, operator-owned and hand-editable:
   - `~/tbd/supervision/supervision.json` — the project definitions (§5),
-    automation membership and its default stance, the per-project mode
+    scope marks and their default stance, the per-project mode
     selections, the per-project supervisor bindings (§9), and the
     per-project sweep selections (§8). Atomically
     rewritten after each operator action; the daemon
@@ -1485,7 +1485,7 @@ none of them is a permission.
    both general guidance and the named **mode** sections a project can run (§3).
    The tool never writes it after seeding.
 2. **Selection** — which mode each project runs, which projects are in
-   automation, how repos group into projects, which session supervises a
+   scope, how repos group into projects, which session supervises a
    project (the supervisor binding, §9), and each project's sweep
    selections. Operator-owned, stored in
    `~/tbd/supervision/supervision.json`, and the entirety of what "operators
@@ -1613,7 +1613,7 @@ briefing must carry and no one ever reviews.
       "sweep": { "script": "~/tbd/supervision/projects/acme-checkout/sweep.py" }
     }
   },
-  "automation": { "default": "in", "projects": { "acme-checkout": "out" } },
+  "scope": { "default": "in", "projects": { "acme-checkout": "out" } },
   "modes": {
     "acme-checkout": "autonomous",
     "acme-hooks": { "selected": "friday-freeze",
@@ -1632,8 +1632,8 @@ project lists its member `repos` and designates one `policy` source:
 most one project; the loader rejects the file if one appears twice, because
 "exactly one" is the property the whole grouping rests on.
 
-`automation` is case detection's configuration: which projects generate cases at all
-(below). `modes` holds two things on the default-props chain: the **declared
+`scope` is the standing reach of TBD's own attention: which projects it
+covers at all (below). `modes` holds two things on the default-props chain: the **declared
 mode list** — the names a project's operator may select, defaulting to the
 built-in pair `attended`/`autonomous` when absent — and the operator's
 **selection** per project, defaulting to `attended` (§3). The map's value
@@ -1681,7 +1681,7 @@ sweep…" gesture; sweep-program sub-document §4, §7) — selection-tier
 operational choices, still zero rules. This file, hand-edited or driven
 through its CLI twins, is the entire operator surface for v1 (§10).
 
-### Project automation membership (operator-configurable)
+### Project scope (operator-configurable)
 
 Which projects the supervisor watches is an operator setting, not a design
 constant, and it is **scope configuration** — the standing answer to "which
@@ -2134,11 +2134,11 @@ Principle: **you take action where you already read the relevant information.**
   in chat while a queued proposal says another — because chat steers and the
   record is written by the daemon either way (above).
 - **The operator surface for v1 is `supervision.json` itself, plus the CLI.**
-  The file is hand-editable by design (§8) — project topology, automation
-  membership, mode selections, sweep selections — atomically rewritten after
+  The file is hand-editable by design (§8) — project topology, scope
+  marks, mode selections, sweep selections — atomically rewritten after
   each CLI action and reloaded after a manual edit, and every control is a
   CLI command (`tbd supervise project ...`, `tbd supervise mode ...`,
-  `tbd supervise automation ...`, `tbd supervise sweep ...`). App
+  `tbd supervise scope ...`, `tbd supervise sweep ...`). App
   presentation of these selections is deliberately deferred to its own
   design pass; this document specs no screens for them. The account panel
   above is the one app surface this design leans on, and it is being built
@@ -2249,12 +2249,12 @@ conversation with the playbook layer installed and `TBD_PROJECT` injected.
 default (lazily, on the next briefing need). Both write the binding into
 `supervision.json` (§8) and append a lifecycle ledger line.
 
-**Operator — automation membership** (§8).
+**Operator — scope** (§8).
 
 ```
-tbd supervise automation default in|out
-tbd supervise automation set <project> in|out|follow-default
-tbd supervise automation list
+tbd supervise scope default in|out
+tbd supervise scope set <project> in|out|follow-default
+tbd supervise scope list
 ```
 
 **Operator — the sweep** (sub-document §4, §7).
@@ -2298,7 +2298,7 @@ tbd supervise sweep customize <project>   # copy the shipped program, write the 
   `relieve` are not the exception: they select *who* supervises — a binding
   gesture, like `mode` — and drive no hosted desk's lifecycle.
 - **Per-project on/off** — one switch, fleet-wide; "not this project" is an
-  automation mark (§5, §8). Mode is per project, but mode is conduct, not
+  scope mark (§5, §8). Mode is per project, but mode is conduct, not
   lifecycle (§3).
 - **Rules of any kind — allow, deny, approve-lists, prompt-approvals.** No verb
   is gated, so there is nothing to permit or forbid. The operator's controls are
@@ -2807,7 +2807,7 @@ to inaction at the largest scale.
   judgment and conduct, not of lifecycle. One on/off switch keeps P0-2's
   one-gesture handover; one shift, ledger, and account keep every
   lifecycle surface single. "Not this project tonight" is already expressible as
-  an automation mark (§8). See §5.
+  a scope mark (§8). See §5.
 - **A grouping layer in TBD's schema** — *project* is supervision
   configuration: a key in the operator's rules file, not a table, a UI noun, or
   a lifecycle other subsystems must respect. Graduating it is a conscious later
@@ -2913,7 +2913,7 @@ and blunt cases are the ones that actually happen at 3 a.m.
 What makes the bet reasonable rather than reckless: the models are trusted to
 follow instructions and are already injection-resistant, so a second mechanism
 inside TBD would duplicate a defense that exists upstream and be weaker than it;
-the blast radius is bounded by project (§5) and by automation membership (§8),
+the blast radius is bounded by project (§5) and by scope (§8),
 which are selection, not enforcement, but do limit *reach*; and the record is
 immediate and complete, so nothing is hidden, only late. The bet is that "late
 and visible" beats "prevented and complicated" for a single-operator tool whose
