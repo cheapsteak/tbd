@@ -74,6 +74,28 @@ jobs:
           python3 .claude/hooks/guardrails/dispatch.py --self-test
           python3 scripts/test-swift-safe.py
 
+  review-scripts-tests:
+    name: Review scripts tests
+    runs-on: ubuntu-latest
+    # Unit tests for the claude-review-v2 bookend scripts (prepare.py /
+    # validate.py — see docs/specs/2026-08-03-pr-review-fanout-design.md §4).
+    # No paths filter: the suite runs in seconds, and an unconditional run can
+    # never leave the check unreported on a PR that happens to touch the
+    # scripts indirectly.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python3 -m pip install pytest jsonschema
+
+      - name: Run review-script tests
+        run: python3 -m pytest .github/workflows/claude-review-v2/tests/ -q
+
   test:
     runs-on: macos-26
     # All three test steps below append their `.flaky(issue:)` retry records
