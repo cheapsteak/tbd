@@ -317,6 +317,12 @@ and become a contract that migration and future change must respect.
   three-tier precedence, so that process travels with the repo instead of living in one
   operator's tool.
 
+  *This story is **Enabled**, not Built. TBD's compiled part is carriage — the
+  three-tier resolution, the seeding gesture, and the standing-layer install deliver
+  the artifact to the supervisor unread. The policy itself is the repo's authored
+  prose, its only consumer is a model, and TBD guarantees the artifact arrives,
+  never that it is followed (design §3, §5).*
+
   *Worked example, and the seam this requirement is really about.* Take the wake decision in
   P1-2. Deriving the facts is app-global: whether a branch has commits not on main, whether a
   request is open or merged, whether checks fail, whether any of that could not be established.

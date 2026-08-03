@@ -79,7 +79,7 @@ Detection (the sweep program; stable JSON and exit codes):
   machinery state
 - **brief** – submit a composed briefing; empty input is a liveness heartbeat
 - **ledger** – the joined per-project record: actuations with outcomes,
-  deliveries, lifecycle, anomalies
+  deliveries, lifecycle, enrollment, anomalies
 
 Acting and narrative have no `supervise` commands, deliberately. Acting on a
 session is the public **`tbd terminal send`** — one verb for every caller,
@@ -333,7 +333,7 @@ Read-only. The joined per-project view of TBD's record since `<t>`: the
 actuation-log rows touching the project's sessions — any identified
 caller's, a human's identified send included — with their observed
 outcomes, plus supervision's own lines: briefing deliveries, lifecycle
-events, anomalies. This is how a sweep program closes its loop — seeing
+and enrollment events, anomalies. This is how a sweep program closes its loop — seeing
 everything that touched the fleet since its last evaluation, not only
 supervision's half — and how anything else audits the night. JSON on
 stdout, `schemaVersion` at top level.

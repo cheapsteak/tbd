@@ -117,7 +117,7 @@ exactly what each desk received (§3, design §6).
 The old system is the cautionary precedent for collapsing this split. Its
 recurring desk briefing was a prompt template compiled into the binary
 (`NightwatchDeskPrompts.judgePrompt`,
-`Sources/TBDShared/NightwatchDeskPrompts.swift:91`; `docs/nightwatch.md` §5),
+`Sources/TBDShared/NightwatchDeskPrompts.swift:172`; `docs/nightwatch.md` §5),
 mixing mechanism, policy, and a section literally titled "Field learnings —
 apply these rules" — conduct learned on real nights that could only be taught
 by editing Swift and rebuilding. Every sentence of that content has an
@@ -214,7 +214,7 @@ places elsewhere.
 of TBD's own record since a timestamp: the actuation-log rows touching the
 project's sessions — every identified caller's, so a human's identified send
 appears beside the desk's — with the outcome rows that join them, plus the
-supervision lines: briefing deliveries, lifecycle, anomalies (design §6). It
+supervision lines: briefing deliveries, lifecycle, enrollment, anomalies (design §6). It
 is how the program sees everything that touched the fleet since its last
 evaluation — which briefings were delivered, whether the desk acted, what
 came of the acts, and interventions supervision did not make. It is TBD's
@@ -758,7 +758,7 @@ refusal means.
 - **Ledger query** — returns exactly the joined per-project view since the
   timestamp: the actuation rows touching the project's sessions — any
   identified caller's included — with their outcomes, plus its deliveries,
-  lifecycle lines, and anomalies; other projects' lines never appear.
+  lifecycle and enrollment lines, and anomalies; other projects' lines never appear.
 - **Watchdog** — a missed window writes the anomaly line; the configured
   consecutive count raises the operator notification; contact resets the
   count; the window is disarmed while the project's mark is off or the

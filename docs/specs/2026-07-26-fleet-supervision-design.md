@@ -341,12 +341,13 @@ argues it against itself rather than hiding it here.
 
 Alongside those asks, the residual dialog zoo still stalls agents: folder
 trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.
-Folder trust looks solved and isn't: `ClaudeTrustSeeder` pre-answers it for
-scratch spaces only — its `guard worktree.isScratch else { return }` returns
-early for repo-backed worktrees — and a fleet worktree is a path Claude has
-never been trusted at, exactly as fresh and untrusted as a scratch dir. Seeding
-trust for non-scratch worktrees is prong 2's first piece of new work, not
-existing coverage. `ask`-rule prompts join the zoo as its one permission-shaped
+Folder trust is mostly pre-answered already: `ClaudeTrustSeeder` seeds
+scratch spaces unconditionally and non-scratch worktrees whenever
+`auto_trust_worktrees` is on (its default), excluding only `foreignHead`
+checkouts — contents TBD declines to vouch for. What prong 2 inherits here
+is the residue, not the feature: the `foreignHead` carve-out still renders
+the dialog, and an operator who turns the setting off has chosen the prompt
+deliberately. `ask`-rule prompts join the zoo as its one permission-shaped
 member — and they are the one member that is deliberate. Measured against the
 test, one other member of that zoo separates from the rest.
 
@@ -1364,7 +1365,7 @@ reporter of its own acts (P1-7, §3).
 - The record is also readable per project by the sweep program:
   `tbd supervise ledger --project <name> --since <t>` prints a project's
   view — actuations touching its sessions joined with its supervision
-  lines (deliveries, anomalies, lifecycle) — the loop-closer that lets a
+  lines (deliveries, lifecycle, enrollment, anomalies) — the loop-closer that lets a
   program see what TBD did since its last evaluation (sweep-program
   sub-document §3). Read-only, schema-versioned, one of the three public
   sweep surfaces. That it reads through to the actuation log means the
@@ -2343,7 +2344,7 @@ briefing (§3).
 ```
 tbd supervise on  [<project>]
 tbd supervise off [<project>]
-tbd supervise status
+tbd supervise status [--json]
 tbd supervise mode <project> <mode-name>
 tbd supervise mode <project>            # show the active mode and the choices
 ```
@@ -2710,6 +2711,7 @@ to hunt for the value that governs a behavior:
 | Desk-overdue threshold (briefing unanswered) | 60 min | shipped sweep program (sub-doc §7) |
 | Desk replacement budget | 2 consecutive per project | shipped sweep program (sub-doc §7) |
 | Per-project briefing rate limit | 1 briefing / 2 min | sub-doc §3, §10 |
+| Briefing size bound (`brief` stdin) | 256 KiB | sub-doc §3, §10 |
 | Paused-refusal exit code (`brief`) | 75 | sub-doc §3, §10 |
 | Transition-hook run timeout | 5 min | §9 |
 | Transition-hook output bound | 256 KiB | §9 |

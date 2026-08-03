@@ -280,7 +280,7 @@ The embedded content hardcodes:
 - `acme-ai/monorepo` again in SKILL.md — the required-checks count (`:107`) and the commit-signing rule (`:178`).
 - Person-specific first names, more than one of them. `<operator>` appears 17 times (tier table `:47`, `queue/for-<operator>.md` throughout `tick.py`/`judge.py`, "`%352` = `<operator>`'s own monitoring session" in `dont_touch.txt`, `:1742`), plus "needs `<operator>`'s attention" in the wrap-up prompt (`NightwatchDeskPrompts.swift:102`) and "set by `<operator>`" attributions on the merge rule (`:257`, `:275`). A second individual's first name is baked into the standing-rules headers and their surrounding prose (`NightwatchDeskPrompts.swift:58`, `NightwatchSkillContent.swift:132`, `:543`, `:793`) — so the count above covers one name, not every person the sources name.
 - A project-specific `/closeout` slash command 14 times, and Slack (`:47`).
-- Snapshots of one machine's fleet state at authoring time: `priorities.txt` ships the worktree name "Fix CSV Row Truncation" (`:1724`), `dont_touch.txt` ships a pane ID comment (`:1742`) — reimposed on every boot on every install.
+- Snapshots of one machine's fleet state at authoring time: `priorities.txt` ships a real task's worktree name (`:1724`), `dont_touch.txt` ships a pane ID comment (`:1742`) — reimposed on every boot on every install.
 
 The house rule is explicit: never check the real third-party organization name, or names prefixed with it, into TBD; use `acme`/`acme-prod` placeholders. **This is a standing rule violation in `main`, not a style nit.** Anyone forking or even just reading TBD gets another organization's repo slug, bot identity, and an individual's GitHub handle compiled into `TBDShared`.
 
