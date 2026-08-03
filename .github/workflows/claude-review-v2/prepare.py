@@ -212,6 +212,15 @@ def render_discussion(items: list[dict], fence_token: str) -> str:
 
 # --- discussion fetch (the one gh boundary; called from main only) ----------
 
+# Fetch-window caps: these `last:`/`first:` bounds are a truncation layer of
+# their own — items beyond them are never fetched, so they cannot appear in
+# render_discussion()'s visible "[N older item(s) dropped]" note, which only
+# counts items received and then shed by WHOLE_BLOCK_CAP. Accepted for v1: a
+# PR with >50 issue comments or >100 reviews/threads loses its OLDEST items
+# silently. Top-level comments/reviews use `last:` (recent items matter most);
+# thread replies deliberately use `first:` — a review thread's FIRST comment
+# is the finding the thread is anchored to, and replies without their root
+# lose their referent.
 _DISCUSSION_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {

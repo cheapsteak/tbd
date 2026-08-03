@@ -554,6 +554,12 @@ jobs:
               # Comment bodies are untrusted text: moved between files by jq only,
               # never interpolated into the shell. jq `sub` replaces the first
               # occurrence, which is the marker the session wrote at the top.
+              jq -s -r --arg login "$APP_LOGIN" '
+                add
+                | map(select(.user.login == $login and (.body | startswith("<!-- claude-review-v2 -->"))))
+                | last
+                | .body
+              ' "$tmp/all-comments.json" > "$tmp/original-body.txt"
               jq -s -r --arg login "$APP_LOGIN" --arg verdict "$verdict" '
                 add
                 | map(select(.user.login == $login and (.body | startswith("<!-- claude-review-v2 -->"))))
@@ -561,7 +567,14 @@ jobs:
                 | .body
                 | sub("<!-- last-verdict: PENDING -->"; "<!-- last-verdict: " + $verdict + " -->")
               ' "$tmp/all-comments.json" > "$tmp/patched-body.txt"
-              if gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -F body=@"$tmp/patched-body.txt" > /dev/null; then
+              # Self-reporting check (same pattern as the merge-base step): jq sub
+              # returns its input UNCHANGED when the literal never matches, so an
+              # absent/mangled PENDING marker would otherwise "patch" silently.
+              # Fails safe either way (an unstamped marker means the next run does
+              # a full review, never a wrong skip) — but say so in the log.
+              if cmp -s "$tmp/original-body.txt" "$tmp/patched-body.txt"; then
+                echo "::warning::Sticky comment $comment_id contains no exact '<!-- last-verdict: PENDING -->' marker — verdict not stamped; the next run performs a full review instead of skipping."
+              elif gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -F body=@"$tmp/patched-body.txt" > /dev/null; then
                 echo "Stamped verdict $verdict into sticky comment $comment_id."
               else
                 echo "::warning::Could not update sticky comment $comment_id — its verdict marker stays PENDING, so the next run performs a full review instead of skipping."
