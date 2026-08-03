@@ -1685,7 +1685,11 @@ through its CLI twins, is the entire operator surface for v1 (§10).
 
 Which projects the supervisor watches is an operator setting, not a design
 constant, and it is **scope configuration** — the standing answer to "which
-projects does TBD's own attention cover." For an out project, TBD's compiled
+projects does TBD's own attention cover." It is the per-project half of
+on/off: the switch (§3) says whether supervision runs at all, scope says
+which projects it runs for, and "supervised here, not there" is the switch
+on plus marks — never a project-targeted switch, which would be a second
+per-project axis composing ambiguously with this one. For an out project, TBD's compiled
 defaults stand down: no default tick runs, no prompt case is cut, and no
 desk is spawned — so a briefing submitted for it has no supervisor to reach,
 and the pipe returns the same machine-readable no-arrangement result it uses

@@ -201,7 +201,10 @@ tbd supervise scope set <project> in|out|follow-default
 tbd supervise scope list
 ```
 
-The standing scope of TBD's own attention. Default stance ships as `in`.
+The standing scope of TBD's own attention — the per-project half of on/off:
+the switch says whether supervision runs at all, scope says which projects it
+runs for, so "on for these, off for those" is the switch on plus scope
+marks. Default stance ships as `in`.
 For a project resolved `out`, TBD's defaults stand down — no default tick,
 no prompt cases, no desk, so a submitted briefing has no supervisor to
 reach — while its facts still appear in the readout and the account. Scope,
