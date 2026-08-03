@@ -12,7 +12,7 @@ the compiled machinery that program runs against: three public surfaces (the
 readout, the brief pipe, the ledger query), the delivery path with its
 standing-conduct mechanics, and the liveness contract that makes a dead
 program detectable. Compiled TBD's remit here is exactly five things: facts
-out, briefings delivered, verbs executed, record kept, liveness attested. The
+out, briefings delivered, actuations executed, record kept, liveness attested. The
 requirements doc carries the Built/Enabled classification and the
 outside-first ratchet this document applies
 ([`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md)).
@@ -36,7 +36,7 @@ counterpart of the wake program, which holds both theories for the parked
 half. It also holds the project's case memory (§7) and the briefings' own
 voice: the text a desk reads is the program's prose. Compiled TBD keeps what
 remains when the theories, the memory, and the voice are all subtracted: how
-to look (the fact snapshot), how to act (the verbs), what happened (the
+to look (the fact snapshot), how to act (the public send), what happened (the
 record), and whether anyone is actually looking (the liveness contract, §6).
 
 A rule of thumb runs through every artifact in this document, stated once:
@@ -86,14 +86,18 @@ Compiled, always — the integrity-facing remit:
 - **The pipe, delivery, and the record** — pacing at the brief pipe, the
   compiled header, delivery through the agent-kind adapter, the ledger and
   its query (§3, design §4–§6, §12).
-- **The mechanical reasons not to act** — an intervention already in flight
-  for the target, a pending act re-check, a rate-limited target — checked
-  inside the acting verbs, at the moment of the act, where the target is
-  explicit in the call (design §3). They protect the record's integrity
-  (never double-treat before the first treatment is assessed) and the wake
-  count (design §5's honestly priced resource). The same facts appear in the
-  readout, so a program can reason with them and decline to brief; the checks
-  hold at the act regardless of whether it did.
+- **The mechanical reasons not to act** — a rate-limited or capacity-held
+  target is checked inside the identified supervisor send, at the moment of
+  the act, where the target is explicit in the call (design §3); an
+  intervention already mid-flight to the same target is transport
+  serialization, held for every caller alike. Never double-treat before the
+  first treatment is assessed is conduct, not a gate: the pending re-check
+  and the in-flight intervention are not-to-act facts in the readout, and
+  the desk decides with them and the act log in hand. Together these protect
+  the record's integrity and the wake count (design §5's honestly priced
+  resource); a program can reason with the same readout facts and decline to
+  brief, and the compiled checks hold at the act regardless of whether it
+  did.
 - **Every compiled liveness contract** — the act re-check (design §12) and
   the sweep watchdog (§6). Desk liveness is deliberately not among them:
   the supervisor sits inside this program's perimeter, its silence judged
@@ -142,7 +146,7 @@ rate limit) — plus the supervision machinery's own state: the brake, the
 project's mark (design §3, §8), and the project's active mode. It also
 carries the **supervisor section**, because the supervisor is a session in
 this program's perimeter (design §9): the desk's session state, its last
-ledgered act, its context fullness where known, and the age of any
+attested act, its context fullness where known, and the age of any
 delivered briefing with no answering desk line — the facts the program's
 continuation policy judges (§7). A program can
 therefore see for itself when a submission would be refused (§4). There is no
@@ -164,8 +168,8 @@ does, synchronously:
    machine-readable result; the refusal still counts as contact. This is the
    whole of the pipe's not-to-act checking, because pacing is the one check
    that needs no identity. The per-target reasons not to act live inside the
-   acting verbs' preconditions (design §3), where the target is explicit in
-   the call (`--terminal <id>`) — the same check-at-the-act pattern that
+   identified send's preconditions (design §3), where the target is explicit
+   in the call (`--terminal <id>`) — the same check-at-the-act pattern that
    makes the off switch bind.
 3. **Refuse while paused.** With the brake engaged, the pipe
    refuses with a distinct machine-readable paused result — a pinned exit
@@ -206,14 +210,17 @@ from the program becomes vocabulary TBD must version, and the compiled
 consumers such structure would feed are checks this design deliberately
 places elsewhere.
 
-**The ledger query** closes the loop. It prints TBD's own record for the
-project since a timestamp: actions with their outcomes, briefing deliveries,
-anomalies. It is how the program sees what TBD did since its last
+**The ledger query** closes the loop. It prints the joined per-project view
+of TBD's own record since a timestamp: the actuation-log rows touching the
+project's sessions — every identified caller's, so a human's identified send
+appears beside the desk's — with the outcome rows that join them, plus the
+supervision lines: briefing deliveries, lifecycle, anomalies (design §6). It
+is how the program sees everything that touched the fleet since its last
 evaluation — which briefings were delivered, whether the desk acted, what
-came of the acts — and how it reads back anything it noted pointers to. It is
-TBD's half of the program's case memory (§7): the program's files say what it
-has raised; the ledger says what the machinery did about it. Read-only,
-schema-versioned, free to call.
+came of the acts, and interventions supervision did not make. It is TBD's
+half of the program's case memory (§7): the program's files say what it has
+raised; the record says what the machinery did about it, whoever asked.
+Read-only, schema-versioned, free to call.
 
 ## 4. Triggers and the default tick
 
@@ -446,7 +453,8 @@ What the program is, wherever it runs from:
   documented surfaces — `tbd supervise readout`, `tbd supervise brief`,
   and `tbd supervise ledger` for its contract, plus the public actuations
   its continuation policy composes with (`tbd supervise on`,
-  `tbd notify`; design §9, §10). A fact it cannot obtain that way is a failed
+  `tbd terminal send`, `tbd notify`; design §3, §9, §10). A fact it cannot
+  obtain that way is a failed
   conformance check and a scoped API request — the mechanism by which TBD's
   surface grows, pulled by a real consumer.
 - **It submits on every evaluation**, findings or none — an empty submission
@@ -457,12 +465,12 @@ What the program is, wherever it runs from:
   threshold, or found dead at a delivery attempt (the no-live-supervisor
   result), is replaced through `tbd supervise on` (ensure) and the case
   resubmitted from current state; after the replacement budget's
-  consecutive replacements with no ledgered act between them, it stops and
+  consecutive replacements with no attested act between them, it stops and
   pages through `tbd notify`; an appointed supervisor is never touched —
   overdue there means a page, nothing more. A project's copy may nudge
-  first, fail over to another model or agent kind by spawning and
-  appointing, or rebind its budgets — continuation is authored like the
-  rest of the file.
+  first through the public send, fail over to another model or agent kind
+  by spawning and appointing, or rebind its budgets — continuation is
+  authored like the rest of the file.
 - **It demonstrates case memory as authored discipline.** Its own files
   record what it has briefed; before briefing an agent's situation it
   consults the ledger query for TBD-side activity since — a situation it
@@ -543,7 +551,7 @@ conduct-shaped travels any other way.
 adapter nicety.** Standing-layer install at (re)launch is one of the four
 requirements of the supervisor-capability qualification (design §9, the
 normative home; resume without conversation loss, briefing delivery, and CLI
-reachability for the verbs are the others). An agent kind without the
+reachability for the public send are the others). An agent kind without the
 mechanism cannot run a supervisor at all — hosted or appointed; appointing a
 session of such a kind is refused at the gesture with the reason — so there
 is exactly one conduct-delivery story, this section's. The Claude adapter
@@ -667,9 +675,9 @@ refusal means.
   structure demanded from the program becomes vocabulary TBD must version
   and the program must satisfy, and the compiled consumers a manifest would
   feed — per-agent cooldowns, open-case tracking — are checks this design
-  deliberately places elsewhere: at the verbs, where the target is already
-  explicit, and in the program's own memory (§7). The pipe takes pure text
-  because its reader is a desk.
+  deliberately places elsewhere: at the identified send, where the target is
+  already explicit, and in the program's own memory (§7). The pipe takes
+  pure text because its reader is a desk.
 - **A separate renderer hook** — a per-project program between compiled
   assembly and delivery, receiving an assembled order structure on stdin,
   its stdout becoming the delivered text. Rejected as the two-author
@@ -719,7 +727,7 @@ refusal means.
   project whose desk has died returns no-live-supervisor with the failure
   recorded, and TBD performs no replacement and no retry of its own.
 - **Desk supervision** — the readout's supervisor section reports session
-  state, last ledgered act, and unanswered-briefing age; the shipped
+  state, last attested act, and unanswered-briefing age; the shipped
   program replaces a dead hosted desk via ensure and resubmits; past the
   replacement budget it pages and stops; an appointed supervisor is paged
   about, never replaced.
@@ -740,13 +748,17 @@ refusal means.
   external process is signaled. Both branches of the brake and of the mark
   behave (per the
   flag-branch rule).
-- **Verb preconditions** — a `drive` targeting a terminal with an
-  intervention in flight, a pending re-check, or a rate limit is refused at
-  the act with an ordinary error naming the condition, and the refusal is
-  recorded (design §3, §4).
-- **Ledger query** — returns exactly the project's actions, outcomes,
-  deliveries, and anomalies since the timestamp; other projects' lines never
-  appear.
+- **Send preconditions** — an identified supervisor send targeting a
+  rate-limited or capacity-held terminal, a target outside the caller's
+  project, or issued while the brake is engaged or the project off, is
+  refused at the act with an ordinary error naming the condition, and the
+  refusal is logged (design §3); an unidentified send passes none of these
+  gates and is logged as anonymous; a send to a target with one mid-flight
+  queues behind it (transport serialization).
+- **Ledger query** — returns exactly the joined per-project view since the
+  timestamp: the actuation rows touching the project's sessions — any
+  identified caller's included — with their outcomes, plus its deliveries,
+  lifecycle lines, and anomalies; other projects' lines never appear.
 - **Watchdog** — a missed window writes the anomaly line; the configured
   consecutive count raises the operator notification; contact resets the
   count; the window is disarmed while the project's mark is off or the

@@ -1,8 +1,10 @@
 # tbd supervise
 
-Operate fleet supervision: per-project coverage and the fleet brake,
-supervisors,
-the sweep program's contract surfaces, and the verbs a supervisor acts with.
+Operate fleet supervision's surfaces: per-project coverage and the fleet
+brake, supervisors, and the sweep program's contract surfaces. Acting on a
+session is the public `tbd terminal send`, identity-attributed and always
+logged; a supervisor's narrative is its project's journal file (see "Acting
+and narrative" below).
 
 Status: documents the `tbd supervise` surface specified by
 [`docs/specs/2026-07-26-fleet-supervision-design.md`](specs/2026-07-26-fleet-supervision-design.md)
@@ -25,10 +27,6 @@ tbd supervise sweep customize <project>
 tbd supervise readout --project <name>
 tbd supervise brief   --project <name>            # briefing text on stdin
 tbd supervise ledger  --project <name> --since <t>
-
-tbd supervise drive --terminal <id> --text "…" | --keys "…"
-tbd supervise pause --terminal <id> [--reason "…"]
-tbd supervise note  --text "…" [--ref <line-id>]
 ```
 
 ## Description
@@ -37,9 +35,11 @@ Supervision watches a fleet of agent sessions and intervenes through a
 **supervisor** — itself an agent session — one per **project** (a repo, or a
 declared group of repos). It is turned on per project — every project
 starts off — and the bare `on`/`off` is the fleet-wide brake. Every act
-lands in one continuous append-only **ledger** the daemon writes; evening
-and morning views are windowed queries over it, and each `on`/`off` is
-itself a ledger line, so a project's covered spans are always on record.
+lands in TBD's general append-only **actuation log** the moment the daemon
+executes it, and supervision's own events — coverage, deliveries,
+anomalies — land in a continuous **ledger** beside it; evening and morning
+views are windowed queries over the two, and each `on`/`off` is itself a
+ledger line, so a project's covered spans are always on record.
 
 Each project's supervisor is either the **hosted desk** — a session TBD
 spawns and keeps for the project (the default; zero setup) — or an
@@ -78,18 +78,17 @@ Detection (the sweep program; stable JSON and exit codes):
 - **readout** – the project's live-agent facts, supervisor state, and
   machinery state
 - **brief** – submit a composed briefing; empty input is a liveness heartbeat
-- **ledger** – TBD's own record of acts, outcomes, and deliveries
+- **ledger** – the joined per-project record: actuations with outcomes,
+  deliveries, lifecycle, anomalies
 
-Acting (supervisor sessions; each writes a ledger line and schedules a
-60-second re-check):
-
-- **drive** – deliver a message or named keys into an agent's session
-- **pause** – halt a runaway session
-
-Recording:
-
-- **note** – attributed prose into the ledger; the only supervisor-authored
-  line kind
+Acting and narrative have no `supervise` commands, deliberately. Acting on a
+session is the public **`tbd terminal send`** — one verb for every caller,
+identity-attributed and always recorded in TBD's actuation log, with
+act-time preconditions binding supervisor-identified sends only. Narrative
+is the project's **journal** —
+`~/tbd/supervision/projects/<name>/journal.md`, appended by the supervisor
+under its conduct, never through a command. Both are covered in "Acting and
+narrative" below.
 
 ## Common examples
 
@@ -128,28 +127,28 @@ cases reach its supervisor, and its supervisor is ensured live (a hosted
 desk is spawned if the project has none, or resumed where one stands idle
 from an earlier span) — and `off <project>` clears
 the mark (an untouched project and a turned-off one are the same state).
-The acting verbs recheck the mark at the moment of the act, so turning a
-project off stops even a drive its supervisor already decided. `off`
-stands the hosted desk down but keeps its session — deliveries stop, the
-context is kept, and the next `on` resumes it rather than paying to rebuild
-it.
+An identified supervisor send rechecks the mark at the moment of the act,
+so turning a project off stops even a send its supervisor already decided.
+`off` stands the hosted desk down but keeps its session — deliveries stop,
+the context is kept, and the next `on` resumes it rather than paying to
+rebuild it.
 Coverage, never protection: public commands stay public; keeping supervision
 away from specific terminals is the sweep program's concern (its exclusions
 can be per-terminal, in its own files), and hard per-session protection at
-the acting verbs is a deferred design. An off project's facts still appear
+the send is a deferred design. An off project's facts still appear
 in the readout and the account — observability is never withheld.
 
 Each transition also runs the project's **transition hook**, after the
 switch has taken effect and without ever blocking it: the shipped default —
-on `off`, a stand-down note asking the supervisor to ledger a closing
+on `off`, a stand-down message asking the supervisor to journal a closing
 summary of the span; on `on`, nothing — or the project's own script at
 `~/tbd/supervision/projects/<name>/transition.py`, whose stdout (if any) is
 delivered to the supervisor verbatim. A failing hook is recorded as an
 anomaly and never blocks the transition.
 
 Bare: the fleet brake. `off` pauses TBD's authority to act everywhere —
-briefings refused, acting verbs refuse from that instant — without
-disposing any supervisor or touching the per-project marks, so
+briefings refused, identified supervisor sends refused from that instant —
+without disposing any supervisor or touching the per-project marks, so
 releasing the brake with `on` restores exactly the coverage that stood. The
 switch is
 a daemon config column shipped default-off. Toggling is cheap in both
@@ -239,9 +238,9 @@ Read-only; prints and changes nothing else. The project's live-agent facts —
 session state with its source and observed-at, work facts, runaway counters,
 pin state, the not-to-act facts — plus machinery state (the brake, the
 project's mark, the active mode) and the **supervisor section**: the
-supervisor's session state, last ledgered act, context fullness where
-known, and the age of any delivered briefing with no answering ledger
-line. The supervisor is in the sweep program's perimeter — whether its
+supervisor's session state, last attested act, context fullness where
+known, and the age of any delivered briefing with no answering act from
+the desk. The supervisor is in the sweep program's perimeter — whether its
 silence is failure, and what to do about it, is the program's judgment
 over these facts.
 
@@ -256,7 +255,7 @@ $ tbd supervise readout --project acme-platform
   "supervision": { "on": true, "brakeEngaged": false, "mode": "autonomous" },
   "supervisor": { "arrangement": "hostedDesk", "terminal": "t81",
                   "state": { "value": "idle", "source": "hook", "observedAt": "02:13:12Z" },
-                  "lastLedgeredAct": "02:04:51Z", "unansweredBriefingSince": null },
+                  "lastAttestedAct": "02:04:51Z", "unansweredBriefingSince": null },
   "agents": [
     { "terminal": "t17",
       "state": { "value": "idle", "source": "hook", "observedAt": "02:13:40Z" },
@@ -330,11 +329,14 @@ $ tbd supervise brief --project acme-platform < /dev/null
 tbd supervise ledger --project <name> --since <t>
 ```
 
-Read-only. TBD's own record for the project since `<t>`: acts (drive and
-pause) with payload hashes, their observed outcomes, briefing deliveries,
-lifecycle events, notes, anomalies. This is how a sweep program closes its
-loop — seeing what TBD did since its last evaluation — and how anything else
-audits the night. JSON on stdout, `schemaVersion` at top level.
+Read-only. The joined per-project view of TBD's record since `<t>`: the
+actuation-log rows touching the project's sessions — any identified
+caller's, a human's identified send included — with their observed
+outcomes, plus supervision's own lines: briefing deliveries, lifecycle
+events, anomalies. This is how a sweep program closes its loop — seeing
+everything that touched the fleet since its last evaluation, not only
+supervision's half — and how anything else audits the night. JSON on
+stdout, `schemaVersion` at top level.
 
 ### Examples
 
@@ -343,67 +345,70 @@ audits the night. JSON on stdout, `schemaVersion` at top level.
 $ tbd supervise ledger --project acme-platform --since 02:10
 
 # Morning audit, human-shaped: prefer the account file, but this is the raw truth
-$ tbd supervise ledger --project tbd --since 22:00 | jq '.lines[] | select(.kind=="action")'
+$ tbd supervise ledger --project tbd --since 22:00 | jq '.lines[] | select(.kind=="send")'
 ```
 
-## tbd supervise drive
+## Acting and narrative
+
+Supervision deliberately owns no acting or recording commands. A supervisor
+acts through the same public actuation as every other caller and narrates
+in a file of its own; TBD's compiled part is the send's execution, the
+record, and the display.
+
+**Acting is `tbd terminal send`** — one verb for every caller: a human's
+script, a wake program, a sweep program's continuation policy, the
+supervisor itself.
 
 ```
-tbd supervise drive --terminal <id> --text "…"
-tbd supervise drive --terminal <id> --keys "…"
+tbd terminal send --terminal <id> --text "…" [--verify]
+tbd terminal send --terminal <id> --keys "…" [--verify]
 ```
 
-Delivers a message (`--text`) or named keys (`--keys`) into an agent's
-session. Exactly one payload flag per call. The daemon does not read the
-payload; it records it verbatim and schedules the 60-second re-check.
+Payloads, not verbs: `--text` delivers a message and submits it (also how a
+pending question is answered — the adapter clears a machine-known dialog
+first); `--keys` sends named keys chosen after reading the screen; an
+interrupt is a keys payload. Exactly one payload flag per call. The daemon
+does not read a text payload; it records it verbatim — every send lands in
+TBD's actuation log (`~/tbd/actuations.jsonl`) with the caller identity as
+declared, and a caller with no identity is logged as anonymous. `--verify`
+opts into landing confirmation — a tail read of the target transcript's
+JSONL, with the re-check deadline as its default timeout. TBD makes one
+full attempt and never retries; the synchronous result is honest and
+machine-readable, and what happens next is the caller's policy.
 
-Preconditions, checked at the moment of the act — a refusal names the
-condition and is recorded: the brake released, the target inside the
-calling supervisor's project and that project turned on, target not
-rate-limited, no intervention
-already in flight for the target, no pending re-check. The transport then
-verifies the pane is alive and is the session it claims to be; a dead or
-wrong pane fails as a recorded delivery error. If the target is showing a
-dialog TBD machine-knows, the adapter clears it first; an unidentified
-dialog refuses the delivery and writes an anomaly.
+**Supervisor-identified sends carry act-time preconditions.** When the
+ambient supervisor identity (`TBD_PROJECT`) is present, the daemon rechecks
+current state at the moment of the act — a refusal names the condition and
+is logged: the brake released, the target inside the calling supervisor's
+project and that project turned on, the target not rate-limited or under a
+capacity hold. A send without that identity passes none of these gates —
+the marks bind TBD's own autonomous hand, never a human's. For every caller
+alike, the transport verifies the pane is alive and is the session it
+claims to be, and a send to a target with one already mid-flight queues
+behind it. For a supervisor deciding how to act on failure: precondition
+and transport refusals are safe to re-evaluate on the next briefing — never
+retry in a loop, and never assert a fact in the message older than this
+call.
 
-For a supervisor deciding how to act on failure: precondition and transport
-refusals are safe to re-evaluate on the next briefing — never retry in a
-loop, and never assert a fact in the message older than this call.
+**Narrative is the journal.** A supervisor's story lands in
+`~/tbd/supervision/projects/<name>/journal.md` — authored markdown, no
+command in the path. Conduct governs it: append, never rewrite; timestamp
+entries; a dated heading per coverage span. What goes there: narration of
+what the desk saw and did, deliberate inaction ("agent t17 progressing,
+left alone"), pointers that keep the record one hop from off-record threads
+("question posted to #fleet-questions, answered 09:14"), and the closing
+summary a stand-down requests — a file needs no precondition carve-outs, so
+the summary lands after the mark clears. TBD compiles only the file's
+location and the app displaying it beside the account; it never parses the
+prose or matches it to acts. Held-back suggestions still go to the
+project's `proposals.md`, unchanged.
 
-### Examples
+### Example
 
 ```
 # A specific next step, decided after reading the transcript
-$ tbd supervise drive --terminal t17 --text "PR #522 review comments are in; address the two blocking ones, then re-request review."
-
-# Answer a question TBD machine-knows is on screen
-$ tbd supervise drive --terminal t23 --text "Option 2. The migration must stay append-only."
+$ tbd terminal send --terminal t17 --text "PR #522 review comments are in; address the two blocking ones, then re-request review."
 ```
-
-## tbd supervise pause
-
-```
-tbd supervise pause --terminal <id> [--reason "…"]
-```
-
-Halts a runaway session. Counters (turns in window, no-progress time) arrive
-in briefings as facts; whether to pause is the supervisor's judgment under
-its mode's conduct. Same preconditions and recording as `drive`.
-
-## tbd supervise note
-
-```
-tbd supervise note --text "…" [--ref <line-id>]
-```
-
-Appends attributed prose to the ledger — the one supervisor-authored line
-kind. A note can reference another line but can never change one. Use it for
-deliberate inaction ("agent t17 progressing, left alone") and for pointers
-that keep the record one hop from off-record threads ("question posted to
-#fleet-questions, answered 09:14"). A note is accepted even for a project
-just turned off — which is how the closing summary a stand-down requests
-lands after the mark clears.
 
 ## Related: tbd notify
 
@@ -427,9 +432,11 @@ facts TBD itself observed.
   it. A project turned off is an ordinary nonzero refusal, not 75 — off is
   standing, not temporary.
 - **other nonzero** – refusal or failure, with the condition named on
-  stderr: usage errors, unmet preconditions, rate or size bounds, an
-  unsupported agent kind at `appoint`. Codes other than 0 and 75 are not yet
-  pinned as contract; branch on 0 / 75 / nonzero, not on specific values.
+  stderr: usage errors, rate or size bounds at `brief`, an unsupported
+  agent kind at `appoint`. Codes other than 0 and 75 are not yet pinned as
+  contract; branch on 0 / 75 / nonzero, not on specific values. (The
+  public send's precondition refusals are `tbd terminal send`'s own,
+  ordinary nonzero errors naming the condition.)
 
 ## Files
 
@@ -441,16 +448,24 @@ facts TBD itself observed.
 - `~/tbd/supervision/projects/<name>/transition.py` – the project's own
   transition hook, if present; its stdout is delivered to the supervisor at
   each on/off edge.
-- `~/tbd/supervision/ledger.jsonl` – the continuous supervision record, with
-  the generated `account.md` beside it and each project's `proposals.md`
-  under its project directory.
+- `~/tbd/actuations.jsonl` – TBD's general actuation log: every
+  state-changing actuation the daemon executes, for every caller,
+  supervision or not; the `ledger` view joins it per project.
+- `~/tbd/supervision/ledger.jsonl` – the continuous supervision record
+  (lifecycle, enrollment, deliveries, anomalies), with the generated
+  `account.md` beside it and each project's `proposals.md` under its
+  project directory.
+- `~/tbd/supervision/projects/<name>/journal.md` – the supervisor's
+  narrative, appended by conduct; displayed by TBD as-is, beside the
+  account.
 - `.agents/supervision.md` (in each repo) – the playbook; resolved per
   project through the standard tiers.
 
 ## Environment
 
 - `TBD_PROJECT` – injected by TBD into supervisor sessions at spawn or
-  appointment; carries the acting verbs' ambient identity. Not set by hand.
+  appointment; carries the supervisor's ambient identity for identified
+  sends and attribution. Not set by hand.
 
 ## See also
 

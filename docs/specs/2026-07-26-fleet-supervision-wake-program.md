@@ -62,12 +62,13 @@ daemon — and outside the desk — entirely.**
 - **No model is involved.** The old wake.py proved routine waking is a pure
   facts-to-text mapping; its classification and composition never called one.
   The desk's only role was invoking the script, which a scheduler does better.
-  Routine waking therefore never reaches a desk. The `wake` verb survives for
-  judgment — a desk may still conclude from a case that a session should be
-  up — but no case is ever raised *for the purpose of* waking.
+  Routine waking therefore never reaches a desk. The public
+  `tbd terminal wake` survives for judgment — a desk may still conclude from
+  a case that a session should be up — but no case is ever raised *for the
+  purpose of* waking.
 - **TBD guards nothing here — its obligation is sufficiency, not guardrails.**
-  There is no compiled choke point at actuation — no capacity holds, in-flight
-  dedup, send-time freshness, or daemon-written ledger line through which every
+  There is no compiled choke point at actuation — no capacity hold, no
+  in-flight dedup, no send-time freshness check through which every
   wake must pass. Such a choke point would make TBD the guarantor of a program
   TBD does not run, does not schedule, and — seeded once, never clobbered —
   cannot repair. A wake program's correctness is its author's, like any cron
@@ -86,8 +87,9 @@ daemon — and outside the desk — entirely.**
   discipline: derive facts live, immediately before composing, as the old
   wake.py always did — and it is the discipline for desk sends too. The
   daemon verifies nothing for anyone; freshness is authored on both sides of
-  the process boundary. Wakes are recorded as the ordinary terminal operations
-  they already are; nothing here depends on supervision coverage, and nothing
+  the process boundary. Wakes are recorded like every actuation the daemon
+  executes — a row in the general actuation log (design §6), a record and
+  never a gate; nothing here depends on supervision coverage, and nothing
   here writes supervision ledger lines.
 - **The program schedules itself, and watches itself.** Cadence is a
   requirement; daemon ownership of it is not. The reference script runs its
