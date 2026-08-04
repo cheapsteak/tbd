@@ -167,6 +167,16 @@ jobs:
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
+      # A restored `.build/` can come back with a dependency checkout present but
+      # its manifest missing, which fails the job at manifest planning before a
+      # single test compiles (run 30557645064, PR #554 — a docs-only diff). The
+      # stored cache entry was intact; the rerun restored the same key and
+      # passed. Probe the workspace here and re-resolve if it is damaged, so that
+      # class of red self-heals instead of costing a rerun. Rationale, and why
+      # only checkouts/ and repositories/ are discarded, in the script's header.
+      - name: Repair the restored SwiftPM workspace if it is damaged
+        run: bash scripts/repair-spm-workspace.sh
+
       # Workaround for swiftlang/swift-package-manager#7715: a cache-restored
       # `.build/` can hold a stale object archive for a first-party library
       # target next to a fresh `.swiftmodule`. Downstream files (incl. test
