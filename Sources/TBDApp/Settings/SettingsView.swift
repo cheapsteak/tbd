@@ -47,6 +47,14 @@ struct GeneralSettingsTab: View {
     @AppStorage("errorNotificationSoundName") private var errorSoundName: String = "Sosumi"
     @AppStorage("errorNotificationSoundCustomPath") private var errorCustomPath: String = ""
 
+    /// In-progress amount text for the hibernate-idle-threshold field. Kept
+    /// separate from the committed `hibernateIdleDuration` so a keystroke
+    /// never fires an RPC — only `.onSubmit` / focus-loss / a unit-picker
+    /// change commits (see `hibernateIdleThresholdRow`).
+    @State private var hibernateIdleAmountText: String = ""
+    @State private var hibernateIdleDuration = HibernateIdleDuration(totalMinutes: Config.defaultHibernateIdleMinutes)
+    @FocusState private var hibernateIdleFieldFocused: Bool
+
     private var systemSounds: [String] { NotificationSoundPlayer.systemSoundNames() }
     private let soundPlayer = NotificationSoundPlayer()
 
@@ -191,19 +199,7 @@ struct GeneralSettingsTab: View {
                 .help("Kill the claude process of a session idle at rest, keeping its tab alive. It respawns automatically on focus. The prompt cache has already expired by then, so resume is cheap. Never touches a running turn, a permission prompt, or a keep-warm session.")
 
                 if appState.autoHibernateEnabled {
-                    Stepper(
-                        "Idle before hibernating: \(appState.hibernateIdleMinutes) min",
-                        value: Binding(
-                            get: { appState.hibernateIdleMinutes },
-                            set: { newValue in
-                                Task { await appState.setAutoHibernate(
-                                    enabled: appState.autoHibernateEnabled, idleMinutes: newValue) }
-                            }
-                        ),
-                        in: 5...240,
-                        step: 5
-                    )
-                    .help("How long a Claude session must sit idle before it's hibernated.")
+                    hibernateIdleThresholdRow
                 }
             }
 
@@ -317,6 +313,111 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setAutoTrustWorktrees(newValue) } }
         ))
         .help("Answer Claude's \u{201C}do you trust the files in this folder?\u{201D} prompt ahead of time for worktrees TBD created and for the checkout of each repo you added. You registered the repo and TBD made the worktree, so the answer is already known \u{2014} and the prompt blocks before any Claude hook fires, so a session waiting on it looks idle to TBD instead of stuck. Worktrees checked out from a pull request head are never pre-trusted, on or off: their files may come from someone else's fork, which is exactly what the prompt is for. On by default. Turning it off stops any further pre-trusting, including for worktrees that already exist; nothing already trusted is undone, and TBD's own scratch spaces are always trusted.")
+    }
+
+    /// Amount + unit control for `Config.hibernateIdleMinutes`, replacing a
+    /// `Stepper` that was capped at 240 minutes / 5-minute steps (48 clicks
+    /// for a day, impossible past 4 hours). Never fires an RPC per keystroke:
+    /// the amount commits on `.onSubmit` or focus loss, the unit commits
+    /// immediately on picker change. `HibernateIdleDuration` (its own file)
+    /// holds the pure amount/unit math; this view owns only the SwiftUI
+    /// commit timing.
+    @ViewBuilder
+    private var hibernateIdleThresholdRow: some View {
+        HStack {
+            Text("Idle before hibernating:")
+            TextField("", text: $hibernateIdleAmountText)
+                .frame(width: 56)
+                .multilineTextAlignment(.trailing)
+                .focused($hibernateIdleFieldFocused)
+                .onSubmit { commitHibernateIdleAmount() }
+            Picker("", selection: hibernateIdleUnitBinding) {
+                ForEach(HibernateIdleDuration.Unit.allCases) { unit in
+                    Text(unit.displayName(count: hibernateIdleDisplayAmount).capitalized)
+                        .tag(unit)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 100)
+        }
+        .help("How long a Claude session must sit idle before it's hibernated. Accepts 1 minute to 99 days. Below about 5 minutes, the prompt cache may not have expired yet, so resume can cost more.")
+        .onAppear { syncHibernateIdleFromAppState() }
+        .onChange(of: appState.hibernateIdleMinutes) { _, _ in syncHibernateIdleFromAppState() }
+        .onChange(of: hibernateIdleFieldFocused) { _, focused in
+            if !focused { commitHibernateIdleAmount() }
+        }
+    }
+
+    /// The amount used to pluralize the unit-picker labels: the in-progress
+    /// typed value when it parses, otherwise the last committed amount — so
+    /// "1" -> "Minute" updates live as the user types, without waiting for
+    /// commit.
+    private var hibernateIdleDisplayAmount: Int {
+        Int(hibernateIdleAmountText.trimmingCharacters(in: .whitespaces)) ?? hibernateIdleDuration.amount
+    }
+
+    /// Unit-picker binding. Changing the unit commits immediately (unlike the
+    /// amount field), reinterpreting the currently-typed amount in the new
+    /// unit — 2 + hours -> Days means 2 days, not an equivalent-total
+    /// conversion. Uses the same resolve rule as `commitHibernateIdleAmount`
+    /// (see `HibernateIdleDuration.resolveAmount(fromText:targetUnit:)`).
+    private var hibernateIdleUnitBinding: Binding<HibernateIdleDuration.Unit> {
+        Binding(
+            get: { hibernateIdleDuration.unit },
+            set: { newUnit in
+                let amount = hibernateIdleDuration.resolveAmount(fromText: hibernateIdleAmountText, targetUnit: newUnit)
+                applyHibernateIdleDuration(HibernateIdleDuration(amount: amount, unit: newUnit))
+            }
+        )
+    }
+
+    /// Re-sync the field from the daemon's current value. Called on appear,
+    /// after this view's own commit RPC settles (`applyHibernateIdleDuration`
+    /// — success or failure), and whenever `appState.hibernateIdleMinutes`
+    /// changes externally (a config delta from another window/session) — but
+    /// never while the field is focused, so it can't stomp on an in-progress
+    /// edit.
+    ///
+    /// Returns early when the local duration's total already agrees with
+    /// `appState.hibernateIdleMinutes`: there is nothing to sync, and
+    /// re-deriving amount+unit from the total would undo the user's
+    /// deliberately chosen unit even though nothing actually changed —
+    /// typing "120" with unit Minutes and clicking away would otherwise
+    /// silently renormalize to "2 Hours" the moment the commit round-trips
+    /// and this fires from `.onChange(of: appState.hibernateIdleMinutes)`.
+    /// Only a genuine external delta — a different total — re-derives the
+    /// unit.
+    private func syncHibernateIdleFromAppState() {
+        guard !hibernateIdleFieldFocused else { return }
+        guard hibernateIdleDuration.totalMinutes != appState.hibernateIdleMinutes else { return }
+        hibernateIdleDuration = HibernateIdleDuration(totalMinutes: appState.hibernateIdleMinutes)
+        hibernateIdleAmountText = String(hibernateIdleDuration.amount)
+    }
+
+    /// Commit the typed amount for the current unit. See
+    /// `HibernateIdleDuration.resolveAmount(fromText:targetUnit:)` for the
+    /// revert-vs-clamp rule, shared with `hibernateIdleUnitBinding`.
+    private func commitHibernateIdleAmount() {
+        let amount = hibernateIdleDuration.resolveAmount(fromText: hibernateIdleAmountText, targetUnit: hibernateIdleDuration.unit)
+        applyHibernateIdleDuration(HibernateIdleDuration(amount: amount, unit: hibernateIdleDuration.unit))
+    }
+
+    /// Commit a validated duration: update local state immediately (so the
+    /// field/picker reflect it without waiting on the RPC round-trip),
+    /// persist via the same `setAutoHibernate` path the master-switch toggle
+    /// uses, and then re-sync from `appState` once the RPC settles. On
+    /// success this is a no-op (the persisted total now matches, so
+    /// `syncHibernateIdleFromAppState` returns early and the chosen unit
+    /// survives); on failure `appState.hibernateIdleMinutes` never moved, so
+    /// the re-sync reverts the field to what is actually persisted instead
+    /// of stranding an unsaved value that silently looks committed.
+    private func applyHibernateIdleDuration(_ duration: HibernateIdleDuration) {
+        hibernateIdleDuration = duration
+        hibernateIdleAmountText = String(duration.amount)
+        Task {
+            await appState.setAutoHibernate(enabled: appState.autoHibernateEnabled, idleMinutes: duration.totalMinutes)
+            syncHibernateIdleFromAppState()
+        }
     }
 
     /// Remote agent sessions master switch. Reads the persisted flag from

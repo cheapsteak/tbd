@@ -58,7 +58,17 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             nightwatchMode: nightwatch_mode
                 .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
             autoHibernateEnabled: auto_hibernate_enabled ?? false,
-            hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
+            // Clamped on read (not just on write) so every consumer sees a
+            // bounded value regardless of what's actually in the row — a
+            // hand-edited DB, a value written by an older/newer daemon
+            // build, or any other row that bypassed `setAutoHibernate`.
+            hibernateIdleMinutes: min(
+                max(
+                    hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
+                    Config.minHibernateIdleMinutes
+                ),
+                Config.maxHibernateIdleMinutes
+            ),
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
             hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
@@ -241,9 +251,13 @@ public struct ConfigStore: Sendable {
 
     /// Persist the auto-hibernate master switch + idle-timeout (minutes). The
     /// minutes value is floored at 1 so a zero/negative can't make the idle
-    /// timer hibernate everything on the next sweep.
+    /// timer hibernate everything on the next sweep, and ceilinged at 99 days
+    /// so a stale or hand-edited value can't produce an absurd timeout.
+    /// `ConfigRecord.toModel()` applies the same clamp on every read, so a
+    /// row that bypassed this method — hand-edited SQL, a value written by a
+    /// different daemon build — still comes back bounded.
     public func setAutoHibernate(enabled: Bool, idleMinutes: Int) async throws {
-        let minutes = max(1, idleMinutes)
+        let minutes = min(max(Config.minHibernateIdleMinutes, idleMinutes), Config.maxHibernateIdleMinutes)
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET auto_hibernate_enabled = ?, hibernate_idle_minutes = ? WHERE id = ?",
