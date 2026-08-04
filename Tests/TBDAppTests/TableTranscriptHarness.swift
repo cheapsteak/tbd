@@ -1188,11 +1188,9 @@ struct TableTranscriptHarness {
     /// (`TranscriptCompareRealSessions.parse`). Falls back to a tall synthetic
     /// session when no real file is found.
     private func loadSession() throws -> [TranscriptItem] {
-        let fm = FileManager.default
-        let thisSessionPath = ProcessInfo.processInfo.environment["TBD_COMPARE_THIS_SESSION"]
-            ?? "/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-transcript-row-flatten"
-                + "/6F6A46F5-0E30-4CF8-A06C-A5C628760FF5/scratchpad/this-session-6F6A46F5.jsonl"
-        if fm.fileExists(atPath: thisSessionPath) {
+        // `TBD_COMPARE_THIS_SESSION` only — no hardcoded developer scratchpad
+        // fallback. See `TranscriptCompareRealSessions.resolveThisSession`.
+        if let thisSessionPath = TranscriptCompareRealSessions.resolveThisSession() {
             let items = TranscriptCompareRealSessions.parse(filePath: thisSessionPath)
             if !items.isEmpty { return items }
         }

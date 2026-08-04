@@ -82,6 +82,14 @@ scale, so the posted format doesn't change for readers). A JSON-schema file in t
 workflow directory is the single source of truth; validation failures list the offending
 file and field.
 
+`line` is both optional and nullable. Repo-wide, convention, and architectural findings
+have no single line anchor, and a model writing one emits `"line": null` — the natural
+JSON. A schema that accepted omission but rejected null would fail the whole gate closed
+on precisely the category of finding least amenable to mechanical judgment, which is a
+systematic blind spot rather than a random one. Tolerating what the model naturally
+produces is more robust than a prompt instruction nothing can enforce. Renderers treat a
+null line as "file only" and never emit a `file:null` placeholder.
+
 Initial specialist set (2, deliberately small):
 
 - **correctness** — the diff's logic, plus the existing premise-audit instructions for
@@ -131,8 +139,12 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   `review-result.json` exists and parses. The enforce step's fail-closed behavior
   (missing file ⇒ red check) carries over unchanged. The validate script also
   enforces specialist-set completeness (`--expected-specialists`): if any named
-  specialist never produced a findings file — e.g. the orchestrator merged before
-  all background specialists completed — it fails closed with no verdict written.
+  specialist contributed no *valid* findings file it fails closed with no verdict
+  written. The diagnostic distinguishes the two causes, because they send an
+  operator to different places: a lens that produced nothing (e.g. the orchestrator
+  merged before all background specialists completed) versus one that ran and had
+  its file rejected by schema validation a moment earlier. Reporting the second as
+  the first is a false lead toward an orchestrator race that isn't there.
 - **One review comment per run, carrying its own state**: a full-review run posts a
   NEW comment; nothing is edited in place. `render_comment.py` builds the body as
   three machine-read marker lines — a `<!-- claude-review-v2 -->` sentinel plus

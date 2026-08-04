@@ -23,7 +23,7 @@ struct SkillFileWriter {
     }
 
     /// Absolute path the daemon writes to, e.g.
-    /// `/Users/chang/Library/Application Support/TBD/skill/SKILL.md`.
+    /// `/Users/me/Library/Application Support/TBD/skill/SKILL.md`.
     func fallbackPath() -> String {
         applicationSupportRoot + "/TBD/skill/SKILL.md"
     }

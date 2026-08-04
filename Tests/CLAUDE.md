@@ -58,6 +58,94 @@ merges and you stand down, delete your own `.build` — and reclaim only your
 own, never a sibling's, because a rebuild costs them ~2 minutes and silently
 invalidates any measurement they are midway through.
 
+## Running the suite — `scripts/test.sh`, never bare `swift test`
+
+Every invocation in this file, in `test.yml` and in the pre-push hook goes
+through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
+scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
+`TBD_TEST_CODEX_HOME`. Bare `swift test` writes into the developer's real
+`~/tbd`, `~/.claude` and `~/.codex` — 18k orphan profile dirs and ~2.9k fake
+worktrees accumulated that way before anyone noticed. Read `swift test …` below
+as `scripts/test.sh …`.
+
+Those four variables only fence code that *asks* where home is. The wrapper
+also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
+`tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
+the code that assembles a path out of the home directory instead of asking: it
+gets `EACCES` at the call site, inside the failing test, with the offending path
+in the error.
+
+**So if a test fails with "You don't have permission to save the file …" on a
+path ending in `/tbd/…`, `/.claude/…` or `/.codex/…`, read it as: this code
+hand-built a home path instead of going through `TBDConstants` (for TBD's own
+dirs and, via `claudeHostHome`, the host Claude store) or `CodexHomeManager`
+(for the Codex store).** On a developer box the same line writes into the real
+store. Fix the resolution; never relax the decoy.
+
+That scratch home is itself checked before anything is chmod'd: it must be a
+real directory (never a symlink) owned by the calling uid, and it lives under
+`$TMPDIR`, which darwin makes per-user. Under `/tmp` — mode 1777 — anyone could
+pre-create the path as a symlink, and `mkdir -p` through a symlink-to-a-directory
+succeeds silently while `chmod` resolves straight through it; pointed at `$HOME`
+that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
+`~/.claude`. The decoys are re-checked *after* the run too, since code inside it
+owns them and can chmod them back.
+
+Two things the fence does *not* cover, so the existing disciplines stay
+load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
+`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
+breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
+must be reached through an injection seam such as
+`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+(`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
+`FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
+escape both variables outright and are rejected mechanically by the
+`no_passwd_home_lookup` and `no_hardcoded_users_path` SwiftLint rules — the
+second covers `Tests/TBDSharedTests` and `Tests/TBDAppTests` as well, matches
+the dash-encoded `-Users-<name>-` form Claude Code scratchpad paths use, and
+fires in comments too, because a real username in a doc comment is a leak in a
+public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
+in examples.
+
+Neither of those is the shape the leaks actually took, so a third rule covers
+it. Every one of them went through the ordinary, fence-*honouring*
+`homeDirectoryForCurrentUser` / `NSHomeDirectory()` and then appended `tbd`,
+`.claude` or `.codex` — which resolves to the real store because it never
+consults `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` / `TBD_TEST_CODEX_HOME` at all.
+`no_home_relative_store_path` fires on a home lookup followed within 80
+characters by one of those three as a whole path component, which is narrow
+enough to leave the ~20 legitimate home lookups (tilde-abbreviation for
+display, `~/Library` fallbacks, defaulted injection seams, `~/.ssh/tbd-agent.sock`)
+untouched. Three sites carry a reasoned inline suppression: `Constants.swift`
+is excluded outright as the file that *defines* the resolvers, and
+`CodexHomeManager`, `ModelProfileKeychain.legacyStorageDir` and the frozen v-24
+conductors migration name a real path deliberately. Its limit is worth knowing
+before trusting it: the home value has to be visible near the append, so a path
+built from a `home` that arrived as a parameter matches nothing. It narrows the
+shape rather than closing it.
+
+The wrapper's last layer, a before/after fingerprint of the three real
+directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
+locally and `--no-fingerprint` forces it off. The default follows the argument
+rather than contradicting it: a live daemon and sibling worktrees write to
+`~/tbd` legitimately for the whole duration of a local run, and any concurrent
+agent session starting in a new directory mints a fresh
+`~/.claude/projects/<cwd-hash>`. It is a backstop,
+not the primary guard: it compares directory *listings*, so a leak that writes
+to a fixed path — or one that cleans up after itself in a `defer` — is invisible
+to it, while the tripwire fails on the permission check every run regardless.
+Full rationale is in the wrapper's header.
+
+The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
+runs in the `lint` CI job: it drives the symlink and ownership refusals on the
+fake home, the post-run mode-000 recheck, the fingerprint's four arms and the
+shared-lock pin against fixture directories with a stub `swift`, so it takes
+~11 s, builds nothing, and touches no real store. **Every case there is
+mutation-checked** — the assertion is shown going red against a deliberately
+weakened copy of the script. If you change a guard, change its case; if you add
+one, add a case. The guards were proven once by hand when they landed, and that
+is not a regression test.
+
 ## Test tiers
 
 Three tiers, defined by what a test may touch: tier 1 (deterministic,

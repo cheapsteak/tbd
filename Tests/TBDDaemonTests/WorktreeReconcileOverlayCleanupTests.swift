@@ -19,9 +19,9 @@ struct WorktreeReconcileOverlayCleanupTests {
         // Isolate the overlay runtime dir from the developer's ~/tbd.
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-reconcile-overlay-\(UUID().uuidString)")
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: home)
         }
         ClaudeHookOverlay.writeOverlay()

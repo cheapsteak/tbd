@@ -16,6 +16,7 @@ struct CodexHomeManager: Sendable {
     init(codexHome: URL? = nil) {
         self.codexHome = codexHome
             ?? Self.testCodexHomeOverride()
+            // swiftlint:disable:next no_home_relative_store_path - THE Codex-store resolver; the override is consulted on the line above
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".codex", isDirectory: true)
     }

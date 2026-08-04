@@ -103,7 +103,7 @@ struct LocalFileLinkerTests {
     }
 
     @Test func pathWithSpecialCharacters_isLinkified() {
-        let p = "/private/tmp/claude-501/-Users-chang-tbd-worktrees-longeye-app-20260522-vertical-manatee/aa0e7f1a-ddfa-49be-9804-bbde46833998/tasks/a9af77d70d2239272.output"
+        let p = "/private/tmp/claude-501/-Users-me-tbd-worktrees-acme-app-20260522-vertical-manatee/aa0e7f1a-ddfa-49be-9804-bbde46833998/tasks/a9af77d70d2239272.output"
         let link = linker(existing: [p])
         let input = "output_file: \(p)"
         let want  = "output_file: [\(p)](tbd-file:\(p))"

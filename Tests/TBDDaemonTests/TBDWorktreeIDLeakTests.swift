@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -51,16 +52,23 @@ private func containsCodexProfileLaunch(_ body: String) -> Bool {
             "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
 }
 
-private let codexTestHomePath: String = {
-    let path = FileManager.default.temporaryDirectory
+/// Points `TBD_TEST_CODEX_HOME` at a fresh temp dir for one test, and returns
+/// the teardown that puts the previous value back.
+///
+/// Previously a file-scope `let` did a one-time `setenv` for the whole process
+/// and each test's `defer` called `unsetenv`. Both halves were wrong now that
+/// `scripts/test.sh` exports this variable for the entire run: the `unsetenv`
+/// punched a hole straight through the fence, handing every concurrently
+/// running suite the developer's real `~/.codex`. Restore, never unset — see
+/// `setCodexTestHome(_:)`.
+private func isolateCodexHome() -> (home: URL, cleanup: () -> Void) {
+    let home = FileManager.default.temporaryDirectory
         .appendingPathComponent("tbd-codex-home-tests-\(UUID().uuidString)", isDirectory: true)
-        .path
-    setenv("TBD_TEST_CODEX_HOME", path, 1)
-    return path
-}()
-
-private func installCodexTestHomeOverride() {
-    _ = codexTestHomePath
+    let prior = setCodexTestHome(home.path)
+    return (home, {
+        restoreCodexTestHome(prior)
+        try? FileManager.default.removeItem(at: home)
+    })
 }
 
 /// terminal.create / terminal.recreateWindow refuse to spawn into a missing
@@ -164,60 +172,6 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
             "handleTerminalRecreateWindow must export TBD_WORKTREE_ID; got bodies: \(bodies)")
 }
 
-@Test("handleTerminalRecreateWindow uses current Codex launch command")
-func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
-    installCodexTestHomeOverride()
-    defer { unsetenv("TBD_TEST_CODEX_HOME") }
-
-    let db = try TBDDatabase(inMemory: true)
-    let recorded = RecordedCommands()
-    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
-        recorded.append(args)
-    })
-    let router = RPCRouter(
-        db: db,
-        lifecycle: WorktreeLifecycle(
-            db: db,
-            git: GitManager(),
-            tmux: tmux,
-            hooks: HookResolver()
-        ),
-        tmux: tmux
-    )
-
-    let repo = try await db.repos.create(
-        path: "/tmp/fake-repo-recreate-codex", displayName: "test", defaultBranch: "main"
-    )
-    try ensureWorktreeDir("/tmp/fake-repo-recreate-codex/wt-recreate-codex")
-    let wt = try await db.worktrees.create(
-        repoID: repo.id,
-        name: "wt-recreate-codex",
-        branch: "tbd/wt-recreate-codex",
-        path: "/tmp/fake-repo-recreate-codex/wt-recreate-codex",
-        tmuxServer: "tbd-c0de1234"
-    )
-    let terminal = try await db.terminals.create(
-        worktreeID: wt.id,
-        tmuxWindowID: "@old-codex",
-        tmuxPaneID: "%old-codex",
-        label: "Codex",
-        kind: .codex
-    )
-
-    let request = try RPCRequest(
-        method: RPCMethod.terminalRecreateWindow,
-        params: TerminalRecreateWindowParams(terminalID: terminal.id)
-    )
-    let response = await router.handle(request)
-    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
-
-    let bodies = newWindowBodies(recorded.snapshot())
-    #expect(bodies.contains {
-        containsCodexProfileLaunch($0)
-    }, "recreated codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
-    #expect(!bodies.contains { $0.contains("codex --full-auto") },
-            "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
-}
 
 // MARK: - Dead-window recovery: park resumable Claude terminals instead of wiping to shell
 
@@ -517,117 +471,183 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
             "handleTerminalCreate must export TBD_WORKTREE_ID matching params.worktreeID; got bodies: \(bodies)")
 }
 
-@Test("handleTerminalCreate uses current Codex launch command")
-func testHandleTerminalCreateCodexLaunchCommand() async throws {
-    installCodexTestHomeOverride()
-    defer { unsetenv("TBD_TEST_CODEX_HOME") }
+// MARK: - Codex launch command
 
-    let db = try TBDDatabase(inMemory: true)
-    let recorded = RecordedCommands()
-    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
-        recorded.append(args)
-    })
-    let router = RPCRouter(
-        db: db,
-        lifecycle: WorktreeLifecycle(
+// Nested under TBDHomeSerialized: these tests mutate the process-global
+// `TBD_TEST_CODEX_HOME` to keep `CodexHomeManager` out of the real `~/.codex`.
+// There is no injection seam for it — `RPCRouter` and `WorktreeLifecycle`
+// construct `CodexHomeManager()` internally — so the env var is the only
+// override, and nesting is what stops it racing the other env-mutating suites.
+// See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
+@Suite("Codex launch command (worktree-id leak fixtures)")
+struct CodexLaunchCommandTests {
+
+    @Test("handleTerminalRecreateWindow uses current Codex launch command")
+    func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
+        let codex = isolateCodexHome(); defer { codex.cleanup() }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+            recorded.append(args)
+        })
+        let router = RPCRouter(
             db: db,
-            git: GitManager(),
-            tmux: tmux,
-            hooks: HookResolver()
-        ),
-        tmux: tmux
-    )
-
-    let repo = try await db.repos.create(
-        path: "/tmp/fake-repo-create-codex", displayName: "test", defaultBranch: "main"
-    )
-    try ensureWorktreeDir("/tmp/fake-repo-create-codex/wt-create-codex")
-    let wt = try await db.worktrees.create(
-        repoID: repo.id,
-        name: "wt-create-codex",
-        branch: "tbd/wt-create-codex",
-        path: "/tmp/fake-repo-create-codex/wt-create-codex",
-        tmuxServer: "tbd-c0de5678"
-    )
-
-    let request = try RPCRequest(
-        method: RPCMethod.terminalCreate,
-        params: TerminalCreateParams(worktreeID: wt.id, type: .codex)
-    )
-    let response = await router.handle(request)
-    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
-
-    let terminal = try response.decodeResult(Terminal.self)
-    #expect(terminal.kind == .codex)
-    #expect(terminal.label == "Codex")
-
-    let bodies = newWindowBodies(recorded.snapshot())
-    #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
-            "created codex tab must export CODEX_HOME; got bodies: \(bodies)")
-    #expect(bodies.contains {
-        containsCodexProfileLaunch($0)
-    }, "created codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
-    #expect(!bodies.contains { $0.contains("codex --full-auto") },
-            "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
-    // The codex window must carry `-e DISABLE_AUTO_UPDATE=true` (process env,
-    // set before .zshrc runs) so oh-my-zsh's interactive update prompt can't
-    // block the spawned codex command.
-    // Adjacency-checked like PreSessionHookTests.hasProcessEnvFlag (that
-    // helper is file-private): a bare substring match could false-positive
-    // on the shell command body.
-    let codexCall = try #require(recorded.snapshot().first { $0.contains("new-window") })
-    let hasFlag = codexCall.firstIndex(of: "DISABLE_AUTO_UPDATE=true")
-        .map { $0 > codexCall.startIndex && codexCall[codexCall.index(before: $0)] == "-e" } ?? false
-    #expect(hasFlag,
-            "codex window must suppress the oh-my-zsh update prompt via -e; got: \(codexCall)")
-}
-
-@Test("handleTerminalCreate passes initial prompt to fresh Codex sessions")
-func testHandleTerminalCreateCodexInitialPrompt() async throws {
-    installCodexTestHomeOverride()
-    defer { unsetenv("TBD_TEST_CODEX_HOME") }
-
-    let db = try TBDDatabase(inMemory: true)
-    let recorded = RecordedCommands()
-    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
-        recorded.append(args)
-    })
-    let router = RPCRouter(
-        db: db,
-        lifecycle: WorktreeLifecycle(
-            db: db,
-            git: GitManager(),
-            tmux: tmux,
-            hooks: HookResolver()
-        ),
-        tmux: tmux
-    )
-
-    let repo = try await db.repos.create(
-        path: "/tmp/fake-repo-create-codex-prompt", displayName: "test", defaultBranch: "main"
-    )
-    try ensureWorktreeDir("/tmp/fake-repo-create-codex-prompt/wt-create-codex-prompt")
-    let wt = try await db.worktrees.create(
-        repoID: repo.id,
-        name: "wt-create-codex-prompt",
-        branch: "tbd/wt-create-codex-prompt",
-        path: "/tmp/fake-repo-create-codex-prompt/wt-create-codex-prompt",
-        tmuxServer: "tbd-c0de9876"
-    )
-
-    let request = try RPCRequest(
-        method: RPCMethod.terminalCreate,
-        params: TerminalCreateParams(
-            worktreeID: wt.id,
-            type: .codex,
-            prompt: "don't ship regressions"
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: tmux,
+                hooks: HookResolver()
+            ),
+            tmux: tmux
         )
-    )
-    let response = await router.handle(request)
-    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
 
-    let bodies = newWindowBodies(recorded.snapshot())
-    #expect(bodies.contains {
-        containsCodexProfileLaunch($0) && $0.contains("'don'\\''t ship regressions'")
-    }, "fresh codex tab must append the initial prompt as a shell-escaped positional argument; got bodies: \(bodies)")
+        let repo = try await db.repos.create(
+            path: "/tmp/fake-repo-recreate-codex", displayName: "test", defaultBranch: "main"
+        )
+        try ensureWorktreeDir("/tmp/fake-repo-recreate-codex/wt-recreate-codex")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt-recreate-codex",
+            branch: "tbd/wt-recreate-codex",
+            path: "/tmp/fake-repo-recreate-codex/wt-recreate-codex",
+            tmuxServer: "tbd-c0de1234"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@old-codex",
+            tmuxPaneID: "%old-codex",
+            label: "Codex",
+            kind: .codex
+        )
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)
+        )
+        let response = await router.handle(request)
+        #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+        let bodies = newWindowBodies(recorded.snapshot())
+        #expect(bodies.contains {
+            containsCodexProfileLaunch($0)
+        }, "recreated codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
+        #expect(!bodies.contains { $0.contains("codex --full-auto") },
+                "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
+    }
+
+    @Test("handleTerminalCreate uses current Codex launch command")
+    func testHandleTerminalCreateCodexLaunchCommand() async throws {
+        let codex = isolateCodexHome(); defer { codex.cleanup() }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+            recorded.append(args)
+        })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: tmux,
+                hooks: HookResolver()
+            ),
+            tmux: tmux
+        )
+
+        let repo = try await db.repos.create(
+            path: "/tmp/fake-repo-create-codex", displayName: "test", defaultBranch: "main"
+        )
+        try ensureWorktreeDir("/tmp/fake-repo-create-codex/wt-create-codex")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt-create-codex",
+            branch: "tbd/wt-create-codex",
+            path: "/tmp/fake-repo-create-codex/wt-create-codex",
+            tmuxServer: "tbd-c0de5678"
+        )
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .codex)
+        )
+        let response = await router.handle(request)
+        #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+        let terminal = try response.decodeResult(Terminal.self)
+        #expect(terminal.kind == .codex)
+        #expect(terminal.label == "Codex")
+
+        let bodies = newWindowBodies(recorded.snapshot())
+        #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
+                "created codex tab must export CODEX_HOME; got bodies: \(bodies)")
+        #expect(bodies.contains {
+            containsCodexProfileLaunch($0)
+        }, "created codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
+        #expect(!bodies.contains { $0.contains("codex --full-auto") },
+                "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
+        // The codex window must carry `-e DISABLE_AUTO_UPDATE=true` (process env,
+        // set before .zshrc runs) so oh-my-zsh's interactive update prompt can't
+        // block the spawned codex command.
+        // Adjacency-checked like PreSessionHookTests.hasProcessEnvFlag (that
+        // helper is file-private): a bare substring match could false-positive
+        // on the shell command body.
+        let codexCall = try #require(recorded.snapshot().first { $0.contains("new-window") })
+        let hasFlag = codexCall.firstIndex(of: "DISABLE_AUTO_UPDATE=true")
+            .map { $0 > codexCall.startIndex && codexCall[codexCall.index(before: $0)] == "-e" } ?? false
+        #expect(hasFlag,
+                "codex window must suppress the oh-my-zsh update prompt via -e; got: \(codexCall)")
+    }
+
+    @Test("handleTerminalCreate passes initial prompt to fresh Codex sessions")
+    func testHandleTerminalCreateCodexInitialPrompt() async throws {
+        let codex = isolateCodexHome(); defer { codex.cleanup() }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+            recorded.append(args)
+        })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: tmux,
+                hooks: HookResolver()
+            ),
+            tmux: tmux
+        )
+
+        let repo = try await db.repos.create(
+            path: "/tmp/fake-repo-create-codex-prompt", displayName: "test", defaultBranch: "main"
+        )
+        try ensureWorktreeDir("/tmp/fake-repo-create-codex-prompt/wt-create-codex-prompt")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt-create-codex-prompt",
+            branch: "tbd/wt-create-codex-prompt",
+            path: "/tmp/fake-repo-create-codex-prompt/wt-create-codex-prompt",
+            tmuxServer: "tbd-c0de9876"
+        )
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id,
+                type: .codex,
+                prompt: "don't ship regressions"
+            )
+        )
+        let response = await router.handle(request)
+        #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+        let bodies = newWindowBodies(recorded.snapshot())
+        #expect(bodies.contains {
+            containsCodexProfileLaunch($0) && $0.contains("'don'\\''t ship regressions'")
+        }, "fresh codex tab must append the initial prompt as a shell-escaped positional argument; got bodies: \(bodies)")
+    }
+}
 }
