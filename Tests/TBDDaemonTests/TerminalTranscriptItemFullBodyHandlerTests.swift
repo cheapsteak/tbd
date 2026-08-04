@@ -3,6 +3,15 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+// Nested because this suite READS the process-global `TBD_CLAUDE_HOST_HOME` —
+// once via `resolveHostBaseDirectory()` when planting fixtures, and again when
+// its `RPCRouter` builds a default config-dir manager. A reader is exposed to
+// the unserialized-global race exactly as a writer is: sibling suites in this
+// same domain (`ScratchPromoteMigrationTests`, `WorktreeReviveFreshTests`)
+// mutate that variable mid-test, and one landing between the plant and the read
+// makes the fixture look missing. That is the flake shape `CLAUDE.md` records
+// for `ConstantsTests.derivedPathsFollowTBDHome`.
+extension TBDHomeSerialized {
 @Suite("terminal.transcriptItemFullBody handler")
 struct TerminalTranscriptItemFullBodyHandlerTests {
     let db: TBDDatabase
@@ -280,4 +289,5 @@ struct TerminalTranscriptItemFullBodyHandlerTests {
         let result = try response.decodeResult(TerminalTranscriptItemFullBodyResult.self)
         #expect(result.text == body)
     }
+}
 }
