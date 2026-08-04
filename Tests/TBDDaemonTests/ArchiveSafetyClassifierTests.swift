@@ -373,6 +373,136 @@ struct ArchiveSafetyClassifierTests {
     #expect(hook != unsafe)
   }
 
+  @Test func nonzeroArchiveHookBlocksBeforeTerminalTeardown() async throws {
+    let fixture = try await makePublishedFixture(name: "hook-failure")
+    defer { fixture.cleanup() }
+    let hook = fixture.worktree.appendingPathComponent(".worktree-hooks/archive")
+    try write("#!/bin/bash\necho preserve-step-failed >&2\nexit 23\n", to: hook)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+    let commands = OrderLog()
+    let db = try TBDDatabase(inMemory: true)
+    let repo = try await db.repos.create(
+      path: fixture.repo.path, displayName: "acme", defaultBranch: "main")
+    let worktree = try await db.worktrees.create(
+      repoID: repo.id, name: "hook-failure", branch: fixture.branch,
+      path: fixture.worktree.path, tmuxServer: "tbd-test")
+    let terminal = try await db.terminals.create(
+      worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+    let lifecycle = WorktreeLifecycle(
+      db: db,
+      git: GitManager(),
+      tmux: TmuxManager(dryRun: true, dryRunRecorder: { args in
+        if args.contains("kill-window") { commands.record("kill") }
+      }),
+      hooks: HookResolver(),
+      archiveSafetyEvaluator: { _, _ in
+        ArchiveSafetyReport(findings: [], headIsPublished: true)
+      },
+      worktreeRemover: { _, _ in Issue.record("removal ran after failed hook") }
+    )
+
+    let pair = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id)
+    do {
+      try await lifecycle.completeArchiveWorktree(worktree: pair.0, repo: pair.1)
+      Issue.record("archive unexpectedly succeeded")
+    } catch let error as WorktreeLifecycleError {
+      #expect(error.description.contains("Archive hook failed"))
+      #expect(error.description.contains("preserve-step-failed"))
+    }
+
+    #expect(commands.all.isEmpty)
+    #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+    #expect(try await db.terminals.get(id: terminal.id) != nil)
+    #expect(FileManager.default.fileExists(atPath: fixture.worktree.path))
+  }
+
+  @Test func regularFileReadRejectsSymlinkedComponents() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("archive-openat-\(UUID().uuidString)")
+    let outside = FileManager.default.temporaryDirectory
+      .appendingPathComponent("archive-openat-outside-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: root)
+      try? FileManager.default.removeItem(at: outside)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try write("outside", to: outside)
+    try FileManager.default.createSymbolicLink(
+      at: root.appendingPathComponent("file-link"), withDestinationURL: outside)
+    let realDirectory = root.appendingPathComponent("real")
+    try FileManager.default.createDirectory(at: realDirectory, withIntermediateDirectories: true)
+    try write("outside", to: realDirectory.appendingPathComponent("artifact"))
+    try FileManager.default.createSymbolicLink(
+      at: root.appendingPathComponent("directory-link"), withDestinationURL: realDirectory)
+
+    let classifier = ArchiveSafetyClassifier(git: GitManager())
+    #expect(classifier.regularFileData(rootPath: root.path, relativePath: "file-link") == nil)
+    #expect(classifier.regularFileData(
+      rootPath: root.path, relativePath: "directory-link/artifact") == nil)
+  }
+
+  @Test func regularFileReadStaysOnOpenedDescriptorDuringPathSwap() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("archive-openat-race-\(UUID().uuidString)")
+    let outside = FileManager.default.temporaryDirectory
+      .appendingPathComponent("archive-openat-race-outside-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: root)
+      try? FileManager.default.removeItem(at: outside)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let artifact = root.appendingPathComponent("artifact")
+    let parked = root.appendingPathComponent("artifact-opened")
+    try write("trusted-bytes", to: artifact)
+    try write("replacement-bytes", to: outside)
+
+    let data = ArchiveSafetyClassifier(git: GitManager()).regularFileData(
+      rootPath: root.path,
+      relativePath: "artifact",
+      afterOpen: {
+        do {
+          try FileManager.default.moveItem(at: artifact, to: parked)
+          try FileManager.default.createSymbolicLink(at: artifact, withDestinationURL: outside)
+        } catch {
+          Issue.record("could not arrange descriptor race: \(error)")
+        }
+      }
+    )
+
+    #expect(data == Data("trusted-bytes".utf8))
+  }
+
+  @Test func regularFileReadStaysOnOpenedDescriptorDuringParentSwap() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("archive-openat-parent-race-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = root.appendingPathComponent("directory")
+    let parked = root.appendingPathComponent("directory-opened")
+    let replacement = root.appendingPathComponent("replacement")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: replacement, withIntermediateDirectories: true)
+    try write("trusted-bytes", to: directory.appendingPathComponent("artifact"))
+    try write("replacement-bytes", to: replacement.appendingPathComponent("artifact"))
+
+    let data = ArchiveSafetyClassifier(git: GitManager()).regularFileData(
+      rootPath: root.path,
+      relativePath: "directory/artifact",
+      afterOpen: {
+        do {
+          try FileManager.default.moveItem(at: directory, to: parked)
+          try FileManager.default.createSymbolicLink(
+            at: directory, withDestinationURL: replacement)
+        } catch {
+          Issue.record("could not arrange parent descriptor race: \(error)")
+        }
+      }
+    )
+
+    #expect(data == Data("trusted-bytes".utf8))
+  }
+
   /// A repository with no remote configured must still be archivable. Requiring
   /// a remote-tracking branch there refuses every archive forever, which is the
   /// always-refuses failure this design argues against — and `git worktree
@@ -429,9 +559,20 @@ struct ArchiveSafetyClassifierTests {
     let worktree = try await db.worktrees.create(
       repoID: repo.id, name: "remove-failure", branch: fixture.branch,
       path: fixture.worktree.path, tmuxServer: "tbd-test")
+    let terminal = try await db.terminals.create(
+      worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+    let subscriptions = StateSubscriptionManager()
+    let deltas = DeltaLog()
+    subscriptions.addSubscriber { data in
+      if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+        deltas.append(delta)
+      }
+      return true
+    }
     let lifecycle = WorktreeLifecycle(
-      db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-      hooks: HookResolver(), archiveSafetyEvaluator: nil,
+      db: db, git: GitManager(), tmux: TmuxManager(
+        dryRun: true, dryRunCapturePane: { _, _ in "preserved output" }),
+      hooks: HookResolver(), subscriptions: subscriptions, archiveSafetyEvaluator: nil,
       worktreeRemover: { _, _ in })
 
     let pair = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id, force: true)
@@ -441,6 +582,9 @@ struct ArchiveSafetyClassifierTests {
     }
 
     #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+    #expect(try await db.terminals.get(id: terminal.id) == nil)
+    #expect(try await db.terminalHistory.list(worktreeID: worktree.id).count == 1)
+    #expect(deltas.terminalRemovals == [terminal.id])
     #expect(FileManager.default.fileExists(atPath: fixture.worktree.path))
   }
 
@@ -453,10 +597,21 @@ struct ArchiveSafetyClassifierTests {
     let worktree = try await db.worktrees.create(
       repoID: repo.id, name: "revalidate", branch: fixture.branch,
       path: fixture.worktree.path, tmuxServer: "tbd-test")
+    let terminal = try await db.terminals.create(
+      worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+    let subscriptions = StateSubscriptionManager()
+    let deltas = DeltaLog()
+    subscriptions.addSubscriber { data in
+      if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+        deltas.append(delta)
+      }
+      return true
+    }
     let reports = ArchiveReportSequence()
     let lifecycle = WorktreeLifecycle(
-      db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-      hooks: HookResolver(),
+      db: db, git: GitManager(), tmux: TmuxManager(
+        dryRun: true, dryRunCapturePane: { _, _ in "preserved output" }),
+      hooks: HookResolver(), subscriptions: subscriptions,
       archiveSafetyEvaluator: { _, _ in await reports.next() },
       worktreeRemover: { _, _ in Issue.record("removal ran after failed revalidation") })
 
@@ -467,11 +622,14 @@ struct ArchiveSafetyClassifierTests {
 
     #expect(await reports.callCount == 2)
     #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+    #expect(try await db.terminals.get(id: terminal.id) == nil)
+    #expect(try await db.terminalHistory.list(worktreeID: worktree.id).count == 1)
+    #expect(deltas.terminalRemovals == [terminal.id])
     #expect(FileManager.default.fileExists(atPath: fixture.worktree.path))
   }
 
-  /// The worktree's own terminals must be silenced before the archive hook,
-  /// the final revalidation, and forced removal. A live agent that outlives
+  /// The worktree's own terminals must be silenced after the archive hook but
+  /// before the final revalidation and forced removal. A live agent that outlives
   /// the last check can create a file in the gap before `git worktree remove
   /// --force` runs, and that file is then discarded with nothing having
   /// observed it — the exact loss this classifier exists to prevent.
@@ -480,6 +638,11 @@ struct ArchiveSafetyClassifierTests {
     defer { fixture.cleanup() }
 
     let events = OrderLog()
+    let hookMarker = fixture.temp.appendingPathComponent("archive-hook-ran")
+    let hook = fixture.worktree.appendingPathComponent(".worktree-hooks/archive")
+    try write("#!/bin/bash\ntouch '\(hookMarker.path)'\n", to: hook)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o755], ofItemAtPath: hook.path)
     let db = try TBDDatabase(inMemory: true)
     let repo = try await db.repos.create(
       path: fixture.repo.path, displayName: "acme", defaultBranch: "main")
@@ -495,7 +658,12 @@ struct ArchiveSafetyClassifierTests {
       tmux: TmuxManager(
         dryRun: true,
         dryRunRecorder: { args in
-          if args.contains("kill-window") { events.record("kill") }
+          if args.contains("kill-window") {
+            if FileManager.default.fileExists(atPath: hookMarker.path) {
+              events.record("hook")
+            }
+            events.record("kill")
+          }
         }
       ),
       hooks: HookResolver(),
@@ -512,9 +680,9 @@ struct ArchiveSafetyClassifierTests {
     let pair = try await lifecycle.beginArchiveWorktree(worktreeID: worktree.id)
     try await lifecycle.completeArchiveWorktree(worktree: pair.0, repo: pair.1)
 
-    // Phase 1 gates, then the window dies, then the revalidation attests a
-    // worktree nothing can still be writing to, then removal.
-    #expect(events.all == ["classify", "kill", "classify", "remove"])
+    // Phase 1 gates, the hook finishes, the window dies, then revalidation
+    // attests a worktree nothing can still be writing to before removal.
+    #expect(events.all == ["classify", "hook", "kill", "classify", "remove"])
   }
 
   // MARK: - Fixtures
@@ -533,6 +701,24 @@ struct ArchiveSafetyClassifierTests {
       lock.lock()
       defer { lock.unlock() }
       return events
+    }
+  }
+
+  final class DeltaLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+    func append(_ delta: StateDelta) {
+      lock.lock()
+      defer { lock.unlock() }
+      deltas.append(delta)
+    }
+    var terminalRemovals: [UUID] {
+      lock.lock()
+      defer { lock.unlock() }
+      return deltas.compactMap { delta in
+        guard case .terminalRemoved(let removal) = delta else { return nil }
+        return removal.terminalID
+      }
     }
   }
 
