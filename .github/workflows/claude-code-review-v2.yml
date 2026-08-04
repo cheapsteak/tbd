@@ -194,14 +194,16 @@ jobs:
         # v1 restores only claude-review-hooks/ (the Stop hook + settings). v2 must
         # restore the ENTIRE .github/workflows/claude-review-v2/ directory, because
         # far more of the gate now lives in the checked-out tree: prepare.py decides
-        # skip-vs-review, validate.py computes the verdict from the findings, the
+        # skip-vs-review, validate.py computes the verdict from the findings,
+        # render_comment.py builds the comment body carrying the state markers, the
         # JSON schemas define what counts as a valid finding, and the hooks gate the
         # session's exit. A PR must not be able to neuter the gate that reviews it —
         # a PR-committed prepare.py that always skips with APPROVE, a validate.py
-        # that never REJECTs, or a schema loosened to accept an empty result would
-        # each defeat the review silently. Restoring from base also keeps branches
-        # created before v2 existed reviewable (the action hard-errors on a missing
-        # `settings:` file). github.event.pull_request.base.ref is the base branch
+        # that never REJECTs, a render_comment.py that writes forged markers, or a
+        # schema loosened to accept an empty result would each defeat the review
+        # silently. Restoring from base also keeps branches created before v2
+        # existed reviewable (the action hard-errors on a missing `settings:`
+        # file). github.event.pull_request.base.ref is the base branch
         # under pull_request_target; FETCH_HEAD is its tip after the fetch.
         # No --depth=1 on this fetch: it would re-introduce shallow grafts and undo
         # the unshallow the previous step just performed.
@@ -305,9 +307,13 @@ jobs:
         # Append a visible "review skipped" note to the v2 comment while KEEPING
         # everything already in it: the marker lines (they must survive so the
         # next identical push skips again) and the review prose (so a REJECT
-        # re-assertion still shows the author what to fix). The note is appended
-        # by jq to the fetched body, and only lines that are themselves a previous
-        # skip note are stripped first, so repeated rebases don't accumulate them.
+        # re-assertion still shows the author what to fix). render_comment.py
+        # (restored from base, so PR-tamper-proof) builds the body — it strips a
+        # previous note by its provenance sentinel, never by prose text, so
+        # repeated rebases don't accumulate notes and a review line that quotes
+        # the note's wording survives. jq only lifts the prior body and the
+        # comment id out of the API response; comment bodies are never
+        # interpolated into the shell.
         # Best-effort: a comment-update failure is warned, not fatal — the check
         # outcome (next step) is the gate, and the untouched comment still carries
         # correct markers.
@@ -332,42 +338,41 @@ jobs:
             | map(select(.user.login == $login and (.body | startswith("<!-- claude-review-v2 -->"))))
             | (last | .id) // ""
           ' "$tmp/all-comments.json")"
-          if [ -z "$comment_id" ]; then
-            # Should be unreachable — the skip only fires off a fetched v2
-            # comment — but if it vanished between fetch and now, re-post one in
-            # the same shape the post step writes (markers first, so the next
-            # run's fetch matches it). No review prose is available on this path:
-            # this run spent no review, and the prose lived in the comment that
-            # just disappeared.
-            note_file="$tmp/skip-note-body.txt"
-            {
-              printf '%s\n' "<!-- claude-review-v2 -->"
-              printf '%s\n' "<!-- last-reviewed-patch-id: $HEAD_PATCH_ID -->"
-              printf '%s\n' "<!-- last-verdict: $VERDICT -->"
-              printf '\n%s\n' "_Posted by the [claude-review-v2 shadow check](https://github.com/$REPO/blob/$BASE_REF/.github/workflows/claude-code-review-v2.yml) — this comment is updated in place on each run._"
-              printf '\n%s\n' "> ⏭️ Review skipped — diff unchanged since the last review (patch-id match). Re-asserting the recorded verdict: $VERDICT. (The prior review comment could not be found to update, so its findings are not reproduced here.)"
-            } > "$note_file"
-            gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$note_file" > /dev/null \
-              || echo "::warning::Could not re-post the v2 comment with the skip note; continuing."
-            exit 0
-          fi
-          # Comment bodies fetched from the API are moved between files by jq
-          # only, never interpolated into the shell. Only a line that IS a
-          # previous skip note is dropped, so the marker lines and the review
-          # prose pass through untouched; the trailing-whitespace trim keeps the
-          # gap before the note from growing by a blank line per rebase.
-          jq -s -r --arg login "$APP_LOGIN" --arg verdict "$VERDICT" '
+          jq -s -r --arg login "$APP_LOGIN" '
             add
             | map(select(.user.login == $login and (.body | startswith("<!-- claude-review-v2 -->"))))
-            | last
-            | .body
-            | split("\n") | map(select(startswith("> ⏭️ Review skipped") | not)) | join("\n")
-            | sub("[[:space:]]+$"; "")
-            | . + "\n\n> ⏭️ Review skipped — diff unchanged since the last review (patch-id match). Re-asserting the recorded verdict: " + $verdict + "."
-          ' "$tmp/all-comments.json" > "$tmp/updated-body.txt"
-          gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -F body=@"$tmp/updated-body.txt" > /dev/null \
-            || echo "::warning::Could not update v2 comment $comment_id with the skip note; continuing."
-          echo "v2 comment $comment_id updated with the skip note."
+            | (last | .body) // ""
+          ' "$tmp/all-comments.json" > "$tmp/prior-body.txt"
+          # An EMPTY prior body means the v2 comment vanished between the fetch
+          # and now (should be unreachable — the skip only fires off a fetched
+          # v2 comment). The renderer then emits a fresh markers-first body in
+          # the same shape the post step writes, so the next run's fetch matches
+          # it; no review prose is available on that path, because this run
+          # spent no review and the prose lived in the comment that disappeared.
+          python3 .github/workflows/claude-review-v2/render_comment.py skip-note \
+            --patch-id "$HEAD_PATCH_ID" \
+            --verdict "$VERDICT" \
+            --repo "$REPO" \
+            --base-ref "$BASE_REF" \
+            --prior-body-file "$tmp/prior-body.txt" \
+            > "$tmp/updated-body.txt" 2> "$tmp/render-warning.txt" \
+            || echo "::warning::Could not render the skip-note comment body; continuing."
+          if [ -s "$tmp/render-warning.txt" ]; then
+            echo "::warning::claude-review-v2 skip-note rendering degraded: $(tr '\n' ' ' < "$tmp/render-warning.txt")"
+          fi
+          if [ ! -s "$tmp/updated-body.txt" ]; then
+            echo "::warning::Skip-note renderer produced an empty body — leaving the v2 comment untouched. It already records this verdict."
+            exit 0
+          fi
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -F body=@"$tmp/updated-body.txt" > /dev/null \
+              || echo "::warning::Could not update v2 comment $comment_id with the skip note; continuing."
+            echo "v2 comment $comment_id updated with the skip note."
+          else
+            gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$tmp/updated-body.txt" > /dev/null \
+              || echo "::warning::Could not re-post the v2 comment with the skip note; continuing."
+            echo "Re-posted the v2 comment with the skip note."
+          fi
 
       - name: Enforce re-asserted verdict (review skipped)
         if: steps.trust.outputs.trusted == 'true' && steps.prepare.outputs.skip == 'true'
@@ -530,19 +535,22 @@ jobs:
         # 1. Read the computed verdict and fail closed if it is missing or is not
         #    exactly APPROVE/REJECT. This precedes the posting code deliberately:
         #    a hard failure must not publish a comment.
-        # 2. Upsert THE v2 comment: this run's patch-id and verdict markers, then
-        #    the model's review prose (review-result.json's `comment_body`),
-        #    PATCHing the App's newest sentinel-led comment or POSTing a new one.
-        #    One comment per PR, updated in place however many times the review
-        #    runs. The markers are the state the NEXT run's skip decision reads;
-        #    the model never knows (and must never type) the verdict — validate.py
-        #    computes it (spec §3.5) — and never posts, so the record and the
-        #    prose are published by the same deterministic write.
+        # 2. Upsert THE v2 comment: render_comment.py builds the body (this
+        #    run's patch-id and verdict markers, then the model's review prose
+        #    from review-result.json's `comment_body`), and this step PATCHes the
+        #    App's newest sentinel-led comment or POSTs a new one. One comment
+        #    per PR, updated in place however many times the review runs. The
+        #    markers are the state the NEXT run's skip decision reads; the model
+        #    never knows (and must never type) the verdict — validate.py computes
+        #    it (spec §3.5) — and never posts, so the record and the prose are
+        #    published by the same deterministic write.
         #    Best-effort on the API calls: if the upsert fails, no fresh marker
         #    records this patch-id, so prepare.py falls through to a full review
         #    next run — failing toward a review, never toward a wrong skip.
-        #    Missing prose is likewise not fatal: the markers still post and the
-        #    step warns, because validate.py — not this step — governs pass/fail.
+        #    Missing or blank prose is likewise not fatal: the renderer emits a
+        #    fallback body built from the findings themselves (so a REJECT is
+        #    never published with nothing to explain it) and warns, because
+        #    validate.py — not this step — governs pass/fail.
         # 3. Enforce the verdict exactly like v1: whitespace-trimmed exact match,
         #    APPROVE passes, REJECT fails, anything else fails closed. Enforcement
         #    comes AFTER the upsert because a REJECT exits 1 — a rejecting review
@@ -578,38 +586,38 @@ jobs:
           esac
 
           # --- 2. Upsert the v2 comment: markers + the model's review prose ---
-          # The marker lines are built entirely from workflow-generated values:
-          # the verdict is validated APPROVE/REJECT above, and HEAD_PATCH_ID is
-          # script-generated hex (prepare.py) delivered via GITHUB_OUTPUT — safe
-          # to interpolate. The prose is MODEL-authored text and is never
-          # interpolated into the shell: jq lifts it out of review-result.json
-          # into its own file, which is concatenated into the body. Posted from a
-          # file (gh api -F body=@file) like every comment write in this workflow.
+          # render_comment.py (restored from base, so PR-tamper-proof) owns the
+          # whole body: the marker lines, the prose, and the attribution, with
+          # exactly one blank line between sections. It reads review-result.json
+          # itself, so the MODEL-authored prose is never interpolated into the
+          # shell — it goes file → renderer stdout → body file → `gh api -F
+          # body=@file`, like every comment write in this workflow. The renderer
+          # never exits non-zero: on a missing/malformed result file or blank
+          # `comment_body` it emits a degraded-but-valid body (findings rendered
+          # from the record when prose is blank) and explains itself on stderr,
+          # which this step republishes as a ::warning::.
           tmp="$RUNNER_TEMP/claude-review-v2"
           mkdir -p "$tmp"
-          prose_file="$tmp/review-prose.md"
           body_file="$tmp/comment-body.txt"
-          result_file="$GITHUB_WORKSPACE/review-result.json"
-          prose_ok=false
-          if [ -f "$result_file" ] \
-             && jq -e '(.comment_body | type) == "string" and (.comment_body | length) > 0' "$result_file" > /dev/null 2>&1 \
-             && jq -r '.comment_body' "$result_file" > "$prose_file"; then
-            prose_ok=true
+          render_warning_file="$tmp/render-warning.txt"
+          python3 .github/workflows/claude-review-v2/render_comment.py review \
+            --patch-id "$HEAD_PATCH_ID" \
+            --verdict "$verdict" \
+            --repo "$REPO" \
+            --base-ref "$BASE_REF" \
+            --result-file "$GITHUB_WORKSPACE/review-result.json" \
+            > "$body_file" 2> "$render_warning_file" \
+            || echo "::warning::The comment renderer exited non-zero — it is written never to. Falling through to the empty-body check below."
+          if [ -s "$render_warning_file" ]; then
+            echo "::warning::claude-review-v2 comment rendering degraded: $(tr '\n' ' ' < "$render_warning_file") The computed verdict ('$verdict') still stands; validate.py governs pass/fail."
           fi
-          {
-            printf '%s\n' "<!-- claude-review-v2 -->"
-            printf '%s\n' "<!-- last-reviewed-patch-id: $HEAD_PATCH_ID -->"
-            printf '%s\n' "<!-- last-verdict: $verdict -->"
-            printf '\n'
-            if [ "$prose_ok" = true ]; then
-              cat "$prose_file"
-            fi
-            printf '\n%s\n' "_Posted by the [claude-review-v2 shadow check](https://github.com/$REPO/blob/$BASE_REF/.github/workflows/claude-code-review-v2.yml) — this comment is updated in place on each run._"
-          } > "$body_file"
-          if [ "$prose_ok" != true ]; then
-            echo "::warning::No review prose available in review-result.json (missing file or empty comment_body) — posting the verdict markers without it. The computed verdict ('$verdict') still stands; validate.py governs pass/fail."
-          fi
-          if gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate > "$tmp/all-comments.json"; then
+          if [ ! -s "$body_file" ]; then
+            # Unreachable by construction (the renderer always emits a body);
+            # posting an empty comment would be worse than posting none, and
+            # skipping the upsert leaves no fresh marker, so the next run
+            # full-reviews.
+            echo "::warning::The comment renderer produced no body — not posting. This run's verdict is not recorded, so the next run performs a full review instead of skipping."
+          elif gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate > "$tmp/all-comments.json"; then
             # The startswith matcher is exact here: this workflow authors the
             # comment itself, so its body genuinely BEGINS with the marker — no
             # other writer can prepend a header to it.
@@ -620,13 +628,13 @@ jobs:
             ' "$tmp/all-comments.json")"
             if [ -n "$comment_id" ]; then
               if gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -F body=@"$body_file" > /dev/null; then
-                echo "Updated v2 review comment $comment_id (patch-id: ${HEAD_PATCH_ID:-<empty>}, verdict: $verdict, prose: $prose_ok)."
+                echo "Updated v2 review comment $comment_id (patch-id: ${HEAD_PATCH_ID:-<empty>}, verdict: $verdict)."
               else
                 echo "::warning::Could not update v2 review comment $comment_id — the review is unpublished and this run's verdict is not recorded, so the next run performs a full review instead of skipping."
               fi
             else
               if gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$body_file" > /dev/null; then
-                echo "Posted new v2 review comment (patch-id: ${HEAD_PATCH_ID:-<empty>}, verdict: $verdict, prose: $prose_ok)."
+                echo "Posted new v2 review comment (patch-id: ${HEAD_PATCH_ID:-<empty>}, verdict: $verdict)."
               else
                 echo "::warning::Could not post the v2 review comment — the review is unpublished and this run's verdict is not recorded, so the next run performs a full review instead of skipping."
               fi

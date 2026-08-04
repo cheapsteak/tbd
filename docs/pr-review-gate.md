@@ -135,11 +135,15 @@ A second review pipeline, `claude-review-v2`, runs alongside this gate as a
 It reviews with two specialist subagents and deterministic script bookends —
 schema-validated findings, a script-computed verdict, and a patch-id skip for
 unchanged diffs — and is designed to eventually replace this gate once its
-verdicts prove out against v1's on real PRs. Its review session holds no GitHub
-write tools: the workflow itself posts v2's single per-PR comment (state markers
-plus the review prose) and upserts it in place, matching on its own
-`<!-- claude-review-v2 -->` sentinel rather than the action's sticky-comment
-matcher, which keys on the App identity this gate owns. Design and rollout plan:
+verdicts prove out against v1's on real PRs. Three pure Python scripts under
+`.github/workflows/claude-review-v2/` hold those bookends: `prepare.py` (skip
+decision + discussion context), `validate.py` (schema validation, disposition
+coverage, verdict), and `render_comment.py` (the comment body). Its review
+session holds no GitHub write tools: the workflow itself posts v2's single
+per-PR comment (state markers plus the review prose) and upserts it in place,
+matching on its own `<!-- claude-review-v2 -->` sentinel rather than the action's
+sticky-comment matcher, which keys on the App identity this gate owns. Design
+and rollout plan:
 [`docs/specs/2026-08-03-pr-review-fanout-design.md`](specs/2026-08-03-pr-review-fanout-design.md).
 
 Both traps documented in this file apply to the v2 workflow identically: it runs

@@ -51,8 +51,13 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
 ### 3.1 Pipeline shape: deterministic bookends around one model session
 
 ```
-prepare (script)  →  review session (model, fan-out)  →  validate + post + enforce (script)
+prepare (script)  →  review session (model, fan-out)  →  validate + render + post + enforce
 ```
+
+Three scripts hold the deterministic halves: `prepare.py` (skip decision, discussion
+context), `validate.py` (schemas, disposition coverage, verdict), and
+`render_comment.py` (the comment body). The workflow shell holds only the GitHub calls
+around them.
 
 Everything before and after the model session is plain Python: argument in, files out,
 no network beyond one `gh` boundary, unit-testable with hand-built fixtures. The model
@@ -128,29 +133,50 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   specialist never produced a findings file — e.g. the orchestrator merged before
   all background specialists completed — it fails closed with no verdict written.
 - **The review comment**: v2 leaves exactly one comment per PR, and the workflow —
-  not the model — writes it. After validation a deterministic step builds the body
-  (a `<!-- claude-review-v2 -->` sentinel plus `<!-- last-reviewed-patch-id: … -->`
-  and `<!-- last-verdict: … -->` HTML comments, then `review-result.json`'s
-  `comment_body` prose verbatim, then a one-line attribution) and upserts it: PATCH
-  the App's newest sentinel-led comment, else POST one. Re-review therefore updates
-  the comment in place instead of stacking one per run. The session posts nothing
-  and holds no GitHub write tool at all — its outputs are files — so the
-  machine-read state stays out of the model's hands: it never types the verdict and
-  cannot forge the markers. The comment must be workflow-authored for the upsert to
-  work at all: the action's own sticky-comment mode keys on the posting App
-  identity, which the v1 gate owns while both pipelines post as the same App, so v2
-  matches on its own sentinel instead. Missing prose (no result file, empty
-  `comment_body`) posts the markers alone with a warning — the verdict record must
-  survive regardless, and the validate script, not the posting step, governs
-  pass/fail.
+  not the model — writes it. The session posts nothing and holds no GitHub write
+  tool at all — its outputs are files — so the machine-read state stays out of the
+  model's hands: it never types the verdict and cannot forge the markers. The
+  comment must be workflow-authored for the upsert to work at all: the action's own
+  sticky-comment mode keys on the posting App identity, which the v1 gate owns while
+  both pipelines post as the same App, so v2 matches on its own sentinel instead.
+- **The renderer owns the body; the shell owns the upsert.** Body construction is
+  the third bookend script, `render_comment.py` — a pure function of (patch-id,
+  verdict, `review-result.json` contents) → comment text, with no network and no
+  GitHub calls, so every branch of it is unit-testable. The workflow pipes its
+  stdout into the body file and does only the upsert: PATCH the App's newest
+  sentinel-led comment, else POST one, so re-review updates the comment in place
+  instead of stacking one per run. Model prose is never interpolated into a shell
+  command — it travels file → renderer → file → `gh api -F body=@file`. Every body
+  the renderer emits holds the same shape: the `<!-- claude-review-v2 -->` sentinel
+  and the `<!-- last-reviewed-patch-id: … -->` / `<!-- last-verdict: … -->` markers
+  as the first three lines in that order, then the prose, then a one-line
+  attribution last, with exactly one blank line between sections.
+- **Degraded prose still explains the verdict.** The verdict is computed from
+  finding severities, independent of the prose — so a run can REJECT while its
+  `comment_body` is blank, and markers alone would leave the author a red check with
+  no visible reason. When the prose is blank but findings survive, the renderer
+  synthesizes the body from the findings themselves: a lead line stating the review
+  prose was unavailable and this rendering is machine-made, then one bullet per
+  finding with severity, file/line, title, and description. Blank prose with no
+  findings, and an unreadable or malformed result file, each get the markers plus a
+  one-line note of the same kind. The renderer never exits non-zero; it explains the
+  degradation on stderr and the step republishes that as a warning. The validate
+  script, not the posting step, governs pass/fail.
 - **Skip**: the prepare script computes `git patch-id --stable` over
   `git diff base...HEAD`; if it equals the patch-id recorded in the v2 comment, the
   run short-circuits and re-asserts the recorded verdict without spending a review,
   appending a visible one-line skip note to that comment (markers and review prose
-  kept, so a re-asserted REJECT still shows the author what to fix; a previous skip
-  note is stripped first so rebases don't accumulate them). A new human comment does
-  **not** defeat the skip in v1 (accepted: a human can re-request review by pushing
-  or re-running the check).
+  kept, so a re-asserted REJECT still shows the author what to fix). The renderer
+  builds that body too, so the note's placement and the strip of the previous one
+  are unit-tested like every other body branch. The skip note carries its own
+  `<!-- claude-review-v2-skip-note -->` provenance sentinel and lives in the
+  trailing block after the attribution line; the strip walks backwards from the end
+  of the body and stops at the first line that is neither blank nor a skip note.
+  Repeated skips therefore replace the note instead of accumulating notes or blank
+  lines, and no prose can be eaten: matching on the note's *text* would silently
+  delete a review line quoting it, which a review of this very workflow writes. A
+  new human comment does **not** defeat the skip in v1 (accepted: a human can
+  re-request review by pushing or re-running the check).
 - **Skip fail-direction**: the skip fires only when the comment fetch succeeded,
   both markers parse, and the recorded verdict is exactly `APPROVE` or `REJECT`.
   Any other state — fetch error, no v2 comment, missing or malformed marker,
@@ -195,9 +221,11 @@ over as-is. The trigger event does not change, so the admin-merge trap is not sp
 
 - **Pure policy, fixture-driven tests.** Every decision the scripts make — skip or
   review, verdict from findings, discussion rendering, marker parsing, disposition
-  coverage — is a pure function taking scalars/dicts. Tests hand-build inputs; no
-  clocks, no subprocesses, no network. `gh` is called through one module-level function
-  that tests monkeypatch.
+  coverage, comment-body construction and its degraded branches — is a pure function
+  taking scalars/dicts. Tests hand-build inputs; no clocks, no subprocesses, no
+  network. `gh` is called through one module-level function that tests monkeypatch.
+  Degradation paths are the ones this buys most: they run only when something has
+  already gone wrong, so they are never exercised by a healthy run.
 - **Stub-API end-to-end test.** A stdlib `ThreadingHTTPServer` fakes the model API:
   canned SSE turn sequences, request *N* answered by turn *N−1*, `tool_use` blocks to
   script subagent spawns and file writes. The real `claude` CLI runs headless against
