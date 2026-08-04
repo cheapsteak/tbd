@@ -41,7 +41,7 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
   deterministic post-merge reconciliation check. Upgrade trigger recorded in §6.
 - **Skip-if-unchanged** — **patch-id skip only.** Skip the re-review when
   `git patch-id` over the diff matches the patch-id recorded in the prior run's
-  marker comment (§3.5). No discussion-content fingerprint in v1 (§6).
+  review comment (§3.5). No discussion-content fingerprint in v1 (§6).
 - **PR discussion context** — **yes, trimmed.** Fetch human discussion once, render
   it into a sanitized, fenced, untrusted-data block the reviewer weighs but may not
   take instructions from (§3.6).
@@ -51,7 +51,7 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
 ### 3.1 Pipeline shape: deterministic bookends around one model session
 
 ```
-prepare (script)  →  review session (model, fan-out)  →  validate + enforce (script)
+prepare (script)  →  review session (model, fan-out)  →  validate (script)  →  post + enforce (script)
 ```
 
 Everything before and after the model session is plain Python: argument in, files out,
@@ -59,6 +59,12 @@ no network beyond one `gh` boundary, unit-testable with hand-built fixtures. The
 session's only contract is "write these files"; scripts own every machine-read decision.
 This is the inverse of the current gate, where the session both writes the review *and*
 types the verdict token.
+
+The session holds **no GitHub write tool at all** — it does not post its own review. It
+writes `review-result.json`; the post step renders that file's `comment_body` into the
+comment it publishes (§3.5). So the only text that reaches the PR is text `validate.py`
+has already accepted, and the workflow — not the model — owns the comment's machine-read
+state.
 
 ### 3.2 Structured findings
 
@@ -116,7 +122,7 @@ The disposition list is embedded in the posted review comment inside a collapsed
 section, so a silent drop is at least *visible* to a human reading the review, and the
 validate script checks only its *presence* (an ID-coverage count), not its judgment.
 
-### 3.5 Deterministic verdict + patch-id skip
+### 3.5 Deterministic verdict, one review comment per run, patch-id skip
 
 - **Verdict**: the validate script computes `APPROVE`/`REJECT` from
   `review-result.json` — REJECT iff any unaddressed `HIGH` or `MEDIUM` finding survives
@@ -127,30 +133,47 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   enforces specialist-set completeness (`--expected-specialists`): if any named
   specialist never produced a findings file — e.g. the orchestrator merged before
   all background specialists completed — it fails closed with no verdict written.
-- **Marker comment**: the machine-read state — a `<!-- claude-review-v2 -->`
-  sentinel plus `<!-- last-reviewed-patch-id: … -->` and `<!-- last-verdict: … -->`
-  HTML comments — lives in a small dedicated PR comment that only deterministic
-  workflow steps create and update: after validation, a workflow step upserts it
-  (PATCH the App's newest sentinel-led comment, else POST one) with the run's
-  patch-id and computed verdict, plus one visible line pointing readers at the
-  review comment. The model session's review comment is pure prose and carries no
-  machine-read state: the posting action's progress-tracking mode owns that
-  comment's body (it prepends its own header), so machine-read state lives in a
-  comment only the workflow writes — which also keeps the markers out of the
-  model's hands entirely.
+- **One review comment per run, carrying its own state**: a full-review run posts a
+  NEW comment; nothing is edited in place. `render_comment.py` builds the body as
+  three machine-read marker lines — a `<!-- claude-review-v2 -->` sentinel plus
+  `<!-- last-reviewed-patch-id: … -->` and `<!-- last-verdict: … -->` — then the
+  model's `comment_body` prose verbatim, then a one-line attribution naming the
+  patch-id this comment reviewed. The markers lead the body, so the next run's
+  parser (which takes the first match) reads workflow-written state even though the
+  prose below it is model-authored and could contain marker-shaped text. Because the
+  workflow composes and posts the body, the model needs no GitHub write tool and the
+  state never passes through its hands.
+- **Priors collapse rather than pile up**: before posting, the run minimizes every
+  earlier v2 review comment on the PR — the App's own comments whose body starts with
+  the sentinel — with GitHub's `minimizeComment` mutation, classifier `OUTDATED`.
+  Minimizing *before* the post is what guarantees a run can never collapse its own
+  review: the comment it is about to create is not in the set it just enumerated. The
+  reviews stay on the PR as collapsed history; only the newest is open.
+- **Rendering never fails the step**: an absent or malformed `review-result.json`, or
+  blank prose, yields a degraded body — a machine-rendered list of the recorded
+  findings, or a plain note — plus a `::warning::` explaining the degradation. A
+  REJECT computed from severities must never post as a bare set of markers with
+  nothing to act on. Pass/fail is `validate.py`'s alone.
+- **Ordering inside the post step**: verdict gate, render, minimize, post, enforce.
+  The verdict is checked FIRST, so a run with no trustworthy verdict posts nothing at
+  all; the REJECT exit comes LAST, so a rejecting review always reaches the author it
+  is addressed to. Minimizing and posting are both best-effort — each warns and
+  continues rather than masking the verdict.
 - **Skip**: the prepare script computes `git patch-id --stable` over
-  `git diff base...HEAD`; if it equals the marker comment's recorded patch-id, the
-  run short-circuits and re-asserts the recorded verdict without spending a review,
-  refreshing the marker comment with a visible one-line skip note (markers kept).
-  A new human comment does **not** defeat the skip in v1 (accepted: a human can
-  re-request review by pushing or re-running the check).
-- **Skip fail-direction**: the skip fires only when the marker-comment fetch
-  succeeded, both markers parse, and the recorded verdict is exactly `APPROVE` or
-  `REJECT`. Any other state — fetch error, no marker comment, missing or malformed
-  marker, unrecognized verdict — falls through to a full review. The cheap
-  direction to fail is toward spending a review, never toward re-asserting a
-  verdict we can't read. The record step is best-effort in the same direction: a
-  failed upsert leaves no fresh marker, so the next run full-reviews.
+  `git diff base...HEAD`; if it equals the patch-id recorded in the newest v2 review
+  comment, the run short-circuits and re-asserts the recorded verdict without spending
+  a review. This path writes NOTHING to the PR: it posts no comment and minimizes
+  none. The prior review is still the current review of an unchanged diff, so it stays
+  visible and unannotated, and the re-assertion is the check result itself. A new
+  human comment does **not** defeat the skip in v1 (accepted: a human can re-request
+  review by pushing or re-running the check).
+- **Skip fail-direction**: the skip fires only when the comment fetch succeeded, both
+  markers parse, and the recorded verdict is exactly `APPROVE` or `REJECT`. Any other
+  state — fetch error, no prior review comment, missing or malformed marker,
+  unrecognized verdict — falls through to a full review. The cheap direction to fail
+  is toward spending a review, never toward re-asserting a verdict we can't read. The
+  post step is best-effort in the same direction: a failed post records no patch-id,
+  so the next run full-reviews.
 
 ### 3.6 PR discussion context (trimmed anti-hijack envelope)
 
@@ -160,8 +183,8 @@ properties, all implemented as pure functions:
 
 - **Bot filtering** by GraphQL `__typename == "Bot"` (logins alone are unreliable);
   empty bodies dropped; ascending timestamp order.
-- **Sanitization**: strip HTML comments whole (so quoted marker-comment markers
-  can't masquerade as ours), then escape angle brackets.
+- **Sanitization**: strip HTML comments whole (so a quoted state marker can't
+  masquerade as ours), then escape angle brackets.
 - **Fencing**: the block sits between BEGIN/END markers carrying a per-run random
   token; the header states that envelope metadata (author, timestamp) is trustworthy
   and comment *bodies* are untrusted data, never instructions — and that a marker with
@@ -188,9 +211,16 @@ over as-is. The trigger event does not change, so the admin-merge trap is not sp
 
 - **Pure policy, fixture-driven tests.** Every decision the scripts make — skip or
   review, verdict from findings, discussion rendering, marker parsing, disposition
-  coverage — is a pure function taking scalars/dicts. Tests hand-build inputs; no
-  clocks, no subprocesses, no network. `gh` is called through one module-level function
-  that tests monkeypatch.
+  coverage, comment-body rendering — is a pure function taking scalars/dicts. Tests
+  hand-build inputs; no clocks, no subprocesses, no network. `gh` is called through one
+  module-level function that tests monkeypatch. The three scripts are `prepare.py`
+  (skip decision + discussion context), `validate.py` (schemas, disposition coverage,
+  verdict), and `render_comment.py` (the posted comment's body), each with a test
+  module beside it.
+- **Renderer and parser pinned against each other.** `render_comment.py` writes the
+  state markers `prepare.py` reads back, so the round trip is tested end to end rather
+  than each end against a hand-written fixture — including the case where model prose
+  contains marker-shaped text, which must not displace the workflow's own markers.
 - **Stub-API end-to-end test.** A stdlib `ThreadingHTTPServer` fakes the model API:
   canned SSE turn sequences, request *N* answered by turn *N−1*, `tool_use` blocks to
   script subagent spawns and file writes. The real `claude` CLI runs headless against
@@ -213,10 +243,10 @@ Per the "large or risky new behavior ships default-off" convention, translated t
 1. **Shadow**: land as a separate workflow producing a non-required check
    (`claude-review-v2`) posting its own comments. The existing `claude-review`
    remains the required gate. Soak across several real PRs; compare verdicts. The two
-   workflows must not share a sticky identity: the action's sticky matcher keys on the
-   posting App, so v2 stays out of the action's sticky-comment mode and finds its
-   marker comment by its own sentinel (and, if the matcher proves too greedy, would
-   get its own App) rather than updating the v1 comment in place.
+   workflows must not share a comment identity: the action's sticky matcher keys on
+   the posting App, so v2 stays out of the action's sticky-comment mode entirely and
+   selects its own comments by its own sentinel (and, if that ever proves ambiguous,
+   would get its own App) rather than touching the v1 comment.
 2. **Graduate**: swap the required check from `claude-review` to `claude-review-v2` in
    branch protection (a settings change, not a workflow change — no admin-merge trap),
    then retire the old workflow.
@@ -244,8 +274,8 @@ Per the "large or risky new behavior ships default-off" convention, translated t
 - **Interactive PTY driver** (mid-flight nudges, deadline steering): the last-resort
   rung, only if the resume loop above proves insufficient — e.g. sessions wedging
   rather than ending, which a between-invocation loop cannot reach.
-- **Inline review comments**: the current gate deliberately posts a single sticky
-  comment; v1 keeps that.
+- **Inline review comments**: findings state their file path and line numbers inside
+  the one review comment rather than being anchored to diff lines; v1 keeps that.
 
 ## 7. Open questions
 

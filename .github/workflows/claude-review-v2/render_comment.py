@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """Comment-body renderer for the claude-review-v2 pipeline.
 
-Owns the construction of v2's single per-PR comment
+Owns the construction of the review comment each full-review run posts
 (docs/specs/2026-08-03-pr-review-fanout-design.md §3.5). The workflow calls it
-and pipes stdout into the body file; the upsert itself (find the App's newest
-sentinel-led comment → PATCH, else POST) stays in the workflow shell.
+and pipes stdout into the body file; posting the comment — and minimizing the
+PR's earlier v2 reviews as outdated — stays in the workflow shell.
 
-Two modes:
+The body it renders is one review comment carrying its own machine-read state:
+the three marker lines, the model's `comment_body` prose (or a machine-rendered
+fallback when that prose is missing), then the attribution line. The next run's
+prepare step reads its markers back off the newest such comment.
 
-- `review`     — the body posted after a full review: the three marker lines,
-                 the model's `comment_body` prose (or a machine-rendered
-                 fallback when that prose is missing), then the attribution.
-- `skip-note`  — the prior comment's body with the "review skipped" note
-                 re-applied, or a fresh markers-only body when the prior
-                 comment has vanished.
-
-Invariants every rendered body holds, in both modes:
+Invariants every rendered body holds:
 
 - the three marker lines are the first three lines, in a fixed order,
 - sections are separated by exactly one blank line,
@@ -35,22 +31,13 @@ import argparse
 import json
 import sys
 
-# --- sentinels --------------------------------------------------------------
+# --- sentinel ---------------------------------------------------------------
 
-# Opens every v2 comment body. The workflow's upsert matches the App's newest
-# comment whose body STARTS WITH this line, so it must stay line 1.
+# Opens every v2 review comment body. The workflow selects prior v2 reviews —
+# to read state off the newest and to minimize them all as outdated — by
+# matching the App's comments whose body STARTS WITH this line, so it must
+# stay line 1.
 COMMENT_SENTINEL = "<!-- claude-review-v2 -->"
-
-# Marks a skip note as workflow-authored provenance. Skip notes are stripped by
-# this sentinel — never by their prose, which a review discussing this very
-# workflow can quote verbatim.
-SKIP_NOTE_SENTINEL = "<!-- claude-review-v2-skip-note -->"
-
-# Skip notes written before the sentinel existed carry no provenance at all.
-# They are recognized by this prefix, and ONLY in the trailing position (see
-# strip_skip_notes) — a rendered body always ends with the attribution line, so
-# nothing the model wrote can occupy that position.
-_LEGACY_SKIP_NOTE_PREFIX = "> ⏭️ Review skipped"
 
 
 # --- section assembly -------------------------------------------------------
@@ -79,12 +66,22 @@ def marker_block(patch_id: str, verdict: str) -> str:
     )
 
 
-def attribution_line(repo: str, base_ref: str) -> str:
-    """The one-line provenance footer that closes every rendered review body."""
+def attribution_line(repo: str, base_ref: str, patch_id: str = "") -> str:
+    """The one-line provenance footer that closes every rendered review body.
+
+    It names the diff this comment reviewed, because a PR accumulates one such
+    comment per review: earlier ones are collapsed as outdated, and this line
+    says which diff the visible one speaks for.
+    """
+    scope = (
+        f"the review of this PR's diff at patch-id `{patch_id}`"
+        if patch_id
+        else "the review of this PR's diff as of the time it was posted"
+    )
     return (
         f"_Posted by the [claude-review-v2 shadow check](https://github.com/"
         f"{repo}/blob/{base_ref}/.github/workflows/claude-code-review-v2.yml) — "
-        "this comment is updated in place on each run._"
+        f"{scope}. A newer v2 review comment supersedes this one._"
     )
 
 
@@ -144,7 +141,7 @@ def unreadable_result_body(verdict: str) -> str:
     )
 
 
-# --- review-mode body -------------------------------------------------------
+# --- review body ------------------------------------------------------------
 
 
 def prose_of(result: dict | None) -> str:
@@ -174,7 +171,7 @@ def render_review_body(
     repo: str,
     base_ref: str,
 ) -> tuple[str, str | None]:
-    """Render the post-review comment body.
+    """Render the review comment body this run posts.
 
     `result` is review-result.json's parsed contents, or None when the file was
     missing or unparseable. Returns (body, warning) — `warning` is None on the
@@ -182,7 +179,7 @@ def render_review_body(
     surfaces as a `::warning::`.
     """
     markers = marker_block(patch_id, verdict)
-    attribution = attribution_line(repo, base_ref)
+    attribution = attribution_line(repo, base_ref, patch_id)
 
     if result is None:
         return (
@@ -209,76 +206,6 @@ def render_review_body(
     )
 
 
-# --- skip-mode body ---------------------------------------------------------
-
-
-def skip_note(verdict: str, prior_comment_found: bool = True) -> str:
-    """The one-line "review skipped" note, carrying its provenance sentinel."""
-    note = (
-        "> ⏭️ Review skipped — diff unchanged since the last review (patch-id "
-        f"match). Re-asserting the recorded verdict: {verdict}."
-    )
-    if not prior_comment_found:
-        note += (
-            " (The prior review comment could not be found to update, so its "
-            "findings are not reproduced here.)"
-        )
-    return f"{note} {SKIP_NOTE_SENTINEL}"
-
-
-def strip_skip_notes(body: str) -> str:
-    """Remove previously appended skip notes from the END of a comment body.
-
-    Skip notes are appended after the attribution line, so they are exactly the
-    trailing block; stripping walks backwards from the end and stops at the
-    first line that is neither blank nor a skip note. Model prose therefore
-    cannot be eaten — a rendered body always ends with the attribution, which
-    halts the walk before any prose line is reached, and a prose line that
-    merely quotes the note's text sits above it untouched.
-    """
-    lines = body.split("\n")
-    while lines:
-        last = lines[-1]
-        if last.strip() == "":
-            lines.pop()
-            continue
-        if SKIP_NOTE_SENTINEL in last or last.startswith(_LEGACY_SKIP_NOTE_PREFIX):
-            lines.pop()
-            continue
-        break
-    return "\n".join(lines)
-
-
-def render_skip_body(
-    prior_body: str,
-    patch_id: str,
-    verdict: str,
-    repo: str,
-    base_ref: str,
-) -> tuple[str, str | None]:
-    """Render the comment body for a skipped review.
-
-    With a prior v2 comment body, everything already in it is kept — markers
-    (so the next identical push skips again) and review prose (so a re-asserted
-    REJECT still shows the author what to fix) — with any earlier skip note
-    replaced rather than accumulated. Without one, a fresh markers-only body is
-    rendered in the same shape the review path writes, so the next run's fetch
-    matches it. Returns (body, warning).
-    """
-    if prior_body.startswith(COMMENT_SENTINEL):
-        kept = strip_skip_notes(prior_body)
-        return _join_sections([kept, skip_note(verdict)]), None
-    markers = marker_block(patch_id, verdict)
-    attribution = attribution_line(repo, base_ref)
-    return (
-        _join_sections(
-            [markers, attribution, skip_note(verdict, prior_comment_found=False)]
-        ),
-        "no prior v2 comment body to update — rendered a fresh markers-only "
-        "body carrying the skip note",
-    )
-
-
 # --- main (the only I/O shell) ----------------------------------------------
 
 
@@ -300,59 +227,25 @@ def load_result(path: str) -> tuple[dict | None, str | None]:
     return data, None
 
 
-def _read_text(path: str) -> str:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
-    except OSError:
-        return ""
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="mode", required=True)
-
-    def add_common(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("--patch-id", default="", help="head patch-id (hex or empty)")
-        sub.add_argument("--verdict", required=True, help="APPROVE or REJECT")
-        sub.add_argument("--repo", required=True, help="owner/name")
-        sub.add_argument("--base-ref", required=True, help="PR base branch name")
-
-    review = subparsers.add_parser(
-        "review", help="render the body posted after a full review"
-    )
-    add_common(review)
-    review.add_argument(
+    parser.add_argument("--patch-id", default="", help="head patch-id (hex or empty)")
+    parser.add_argument("--verdict", required=True, help="APPROVE or REJECT")
+    parser.add_argument("--repo", required=True, help="owner/name")
+    parser.add_argument("--base-ref", required=True, help="PR base branch name")
+    parser.add_argument(
         "--result-file",
         required=True,
         help="path to review-result.json; missing or malformed degrades to a "
         "machine-rendered body rather than failing",
     )
-
-    skip = subparsers.add_parser(
-        "skip-note", help="render the body for a skipped review"
-    )
-    add_common(skip)
-    skip.add_argument(
-        "--prior-body-file",
-        default=None,
-        help="file holding the prior v2 comment body; missing or empty renders "
-        "a fresh markers-only body",
-    )
-
     args = parser.parse_args(argv)
 
-    if args.mode == "review":
-        result, read_warning = load_result(args.result_file)
-        body, render_warning = render_review_body(
-            args.patch_id, args.verdict, result, args.repo, args.base_ref
-        )
-        warning = read_warning or render_warning
-    else:
-        prior_body = _read_text(args.prior_body_file) if args.prior_body_file else ""
-        body, warning = render_skip_body(
-            prior_body, args.patch_id, args.verdict, args.repo, args.base_ref
-        )
+    result, read_warning = load_result(args.result_file)
+    body, render_warning = render_review_body(
+        args.patch_id, args.verdict, result, args.repo, args.base_ref
+    )
+    warning = read_warning or render_warning
 
     print(body)
     if warning:
