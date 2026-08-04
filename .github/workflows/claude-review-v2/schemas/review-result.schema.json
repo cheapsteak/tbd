@@ -22,7 +22,10 @@
       "properties": {
         "id": { "type": "string" },
         "file": { "type": "string" },
-        "line": { "type": "integer" },
+        "line": {
+          "type": ["integer", "null"],
+          "description": "Line anchor, or null when the finding has none. Null is accepted as well as omission: repo-wide, convention, and architectural findings have no single line, and a schema that rejects the null a model naturally writes would fail the gate closed on exactly the findings that most need a human."
+        },
         "severity": { "enum": ["HIGH", "MEDIUM", "MINOR"] },
         "title": { "type": "string" },
         "body": { "type": "string" },
