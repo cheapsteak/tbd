@@ -41,7 +41,7 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
   deterministic post-merge reconciliation check. Upgrade trigger recorded in §6.
 - **Skip-if-unchanged** — **patch-id skip only.** Skip the re-review when
   `git patch-id` over the diff matches the patch-id recorded in the prior run's
-  marker comment (§3.5). No discussion-content fingerprint in v1 (§6).
+  v2 comment (§3.5). No discussion-content fingerprint in v1 (§6).
 - **PR discussion context** — **yes, trimmed.** Fetch human discussion once, render
   it into a sanitized, fenced, untrusted-data block the reviewer weighs but may not
   take instructions from (§3.6).
@@ -51,14 +51,14 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
 ### 3.1 Pipeline shape: deterministic bookends around one model session
 
 ```
-prepare (script)  →  review session (model, fan-out)  →  validate + enforce (script)
+prepare (script)  →  review session (model, fan-out)  →  validate + post + enforce (script)
 ```
 
 Everything before and after the model session is plain Python: argument in, files out,
 no network beyond one `gh` boundary, unit-testable with hand-built fixtures. The model
-session's only contract is "write these files"; scripts own every machine-read decision.
-This is the inverse of the current gate, where the session both writes the review *and*
-types the verdict token.
+session's only contract is "write these files"; scripts own every machine-read decision
+and every write to GitHub. This is the inverse of the current gate, where the session
+posts the review itself *and* types the verdict token.
 
 ### 3.2 Structured findings
 
@@ -127,27 +127,34 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   enforces specialist-set completeness (`--expected-specialists`): if any named
   specialist never produced a findings file — e.g. the orchestrator merged before
   all background specialists completed — it fails closed with no verdict written.
-- **Marker comment**: the machine-read state — a `<!-- claude-review-v2 -->`
-  sentinel plus `<!-- last-reviewed-patch-id: … -->` and `<!-- last-verdict: … -->`
-  HTML comments — lives in a small dedicated PR comment that only deterministic
-  workflow steps create and update: after validation, a workflow step upserts it
-  (PATCH the App's newest sentinel-led comment, else POST one) with the run's
-  patch-id and computed verdict, plus one visible line pointing readers at the
-  review comment. The model session's review comment is pure prose and carries no
-  machine-read state: the posting action's progress-tracking mode owns that
-  comment's body (it prepends its own header), so machine-read state lives in a
-  comment only the workflow writes — which also keeps the markers out of the
-  model's hands entirely.
+- **The review comment**: v2 leaves exactly one comment per PR, and the workflow —
+  not the model — writes it. After validation a deterministic step builds the body
+  (a `<!-- claude-review-v2 -->` sentinel plus `<!-- last-reviewed-patch-id: … -->`
+  and `<!-- last-verdict: … -->` HTML comments, then `review-result.json`'s
+  `comment_body` prose verbatim, then a one-line attribution) and upserts it: PATCH
+  the App's newest sentinel-led comment, else POST one. Re-review therefore updates
+  the comment in place instead of stacking one per run. The session posts nothing
+  and holds no GitHub write tool at all — its outputs are files — so the
+  machine-read state stays out of the model's hands: it never types the verdict and
+  cannot forge the markers. The comment must be workflow-authored for the upsert to
+  work at all: the action's own sticky-comment mode keys on the posting App
+  identity, which the v1 gate owns while both pipelines post as the same App, so v2
+  matches on its own sentinel instead. Missing prose (no result file, empty
+  `comment_body`) posts the markers alone with a warning — the verdict record must
+  survive regardless, and the validate script, not the posting step, governs
+  pass/fail.
 - **Skip**: the prepare script computes `git patch-id --stable` over
-  `git diff base...HEAD`; if it equals the marker comment's recorded patch-id, the
+  `git diff base...HEAD`; if it equals the patch-id recorded in the v2 comment, the
   run short-circuits and re-asserts the recorded verdict without spending a review,
-  refreshing the marker comment with a visible one-line skip note (markers kept).
-  A new human comment does **not** defeat the skip in v1 (accepted: a human can
-  re-request review by pushing or re-running the check).
-- **Skip fail-direction**: the skip fires only when the marker-comment fetch
-  succeeded, both markers parse, and the recorded verdict is exactly `APPROVE` or
-  `REJECT`. Any other state — fetch error, no marker comment, missing or malformed
-  marker, unrecognized verdict — falls through to a full review. The cheap
+  appending a visible one-line skip note to that comment (markers and review prose
+  kept, so a re-asserted REJECT still shows the author what to fix; a previous skip
+  note is stripped first so rebases don't accumulate them). A new human comment does
+  **not** defeat the skip in v1 (accepted: a human can re-request review by pushing
+  or re-running the check).
+- **Skip fail-direction**: the skip fires only when the comment fetch succeeded,
+  both markers parse, and the recorded verdict is exactly `APPROVE` or `REJECT`.
+  Any other state — fetch error, no v2 comment, missing or malformed marker,
+  unrecognized verdict — falls through to a full review. The cheap
   direction to fail is toward spending a review, never toward re-asserting a
   verdict we can't read. The record step is best-effort in the same direction: a
   failed upsert leaves no fresh marker, so the next run full-reviews.
@@ -211,12 +218,11 @@ over as-is. The trigger event does not change, so the admin-merge trap is not sp
 Per the "large or risky new behavior ships default-off" convention, translated to CI:
 
 1. **Shadow**: land as a separate workflow producing a non-required check
-   (`claude-review-v2`) posting its own comments. The existing `claude-review`
+   (`claude-review-v2`) posting its own comment. The existing `claude-review`
    remains the required gate. Soak across several real PRs; compare verdicts. The two
    workflows must not share a sticky identity: the action's sticky matcher keys on the
-   posting App, so v2 stays out of the action's sticky-comment mode and finds its
-   marker comment by its own sentinel (and, if the matcher proves too greedy, would
-   get its own App) rather than updating the v1 comment in place.
+   posting App, so v2 stays out of the action's sticky-comment mode and finds its own
+   comment by its sentinel (§3.5) rather than updating the v1 comment in place.
 2. **Graduate**: swap the required check from `claude-review` to `claude-review-v2` in
    branch protection (a settings change, not a workflow change — no admin-merge trap),
    then retire the old workflow.
