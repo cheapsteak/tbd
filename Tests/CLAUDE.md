@@ -136,6 +136,16 @@ to a fixed path — or one that cleans up after itself in a `defer` — is invis
 to it, while the tripwire fails on the permission check every run regardless.
 Full rationale is in the wrapper's header.
 
+The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
+runs in the `lint` CI job: it drives the symlink and ownership refusals on the
+fake home, the post-run mode-000 recheck, the fingerprint's four arms and the
+shared-lock pin against fixture directories with a stub `swift`, so it takes
+~11 s, builds nothing, and touches no real store. **Every case there is
+mutation-checked** — the assertion is shown going red against a deliberately
+weakened copy of the script. If you change a guard, change its case; if you add
+one, add a case. The guards were proven once by hand when they landed, and that
+is not a regression test.
+
 ## Test tiers
 
 Three tiers, defined by what a test may touch: tier 1 (deterministic,

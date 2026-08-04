@@ -146,6 +146,100 @@
 #   scripts/test.sh --parallel -j 2 --filter '^TBDDaemonTests\.'
 #   scripts/test.sh --no-fingerprint --parallel -j 2
 #   scripts/test.sh --fingerprint            # deliberate local leak hunt
+#
+# TESTED BY `scripts/test.test.sh`, which drives the guards below against
+# fixture directories with a stub `swift` — no build, no real `~/tbd`. Every
+# guard there is mutation-checked: the assertion is shown going red against a
+# deliberately weakened copy of this file. A guard nobody can break on purpose
+# is a guard nobody can prove works.
+
+# ---------------------------------------------------------------------------
+# GUARD HELPERS
+#
+# Defined above the source guard so the harness can call them directly — the
+# uid arm in particular cannot be reached by running this script, since a test
+# cannot create a directory owned by somebody else without root. Strict mode is
+# set below, after the guard, so sourcing this file has no side effects at all.
+# ---------------------------------------------------------------------------
+
+fence_bail() {
+  echo >&2
+  echo "=======================================================================" >&2
+  echo "  REFUSING TO RUN — THE TEST FENCE'S OWN SCRATCH HOME IS NOT SAFE" >&2
+  echo "=======================================================================" >&2
+  echo >&2
+  echo "  $1" >&2
+  echo >&2
+  echo "This wrapper chmods 000 the decoy directories inside its fake home. If" >&2
+  echo "that path is a symlink, or a directory somebody else owns, the chmod" >&2
+  echo "resolves through it and lands on whatever it points at — which is how a" >&2
+  echo "planted symlink would take out the real ~/tbd and ~/.claude." >&2
+  echo >&2
+  echo "Inspect the path above, remove it if it is not yours, and re-run." >&2
+  echo >&2
+  exit 1
+}
+
+# A path is safe to chmod only if it is a real directory (never a symlink; the
+# `-L` test must come BEFORE any mkdir, which would otherwise succeed through
+# it) owned by this uid.
+require_owned_dir() {
+  local path="$1" what="$2"
+  [ -L "$path" ] && fence_bail "$what is a SYMLINK: $path"
+  [ -e "$path" ] && [ ! -d "$path" ] && fence_bail "$what exists but is not a directory: $path"
+  return 0
+}
+
+# The post-`mkdir` half. `stat -f '%u'` is deliberately not given `-L`, so a
+# path that turned into a symlink between the two calls reports the link's own
+# owner rather than the target's — but the `-L` test above it is what actually
+# rejects that case.
+#
+# THE RESIDUAL TOCTOU IS ACCEPTED, DELIBERATELY. A same-uid process could swap
+# the directory for a symlink between this check and the `chmod` that follows.
+# Closing it needs an fd held across both — `open(O_NOFOLLOW)` then `fchmod` —
+# which bash cannot express, so the fix would be a helper binary. It buys
+# nothing: every parent directory on the path is already mode 700 and owned by
+# this uid ($TMPDIR is per-user on darwin, and the `/tmp` fallback is chmod
+# 700'd immediately after this check), so the only process that can win the
+# race is one already running as this user, which can simply chmod the target
+# directly and needs no race at all. The checks exist to stop a FOREIGN uid
+# planting a symlink in a world-writable `/tmp`, and against that threat they
+# are not racy: the sticky bit means only the owner can replace an entry.
+require_owned_dir_after_mkdir() {
+  local path="$1" what="$2" owner
+  [ -L "$path" ] && fence_bail "$what is a SYMLINK: $path"
+  [ -d "$path" ] || fence_bail "$what is not a directory: $path"
+  owner="$(stat -f '%u' "$path")"
+  [ "$owner" = "$(id -u)" ] || fence_bail "$what is owned by uid $owner, not $(id -u): $path"
+}
+
+# THE SHARED ADMISSION LOCK. The branches mirror `_lock_path()` in
+# `scripts/swift-safe`: an explicit `TBD_SWIFT_LOCK_PATH` wins, otherwise
+# `$TBD_HOME/runtime/…`, otherwise `~/tbd/runtime/…`. Mirroring rather than
+# inventing a path of our own is what makes a fenced run contend with the plain
+# `scripts/swift-safe build` a sibling worktree is running; a lock nobody else
+# takes is not a lock.
+#
+# It must be called while `$HOME` and `$TBD_HOME` still hold the CALLER's real
+# values. See the call site.
+resolve_swift_lock_path() {
+  if [ -n "${TBD_SWIFT_LOCK_PATH:-}" ]; then
+    printf '%s\n' "$TBD_SWIFT_LOCK_PATH"
+  else
+    printf '%s\n' "${TBD_HOME:-$HOME/tbd}/runtime/swift-build.lock"
+  fi
+}
+
+# Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
+# without the run below. The siblings in this directory express the same thing
+# as `main "$@"` under the inverse condition; this script stays straight-line
+# because every statement below is a step of one fence that runs exactly once,
+# and there is nothing to call twice.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -164,19 +258,10 @@ for arg in "$@"; do
   esac
 done
 
-# THE SHARED ADMISSION LOCK. Resolved HERE, while `$HOME` and `$TBD_HOME` still
-# hold the caller's real values — the `env` prefix at the bottom rewrites both,
-# and `swift-safe` deriving the lock from the rewritten pair is exactly the bug
-# this pins shut. The branches mirror `_lock_path()` in `scripts/swift-safe`:
-# an explicit `TBD_SWIFT_LOCK_PATH` wins, otherwise `$TBD_HOME/runtime/…`,
-# otherwise `~/tbd/runtime/…`. Mirroring rather than inventing a path of our own
-# is what makes a fenced run contend with the plain `scripts/swift-safe build`
-# a sibling worktree is running; a lock nobody else takes is not a lock.
-if [ -n "${TBD_SWIFT_LOCK_PATH:-}" ]; then
-  swift_lock_path="$TBD_SWIFT_LOCK_PATH"
-else
-  swift_lock_path="${TBD_HOME:-$HOME/tbd}/runtime/swift-build.lock"
-fi
+# Resolved HERE, while `$HOME` and `$TBD_HOME` still hold the caller's real
+# values — the `env` prefix at the bottom rewrites both, and `swift-safe`
+# deriving the lock from the rewritten pair is exactly the bug this pins shut.
+swift_lock_path="$(resolve_swift_lock_path)"
 
 # Created BEFORE the fingerprint is taken, not left to `swift-safe`. The lock
 # lives in the real `~/tbd`, so a run that materialises it mid-flight adds a
@@ -266,42 +351,6 @@ sanctioned_home="$scratch_home/sanctioned/tbd"
 fake_home="${TMPDIR:-/tmp}"
 fake_home="${fake_home%/}/tbd-test-fakehome.$(id -u)"
 mkdir -p "$sanctioned_home"
-
-fence_bail() {
-  echo >&2
-  echo "=======================================================================" >&2
-  echo "  REFUSING TO RUN — THE TEST FENCE'S OWN SCRATCH HOME IS NOT SAFE" >&2
-  echo "=======================================================================" >&2
-  echo >&2
-  echo "  $1" >&2
-  echo >&2
-  echo "This wrapper chmods 000 the decoy directories inside its fake home. If" >&2
-  echo "that path is a symlink, or a directory somebody else owns, the chmod" >&2
-  echo "resolves through it and lands on whatever it points at — which is how a" >&2
-  echo "planted symlink would take out the real ~/tbd and ~/.claude." >&2
-  echo >&2
-  echo "Inspect the path above, remove it if it is not yours, and re-run." >&2
-  echo >&2
-  exit 1
-}
-
-# A path is safe to chmod only if it is a real directory (never a symlink; the
-# `-L` test must come BEFORE any mkdir, which would otherwise succeed through
-# it) owned by this uid.
-require_owned_dir() {
-  local path="$1" what="$2"
-  [ -L "$path" ] && fence_bail "$what is a SYMLINK: $path"
-  [ -e "$path" ] && [ ! -d "$path" ] && fence_bail "$what exists but is not a directory: $path"
-  return 0
-}
-
-require_owned_dir_after_mkdir() {
-  local path="$1" what="$2" owner
-  [ -L "$path" ] && fence_bail "$what is a SYMLINK: $path"
-  [ -d "$path" ] || fence_bail "$what is not a directory: $path"
-  owner="$(stat -f '%u' "$path")"
-  [ "$owner" = "$(id -u)" ] || fence_bail "$what is owned by uid $owner, not $(id -u): $path"
-}
 
 require_owned_dir "$fake_home" "the fake home"
 mkdir -p "$fake_home"

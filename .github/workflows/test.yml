@@ -60,6 +60,16 @@ jobs:
       - name: SwiftLint (strict)
         run: swiftlint --strict
 
+      # The fence in `scripts/test.sh` is what stands between the suite and the
+      # developer's real ~/tbd, ~/.claude and ~/.codex, and its guards were
+      # proven once by hand when they landed — which is not a regression test.
+      # This harness drives every one of them against fixture directories with
+      # a stub `swift`: no build, no real home touched, ~11 s. It runs HERE
+      # rather than in the `test` job so a weakened fence fails fast, before a
+      # two-minute build; and on macOS because the guards read BSD `stat -f`.
+      - name: Test the test fence
+        run: bash scripts/test.test.sh
+
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
