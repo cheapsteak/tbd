@@ -7,22 +7,26 @@ import Testing
 /// full column, while user messages keep the gutter (right-anchored bubble).
 @MainActor
 struct TranscriptBubbleGeometryTests {
-    private let columnWidth: CGFloat = 600
+    private let columnWidth: CGFloat = 800
 
     @Test func assistantBodyWidthDropsGutter() {
         let g = TranscriptBubbleGeometry.self
-        // 600 - 24 - 0 == 576 (assistant: no gutter, no body inset).
-        let expected = columnWidth - g.outerHorizontal(for: .assistant) - g.bodyHorizontal(for: .assistant)
+        // 800 - 24 - 0 == 776 (assistant: no gutter, no body inset).
+        let expected = columnWidth
+            - g.outerHorizontal(for: .assistant, columnWidth: columnWidth)
+            - g.bodyHorizontal(for: .assistant)
         #expect(g.bodyWidth(columnWidth: columnWidth, role: .assistant) == expected)
-        #expect(g.bodyWidth(columnWidth: columnWidth, role: .assistant) == 576)
+        #expect(g.bodyWidth(columnWidth: columnWidth, role: .assistant) == 776)
     }
 
     @Test func userBodyWidthKeepsGutter() {
         let g = TranscriptBubbleGeometry.self
-        // 600 - 76 - 22 == 502 (user: gutter + 11pt-per-side bubble padding).
-        let expected = columnWidth - g.outerHorizontal(for: .user) - g.bodyHorizontal(for: .user)
+        // 800 - 76 - 22 == 702 (user: gutter + 11pt-per-side bubble padding).
+        let expected = columnWidth
+            - g.outerHorizontal(for: .user, columnWidth: columnWidth)
+            - g.bodyHorizontal(for: .user)
         #expect(g.bodyWidth(columnWidth: columnWidth, role: .user) == expected)
-        #expect(g.bodyWidth(columnWidth: columnWidth, role: .user) == 502)
+        #expect(g.bodyWidth(columnWidth: columnWidth, role: .user) == 702)
     }
 
     @Test func bodyHorizontalIsRoleDependent() {
@@ -45,7 +49,13 @@ struct TranscriptBubbleGeometryTests {
 
     @Test func outerHorizontalIsRoleDependent() {
         let g = TranscriptBubbleGeometry.self
-        #expect(g.outerHorizontal(for: .assistant) == 24)
-        #expect(g.outerHorizontal(for: .user) == 76)
+        #expect(g.outerHorizontal(for: .assistant, columnWidth: columnWidth) == 24)
+        #expect(g.outerHorizontal(for: .user, columnWidth: columnWidth) == 76)
+    }
+
+    @Test func narrowUserBubbleDropsOppositeSideGutter() {
+        let g = TranscriptBubbleGeometry.self
+        #expect(g.outerHorizontal(for: .user, columnWidth: 679) == 24)
+        #expect(g.bodyWidth(columnWidth: 679, role: .user) == 633)
     }
 }

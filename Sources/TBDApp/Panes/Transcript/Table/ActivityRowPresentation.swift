@@ -68,6 +68,11 @@ struct ActivityRowPresentation: Equatable {
     /// merely repeats a fully-visible short title is noise.
     let titleTooltip: String?
     let style: RowStyle
+    /// Optional trailing disclosure accessory. Ordinary activity rows keep the
+    /// hover-only scope glyph; group summaries show a persistent chevron.
+    let accessorySystemName: String?
+    let accessoryAlwaysVisible: Bool
+    let accessibilityLabel: String?
 
     init(
         iconSystemName: String,
@@ -78,7 +83,10 @@ struct ActivityRowPresentation: Equatable {
         openTargetID: String?,
         titleTruncation: NSLineBreakMode = .byTruncatingTail,
         titleTooltip: String? = nil,
-        style: RowStyle = .chrome
+        style: RowStyle = .chrome,
+        accessorySystemName: String? = nil,
+        accessoryAlwaysVisible: Bool = false,
+        accessibilityLabel: String? = nil
     ) {
         self.iconSystemName = iconSystemName
         self.titleSegments = titleSegments
@@ -89,6 +97,9 @@ struct ActivityRowPresentation: Equatable {
         self.titleTruncation = titleTruncation
         self.titleTooltip = titleTooltip
         self.style = style
+        self.accessorySystemName = accessorySystemName
+        self.accessoryAlwaysVisible = accessoryAlwaysVisible
+        self.accessibilityLabel = accessibilityLabel
     }
 }
 
@@ -114,9 +125,49 @@ enum ActivityRowFormatter {
             return toolCall(
                 id: id, name: name, inputJSON: inputJSON,
                 inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
+        case let .activityGroupSummary(summary):
+            return activityGroup(summary)
         case let .subagentSummary(_, count, agentType):
             return subagentSummary(count: count, agentType: agentType)
         }
+    }
+
+    private static func activityGroup(_ summary: ActivityGroupSummary) -> ActivityRowPresentation {
+        var segments = [
+            ActivityRowSegment(text: "Worked", style: .primary),
+            ActivityRowSegment(
+                text: "· \(summary.itemCount) \(summary.itemCount == 1 ? "action" : "actions")",
+                style: .secondary
+            )
+        ]
+        if !summary.labels.isEmpty {
+            segments.append(ActivityRowSegment(
+                text: "· \(summary.labels.joined(separator: " · "))",
+                style: .tertiary
+            ))
+        }
+        var badges: [ActivityRowBadge] = []
+        if summary.requiresResponse {
+            badges.append(ActivityRowBadge(text: "needs response", kind: .error))
+        } else if summary.errorCount > 0 {
+            badges.append(ActivityRowBadge(text: summary.statusLabel.lowercased(), kind: .error))
+        } else if summary.pendingCount > 0 {
+            badges.append(ActivityRowBadge(text: "active", kind: .neutral))
+        } else {
+            badges.append(ActivityRowBadge(text: "complete", kind: .neutral))
+        }
+        return ActivityRowPresentation(
+            iconSystemName: "point.3.connected.trianglepath.dotted",
+            titleSegments: segments,
+            timestamp: nil,
+            isError: summary.errorCount > 0 || summary.requiresResponse,
+            badges: badges,
+            openTargetID: summary.id,
+            accessorySystemName: summary.isExpanded ? "chevron.down" : "chevron.right",
+            accessoryAlwaysVisible: true,
+            accessibilityLabel: "\(summary.isExpanded ? "Collapse" : "Expand") "
+                + "\(summary.itemCount) actions, \(summary.statusLabel)"
+        )
     }
 
     // MARK: - Tool call dispatch (mirrors TranscriptRow.toolCard)
@@ -140,6 +191,12 @@ enum ActivityRowFormatter {
             return patternTool(id: id, label: "Glob", icon: "folder", inputJSON: inputJSON, timestamp: timestamp)
         case "Task", "Agent":
             return agentTool(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp)
+        case "WebFetch":
+            return webTool(id: id, label: "WebFetch", icon: "globe",
+                           inputJSON: inputJSON, result: result, timestamp: timestamp)
+        case "WebSearch":
+            return webTool(id: id, label: "WebSearch", icon: "magnifyingglass",
+                           inputJSON: inputJSON, result: result, timestamp: timestamp)
         case "AskUserQuestion":
             return nil
         default:
@@ -304,6 +361,47 @@ enum ActivityRowFormatter {
     private struct PatternInput: Decodable {
         let pattern: String
         let path: String?
+    }
+
+    /// `WebFetch` carries `url`, `WebSearch` carries `query`. Both optional so a
+    /// malformed or unexpected payload degrades to the bare label rather than
+    /// dropping the row.
+    private struct WebInput: Decodable {
+        let url: String?
+        let query: String?
+    }
+
+    /// Web tools used to fall through to `genericTool`, which never receives
+    /// `inputJSON` — so the row rendered as a bare "WebFetch" with no indication
+    /// of what was fetched, even though the session index reads the target from
+    /// this same payload. Surfacing it here keeps the transcript and the index
+    /// telling the same story.
+    private static func webTool(
+        id: String, label: String, icon: String, inputJSON: String,
+        result: ToolResult?, timestamp: Date?
+    ) -> ActivityRowPresentation {
+        let parsed = decode(WebInput.self, inputJSON)
+        let target = parsed?.url ?? parsed?.query
+        var segments: [ActivityRowSegment] = [
+            ActivityRowSegment(text: label, style: .primary)
+        ]
+        if let target, !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.append(ActivityRowSegment(text: target, style: .secondary))
+        }
+        var badges: [ActivityRowBadge] = []
+        if result?.isError == true {
+            badges.append(ActivityRowBadge(text: "error", kind: .error))
+        }
+        return ActivityRowPresentation(
+            iconSystemName: icon,
+            titleSegments: segments,
+            timestamp: timestamp,
+            isError: result?.isError == true,
+            badges: badges,
+            openTargetID: id,
+            titleTruncation: .byTruncatingMiddle,
+            titleTooltip: target
+        )
     }
 
     private static func patternTool(

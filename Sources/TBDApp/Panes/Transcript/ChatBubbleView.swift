@@ -41,10 +41,20 @@ struct ChatBubbleView: View {
         // is layout-identical to the prior two-`.padding` chain.
         .padding(EdgeInsets(
             top: 4,
-            leading: isUser ? 64 : 12,
+            leading: isUser ? 64 : 16,
             bottom: 4,
-            trailing: isUser ? 12 : 64
+            trailing: 12
         ))
+        .overlay(alignment: .leading) {
+            if !isUser {
+                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                    .fill(Color.secondary.opacity(0.28))
+                    .frame(width: 2)
+                    .padding(.vertical, 4)
+                    .offset(x: 4)
+                    .accessibilityHidden(true)
+            }
+        }
     }
 
     @ViewBuilder
@@ -88,11 +98,16 @@ struct ChatBubbleView: View {
                 }
             }
         }
-        .padding(EdgeInsets(top: 8, leading: 11, bottom: 8, trailing: 11))
+        .padding(EdgeInsets(
+            top: 8,
+            leading: isUser ? 11 : 0,
+            bottom: 8,
+            trailing: isUser ? 11 : 0
+        ))
         .background(
             isUser
                 ? Color.accentColor.opacity(0.15)
-                : Color(nsColor: .controlBackgroundColor)
+                : Color.clear
         )
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }

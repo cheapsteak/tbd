@@ -39,6 +39,7 @@ struct TableTranscriptPaneView: View {
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row.
     @State private var scrollToBottomToken: Int = 0
+    @State private var activityGroupExpansion: [String: Bool] = [:]
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
@@ -96,6 +97,9 @@ struct TableTranscriptPaneView: View {
         .onAppear { recordWatchdogContext(count: displayedMessages.count) }
         .onChange(of: displayedMessages.count) { _, newCount in
             recordWatchdogContext(count: newCount)
+        }
+        .onChange(of: currentSessionID) { _, _ in
+            activityGroupExpansion.removeAll()
         }
         .onDisappear { clearWatchdogContext() }
     }
@@ -168,26 +172,40 @@ struct TableTranscriptPaneView: View {
 
     @ViewBuilder
     private var tableTranscript: some View {
+        let presentation = TranscriptPresentation.build(
+            items: displayedMessages,
+            expansionOverrides: activityGroupExpansion
+        )
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
+            toggleActivityGroup: setActivityGroup,
             appState: appState
         )
-        TableTranscriptView(
-            context: cardContext,
-            atBottom: $atBottom,
-            scrollToBottomToken: scrollToBottomToken,
-            nodesProvider: { timedRenderNodes(from: displayedMessages) }
-        )
-        // Compose the terminal with its current Claude session so a session
-        // rollover within one terminal tears down and rebuilds the stateful
-        // Coordinator, re-resolving from a clean baseline rather than persisting
-        // the prior session's drilled-in subagent thread. (#129)
-        .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
-        .overlay(alignment: .bottomLeading) {
-            jumpToBottomButton
-                .animation(.easeInOut(duration: 0.2), value: atBottom)
+        SessionWorkbenchView(
+            sections: presentation.indexSections,
+            onOpen: { itemID in openTranscriptOverlay?(itemID) }
+        ) {
+            TableTranscriptView(
+                context: cardContext,
+                atBottom: $atBottom,
+                scrollToBottomToken: scrollToBottomToken,
+                nodesProvider: { timedRenderNodes(presentation.nodes) }
+            )
+            // Compose the terminal with its current Claude session so a session
+            // rollover within one terminal tears down and rebuilds the stateful
+            // Coordinator, re-resolving from a clean baseline rather than persisting
+            // the prior session's drilled-in subagent thread. (#129)
+            .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
+            .overlay(alignment: .bottomLeading) {
+                jumpToBottomButton
+                    .animation(.easeInOut(duration: 0.2), value: atBottom)
+            }
         }
+    }
+
+    private func setActivityGroup(_ id: String, expanded: Bool) {
+        activityGroupExpansion[id] = expanded
     }
 
     // MARK: - Jump-to-Bottom
@@ -217,10 +235,9 @@ struct TableTranscriptPaneView: View {
     /// Builds the render nodes, emitting one-shot `.debug` boundary markers for
     /// the FIRST non-empty build (`table.open.nodesBuilt`) and the first render
     /// reaching the table (`table.open.firstRender`, measured from pane appear).
-    private func timedRenderNodes(from messages: [TranscriptItem]) -> [TranscriptRenderNode] {
+    private func timedRenderNodes(_ nodes: [TranscriptRenderNode]) -> [TranscriptRenderNode] {
         let timing = openTiming
         let buildStart = DispatchTime.now().uptimeNanoseconds
-        let nodes = transcriptRenderNodes(from: messages)
         if !timing.didLogNodes, !nodes.isEmpty {
             timing.didLogNodes = true
             let ms = Double(DispatchTime.now().uptimeNanoseconds &- buildStart) / 1_000_000

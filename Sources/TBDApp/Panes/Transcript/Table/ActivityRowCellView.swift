@@ -60,6 +60,7 @@ final class ActivityRowCellView: NSTableCellView {
     private var onOpen: (() -> Void)?
     private var trackingArea: NSTrackingArea?
     private var currentStyle: ActivityRowPresentation.RowStyle = .chrome
+    private var accessoryAlwaysVisible = false
     /// Box fill alpha drives the hover-lift (0.4 → 0.65).
     private var hovering = false
 
@@ -171,6 +172,7 @@ final class ActivityRowCellView: NSTableCellView {
         onOpen: (() -> Void)?
     ) {
         currentStyle = presentation.style
+        accessoryAlwaysVisible = presentation.accessoryAlwaysVisible
         self.onOpen = onOpen
         hovering = false
 
@@ -186,8 +188,17 @@ final class ActivityRowCellView: NSTableCellView {
         titleField.lineBreakMode = presentation.titleTruncation
         titleField.cell?.lineBreakMode = presentation.titleTruncation
         titleField.toolTip = presentation.titleTooltip
+        setAccessibilityLabel(
+            presentation.accessibilityLabel
+                ?? presentation.titleSegments.map(\.text).joined(separator: " ")
+        )
+        setAccessibilityRole(onOpen == nil ? .group : .button)
 
         rebuildBadges(presentation.badges)
+        scopeView.image = NSImage(
+            systemSymbolName: presentation.accessorySystemName ?? "scope",
+            accessibilityDescription: nil
+        )
 
         switch presentation.style {
         case .chrome:
@@ -196,7 +207,7 @@ final class ActivityRowCellView: NSTableCellView {
             backgroundBox.fillColor = Self.boxColor(hovering: false)
             backgroundBox.isHidden = false
             scopeView.isHidden = false
-            scopeView.alphaValue = 0
+            scopeView.alphaValue = presentation.accessoryAlwaysVisible ? 0.75 : 0
             if let ts = presentation.timestamp {
                 timestampField.stringValue = ts.absoluteShort
                 timestampField.isHidden = false
@@ -327,7 +338,7 @@ final class ActivityRowCellView: NSTableCellView {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.12
             ctx.allowsImplicitAnimation = true
-            scopeView.animator().alphaValue = value ? 0.8 : 0
+            scopeView.animator().alphaValue = value || accessoryAlwaysVisible ? 0.8 : 0
         }
         backgroundBox.fillColor = Self.boxColor(hovering: value)
     }
@@ -340,6 +351,12 @@ final class ActivityRowCellView: NSTableCellView {
             return
         }
         onOpen()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard currentStyle == .chrome, let onOpen else { return false }
+        onOpen()
+        return true
     }
 
     // MARK: Test backstop
