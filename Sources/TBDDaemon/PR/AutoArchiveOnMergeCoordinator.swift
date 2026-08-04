@@ -25,11 +25,13 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     /// the worktree survives and its idle sessions are still eligible for merge-park.
     @discardableResult
     public func handleMergedTransition(worktreeID: UUID, prNumber: Int) async -> Bool {
+        var activeWorktreeDisplayName: String?
         do {
             guard let wt = try await db.worktrees.get(id: worktreeID), wt.status == .active else { return false }
             let config = try await db.config.get()
             let effective = wt.autoArchiveOnMerge ?? config.autoArchiveOnMergeDefault
             guard effective else { return false }
+            activeWorktreeDisplayName = wt.displayName
 
             // Worktrees with active children are not auto-archivable. Narrow the
             // catch to the children guard so DB errors fall through to the outer
@@ -66,6 +68,30 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
             return true
         } catch {
             logger.error("auto-archive failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+            if let displayName = activeWorktreeDisplayName {
+                do {
+                    let detail = String(describing: error)
+                    let boundedDetail = String(detail.prefix(500))
+                    let notification = try await db.notifications.create(
+                        worktreeID: worktreeID,
+                        type: .error,
+                        message: "Auto-archive failed for \(displayName): \(boundedDetail)",
+                        terminalID: nil
+                    )
+                    subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+                        notificationID: notification.id,
+                        worktreeID: notification.worktreeID,
+                        type: notification.type,
+                        message: notification.message,
+                        terminalID: notification.terminalID,
+                        activate: false
+                    )))
+                } catch {
+                    logger.error(
+                        "failed to surface auto-archive error for \(worktreeID, privacy: .public): \(error, privacy: .public)"
+                    )
+                }
+            }
             return false
         }
     }

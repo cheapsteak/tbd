@@ -172,9 +172,83 @@ actor FiredBox {
         #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
         #expect(FileManager.default.fileExists(atPath: worktreePath.path + "/local.txt"))
     }
+
+    @Test func failedAutoArchivePersistsAndBroadcastsError() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auto-archive-failure-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let db = try TBDDatabase(inMemory: true)
+        let subscriptions = StateSubscriptionManager()
+        let deltas = AutoArchiveDeltaLog()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let repo = try await db.repos.create(
+            path: root.deletingLastPathComponent().path,
+            displayName: "repo-failure", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "failure", branch: "feature/failure",
+            path: root.path, tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        try await db.worktrees.setAutoArchiveOnMerge(id: worktree.id, value: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(),
+            subscriptions: subscriptions,
+            archiveSafetyEvaluator: { _, _ in
+                ArchiveSafetyReport(findings: [], headIsPublished: true)
+            },
+            worktreeRemover: { _, _ in }
+        )
+        let coordinator = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subscriptions)
+
+        let archived = await coordinator.handleMergedTransition(
+            worktreeID: worktree.id, prNumber: 77)
+
+        #expect(!archived)
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let notifications = try await db.notifications.unread(worktreeID: worktree.id)
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.type == .error)
+        #expect(notifications.first?.message?.contains("terminals were stopped") == true)
+        let notificationBroadcasts = deltas.snapshot().compactMap { delta -> NotificationDelta? in
+            guard case .notificationReceived(let notification) = delta else { return nil }
+            return notification
+        }
+        #expect(notificationBroadcasts.count == 1)
+        #expect(notificationBroadcasts.first?.type == .error)
+        #expect(notificationBroadcasts.first?.activate == false)
+    }
 }
 
 private actor KnownPublishedRecorder {
     private(set) var values: [Bool] = []
     func record(_ value: Bool) { values.append(value) }
+}
+
+private final class AutoArchiveDeltaLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    func append(_ delta: StateDelta) {
+        lock.lock()
+        defer { lock.unlock() }
+        deltas.append(delta)
+    }
+
+    func snapshot() -> [StateDelta] {
+        lock.lock()
+        defer { lock.unlock() }
+        return deltas
+    }
 }

@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Stable categories surfaced when a worktree cannot be archived safely.
@@ -314,24 +315,64 @@ public struct ArchiveSafetyClassifier: Sendable {
     regularFileData(rootPath: rootPath, relativePath: relativePath).map(Self.sha256)
   }
 
-  private func regularFileData(rootPath: String, relativePath: String) -> Data? {
+  /// Opens every relative component without following symlinks, then verifies
+  /// and reads the final file through that same descriptor. `afterOpen` is an
+  /// internal race-test seam; production callers leave it nil.
+  func regularFileData(
+    rootPath: String,
+    relativePath: String,
+    afterOpen: (() -> Void)? = nil
+  ) -> Data? {
     guard isSafeRelativePath(relativePath) else { return nil }
-    var current = URL(fileURLWithPath: rootPath, isDirectory: true)
-    for component in relativePath.split(separator: "/").map(String.init) {
-      current.appendPathComponent(component)
-      guard let attributes = try? FileManager.default.attributesOfItem(atPath: current.path),
-        let type = attributes[.type] as? FileAttributeType,
-        type != .typeSymbolicLink
-      else {
-        return nil
+    let components = relativePath.split(separator: "/").map(String.init)
+    guard let fileName = components.last else { return nil }
+
+    var directoryFD = open(
+      rootPath, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard directoryFD >= 0 else { return nil }
+    defer { close(directoryFD) }
+
+    for component in components.dropLast() {
+      let nextFD = component.withCString {
+        openat(directoryFD, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
       }
+      guard nextFD >= 0 else { return nil }
+      close(directoryFD)
+      directoryFD = nextFD
     }
-    guard let attributes = try? FileManager.default.attributesOfItem(atPath: current.path),
-      attributes[.type] as? FileAttributeType == .typeRegular
+
+    let fileFD = fileName.withCString {
+      openat(directoryFD, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    guard fileFD >= 0 else { return nil }
+    defer { close(fileFD) }
+
+    afterOpen?()
+
+    var fileStatus = stat()
+    guard fstat(fileFD, &fileStatus) == 0,
+      fileStatus.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+      fileStatus.st_size >= 0,
+      fileStatus.st_size <= off_t(Int.max)
     else {
       return nil
     }
-    return try? Data(contentsOf: current, options: [.mappedIfSafe])
+
+    var data = Data()
+    data.reserveCapacity(Int(fileStatus.st_size))
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+      let byteCount = buffer.withUnsafeMutableBytes {
+        Darwin.read(fileFD, $0.baseAddress, $0.count)
+      }
+      if byteCount == 0 { return data }
+      if byteCount < 0 {
+        if errno == EINTR { continue }
+        return nil
+      }
+      data.append(contentsOf: buffer.prefix(byteCount))
+    }
   }
 
   private func isSafeRelativePath(_ path: String) -> Bool {

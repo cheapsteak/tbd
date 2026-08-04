@@ -14,6 +14,7 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
     case invalidOperation(String)
     case archiveUnsafe(name: String, detail: String)
     case archiveHookFailed(name: String, detail: String)
+    case archiveInterruptedAfterTerminalStop(name: String, detail: String)
     case archiveRemovalFailed(String)
     case worktreePathAlreadyExists(String)
     case worktreeAlreadyRegistered(String)
@@ -46,6 +47,8 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
             // it would route an ordinary scripting bug through the one flag
             // that skips every content and publication check.
             return "Archive hook failed for \(name): \(detail). Fix the hook, or run `tbd worktree archive \(name) --force` to archive without running it."
+        case .archiveInterruptedAfterTerminalStop(let name, let detail):
+            return "Archive did not finish for \(name) after its terminals were stopped: \(detail). The worktree may still be active; inspect it before restarting work or retrying archive."
         case .archiveRemovalFailed(let detail):
             return "Archive removal failed: \(detail)"
         case .worktreePathAlreadyExists(let path):
