@@ -70,9 +70,11 @@ The alternative to this exclusion is not a stricter system but a bypassed one: a
 
 ## Archive eligibility
 
-Normal and automatic archive run an initial classifier before changing state. Once that gate passes, the worktree's terminals are captured and their windows killed — this comes first, because a live agent left running through the hook and the final check could create a file that neither observed and that forced removal then discards. Killing a window touches only tmux and the history rows, never the directory, and the terminal rows themselves survive until removal is verified.
+Normal and automatic archive run an initial classifier before changing state. The archive hook then runs while the worktree's terminals remain usable. A hook that exits nonzero or cannot launch stops the archive with its bounded output in the error and leaves those terminals and the worktree intact for diagnosis and retry. A live agent may still write during the hook, and the hook itself may create files; neither can bypass the gate because this first classification is only a preflight.
 
-The archive hook then runs, metadata needed for restoration is captured, and classification runs again as the immediately preceding worktree operation before forced removal. Physical removal errors propagate, path absence is verified, and only then may the database become archived-final, terminal rows be deleted, events broadcast, or removal callbacks fire. Publishing archived-final state is what waits on physical absence; silencing writers is a precondition for a safe removal and belongs before it. Archive is eligible only when:
+After the hook succeeds, metadata needed for restoration is captured, then terminal scrollback is captured and the windows are killed. Classification runs again as the immediately preceding worktree operation before forced removal, when no worktree writer remains alive. The tested order is therefore `classify → hook → kill → classify → remove`: hook failure preserves terminals, while successful hooks cannot leave unobserved bytes after the final classification. Killing a window touches only tmux and closed-terminal history, never the directory.
+
+Physical removal errors propagate and path absence is verified before the database becomes archived-final or removal callbacks fire. If any operation fails after terminal teardown, the worktree row stays active, the now-dead live terminal and tab rows are removed and broadcast, closed-terminal history is retained, and the error says that terminals were stopped; the UI never presents dead panes as live. Publishing archived-final state still waits on physical absence. Archive is eligible only when:
 
 - no reviewable generated output exists;
 - no unique unpublished work exists; and
