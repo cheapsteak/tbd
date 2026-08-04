@@ -688,4 +688,13 @@ jobs:
             REJECT)
               echo "::error::Claude review requested changes. Resolve the flagged High/Medium issues and push again."
               exit 1 ;;
+            *)
+              # Unreachable: the verdict gate in section 1 already exited on
+              # anything that is not exactly APPROVE or REJECT. Fail closed
+              # anyway — a `case` with no default falls through at status 0, so
+              # without this arm an unknown verdict arriving here would satisfy
+              # the merge gate silently. Seeing this annotation means that gate
+              # was bypassed or edited, not that a verdict went bad.
+              echo "::error::Enforcement reached an unrecognized verdict ('$verdict') — the verdict gate above did not hold. Failing closed."
+              exit 1 ;;
           esac

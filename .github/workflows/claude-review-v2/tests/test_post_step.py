@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -234,10 +235,19 @@ def _run_step(
     sandbox: Path,
     step_name: str,
     step_env: dict[str, str],
+    source_transform: Callable[[str], str] | None = None,
 ) -> StepRun:
-    """Extract `step_name`'s run block and execute it in the sandbox."""
+    """Extract `step_name`'s run block and execute it in the sandbox.
+
+    `source_transform` rewrites the EXTRACTED COPY before it runs — the one
+    test that uses it needs to reach a section the earlier sections normally
+    stop it from reaching. Production shell is never modified.
+    """
+    body = run_block(read_workflow(), step_name)
+    if source_transform is not None:
+        body = source_transform(body)
     script = sandbox / "step.sh"
-    script.write_text(run_block(read_workflow(), step_name), encoding="utf-8")
+    script.write_text(body, encoding="utf-8")
     call_log = sandbox / "gh-calls.jsonl"
     call_log.touch()  # so "no gh calls at all" reads as an empty log, not a miss
     bin_dir = _write_stub_gh(sandbox)
@@ -274,6 +284,7 @@ def run_post_step(
     fail_minimize: bool = False,
     fail_post: bool = False,
     patch_id: str = PATCH_ID,
+    source_transform: Callable[[str], str] | None = None,
 ) -> StepRun:
     """Run the post/enforce step over a sandboxed workspace.
 
@@ -313,6 +324,7 @@ def run_post_step(
             "GH_FAIL_MINIMIZE": "1" if fail_minimize else "0",
             "GH_FAIL_POST": "1" if fail_post else "0",
         },
+        source_transform=source_transform,
     )
 
 
@@ -414,6 +426,62 @@ def test_an_unrecognized_verdict_fails_closed_with_nothing_posted(
         "did not contain exactly APPROVE or REJECT" in line
         for line in run.annotations("error")
     )
+
+
+TOP_GATE_MARKER = "did not contain exactly APPROVE or REJECT"
+
+
+def _neuter_the_top_verdict_gate(body: str) -> str:
+    """Disarm section 1's `exit 1` in the extracted copy, and nothing else.
+
+    Turns the `exit 1` that follows the top gate's `::error::` line into a
+    no-op so execution carries an invalid verdict on into sections 2-5. Raises
+    when the gate's shape has moved, so this stops silently transforming
+    nothing the moment it stops matching.
+    """
+    lines = body.split("\n")
+    for index, line in enumerate(lines):
+        if TOP_GATE_MARKER not in line:
+            continue
+        follower = lines[index + 1]
+        if follower.strip() != "exit 1 ;;":
+            raise AssertionError(
+                "the verdict gate's `exit 1` no longer follows its ::error:: "
+                f"line; found {follower.strip()!r}"
+            )
+        indent = " " * (len(follower) - len(follower.lstrip(" ")))
+        lines[index + 1] = f"{indent}: ;;"
+        return "\n".join(lines)
+    raise AssertionError(
+        f"no verdict-gate line matching {TOP_GATE_MARKER!r} in the post step"
+    )
+
+
+def test_the_final_enforce_case_fails_closed_independently(tmp_path: Path) -> None:
+    # Defense in depth for section 5's `case`. A POSIX `case` whose subject
+    # matches no branch falls through at status 0, so an unrecognized verdict
+    # arriving at the enforce block would satisfy the merge gate in silence.
+    # Section 1's gate is what keeps that unreachable today — which is also why
+    # the arm cannot be exercised from the outside. So this test NEUTERS THAT
+    # GATE IN THE EXTRACTED COPY ONLY (the workflow's own shell is never
+    # modified) and asserts section 5 still goes red on its own.
+    #
+    # Deliberately independent of the top gate: this must keep passing if that
+    # gate is ever removed or reworked. It asserts the backstop, not the path.
+    run = run_post_step(
+        tmp_path,
+        verdict="MAYBE",
+        result=_result(),
+        source_transform=_neuter_the_top_verdict_gate,
+    )
+    assert run.returncode == 1
+    assert any(
+        "Enforcement reached an unrecognized verdict ('MAYBE')" in line
+        for line in run.annotations("error")
+    )
+    # Section 5 is what failed the job: the run got all the way through the
+    # render/minimize/post sections, so it was not the neutered gate exiting.
+    assert run.kinds.count("post") == 1
 
 
 def test_reject_posts_the_review_and_only_then_exits_nonzero(
