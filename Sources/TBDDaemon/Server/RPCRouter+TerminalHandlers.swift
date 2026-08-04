@@ -293,7 +293,7 @@ extension RPCRouter {
 
         let claudeEnvOverrides = createConfig?.envSettingOverrides ?? [:]
         let profileConfigDir = isClaudeType
-            ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            ? configDirManager.resolveConfigDir(for: resolvedProfile)
             : nil
 
         // Pre-accept Claude Code's folder-trust dialog: this worktree belongs to
@@ -598,7 +598,7 @@ extension RPCRouter {
                 logger.warning("revive: model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
             }
-            let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
             // Reviving a closed terminal respawns claude in the same worktree,
             // so the same trust argument applies — including the seeder's
             // `foreignHead` refusal, which is why the flag lives on the row
@@ -1375,7 +1375,7 @@ extension RPCRouter {
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
-            profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved))
+            profileConfigDir: configDirManager.resolveConfigDir(for: resolved))
 
         let spawn: ClaudeSpawnCommandBuilder.Result
         let storedSessionID: String
@@ -1395,7 +1395,7 @@ extension RPCRouter {
                 profileModel: resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
+                profileConfigDir: configDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
@@ -1425,7 +1425,7 @@ extension RPCRouter {
                 profileModel: resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
+                profileConfigDir: configDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(

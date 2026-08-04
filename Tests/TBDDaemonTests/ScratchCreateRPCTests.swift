@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -10,8 +11,8 @@ struct ScratchCreateRPCTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratchcreate-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        return (home, { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) })
+        let priorTBDHome = setTBDHome(home.path)
+        return (home, { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) })
     }
 
     @Test func createsRepoLessWorktreeRowAndDirectory() async throws {
@@ -75,9 +76,9 @@ struct ScratchCreateRPCTests {
         // sandbox temp dir so it never touches the developer's real config.
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratch-codex-\(UUID().uuidString)")
-        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        let priorCodexHome = setCodexTestHome(codexHome.path)
         defer {
-            unsetenv("TBD_TEST_CODEX_HOME")
+            restoreCodexTestHome(priorCodexHome)
             try? FileManager.default.removeItem(at: codexHome)
         }
 

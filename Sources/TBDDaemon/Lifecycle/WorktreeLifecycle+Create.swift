@@ -792,7 +792,7 @@ extension WorktreeLifecycle {
                     repo: repo, worktree: worktree, isResume: false,
                     scratchInstructions: config.scratchInstructions,
                     scratchRenamePrompt: config.scratchRenamePrompt)
-            let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
             // Pre-accept Claude Code's folder-trust dialog. TBD just created
             // this worktree from a repo the operator registered, so the trust
             // answer is known by construction — and the dialog blocks before
@@ -1008,7 +1008,7 @@ extension WorktreeLifecycle {
             for sessionID in additionalArchivedClaudeSessions {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
-                let restoreProfileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+                let restoreProfileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
                 // Pre-accept the folder-trust dialog so restoring an extra
                 // archived session onto a fresh profile dir doesn't re-prompt.
                 await ClaudeTrustSeeder.ensureTrusted(

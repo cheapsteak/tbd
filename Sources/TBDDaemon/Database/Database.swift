@@ -274,6 +274,16 @@ public final class TBDDatabase: Sendable {
             // when the Conductor feature was deleted; the literal values are
             // preserved here so this historical migration still produces an
             // identical schema for the v24 cleanup step to act on.
+            //
+            // The hand-built `$HOME/tbd/conductors` below is a deliberate
+            // exception to "derive every TBD-owned path from TBDConstants"
+            // (CLAUDE.md, "Tests must not touch ~/tbd"), and must stay
+            // hand-built. It is a STRING WRITTEN INTO A ROW, not a filesystem
+            // access: nothing is created or read at that path, and v24 deletes
+            // the row again. Routing it through `TBDConstants` would make a
+            // frozen migration produce different bytes under `TBD_HOME`, which
+            // is exactly what "never modify an existing migration" forbids.
+            // Leave it alone.
             try db.execute(
                 sql: """
                 INSERT OR IGNORE INTO repo (id, path, displayName, defaultBranch, createdAt)
@@ -281,6 +291,7 @@ public final class TBDDatabase: Sendable {
                 """,
                 arguments: [
                     "00000000-0000-0000-0000-000000000001",
+                    // swiftlint:disable:next no_home_relative_store_path - frozen migration; see comment above
                     FileManager.default.homeDirectoryForCurrentUser
                         .appendingPathComponent("tbd")
                         .appendingPathComponent("conductors").path,

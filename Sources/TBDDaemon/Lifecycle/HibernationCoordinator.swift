@@ -535,7 +535,7 @@ public actor HibernationCoordinator {
             // Repo fragment is file-backed config, read fresh — reapplied on wake.
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
         )
-        let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+        let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
         // isolated profile dir (never seeded before) doesn't re-prompt — the
         // dialog blocks before SessionStart, so the stalled wake would be

@@ -19,7 +19,7 @@ public struct ScratchpadCollector: Sendable {
     }
 
     /// Computes the slug for a worktree path by replacing all forward slashes
-    /// with hyphens. For example: `/Users/chang/tbd` → `-Users-chang-tbd`.
+    /// with hyphens. For example: `/Users/me/tbd` → `-Users-me-tbd`.
     public static func slug(forWorktreePath path: String) -> String {
         path.replacingOccurrences(of: "/", with: "-")
     }

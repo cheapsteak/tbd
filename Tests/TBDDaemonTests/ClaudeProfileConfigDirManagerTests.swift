@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
@@ -186,31 +187,59 @@ struct ClaudeProfileConfigDirManagerTests {
 
     @Test("resolveConfigDir returns nil for nil profile")
     func resolveNilProfileReturnsNil() {
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: nil) == nil)
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase())
+        #expect(manager.resolveConfigDir(for: nil) == nil)
     }
 
-    @Test("ensureOAuthDir produces a per-profile path")
+    /// `resolveConfigDir` is an instance method precisely so this assertion is
+    /// possible: the dir it creates lands under the injected base, not under
+    /// the ambient `~/tbd/profiles`.
+    @Test("resolveConfigDir creates the oauth dir under the manager's own base")
     func resolveOAuthProfileReturnsPath() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
-        // resolveConfigDir is static and uses the default ~/tbd base, so the
-        // oauth branch is exercised here via ensureOAuthDir against a temp base.
         let profileID = UUID()
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
-        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: base, hostBaseDirectory: tempHostBase())
+        let profile = ResolvedModelProfile(
+            profileID: profileID,
+            name: "OAuth",
+            kind: .oauth,
+            baseURL: nil,
+            model: nil,
+            secret: nil,
+            awsRegion: nil,
+            awsProfile: nil,
+            fallbackModels: nil,
+            envOverrides: [:]
+        )
+        let path = try #require(manager.resolveConfigDir(for: profile))
+        #expect(path.contains(profileID.uuidString.lowercased()))
+        #expect(path.hasPrefix(base.path))
     }
 
-    @Test("ensureAPIKeyDir produces a per-profile path")
+    @Test("resolveConfigDir creates the api-key dir under the manager's own base")
     func ensureAPIKeyDirReturnsPath() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
-        // resolveConfigDir is static and uses the default ~/tbd base, so the
-        // api-key branch is exercised here via ensureAPIKeyDir against a temp base.
         let profileID = UUID()
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
-        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: "sk-ant-api03-test-key-XXXXX")
-        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: base, hostBaseDirectory: tempHostBase())
+        let profile = ResolvedModelProfile(
+            profileID: profileID,
+            name: "API Key",
+            kind: .apiKey,
+            baseURL: nil,
+            model: nil,
+            secret: "sk-ant-api03-test-key-XXXXX",
+            awsRegion: nil,
+            awsProfile: nil,
+            fallbackModels: nil,
+            envOverrides: [:]
+        )
+        let path = try #require(manager.resolveConfigDir(for: profile))
+        #expect(path.contains(profileID.uuidString.lowercased()))
+        #expect(path.hasPrefix(base.path))
     }
 
     @Test("resolveConfigDir returns nil for .bedrock profile")
@@ -227,7 +256,7 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+        #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
     }
 
     @Test("resolveConfigDir returns nil for .apiKey profile with no secret")
@@ -244,7 +273,7 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+        #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
     }
 
     // MARK: - host mirror slots
@@ -848,8 +877,11 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(manager1.hostBaseDirectory == tempHostOverride)
 
         // Also verify default (nil) still uses ~/.claude/ by checking it
-        // contains ".claude" in the path.
-        let manager2 = ClaudeProfileConfigDirManager()
+        // contains ".claude" in the path. Through the environment seam, not the
+        // process environment: `scripts/test.sh` fences the whole run behind a
+        // scratch `TBD_CLAUDE_HOST_HOME`, and reading the process env here
+        // would assert the fence instead of the production fallback.
+        let manager2 = ClaudeProfileConfigDirManager(hostEnvironment: [:])
         #expect(manager2.hostBaseDirectory.path.contains(".claude"))
         #expect(manager2.hostBaseDirectory.path.contains(NSHomeDirectory()))
     }
@@ -1069,32 +1101,34 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 }
 
-/// Run env-mutating tests serialized so they don't race each other. Each test
-/// snapshots the prior env value and restores it via defer.
-@Suite("ClaudeProfileConfigDirManager env vars", .serialized)
-struct ClaudeProfileConfigDirManagerEnvVarTests {
-    private func tempHostBase() -> URL {
-        URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
-    }
-
-    @Test("TBD_CLAUDE_HOST_HOME env var is honored in default init")
-    func hostBaseDirectoryRespectsTBDClaudeHostHomeEnvVar() {
-        let tempHostOverride = tempHostBase()
-        defer { try? FileManager.default.removeItem(at: tempHostOverride) }
-
-        let priorValue = ProcessInfo.processInfo.environment["TBD_CLAUDE_HOST_HOME"]
-        setenv("TBD_CLAUDE_HOST_HOME", tempHostOverride.path, 1)
-        defer {
-            if let prior = priorValue {
-                setenv("TBD_CLAUDE_HOST_HOME", prior, 1)
-            } else {
-                unsetenv("TBD_CLAUDE_HOST_HOME")
-            }
+// Nested under TBDHomeSerialized: mutates a process-global environment
+// variable. `@Suite(.serialized)` alone was NOT enough — it orders tests only
+// within this suite and does nothing against the ~520 other suites Swift
+// Testing runs concurrently in the same process, which is the documented root
+// cause of the `ConstantsTests.derivedPathsFollowTBDHome` flake.
+// See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
+    @Suite("ClaudeProfileConfigDirManager env vars")
+    struct ClaudeProfileConfigDirManagerEnvVarTests {
+        private func tempHostBase() -> URL {
+            URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
         }
 
-        let manager = ClaudeProfileConfigDirManager()
-        #expect(manager.hostBaseDirectory.resolvingSymlinksInPath()
-                == tempHostOverride.resolvingSymlinksInPath())
+        @Test("TBD_CLAUDE_HOST_HOME env var is honored in default init")
+        func hostBaseDirectoryRespectsTBDClaudeHostHomeEnvVar() {
+            let tempHostOverride = tempHostBase()
+            defer { try? FileManager.default.removeItem(at: tempHostOverride) }
+
+            // Save/restore via the shared helpers rather than by hand: the run is
+            // fenced behind a scratch `TBD_CLAUDE_HOST_HOME`, and a teardown that
+            // unsets exposes the real `~/.claude` to every concurrent suite.
+            let priorValue = setClaudeHostHome(tempHostOverride.path)
+            defer { restoreClaudeHostHome(priorValue) }
+
+            let manager = ClaudeProfileConfigDirManager()
+            #expect(manager.hostBaseDirectory.resolvingSymlinksInPath()
+                    == tempHostOverride.resolvingSymlinksInPath())
+        }
     }
 }

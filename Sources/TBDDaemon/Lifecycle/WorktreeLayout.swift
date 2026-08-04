@@ -60,14 +60,22 @@ public struct WorktreeLayout: Sendable {
     /// The canonical base directory for fresh worktrees of the given repo.
     ///
     /// - Returns `repo.worktreeRoot` verbatim if the override is set.
-    /// - Otherwise returns `~/tbd/worktrees/<slot>`.
+    /// - Otherwise returns `<TBDConstants.worktreesDir>/<slot>` — i.e.
+    ///   `~/tbd/worktrees/<slot>` in production, and a redirected base when
+    ///   `TBD_HOME` is set. Going through `TBDConstants` rather than
+    ///   re-deriving `~/tbd` by hand is what lets a test run point the whole
+    ///   process at a scratch home; a hand-built home path silently ignored
+    ///   the override and wrote real worktrees into the developer's `~/tbd`.
     public func basePath(for repo: Repo) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
         if let override = repo.worktreeRoot, !override.isEmpty {
             return override
         }
+        // Below the override guard on purpose: `worktreesDir` snapshots the
+        // whole process environment into a Dictionary on every access, and the
+        // override path has no use for the result.
+        let base = TBDConstants.worktreesDir.path
         if let slot = repo.worktreeSlot, !slot.isEmpty {
-            return "\(home)/tbd/worktrees/\(slot)"
+            return "\(base)/\(slot)"
         }
         // Should never happen — v14 backfills worktree_slot for every existing
         // row and RepoStore.create always assigns one. But a precondition in a
@@ -75,7 +83,7 @@ public struct WorktreeLayout: Sendable {
         // UUID-derived path instead.
         logger.fault("Repo \(repo.id, privacy: .public) has neither worktreeRoot nor worktreeSlot — falling back to UUID-derived path")
         let fallbackSlot = "repo-\(repo.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
-        return "\(home)/tbd/worktrees/\(fallbackSlot)"
+        return "\(base)/\(fallbackSlot)"
     }
 
     // LEGACY-WORKTREE-LOCATION: remove after 2026-06-01

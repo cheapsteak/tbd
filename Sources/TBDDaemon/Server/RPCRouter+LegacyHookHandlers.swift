@@ -33,7 +33,8 @@ extension RPCRouter {
     /// `SettingsJSONSafety`. Repo-level files are NEVER touched.
     public func handleDaemonRemoveLegacyGlobalHooks() async throws -> RPCResponse {
         do {
-            let result = try LegacyHookScanner.removeGlobalEntries()
+            let result = try LegacyHookScanner.removeGlobalEntries(
+                at: LegacyHookScanner.globalSettingsPath)
             return try RPCResponse(result: result)
         } catch let e as SettingsJSONSafety.Error {
             logger.error("removeLegacyGlobalHooks safety error: \(String(describing: e), privacy: .public)")
