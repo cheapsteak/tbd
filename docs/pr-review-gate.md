@@ -127,6 +127,23 @@ and gets no `claude-review` run — which leaves the required check unreported a
 the PR blocked. That is a one-time bootstrap gap: land such a PR with an admin
 merge, after which every subsequent PR is gated normally.
 
+## The v2 shadow pipeline
+
+A second review pipeline, `claude-review-v2`, runs alongside this gate as a
+**non-required** check, produced by
+[`.github/workflows/claude-code-review-v2.yml`](../.github/workflows/claude-code-review-v2.yml).
+It reviews with two specialist subagents and deterministic script bookends —
+schema-validated findings, a script-computed verdict, and a patch-id skip for
+unchanged diffs — and is designed to eventually replace this gate once its
+verdicts prove out against v1's on real PRs. Design and rollout plan:
+[`docs/specs/2026-08-03-pr-review-fanout-design.md`](specs/2026-08-03-pr-review-fanout-design.md).
+
+Both traps documented in this file apply to the v2 workflow identically: it runs
+on `pull_request_target` and must pass `github_token` explicitly, and changing
+its trigger event needs an admin merge. Graduation — swapping the required check
+from `claude-review` to `claude-review-v2` — is a branch-protection settings
+change, not a workflow change, so it springs neither trap.
+
 ## Operational notes
 
 - The gate is **fail-closed on infrastructure**: if the Anthropic API is down or
