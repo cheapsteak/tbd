@@ -291,6 +291,7 @@ public final class TBDDatabase: Sendable {
                 """,
                 arguments: [
                     "00000000-0000-0000-0000-000000000001",
+                    // swiftlint:disable:next no_home_relative_store_path - frozen migration; see comment above
                     FileManager.default.homeDirectoryForCurrentUser
                         .appendingPathComponent("tbd")
                         .appendingPathComponent("conductors").path,

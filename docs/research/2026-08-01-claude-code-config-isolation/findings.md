@@ -298,8 +298,11 @@ optional rather than enforced.
 
 ## What we changed because of this
 
-- Deriving the tmux server name from the config root is now a tracked follow-up.
-  It is the highest-value idea here and it is not in the current pull request.
+- Deriving the tmux server name from the config root is a tracked follow-up
+  rather than part of the isolation work these notes were written alongside. It
+  is the highest-value idea here, and it is a behaviour change to how running
+  sessions are addressed rather than a test-isolation fix, which is why it was
+  separated out instead of carried along.
 - The sentinel-file retention pattern will be an input to the separate database
   backup retention design.
 - The "assert the fence is active" check is a candidate for our test setup.

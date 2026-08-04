@@ -1006,10 +1006,10 @@ extension TBDHomeSerialized {
         func codexDeskCreateAndNudge() async throws {
             let f = try makeDeskFixture(tag: "codex-create")
             let codexHome = f.home.appendingPathComponent("codex-home", isDirectory: true)
-            setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+            let priorCodexHome = setCodexTestHome(codexHome.path)
             defer {
-                unsetenv("TBD_TEST_CODEX_HOME")
-                unsetenv("TBD_HOME")
+                restoreCodexTestHome(priorCodexHome)
+                restoreTBDHome(f.priorTBDHome)
                 try? FileManager.default.removeItem(at: f.home)
             }
             try await f.db.config.setPrimaryAgentPreference(.codex)
@@ -1031,10 +1031,10 @@ extension TBDHomeSerialized {
         func codexShellFallbackRecoversBeforeNudge() async throws {
             let f = try makeDeskFixture(tag: "codex-retry")
             let codexHome = f.home.appendingPathComponent("codex-home", isDirectory: true)
-            setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+            let priorCodexHome = setCodexTestHome(codexHome.path)
             defer {
-                unsetenv("TBD_TEST_CODEX_HOME")
-                unsetenv("TBD_HOME")
+                restoreCodexTestHome(priorCodexHome)
+                restoreTBDHome(f.priorTBDHome)
                 try? FileManager.default.removeItem(at: f.home)
             }
             try await f.db.config.setPrimaryAgentPreference(.codex)
@@ -1063,7 +1063,7 @@ extension TBDHomeSerialized {
         @Test("two live unowned judge candidates fail closed and notify once")
         func twoLiveCandidatesFailClosed() async throws {
             let f = try makeDeskFixture(tag: "judge-contention")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
             _ = try await f.db.terminals.create(
@@ -1082,7 +1082,7 @@ extension TBDHomeSerialized {
         @Test("successor spawned before transfer stays read-only and predecessor remains judge")
         func spawnBeforeTransferKeepsPredecessor() async throws {
             let f = try makeDeskFixture(tag: "judge-half-handoff")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
@@ -1120,7 +1120,7 @@ extension TBDHomeSerialized {
         @Test("dead lease owner is fenced and the sole live successor takes a higher generation")
         func deadOwnerRecovery() async throws {
             let f = try makeDeskFixture(tag: "judge-owner-loss")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)

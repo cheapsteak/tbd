@@ -61,6 +61,7 @@ public enum ModelProfileKeychain {
     /// override. Read-only fallback for `load(id:)`; nothing ever *writes*
     /// here while an override is in force, so the fence stays intact.
     static func legacyStorageDir() -> URL {
+        // swiftlint:disable:next no_home_relative_store_path - names the pre-override production dir on purpose; read-only, see doc comment
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".tbd/claude-tokens", isDirectory: true)
     }

@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 public struct ClaudeStateDetector: Sendable {
     // MARK: - Pattern Constants
@@ -21,8 +22,36 @@ public struct ClaudeStateDetector: Sendable {
 
     // MARK: - Instance Methods (require TmuxManager)
     private let tmux: TmuxManager
+    private let environment: [String: String]
 
-    public init(tmux: TmuxManager) { self.tmux = tmux }
+    /// - Parameter environment: the environment the host Claude store is
+    ///   resolved from, defaulted so no call site changes. Present so a test
+    ///   can assert BOTH branches of that resolution with an explicit
+    ///   dictionary instead of mutating the process-global variable, which
+    ///   would hand every concurrently running suite the real `~/.claude`.
+    public init(tmux: TmuxManager, environment: [String: String] = ProcessInfo.processInfo.environment) {
+        self.tmux = tmux
+        self.environment = environment
+    }
+
+    /// Where Claude writes the session file for `pid`, inside the host store.
+    ///
+    /// Resolved through `TBDConstants.claudeHostHome(environment:)` — the
+    /// single resolution point for `TBD_CLAUDE_HOST_HOME`, package-wide — and
+    /// not hand-built from the home directory. Production behaviour is
+    /// unchanged: with no override set, that resolver returns
+    /// `homeDirectoryForCurrentUser/.claude`, which is the path this used to
+    /// assemble itself. What changes is that the override now reaches here too,
+    /// so the read lands inside `scripts/test.sh`'s scratch store rather than
+    /// failing on the mode-000 decoy the fence puts in its place.
+    ///
+    /// Internal rather than private so `ClaudeStateDetectorTests` can assert
+    /// the path without a real session file to read.
+    func sessionFilePath(forPID pid: Int) -> URL {
+        TBDConstants.claudeHostHome(environment: environment)
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent("\(pid).json")
+    }
 
     public func captureSessionID(server: String, paneID: String) async -> String? {
         do {
@@ -55,8 +84,7 @@ public struct ClaudeStateDetector: Sendable {
 
     /// Read a Claude session file for a given PID. Returns nil if file doesn't exist or is invalid.
     private func readSessionID(forPID pid: Int) -> String? {
-        let sessionPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/sessions/\(pid).json")
+        let sessionPath = sessionFilePath(forPID: pid)
         guard let json = try? String(contentsOf: sessionPath, encoding: .utf8) else { return nil }
         return Self.parseSessionID(from: json)
     }

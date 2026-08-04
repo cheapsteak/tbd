@@ -7,9 +7,20 @@
 # holds a machine-global admission lock and bounds compiler jobs so concurrent
 # TBD worktrees cannot each start a full compiler swarm, and the repo guardrail
 # blocks raw `swift build/test/run` for that reason. The two wrappers solve
-# orthogonal problems — admission control there, filesystem isolation here — so
-# they stack rather than replace one another, and every argument this script
-# does not consume is forwarded through to `swift test`.
+# orthogonal problems — admission control there, filesystem isolation here — and
+# every argument this script does not consume is forwarded through to
+# `swift test`.
+#
+# STACKING THEM TAKES ONE EXPLICIT LINE, and leaving it out silently disarms the
+# admission half. `swift-safe` derives its lock from `$TBD_HOME/runtime/…` when
+# `TBD_SWIFT_LOCK_PATH` is unset — and the fence below points `TBD_HOME` at a
+# `mktemp -d` that is unique per invocation, so every fenced run would take a
+# PRIVATE lock and two concurrent runs would never serialize. That is precisely
+# the compiler swarm `swift-safe` exists to prevent, arriving through the
+# wrapper that is supposed to compose with it. So `TBD_SWIFT_LOCK_PATH` is
+# pinned below, computed from the REAL home before the `env` prefix overrides it
+# and passed explicitly — never left for `swift-safe` to derive from an
+# environment this script has already rewritten.
 #
 # Three layers. The first two are always on; the third is CI-only.
 #
@@ -108,15 +119,22 @@
 # `--no-fingerprint` forces it off anywhere, including CI. The fence is the layer
 # that actually *stops* leaks, and it is never optional.
 #
-# All six env vars are OVERWRITTEN, not defaulted: an inherited value is
+# All six FENCE vars are OVERWRITTEN, not defaulted: an inherited value is
 # discarded for the duration of the run. That is the point — a fence you can
 # disable by exporting something first is not a fence — but it does mean this
 # wrapper cannot be pointed at a config dir of your own.
 #
+# `TBD_SWIFT_LOCK_PATH`, the seventh, is the deliberate exception: it is
+# admission control rather than isolation, an inherited value names a lock the
+# caller wants this run to contend on, and honouring it can only ever make the
+# run wait for more things. Nothing about the fence weakens if it is respected.
+#
 # They are applied as a prefix on the `swift test` invocation rather than
 # exported, so this script's own `$HOME` stays real and
 # `scripts/tbd-home-fingerprint.sh` — which deliberately reads `${HOME}` — needs
-# no special-casing on either side of the run.
+# no special-casing on either side of the run. The shared-lock computation below
+# depends on the same property: it reads the real `$HOME` / `$TBD_HOME`, which
+# only works because nothing here has exported the fenced values.
 #
 # `--fingerprint` / `--no-fingerprint` are consumed wherever they appear; every
 # other argument is forwarded to `swift test` untouched. Position-independent on
@@ -145,6 +163,32 @@ for arg in "$@"; do
     *) swift_test_args+=("$arg") ;;
   esac
 done
+
+# THE SHARED ADMISSION LOCK. Resolved HERE, while `$HOME` and `$TBD_HOME` still
+# hold the caller's real values — the `env` prefix at the bottom rewrites both,
+# and `swift-safe` deriving the lock from the rewritten pair is exactly the bug
+# this pins shut. The branches mirror `_lock_path()` in `scripts/swift-safe`:
+# an explicit `TBD_SWIFT_LOCK_PATH` wins, otherwise `$TBD_HOME/runtime/…`,
+# otherwise `~/tbd/runtime/…`. Mirroring rather than inventing a path of our own
+# is what makes a fenced run contend with the plain `scripts/swift-safe build`
+# a sibling worktree is running; a lock nobody else takes is not a lock.
+if [ -n "${TBD_SWIFT_LOCK_PATH:-}" ]; then
+  swift_lock_path="$TBD_SWIFT_LOCK_PATH"
+else
+  swift_lock_path="${TBD_HOME:-$HOME/tbd}/runtime/swift-build.lock"
+fi
+
+# Created BEFORE the fingerprint is taken, not left to `swift-safe`. The lock
+# lives in the real `~/tbd`, so a run that materialises it mid-flight adds a
+# `~/tbd/runtime` entry between the two snapshots and reddens the detection
+# layer on any box where that directory does not exist yet — a CI runner, every
+# time. Bringing it into existence up front puts it on BOTH sides of the diff.
+# The detector already prunes this directory's contents as volatile (see
+# `scripts/tbd-home-fingerprint.sh`), so nothing is hidden by doing so: the
+# `runtime` entry itself is still fingerprinted, and every other name in `~/tbd`
+# is still compared exactly as before.
+mkdir -p "$(dirname "$swift_lock_path")"
+: >> "$swift_lock_path"
 
 fingerprint_before=""
 if [ "$fingerprint" -eq 1 ]; then
@@ -292,6 +336,7 @@ env \
   TBD_SOCKET_PATH="$sanctioned_home/sock" \
   TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
   TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
+  TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
   HOME="$fake_home" \
   CFFIXED_USER_HOME="$fake_home" \
   scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}

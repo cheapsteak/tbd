@@ -184,9 +184,14 @@ run_governed_swift() {
 # Same governance as `run_governed_swift`, but through `scripts/test.sh` so the
 # run is also fenced off the developer's real `~/tbd`, `~/.claude` and
 # `~/.codex`. The two wrappers are orthogonal and stack: `test.sh` sets the
-# fence and then invokes SwiftPM via `swift-safe`, so the admission lock and the
-# lock-timeout env var below still apply. This harness is documented for local
-# use, where an unfenced run would write into the real config dirs.
+# fence, pins `TBD_SWIFT_LOCK_PATH` at the shared machine-global lock so its
+# scratch `TBD_HOME` cannot turn that lock private, and then invokes SwiftPM via
+# `swift-safe` — so the admission lock and the lock-timeout env var below apply
+# exactly as they do to `run_governed_swift`. That matters most here: an
+# iteration that took a private lock would run its whole compile alongside every
+# sibling worktree's, which is the load this harness is trying to CONTROL rather
+# than add to. This harness is documented for local use, where an unfenced run
+# would write into the real config dirs.
 run_governed_fenced() {
   local command_deadline_s="$1" log="$2"; shift 2
   local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"

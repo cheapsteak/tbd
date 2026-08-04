@@ -119,6 +119,48 @@ custom_rules:
     message: "A hardcoded /Users/<name>/ path is machine-specific in a public, multi-tenant repo, and in a string literal it also bypasses both test fences. Use a placeholder name (me / acme / x / test) in examples, and resolve real paths via TBDConstants or NSHomeDirectory(). Suppress with `// swiftlint:disable:next no_hardcoded_users_path - <reason>` only with a reason."
     severity: error
 
+  no_home_relative_store_path:
+    name: "No hand-built path into a TBD or agent store"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    excluded:
+      # THE resolvers. `TBDConstants.configDir` and `claudeHostHome` are the
+      # single resolution points every other call site is supposed to reach
+      # through, so the one file that defines them is the one file that must
+      # compose the path by hand.
+      - "Sources/TBDShared/Constants\\.swift"
+    # THE SHAPE ALL SIX LEAKS TOOK, and the one the two rules above do NOT
+    # cover. `no_passwd_home_lookup` catches the account-database calls, which
+    # escape `CFFIXED_USER_HOME` outright — a real hazard, but not the one that
+    # actually happened here. Every leak this fence was built for went through
+    # the ordinary, fence-honouring `homeDirectoryForCurrentUser` /
+    # `NSHomeDirectory()` and then appended `tbd`, `.claude` or `.codex` to it,
+    # which silently ignores `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` /
+    # `TBD_TEST_CODEX_HOME` and lands in the developer's real store.
+    #
+    # So the regex is deliberately NOT "no home lookups" — that would fire on
+    # ~20 legitimate sites (tilde-abbreviation for display, `~/Library`
+    # fallbacks, defaulted injection seams) and get disabled. It fires only when
+    # a home lookup is followed, within 80 characters, by a path component naming
+    # one of the three stores. The `[/"]` on both sides keeps it to whole
+    # components: `~/.ssh/tbd-agent.sock` does not match, `~/tbd/worktrees` does.
+    #
+    # WHAT IT CANNOT SEE, stated plainly rather than left to be assumed: the home
+    # value has to be visible near the append. A path assembled from a `home`
+    # that arrived as a function parameter, or was read into a property in
+    # another file, matches nothing here. This narrows the shape; it does not
+    # close it. Review still has to ask where a store path came from.
+    regex: '(?:NSHomeDirectory\s*\(\s*\)|homeDirectoryForCurrentUser)[\s\S]{0,80}?[/"]\.?(?:claude|codex|tbd)[/"]'
+    # Code only. Every doc comment in this repo that DESCRIBES this leak spells
+    # the leak out verbatim, so including the comment kinds would fire on the
+    # very passages that document the rule.
+    match_kinds:
+      - identifier
+      - string
+    message: "Don't hand-build a path into ~/tbd, ~/.claude or ~/.codex out of the home directory — it ignores TBD_HOME / TBD_CLAUDE_HOST_HOME / TBD_TEST_CODEX_HOME and writes into the developer's real store under scripts/test.sh. Use TBDConstants (configDir, reposDir, worktreesDir, …), TBDConstants.claudeHostHome / ClaudeProfileConfigDirManager.resolveHostBaseDirectory, or CodexHomeManager. Suppress with `// swiftlint:disable:next no_home_relative_store_path - <reason>` only with a reason."
+    severity: error
+
   no_scrollview_in_transcript_cards:
     name: "No direct ScrollView in transcript row cards"
     # included/excluded HERE take REGEX (not glob), matched against file path.

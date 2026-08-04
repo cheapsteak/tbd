@@ -107,6 +107,23 @@ fires in comments too, because a real username in a doc comment is a leak in a
 public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
 in examples.
 
+Neither of those is the shape the leaks actually took, so a third rule covers
+it. Every one of them went through the ordinary, fence-*honouring*
+`homeDirectoryForCurrentUser` / `NSHomeDirectory()` and then appended `tbd`,
+`.claude` or `.codex` — which resolves to the real store because it never
+consults `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` / `TBD_TEST_CODEX_HOME` at all.
+`no_home_relative_store_path` fires on a home lookup followed within 80
+characters by one of those three as a whole path component, which is narrow
+enough to leave the ~20 legitimate home lookups (tilde-abbreviation for
+display, `~/Library` fallbacks, defaulted injection seams, `~/.ssh/tbd-agent.sock`)
+untouched. Three sites carry a reasoned inline suppression: `Constants.swift`
+is excluded outright as the file that *defines* the resolvers, and
+`CodexHomeManager`, `ModelProfileKeychain.legacyStorageDir` and the frozen v-24
+conductors migration name a real path deliberately. Its limit is worth knowing
+before trusting it: the home value has to be visible near the append, so a path
+built from a `home` that arrived as a parameter matches nothing. It narrows the
+shape rather than closing it.
+
 The wrapper's last layer, a before/after fingerprint of the three real
 directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
