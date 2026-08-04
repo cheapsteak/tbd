@@ -30,7 +30,7 @@ Three components communicate over a Unix socket using a JSON RPC protocol:
 
 ```bash
 # Build everything
-swift build
+scripts/swift-safe build
 
 # Run the daemon
 .build/debug/tbdd
@@ -40,7 +40,7 @@ swift build
 
 # Run the app (or open in Xcode)
 open TBDApp.xcodeproj  # if applicable, or:
-swift build --product TBDApp && .build/debug/TBDApp
+scripts/swift-safe build --product TBDApp && .build/debug/TBDApp
 ```
 
 A convenience script rebuilds and restarts the daemon + app:
@@ -54,7 +54,7 @@ scripts/restart.sh --quick  # skip build
 ## Test
 
 ```bash
-swift test
+scripts/swift-safe test
 ```
 
 ## Migrating from Conductor

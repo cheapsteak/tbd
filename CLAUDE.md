@@ -8,6 +8,20 @@ Use the `tbd-project` skill for architecture, conventions, and file reference.
 
 **This repository is public, and TBD is used by people across different organizations.** Never commit private context — real employer, org, repo, host, account, person, or ticket names, internal URLs, or machine-specific paths (use `acme` / `acme-prod` placeholders). **Whatever a session is working on elsewhere — product features, roadmaps, ticket and task descriptions — is likely confidential to that org and must not leak here**, in docs, specs, tests, fixtures, or commit messages. Never build or document for one repo, one project, or one person's workflow: features, defaults, and docs must generalize.
 
+## Nightwatch is being replaced — two paths until cutover
+
+The fleet-supervision subsystem ("Nightwatch"/"Daywatch") is being redesigned
+from scratch. The target design is
+[`docs/specs/2026-07-26-fleet-supervision-design.md`](docs/specs/2026-07-26-fleet-supervision-design.md)
+(requirements: [`docs/specs/2026-07-26-fleet-supervision-requirements.md`](docs/specs/2026-07-26-fleet-supervision-requirements.md)).
+The redesign builds a second path alongside the existing implementation;
+cutover happens when the new path holds up, and both paths are live until
+then. New supervision features should ideally land in both: in the existing
+implementation where they're needed now, and in the new design's structures —
+where the new-path half is usually user-land (a playbook, sweep-program, or
+wake-program change) rather than compiled (see "Compile only what user-land
+cannot do well" below).
+
 ## Main Session Agent
 
 The main chat session agent should not write code directly. Delegate all implementation work to suitable subagents (Agent tool). The main session focuses on planning, coordination, and reviewing subagent results.
@@ -18,9 +32,18 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Always commit after completing work. Don't wait to be asked.
 - Use conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
 - Banned words — never use these in code or in PR titles, descriptions, or commit messages: "blessed", "golden"
-- Verify your changes compile (`swift build`) before committing.
-- Run `swift test` if you changed daemon or shared code.
+- No prose tables in markdown docs — use lists (bolded lead term, en-dash, prose; nested bullets when a row has several fields). A table is acceptable only when its cells are mostly short numerical or scannable values: counts, defaults, thresholds, old→new line numbers. Prose crammed into cells gets squished and unreadable.
+- Spec and doc edits must leave a document that stands alone for a first-time reader. Never write revision history into prose: no "Amended \<date\>" notes, no "an earlier draft…" retracing, no reversal narratives — rewrite the superseded passage to state the current design as if it were always so; git history is the archive. Keep **evidence** ("field measurement showed X"), drop **chronology** ("removed \<date\> after review Y"). A rejected-alternatives section is welcome as timeless why-not rationale — written as rationale, never as a revision log. The one exemption is an **as-built audit record** of an existing system (e.g. [`docs/nightwatch.md`](docs/nightwatch.md)): there, dated banners recording what was measured against which tree are the evidence, and the document must declare that purpose at the top.
+- Verify your changes compile (`scripts/swift-safe build`) before committing.
+- Run `scripts/swift-safe test` if you changed daemon or shared code. The wrapper
+  serializes SwiftPM across TBD worktrees and defaults to two compiler jobs;
+  raw `swift build/test/run` is blocked by the repo guardrail because
+  concurrent default `-j12` builds can exhaust this development machine.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
+
+### Compile only what user-land cannot do well
+
+Compiled behavior is the hardest kind to change: it ships by rebuild and release, and a flagged default needs a forcing migration to flip later. User-land surfaces — CLI output, hooks, seeded reference scripts, files under `~/tbd/repos/<repoID>/` — change by editing a file. So when deciding where new behavior lives, default to exposing the facts and actuations that make it possible outside the daemon, and compile the behavior itself only when user-land cannot do it well (per-event cost across a whole fleet, liveness attestation, integrity of the record). Capability migrates inward only on field evidence, one piece at a time — the Built/Enabled ratchet in `docs/specs/2026-07-26-fleet-supervision-requirements.md`. Motivations for wanting a change differ case by case; the placement rule does not.
 
 ### Large or risky new behavior ships behind a default-off flag
 
@@ -132,8 +155,8 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 
 ## Quick Reference
 
-- **Build**: `swift build`
-- **Test**: `swift test`
+- **Build**: `scripts/swift-safe build`
+- **Test**: `scripts/swift-safe test`
 - **Restart**: `scripts/restart.sh`
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:

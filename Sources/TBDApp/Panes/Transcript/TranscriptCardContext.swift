@@ -7,5 +7,18 @@ import SwiftUI
 struct TranscriptCardContext {
     let terminalID: UUID?
     let openTranscriptOverlay: (@MainActor (String) -> Void)?
+    let toggleActivityGroup: (@MainActor (String, Bool) -> Void)?
     let appState: AppState?
+
+    init(
+        terminalID: UUID?,
+        openTranscriptOverlay: (@MainActor (String) -> Void)?,
+        toggleActivityGroup: (@MainActor (String, Bool) -> Void)? = nil,
+        appState: AppState?
+    ) {
+        self.terminalID = terminalID
+        self.openTranscriptOverlay = openTranscriptOverlay
+        self.toggleActivityGroup = toggleActivityGroup
+        self.appState = appState
+    }
 }

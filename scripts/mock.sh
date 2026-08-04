@@ -49,8 +49,13 @@ up() {
     local fixture="$REPO_ROOT/Tests/Fixtures/mock-state/scenario-$scenario.json"
     [ -f "$fixture" ] || { echo "No fixture: $fixture" >&2; exit 1; }
 
-    echo "Building..."
-    (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3
+    # Both halves matter: `swift-safe` holds the machine-global admission lock
+    # (#576) so parallel worktrees can't start competing compiler swarms, and
+    # naming the two products keeps the mock from building the whole package.
+    echo "Building mock products..."
+    (cd "$REPO_ROOT" \
+        && scripts/swift-safe build --product TBDApp \
+        && scripts/swift-safe build --product TBDDaemon) 2>&1 | tail -6
 
     down_quiet
     rm -rf "$MOCK_HOME"          # fresh DB each `up`; re-seeding an existing state.db collides on UNIQUE (now fail-loud)
@@ -100,6 +105,8 @@ case "$cmd" in
     up)      up "${1:-default}" ;;
     down)    down ;;
     shot)    shot "${1:-}" ;;
-    restart) (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3; down; up "${1:-default}" ;;
+    restart) (cd "$REPO_ROOT" \
+                && scripts/swift-safe build --product TBDApp \
+                && scripts/swift-safe build --product TBDDaemon) 2>&1 | tail -6; down; up "${1:-default}" ;;
     *) echo "usage: mock.sh {up [scenario]|down|shot <name>|restart [scenario]}" >&2; exit 1 ;;
 esac

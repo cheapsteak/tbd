@@ -60,6 +60,9 @@ DEFAULT_ITERATIONS=10
 # its own much smaller count. Sized from the step budget, not from ambition.
 WHOLE_TARGET_ITERATIONS=3
 ITERATION_DEADLINE_S=600
+BUILD_DEADLINE_S=1800
+SWIFT_LOCK_TIMEOUT_S=1800
+SWIFT_DEADLINE_GRACE_S=30
 
 SPINNER_PIDS=()
 REPORT_DIR=""
@@ -134,6 +137,22 @@ run_with_deadline() {
   return $?
 }
 
+governed_outer_deadline() {
+  local command_deadline_s="$1"
+  echo $((SWIFT_LOCK_TIMEOUT_S + command_deadline_s + SWIFT_DEADLINE_GRACE_S))
+}
+
+# The command deadline starts only after swift-safe wins the machine-global
+# compile slot. The outer harness deadline must therefore cover both phases;
+# otherwise ordinary contention is mislabeled as a wedged test.
+run_governed_swift() {
+  local command_deadline_s="$1" log="$2"; shift 2
+  local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
+  run_with_deadline "$outer_deadline_s" "$log" env \
+    TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
+    "$REPO_ROOT/scripts/swift-safe" "$@"
+}
+
 # The 1-MINUTE load average, which LAGS: measured here, the first iterations
 # after starting 6 spinners still reported ~7 while the run finished at ~24. It
 # is reported as `load1m` everywhere so nobody reads an early figure as the load
@@ -151,7 +170,7 @@ judge_iteration() {
   count="$(grep -oE 'Test run with [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | head -1)"
 
   if [[ "$rc" -eq 124 ]]; then
-    echo "FAIL wedged — no completion within ${ITERATION_DEADLINE_S}s (killed by the harness deadline)"
+    echo "FAIL wedged — no completion within the governed outer deadline (lock wait + ${ITERATION_DEADLINE_S}s execution budget + grace)"
     return
   fi
   # A TRUNCATED LOG IS A FAILURE, NOT A PASS. A wedged run exits with no summary
@@ -198,7 +217,7 @@ run_target() {
     load_before="$(loadavg)"
     local rc=0
     # shellcheck disable=SC2086 # $filter is a deliberately word-split arg list
-    run_with_deadline "$ITERATION_DEADLINE_S" "$log" swift test $filter || rc=$?
+    run_governed_swift "$ITERATION_DEADLINE_S" "$log" test $filter || rc=$?
     verdict="$(judge_iteration "$rc" "$log" "$floor")"
     if [[ "$verdict" == PASS* ]]; then
       pass_counts+=("${verdict#PASS }")
@@ -223,7 +242,7 @@ run_target() {
     echo "- Machine: $(sysctl -n hw.ncpu 2>/dev/null || nproc) cores, ${#SPINNER_PIDS[@]} induced spinners, load1m now: $(loadavg)"
     echo "  (\`load1m\` is the 1-minute average and LAGS the induced load — early iterations under-report it. The spinner count is the reliable half.)"
     echo "- Filter: \`swift test $filter\`, executed-test floor $floor"
-    echo "- Iteration deadline: ${ITERATION_DEADLINE_S}s (an outer timeout — \`.clockDriven\` was measured NOT bounding a hang)"
+    echo "- Execution budget: ${ITERATION_DEADLINE_S}s after admission; lock wait: up to ${SWIFT_LOCK_TIMEOUT_S}s; outer backstop: $(governed_outer_deadline "$ITERATION_DEADLINE_S")s"
     echo
     echo "Signatures:"
     echo
@@ -266,8 +285,9 @@ main() {
   # Build ONCE up front so the first iteration's timing is not dominated by the
   # compile. `swift build` alone does NOT build test targets — `--build-tests` does.
   echo
-  echo "building test targets (swift build --build-tests -j 2)…"
-  if ! run_with_deadline 1800 "$work_dir/build.log" swift build --build-tests -j 2; then
+  echo "building test targets (swift-safe build --build-tests -j 2)…"
+  if ! run_governed_swift "$BUILD_DEADLINE_S" "$work_dir/build.log" \
+    build --build-tests -j 2; then
     echo "nightly-flake-stress: BUILD FAILED — see $work_dir/build.log" >&2
     tail -30 "$work_dir/build.log" >&2
     exit 2

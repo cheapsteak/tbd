@@ -125,7 +125,7 @@ fi
 # local ModuleCache drops to ~0 MB with this flag combo.
 #
 # Stickiness note: SwiftPM bakes the cache path into .build/debug.yaml at plan
-# time, so a later plain `swift build` in this worktree silently keeps using
+# time, so a later build in this worktree silently keeps using
 # the shared cache until a manifest re-plan — expected, not a bug. See
 # docs/reclaim-build.md ("Shared module cache").
 SHARED_MODULE_CACHE="$HOME/Library/Caches/tbd/swift-module-cache"
@@ -138,7 +138,7 @@ MODULE_CACHE_FLAGS=(
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    (cd "$REPO_ROOT" && swift build "${MODULE_CACHE_FLAGS[@]}") 2>&1 | tail -3
+    (cd "$REPO_ROOT" && scripts/swift-safe build "${MODULE_CACHE_FLAGS[@]}") 2>&1 | tail -3
     echo "  Build: $((SECONDS - t0))s"
 fi
 
@@ -147,7 +147,7 @@ fi
 # macOS resolves tbd:// URLs via LaunchServices, which requires a
 # CFBundleURLTypes entry in an Info.plist inside a .app bundle. We assemble
 # a minimal bundle in .build/debug/TBD.app whose binary is a symlink to
-# .build/debug/TBDApp, so swift build continues to update it directly.
+# .build/debug/TBDApp, so the governed Swift build updates it directly.
 
 BUNDLE_DIR="$BUILD_DIR/TBD.app"
 BUNDLE_MACOS="$BUNDLE_DIR/Contents/MacOS"
@@ -168,7 +168,7 @@ APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUILD_DIR/TBDApp")"
 # .build/.../TBDApp with no surrounding .app, so APIs that depend on
 # CFBundleIdentifier (UNUserNotificationCenter for banners, etc.) silently
 # fail. A hard link shares the same inode as the swift-build output —
-# zero extra disk and `swift build` continues to update it directly —
+# zero extra disk and the governed Swift build updates it directly —
 # while keeping the kernel-reported exec path inside the .app bundle.
 # `ln -f` replaces any existing entry (including a stale symlink from
 # previous restart.sh versions) idempotently.
