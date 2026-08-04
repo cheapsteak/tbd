@@ -164,16 +164,21 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
 - **Why collapsing priors carries no flag of its own**: minimizing runs on every
   full-review run, with no user gesture, and mutates persisted PR state — the shape the
   "large or risky new behavior ships behind a default-off flag" convention exists for.
-  The gate it asks for is already present at a coarser grain: the entire v2 pipeline is
-  a non-required shadow check that nothing merges on, which *is* the off position, and
-  graduating it to the required check (§5) is the single event at which this behavior
-  becomes load-bearing and is re-examined. The mutation itself is also about as small as
-  a state mutation gets — it is confined to the App's own prior review comments by an
-  authorship-plus-sentinel selector, it destroys no content (a minimized comment is
+  Being a non-required check does not by itself satisfy that convention: nothing merges
+  on v2's verdict, but the mutation still fires on every live PR and visibly collapses
+  comments on a public thread. "Nothing gates on it" is not the same as "it does not
+  run," and the convention triggers on the mutation, not on the verdict.
+  The exemption rests instead on how small the mutation is. It is confined to the App's
+  own prior review comments by an authorship-plus-sentinel selector — a human comment
+  quoting the sentinel is never touched — it destroys no content (a minimized comment is
   collapsed, not deleted, and `unminimizeComment` reverses it), and its blast radius is
-  bounded by the same selector that a per-comment flag would gate. A second flag inside
-  a check that is itself off would be flag sprawl, which the convention warns against in
-  the same breath.
+  bounded by exactly the selector a per-comment flag would gate, so the flag would buy
+  no containment the selector does not already provide. Collapsing prior reviews is also
+  the behavior the pipeline is *for*: a flag defaulted off would ship the pile-up this
+  section exists to prevent. The behavior was requested directly by the repository owner
+  rather than originated by the pipeline's authors, which is the human judgment the
+  convention ultimately asks for; if a maintainer later wants the exemption withdrawn,
+  the selector is the natural gate to put a flag on.
 - **Rendering never fails the step**: an absent or malformed `review-result.json`, or
   blank prose, yields a degraded body — a machine-rendered list of the recorded
   findings, or a plain note — plus a `::warning::` explaining the degradation. A
