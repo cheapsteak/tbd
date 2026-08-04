@@ -132,10 +132,10 @@ struct ActivityGroupSummaryRow: View {
         Button {
             toggleGroup?(summary.id, !summary.isExpanded)
         } label: {
+            // No leading icon: the persistent disclosure chevron already marks
+            // this as a group, so "Worked" starts at the row's leading padding
+            // (matching the native cell, which collapses its icon column).
             HStack(spacing: 7) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 Text("Worked")
                     .font(.system(.subheadline, design: .rounded, weight: .medium))
                 // Always plural: a lone activity renders as its own row, so no

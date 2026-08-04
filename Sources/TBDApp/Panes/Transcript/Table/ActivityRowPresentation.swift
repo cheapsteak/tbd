@@ -51,7 +51,10 @@ struct ActivityRowPresentation: Equatable {
         case plainSummary
     }
 
-    let iconSystemName: String
+    /// Leading SF Symbol, or nil for a row that renders no icon at all. Nil
+    /// collapses the icon column entirely so the title sits at the row's leading
+    /// inset — it does NOT leave an empty gutter.
+    let iconSystemName: String?
     /// Ordered runs composing the one-line title.
     let titleSegments: [ActivityRowSegment]
     let timestamp: Date?
@@ -75,7 +78,7 @@ struct ActivityRowPresentation: Equatable {
     let accessibilityLabel: String?
 
     init(
-        iconSystemName: String,
+        iconSystemName: String?,
         titleSegments: [ActivityRowSegment],
         timestamp: Date?,
         isError: Bool,
@@ -158,7 +161,10 @@ enum ActivityRowFormatter {
             }
         }
         return ActivityRowPresentation(
-            iconSystemName: "point.3.connected.trianglepath.dotted",
+            // No icon: the group summary already announces itself with the
+            // persistent disclosure chevron, and a second glyph on the same row
+            // was redundant chrome. The title takes the row's leading inset.
+            iconSystemName: nil,
             titleSegments: segments,
             timestamp: nil,
             isError: summary.errorCount > 0 || summary.requiresResponse,
