@@ -158,6 +158,15 @@ before reading a v2-reviewed PR:
   `minimizeComment`, classifier `OUTDATED`). History collapses instead of piling
   up. Minimizing happens before the post, which is what makes it impossible for
   a run to collapse the review it is about to publish.
+- **The pipeline scripts are the base branch's, never the PR's.** The workflow
+  restores `.github/workflows/claude-review-v2/` from the base branch before the
+  review session and again after it, from the same recorded base SHA, so the
+  scripts that compute the verdict and render the posted comment are base
+  content no matter what the PR committed or the session wrote. Two consequences
+  when you review a PR that changes that directory: the check exercises the
+  *base* scripts, so a fix to them proves itself only after merge, and the
+  session sees base content on disk (its prompt says so, and points it at
+  `git show HEAD:<path>` for the PR's version).
 - **A skipped review writes nothing.** When the diff's patch-id matches the last
   reviewed one, the run posts no comment and minimizes none — the prior review
   is still the current review of an unchanged diff — and re-asserts the recorded

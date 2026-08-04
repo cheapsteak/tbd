@@ -149,6 +149,19 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   Minimizing *before* the post is what guarantees a run can never collapse its own
   review: the comment it is about to create is not in the set it just enumerated. The
   reviews stay on the PR as collapsed history; only the newest is open.
+- **Why collapsing priors carries no flag of its own**: minimizing runs on every
+  full-review run, with no user gesture, and mutates persisted PR state — the shape the
+  "large or risky new behavior ships behind a default-off flag" convention exists for.
+  The gate it asks for is already present at a coarser grain: the entire v2 pipeline is
+  a non-required shadow check that nothing merges on, which *is* the off position, and
+  graduating it to the required check (§5) is the single event at which this behavior
+  becomes load-bearing and is re-examined. The mutation itself is also about as small as
+  a state mutation gets — it is confined to the App's own prior review comments by an
+  authorship-plus-sentinel selector, it destroys no content (a minimized comment is
+  collapsed, not deleted, and `unminimizeComment` reverses it), and its blast radius is
+  bounded by the same selector that a per-comment flag would gate. A second flag inside
+  a check that is itself off would be flag sprawl, which the convention warns against in
+  the same breath.
 - **Rendering never fails the step**: an absent or malformed `review-result.json`, or
   blank prose, yields a degraded body — a machine-rendered list of the recorded
   findings, or a plain note — plus a `::warning::` explaining the degradation. A
@@ -207,6 +220,25 @@ the pre-review verdict-file reset, unshallow/merge-base repair, the reviewer App
 stable comment-author identity, and the exact-match fail-closed enforce step all carry
 over as-is. The trigger event does not change, so the admin-merge trap is not sprung.
 
+Where v1 restores only its hooks directory from the base branch, v2 restores its whole
+script directory (`.github/workflows/claude-review-v2/`) — far more of the gate now
+lives in the checked-out tree — and it does so **twice**: once before the session, and
+again after it, before the verdict is computed. The second restore is what makes the
+guarantee hold. The review session holds an unrestricted `Write` tool while reading
+author-controlled text, and the two scripts that run after it are the ones that decide
+and publish the outcome: `validate.py` computes the verdict, so a rewritten copy
+approves everything, and `render_comment.py` builds text posted verbatim to a public PR.
+A single pre-session restore leaves both writable across the whole session window.
+
+Both restores materialize provably the same tree: the first resolves the base branch tip
+once and records that SHA, and the second checks out that exact SHA rather than a ref a
+later fetch could move. The re-restore cannot clobber the session's work, because every
+file the session and its specialists produce lives in the workspace root, not in the
+restored directory. The session prompt states that this directory is deliberately held
+at base content — otherwise the reviewer either reports the divergence as stray
+contamination, or (worse, and silently) reads base text for paths the PR changed and
+reviews code that is not in the PR.
+
 ## 4. Testability (a design driver, not an afterthought)
 
 - **Pure policy, fixture-driven tests.** Every decision the scripts make — skip or
@@ -230,6 +262,18 @@ over as-is. The trigger event does not change, so the admin-merge trap is not sp
   tokens and full determinism. One gotcha worth pinning in a test: the CLI streams; a
   non-SSE response makes it silently retry a byte-identical request, which a naive
   request count misreads as progress.
+- **The workflow's own shell is executed by tests, not just read.** The post/enforce
+  step is where the pipeline's ordering guarantees live — verdict gate before any post,
+  minimize before post, REJECT exit after it — and shell nothing runs is correct only by
+  inspection. A test helper extracts a step's `run:` block from the workflow file **by
+  step name** (a rename fails the tests loudly rather than leaving them asserting on
+  nothing) and executes it under bash with a stub `gh` on `PATH` that records every
+  invocation. Assertions are on the recorded call ORDER, not only on outcomes: an
+  inverted minimize/post pair and a verdict gate moved below the post are each caught.
+  The impostor cases — a human comment opening with the sentinel, an App comment without
+  it — run against the real `jq` selector, since a stubbed selector would test the stub.
+  Step *position* (the re-restore sits between the session and the verdict) is a
+  structural assertion over the same by-name lookup.
 - **Where tests run**: scripts are Python 3 stdlib (the workflow already runs on
   `ubuntu-latest`, where the Swift toolchain is absent); a small CI job runs pytest
   over the workflow's script directory. The stub-API e2e test runs where a `claude`
