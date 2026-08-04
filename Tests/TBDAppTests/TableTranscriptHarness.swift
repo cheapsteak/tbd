@@ -461,6 +461,7 @@ struct TableTranscriptHarness {
         case .systemReminder: return "systemReminder"
         case .skillBody: return "skillBody"
         case .toolCall(_, let name, _, _, _, _): return "toolCall/\(name)"
+        case .activityGroupSummary: return "activityGroup"
         case .subagentSummary: return "subagentSummary"
         }
     }
@@ -1132,6 +1133,8 @@ struct TableTranscriptHarness {
             return text
         case .toolCall(_, let name, let inputJSON, _, let result, _):
             return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"
+        case .activityGroupSummary(let summary):
+            return "Worked \(summary.labels.joined(separator: " ")) \(summary.statusLabel)"
         case .subagentSummary(_, _, let agentType):
             return agentType ?? "subagent"
         }

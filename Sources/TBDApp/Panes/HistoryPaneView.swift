@@ -368,6 +368,7 @@ struct SessionTranscriptView: View {
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row (NSTableView renderer path).
     @State private var scrollToBottomToken: Int = 0
+    @State private var activityGroupExpansion: [String: Bool] = [:]
 
     @State private var isFreshBranchReviveInFlight = false
 
@@ -444,42 +445,46 @@ struct SessionTranscriptView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TableTranscriptView(
-                    context: TranscriptCardContext(
-                        terminalID: nil,
-                        openTranscriptOverlay: { itemID in
-                            overlayCoordinator.open(
-                                terminalID: nil,
-                                itemID: itemID,
-                                historySessionID: sessionId
-                            )
-                        },
-                        appState: appState
-                    ),
-                    atBottom: $atBottom,
-                    scrollToBottomToken: scrollToBottomToken,
-                    nodesProvider: { transcriptRenderNodes(from: messages) }
+                let presentation = TranscriptPresentation.build(
+                    items: messages,
+                    expansionOverrides: activityGroupExpansion
                 )
-                // Rebuild the stateful Coordinator when the selected session changes.
-                .id(sessionId)
-                .overlay(alignment: .bottomTrailing) {
-                    if !atBottom {
-                        Button {
-                            scrollToBottomToken &+= 1
-                        } label: {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.system(size: 28))
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, Color.accentColor)
-                                .background(.ultraThinMaterial, in: Circle())
-                                .shadow(radius: 4)
+                SessionWorkbenchView(
+                    sections: presentation.indexSections,
+                    onOpen: openTranscriptItem
+                ) {
+                    TableTranscriptView(
+                        context: TranscriptCardContext(
+                            terminalID: nil,
+                            openTranscriptOverlay: openTranscriptItem,
+                            toggleActivityGroup: setActivityGroup,
+                            appState: appState
+                        ),
+                        atBottom: $atBottom,
+                        scrollToBottomToken: scrollToBottomToken,
+                        nodesProvider: { presentation.nodes }
+                    )
+                    .overlay(alignment: .bottomTrailing) {
+                        if !atBottom {
+                            Button {
+                                scrollToBottomToken &+= 1
+                            } label: {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.system(size: 28))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, Color.accentColor)
+                                    .background(.ultraThinMaterial, in: Circle())
+                                    .shadow(radius: 4)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(16)
+                            .transition(.scale(scale: 0.5).combined(with: .opacity))
+                            .help("Scroll to bottom")
                         }
-                        .buttonStyle(.plain)
-                        .padding(16)
-                        .transition(.scale(scale: 0.5).combined(with: .opacity))
-                        .help("Scroll to bottom")
                     }
                 }
+                // Rebuild the stateful Coordinator when the selected session changes.
+                .id(sessionId)
                 .animation(.easeInOut(duration: 0.2), value: atBottom)
                 .onAppear {
                     let count = messages.count
@@ -502,9 +507,24 @@ struct SessionTranscriptView: View {
                         snap.paneLabel = nil
                     }
                 }
+                .onChange(of: sessionId) { _, _ in
+                    activityGroupExpansion.removeAll()
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func openTranscriptItem(_ itemID: String) {
+        overlayCoordinator.open(
+            terminalID: nil,
+            itemID: itemID,
+            historySessionID: sessionId
+        )
+    }
+
+    private func setActivityGroup(_ id: String, expanded: Bool) {
+        activityGroupExpansion[id] = expanded
     }
 
     @ViewBuilder

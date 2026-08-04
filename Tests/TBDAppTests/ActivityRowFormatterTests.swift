@@ -253,6 +253,54 @@ struct ActivityRowFormatterTests {
         #expect(p.openTargetID == "k1")
     }
 
+    @Test("WebFetch: globe icon, title carries the url, middle truncation + tooltip")
+    func webFetch() throws {
+        let node = TranscriptRenderNode.makeToolCall(
+            id: "w1", name: "WebFetch",
+            inputJSON: #"{"url":"https://example.com/docs/reference/Array/reduce","prompt":"summarize"}"#)
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.iconSystemName == "globe")
+        #expect(p.titleTruncation == .byTruncatingMiddle)
+        let text = titleText(p)
+        #expect(text.contains("WebFetch"))
+        #expect(text.contains("https://example.com/docs/reference/Array/reduce"))
+        #expect(p.titleTooltip == "https://example.com/docs/reference/Array/reduce")
+        #expect(p.openTargetID == "w1")
+    }
+
+    @Test("WebSearch: title carries the query")
+    func webSearch() throws {
+        let node = TranscriptRenderNode.makeToolCall(
+            id: "w2", name: "WebSearch",
+            inputJSON: #"{"query":"hierarchical data tree structures"}"#)
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        let text = titleText(p)
+        #expect(text.contains("WebSearch"))
+        #expect(text.contains("hierarchical data tree structures"))
+        #expect(p.titleTooltip == "hierarchical data tree structures")
+    }
+
+    @Test("Web tool with a failed result surfaces the error badge")
+    func webFetchError() throws {
+        let node = TranscriptRenderNode.makeToolCall(
+            id: "w3", name: "WebFetch", inputJSON: #"{"url":"https://example.com/gone"}"#,
+            result: ToolResult(text: "404", truncatedTo: nil, isError: true))
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.isError)
+        #expect(p.badges.contains(ActivityRowBadge(text: "error", kind: .error)))
+    }
+
+    /// Malformed input must degrade to the bare label, never drop the row or
+    /// render a dangling empty detail segment.
+    @Test("Web tool with malformed input keeps the label and adds no target")
+    func webMalformed() throws {
+        let node = TranscriptRenderNode.makeToolCall(
+            id: "w4", name: "WebFetch", inputJSON: "not-json")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(titleText(p) == "WebFetch")
+        #expect(p.titleTooltip == nil)
+    }
+
     @Test("Subagent summary → person.2 icon, plain style, no targets, no timestamp")
     func subagentSummary() throws {
         let node = TranscriptRenderNode.makeSubagentSummary(id: "p1#subagent", count: 3, agentType: "Explore")

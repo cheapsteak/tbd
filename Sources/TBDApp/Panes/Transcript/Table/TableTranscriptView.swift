@@ -645,10 +645,16 @@ struct TableTranscriptView: NSViewRepresentable {
             let width = columnWidth
             let height = measuredHeight(for: node, width: width)
             let openOverlay = context.openTranscriptOverlay
-            // The formatter only ever sets `openTargetID` (subagent drill-in was
-            // removed); a nil target (plain subagent summary) is a no-op.
-            let onOpen: (() -> Void)? = presentation.openTargetID.map { target in
-                { openOverlay?(target) }
+            let onOpen: (() -> Void)?
+            if case .activityGroupSummary(let summary) = node.kind {
+                let toggleGroup = context.toggleActivityGroup
+                onOpen = { toggleGroup?(summary.id, !summary.isExpanded) }
+            } else {
+                // The formatter only ever sets `openTargetID` (subagent drill-in
+                // was removed); a nil target is a no-op.
+                onOpen = presentation.openTargetID.map { target in
+                    { openOverlay?(target) }
+                }
             }
             cell.configure(
                 presentation: presentation,
@@ -692,6 +698,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 // pane, which leaves this env false. (#129)
                 .environment(\.transcriptStaticCards, true)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
+                .environment(\.toggleTranscriptActivityGroup, context.toggleActivityGroup)
                 .environmentObjectIfPresent(context.appState)
         }
 
@@ -760,6 +767,8 @@ struct TableTranscriptView: NSViewRepresentable {
             case .chatBubble(let item):
                 return chatBubbleEstimate(item, badgeUsage: node.badgeUsage, columnWidth: width)
             case .systemReminder, .skillBody:
+                return activityRowHeight(style: .chrome)
+            case .activityGroupSummary:
                 return activityRowHeight(style: .chrome)
             case .subagentSummary:
                 return activityRowHeight(style: .plainSummary)

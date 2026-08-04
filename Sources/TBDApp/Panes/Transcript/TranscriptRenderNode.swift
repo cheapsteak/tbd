@@ -84,6 +84,7 @@ struct TranscriptRenderNode: Identifiable, Equatable {
         case skillBody(id: String, text: String, timestamp: Date?)
         case toolCall(id: String, name: String, inputJSON: String,
                       inputTruncatedTo: Int?, result: ToolResult?, timestamp: Date?)
+        case activityGroupSummary(ActivityGroupSummary)
         case subagentSummary(parentItemID: String, count: Int, agentType: String?)
 
         /// Hand-written structural `==` replaces the compiler-synthesized
@@ -105,6 +106,8 @@ struct TranscriptRenderNode: Identifiable, Equatable {
             case (.toolCall(let li, let ln, let lj, let liu, let lr, let lts),
                   .toolCall(let ri, let rn, let rj, let riu, let rr, let rts)):
                 return li == ri && ln == rn && lj == rj && liu == riu && lr == rr && lts == rts
+            case (.activityGroupSummary(let l), .activityGroupSummary(let r)):
+                return l == r
             case (.subagentSummary(let lp, let lc, let la),
                   .subagentSummary(let rp, let rc, let ra)):
                 return lp == rp && lc == rc && la == ra
