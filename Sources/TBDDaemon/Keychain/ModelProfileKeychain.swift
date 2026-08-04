@@ -40,15 +40,28 @@ public enum ModelProfileKeychain {
     ///   the shape `CLAUDE.md`'s "Tests must not touch ~/tbd" forbids.
     ///
     /// Note the asymmetry that follows: under an override the directory is
-    /// `$TBD_HOME/claude-tokens`, dropping the legacy dot. The override is a
-    /// scratch dir with no entries to preserve, so there is nothing to key off
-    /// the old spelling.
+    /// `$TBD_HOME/claude-tokens`, dropping the legacy dot.
+    ///
+    /// **`TBD_HOME` is not only the test fence.** `CLAUDE.md` presents it as a
+    /// general redirect and `scripts/mock.sh` exports it to run a real daemon
+    /// and app against a scratch config dir. So "the override is a scratch dir
+    /// with no entries to preserve" is true of the wrapper and false in
+    /// general: anyone running under an override would silently see no stored
+    /// tokens and be re-prompted to authenticate, with the real files still on
+    /// disk. `legacyStorageDir` exists for that case — see `load(id:)`.
     static func storageDir(environment: [String: String]) -> URL {
         if let override = environment["TBD_HOME"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
                 .appendingPathComponent("claude-tokens", isDirectory: true)
         }
-        return FileManager.default.homeDirectoryForCurrentUser
+        return legacyStorageDir()
+    }
+
+    /// The production directory, `~/.tbd/claude-tokens`, regardless of any
+    /// override. Read-only fallback for `load(id:)`; nothing ever *writes*
+    /// here while an override is in force, so the fence stays intact.
+    static func legacyStorageDir() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".tbd/claude-tokens", isDirectory: true)
     }
 
@@ -58,6 +71,22 @@ public enum ModelProfileKeychain {
 
     private static func fileURL(id: String) -> URL {
         storageDir.appendingPathComponent("\(id).token", isDirectory: false)
+    }
+
+    /// The paths `load(id:)` tries, in order: the resolved storage dir first,
+    /// then — only when an override is in force — the legacy production path.
+    /// Without an override the two are the same directory, so the list is one
+    /// entry and there is nothing to fall back to.
+    static func loadCandidates(id: String, environment: [String: String]) -> [URL] {
+        let primary = storageDir(environment: environment)
+            .appendingPathComponent("\(id).token", isDirectory: false)
+        guard let override = environment["TBD_HOME"], !override.isEmpty else {
+            return [primary]
+        }
+        return [
+            primary,
+            legacyStorageDir().appendingPathComponent("\(id).token", isDirectory: false)
+        ]
     }
 
     /// Create the storage directory if missing, with mode 0700.
@@ -98,10 +127,21 @@ public enum ModelProfileKeychain {
     /// Load a secret. Returns nil if no file exists for the given id.
     /// Throws if the file exists but has wrong mode or wrong owner — we don't
     /// want to return secrets from a misconfigured restore.
+    ///
+    /// **Load-only fallback to the legacy path.** When `TBD_HOME` is overridden
+    /// and the override holds no entry for `id`, the production
+    /// `~/.tbd/claude-tokens/<id>.token` is tried before giving up, so a real
+    /// daemon run under an override (`scripts/mock.sh`, a hand-set `TBD_HOME`)
+    /// still sees the user's tokens instead of silently re-prompting for auth.
+    /// Reads only — `store` and `delete` stay inside the override, so under
+    /// `scripts/test.sh` the extra `stat` lands in the scratch home where
+    /// nothing exists and the fence is untouched.
     public static func load(id: String) throws -> String? {
-        let url = fileURL(id: id)
         let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return nil }
+        let candidates = loadCandidates(id: id, environment: ProcessInfo.processInfo.environment)
+        guard let url = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else {
+            return nil
+        }
 
         let attrs: [FileAttributeKey: Any]
         do {

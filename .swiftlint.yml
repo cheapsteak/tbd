@@ -70,28 +70,53 @@ custom_rules:
     severity: error
 
   no_passwd_home_lookup:
-    name: "No getpwuid/getpwnam home lookup in Sources/"
+    name: "No account-database home lookup in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
       - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
-    regex: '\bgetpw(uid|nam)(_r)?\s*\('
-    match_kinds:
-      - identifier
-    message: "Reading the passwd database bypasses BOTH test fences: `getpwuid` ignores `$HOME` and is itself what `CFFIXED_USER_HOME` is resolved ahead of, so it returns the developer's real home under scripts/test.sh. Resolve TBD paths via TBDConstants, the host Claude store via ClaudeProfileConfigDirManager.resolveHostBaseDirectory, and anything else via NSHomeDirectory()/FileManager.homeDirectoryForCurrentUser. Suppress with `// swiftlint:disable:next no_passwd_home_lookup - <reason>` only with a reason."
+    # Every one of these resolves a home directory through the account database
+    # and defeats `CFFIXED_USER_HOME` identically. The Swift-shaped ones —
+    # `NSHomeDirectoryForUser(_:)` and `FileManager.homeDirectory(forUser:)` —
+    # matter more than the C call, not less: they are what someone reaches for
+    # first, and a rule that blocks only `getpwuid` reads as permission to use
+    # them. `getpwent` enumerates the same database one row at a time.
+    regex: '\b(getpw(uid|nam|ent)(_r)?|NSHomeDirectoryForUser)\s*\(|\bhomeDirectory\s*\(\s*forUser'
+    message: "Resolving a home directory through the account database bypasses BOTH test fences: getpwuid/getpwnam/getpwent, NSHomeDirectoryForUser(_:) and FileManager.homeDirectory(forUser:) all ignore `$HOME` and are what `CFFIXED_USER_HOME` is resolved ahead of, so they return the developer's real home under scripts/test.sh. Resolve TBD paths via TBDConstants, the host Claude store via ClaudeProfileConfigDirManager.resolveHostBaseDirectory, and anything else via NSHomeDirectory()/FileManager.homeDirectoryForCurrentUser. Suppress with `// swiftlint:disable:next no_passwd_home_lookup - <reason>` only with a reason."
     severity: error
 
   no_hardcoded_users_path:
-    name: "No hardcoded /Users/ path literal in Sources/"
+    name: "No hardcoded /Users/ path literal"
     # included/excluded HERE take REGEX (not glob), matched against file path.
+    # The two test dirs are the ones already inside the global lint scope; a
+    # custom rule cannot reach files outside it, and pulling all of Tests/ in
+    # would drag every default rule onto test code — a separate change.
     included:
       - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
-    # `match_kinds: string` on purpose — doc comments legitimately show example
-    # paths like `/Users/me/tbd/worktrees/mywork`, and those are `comment` /
-    # `doccomment` kinds, not `string`. Only a real literal fires.
-    regex: '/Users/'
+      - "Tests/(TBDSharedTests|TBDAppTests)/.*\\.swift"
+    # OPTIMIZED FOR THE PRIVACY RATIONALE, deliberately, and that decides both
+    # knobs:
+    #
+    #   - `match_kinds` includes the comment kinds. The fence rationale only
+    #     needs `string` — a doc comment cannot open a file. But this repo is
+    #     public and multi-tenant, and a real `/Users/<name>/…` in a doc comment
+    #     is exactly the leak the message warns about. Four of them were sitting
+    #     in Sources/ doc comments when this widened, which settles the question
+    #     empirically.
+    #   - the dash-encoded form is matched too (`-Users-<name>-…`), because
+    #     Claude Code's scratchpad paths spell it that way and a `/Users/`-only
+    #     regex reads them as clean.
+    #
+    # The cost of the privacy framing is that placeholder examples must use a
+    # placeholder NAME, so the rule allowlists a prefix set instead of trying to
+    # judge whether a username is real. `/Users/me`, `/Users/acme`, `/Users/x`,
+    # `/Users/test` and `/Users/...` pass; anything else is assumed to be
+    # somebody's account.
+    regex: '[/-]Users[/-](?!me|acme|x|test|\.\.\.)'
     match_kinds:
       - string
-    message: "A hardcoded /Users/ literal bypasses both test fences and is machine-specific in a public, multi-tenant repo. Resolve paths via TBDConstants or NSHomeDirectory(). Suppress with `// swiftlint:disable:next no_hardcoded_users_path - <reason>` only with a reason."
+      - comment
+      - doccomment
+    message: "A hardcoded /Users/<name>/ path is machine-specific in a public, multi-tenant repo, and in a string literal it also bypasses both test fences. Use a placeholder name (me / acme / x / test) in examples, and resolve real paths via TBDConstants or NSHomeDirectory(). Suppress with `// swiftlint:disable:next no_hardcoded_users_path - <reason>` only with a reason."
     severity: error
 
   no_scrollview_in_transcript_cards:

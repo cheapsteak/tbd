@@ -77,7 +77,13 @@ run_pass() {
   # test failure rather than dying inside `set -e` with the file left behind.
   scripts/test.sh "$@" 2>&1 | tee "$log" || rc=$?
   local count
-  count="$(grep -oE 'Test run with [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | head -1)"
+  # `|| true` is load-bearing, not defensive noise. Under `set -euo pipefail` a
+  # log with NO summary line makes the first `grep` exit 1, `pipefail`
+  # propagates it, and a failing command substitution in an assignment
+  # terminates the shell outright. That is exactly the case this floor exists
+  # for — a truncated run — and without this the pusher got a bare non-zero
+  # exit, the explanatory message below never printed, and the temp log leaked.
+  count="$(grep -oE 'Test run with [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | head -1 || true)"
   rm -f "$log"
   if [ "$rc" -ne 0 ]; then
     echo "[pre-push] ERROR: $label failed (exit $rc)." >&2

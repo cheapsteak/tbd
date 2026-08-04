@@ -99,7 +99,7 @@ struct SystemReminderRowBody: View {
     }
 
     /// `$HOME` → `~`, on path-component boundaries. A plain substring replace
-    /// would turn `/Users/changelog-archive/x` into `~elog-archive/x` — a
+    /// would turn `/Users/melog-archive/x` into `~log-archive/x` — a
     /// different directory presented as living inside the user's home. Foundation
     /// reads the same `NSHomeDirectory()`, so the daemon's `injectedPathSource`
     /// abbreviates identically.

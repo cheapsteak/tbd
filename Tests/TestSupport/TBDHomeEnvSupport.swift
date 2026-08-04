@@ -71,3 +71,37 @@ public func restoreClaudeHostHome(_ previous: String?) {
         unsetenv("TBD_CLAUDE_HOST_HOME")
     }
 }
+
+/// The same save/restore pair for `TBD_TEST_CODEX_HOME`, the third host store.
+/// `CodexHomeManager` falls back to `~/.codex` when it is unset, and
+/// `ensureProfilePlugin()` creates directories there and writes a plugin
+/// manifest, a hooks file, a skill and `tbd.config.toml`.
+///
+/// `scripts/test.sh` now exports it for the whole run, which is what makes the
+/// `unsetenv` teardown a real hazard rather than a stylistic one: unsetting
+/// hands every concurrently running suite the developer's real `~/.codex`
+/// until something happens to set it again. Pair these two calls; never
+/// `unsetenv` in a teardown.
+///
+/// Same constraint as the two above, for the same reason: only suites nested
+/// under `TBDHomeSerialized` (in `TBDDaemonTests`) may mutate it. There is no
+/// injection seam for this one yet — `RPCRouter` and `WorktreeLifecycle`
+/// construct `CodexHomeManager()` internally — so the env var is the only
+/// override, and serialization is what keeps it from racing.
+@discardableResult
+public func setCodexTestHome(_ path: String) -> String? {
+    let previous = getenv("TBD_TEST_CODEX_HOME").map { String(cString: $0) }
+    setenv("TBD_TEST_CODEX_HOME", path, 1)
+    return previous
+}
+
+/// Puts `TBD_TEST_CODEX_HOME` back to the value `setCodexTestHome(_:)`
+/// returned. `nil` means it genuinely was unset, and only then is `unsetenv`
+/// the correct restore.
+public func restoreCodexTestHome(_ previous: String?) {
+    if let previous {
+        setenv("TBD_TEST_CODEX_HOME", previous, 1)
+    } else {
+        unsetenv("TBD_TEST_CODEX_HOME")
+    }
+}

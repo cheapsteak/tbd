@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# Prints a stable fingerprint of the REAL `~/tbd` and the REAL `~/.claude` —
-# deliberately `$HOME/...`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME`, because
-# the whole point is to observe the directories a test run is supposed to leave
-# alone even while those overrides point somewhere else.
+# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude` and `~/.codex` —
+# deliberately `$HOME/...`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
+# `$TBD_TEST_CODEX_HOME`, because the whole point is to observe the directories
+# a test run is supposed to leave alone even while those overrides point
+# somewhere else.
 #
 # Bracket a test run with two calls and diff them: any added or removed entry
 # means something wrote into a real store the run should not have touched, which
@@ -32,6 +33,7 @@ set -euo pipefail
 
 real_home="${HOME}/tbd"
 real_claude="${HOME}/.claude"
+real_codex="${HOME}/.codex"
 
 # Written by a live daemon on a developer box while an unrelated test run is in
 # flight, so their churn is noise rather than signal. Each is a name in the
@@ -130,4 +132,45 @@ if [ -d "$real_claude/projects" ]; then
     | LC_ALL=C sort
 else
   echo "~/.claude/projects <absent>"
+fi
+
+# ~/.codex — the third host store, reachable by the same class of leak.
+# `CodexHomeManager.ensureProfilePlugin()` creates directories under it and
+# writes a plugin manifest, a hooks file, a skill and a `tbd.config.toml`. It
+# was outside every layer of the fence until the `.codex` decoy and
+# `TBD_TEST_CODEX_HOME` landed in `scripts/test.sh`, and isolation depended on
+# individual tests remembering to override it.
+#
+# TWO arms, for the same reason `~/.claude` has two, and depth 1 on both.
+#
+#   `~/.codex` at depth 1 — catches `tbd.config.toml`, which
+#   `CodexProfileWriter.ensureProfile` writes right there, and a run that
+#   creates `~/.codex` itself. A deeper walk would report the machine rather
+#   than the run: Codex rewrites `.tmp/`, `shell_snapshots/`, `sessions/` and
+#   several multi-hundred-MB sqlite sidecars continuously while any Codex
+#   session is live.
+#
+#   `~/.codex/plugins/cache` at depth 1 — the `<marketplace>` entries, where
+#   `CodexPluginWriter.writePlugin` lands (`plugins/cache/tbd/tbd/local/...`).
+#   That is depth 3 overall and invisible to the arm above on any box that
+#   already has a `plugins` directory.
+if [ -d "$real_codex" ]; then
+  find "$real_codex" -maxdepth 1 \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_codex}|~/.codex|" \
+    | LC_ALL=C sort
+else
+  echo "~/.codex <absent>"
+fi
+
+# `-mindepth 1`, so the `plugins` entry itself is not printed twice.
+if [ -d "$real_codex/plugins/cache" ]; then
+  find "$real_codex/plugins/cache" -mindepth 1 -maxdepth 1 \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_codex}|~/.codex|" \
+    | LC_ALL=C sort
+else
+  echo "~/.codex/plugins/cache <absent>"
 fi

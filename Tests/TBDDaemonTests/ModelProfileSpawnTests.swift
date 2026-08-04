@@ -298,9 +298,9 @@ struct ModelProfileSpawnTests {
     func codexReceivesMergedEnvOverrides() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
-        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        let priorCodexHome = setCodexTestHome(codexHome.path)
         defer {
-            unsetenv("TBD_TEST_CODEX_HOME")
+            restoreCodexTestHome(priorCodexHome)
             try? FileManager.default.removeItem(at: codexHome)
         }
 
@@ -338,9 +338,9 @@ struct ModelProfileSpawnTests {
     func codexEmptyConfigInjectsNothing() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
-        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        let priorCodexHome = setCodexTestHome(codexHome.path)
         defer {
-            unsetenv("TBD_TEST_CODEX_HOME")
+            restoreCodexTestHome(priorCodexHome)
             try? FileManager.default.removeItem(at: codexHome)
         }
 

@@ -289,7 +289,10 @@ jobs:
       # on a developer box before anyone noticed. No per-test assertion could
       # have caught it — the invariant belongs to the whole run.
       #
-      # THIS JOB IS THE ONLY PLACE THE FINGERPRINT RUNS. The pre-push hook
+      # THIS JOB IS THE ONLY PLACE THE FINGERPRINT RUNS, and every step below
+      # asks for it with an explicit `--fingerprint`. The wrapper's default is
+      # gated on `$CI`, which a runner sets — the explicit flag says so in the
+      # workflow and survives a runner that does not. The pre-push hook
       # passes `--no-fingerprint` and keeps the fence alone, because a developer
       # box writes to `~/tbd` and `~/.claude` for reasons that have nothing to
       # do with the run under way — a live daemon creating worktree/scratch/
@@ -318,8 +321,13 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1)
+          scripts/test.sh --fingerprint --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
+          # with no summary line makes the first `grep` exit 1 and a failing
+          # command substitution in an assignment kills the shell — so the
+          # truncated-run case this floor exists for would die before ever
+          # reaching the `::error::` below.
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1 || true)
           # `swift test --filter/--skip` exits GREEN on zero matches, so a bad
           # regex or a renamed target would silently run nothing and pass.
           if [ -z "$count" ] || [ "$count" -lt 1800 ]; then
@@ -347,8 +355,13 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1)
+          scripts/test.sh --fingerprint --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
+          # with no summary line makes the first `grep` exit 1 and a failing
+          # command substitution in an assignment kills the shell — so the
+          # truncated-run case this floor exists for would die before ever
+          # reaching the `::error::` below.
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1 || true)
           # `swift test --filter/--skip` exits GREEN on zero matches, so an
           # over-broad skip or a renamed target would silently run nothing and
           # pass.
@@ -372,8 +385,13 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          scripts/test.sh --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1)
+          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
+          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
+          # with no summary line makes the first `grep` exit 1 and a failing
+          # command substitution in an assignment kills the shell — so the
+          # truncated-run case this floor exists for would die before ever
+          # reaching the `::error::` below.
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1 || true)
           if [ -z "$count" ] || [ "$count" -lt 35 ]; then
             echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
             exit 1

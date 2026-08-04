@@ -152,7 +152,7 @@ enum TranscriptCompareFixtures {
         .toolCall(
             id: "tc-read",
             name: "Read",
-            inputJSON: #"{"file_path":"/Users/chang/tbd/Sources/TBDApp/AppState.swift"}"#,
+            inputJSON: #"{"file_path":"/Users/me/tbd/Sources/TBDApp/AppState.swift"}"#,
             inputTruncatedTo: nil,
             result: ToolResult(text: "1\timport SwiftUI\n2\timport TBDShared\n3\t\n4\tfinal class AppState {}", truncatedTo: nil, isError: false),
             subagent: nil,
@@ -162,7 +162,7 @@ enum TranscriptCompareFixtures {
         .toolCall(
             id: "tc-edit",
             name: "Edit",
-            inputJSON: #"{"file_path":"/Users/chang/tbd/Sources/TBDApp/Foo.swift","old_string":"let x = 1","new_string":"let x = 2"}"#,
+            inputJSON: #"{"file_path":"/Users/me/tbd/Sources/TBDApp/Foo.swift","old_string":"let x = 1","new_string":"let x = 2"}"#,
             inputTruncatedTo: nil,
             result: ToolResult(text: "The file has been updated.", truncatedTo: nil, isError: false),
             subagent: nil,
@@ -243,7 +243,7 @@ enum TranscriptCompareFixtures {
         .toolCall(
             id: "mix-read",
             name: "Read",
-            inputJSON: #"{"file_path":"/Users/chang/tbd/Sources/TBDApp/Panes/Transcript/TranscriptRenderNode.swift","offset":106,"limit":20}"#,
+            inputJSON: #"{"file_path":"/Users/me/tbd/Sources/TBDApp/Panes/Transcript/TranscriptRenderNode.swift","offset":106,"limit":20}"#,
             inputTruncatedTo: nil,
             result: ToolResult(text: "106\tnonisolated func transcriptRenderNodes(...)\n107\t  // Find latest usage-carrying item for the badge", truncatedTo: nil, isError: false),
             subagent: nil,
@@ -253,7 +253,7 @@ enum TranscriptCompareFixtures {
         .toolCall(
             id: "mix-edit",
             name: "Edit",
-            inputJSON: #"{"file_path":"/Users/chang/tbd/Sources/TBDApp/Panes/Transcript/TranscriptRenderNode.swift","old_string":"let badge","new_string":"// Badge attaches to the latest visible usage item\n        let badge"}"#,
+            inputJSON: #"{"file_path":"/Users/me/tbd/Sources/TBDApp/Panes/Transcript/TranscriptRenderNode.swift","old_string":"let badge","new_string":"// Badge attaches to the latest visible usage item\n        let badge"}"#,
             inputTruncatedTo: nil,
             result: ToolResult(text: "The file has been updated.", truncatedTo: nil, isError: false),
             subagent: nil,

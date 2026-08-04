@@ -50,12 +50,11 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     ///   rather than unsetting the process-global variable, which would hand
     ///   every concurrently running suite the real host store.
     public static func resolveHostBaseDirectory(environment: [String: String]? = nil) -> URL {
-        let env = environment ?? ProcessInfo.processInfo.environment
-        if let override = env["TBD_CLAUDE_HOST_HOME"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude", isDirectory: true)
+        // Delegates to `TBDConstants.claudeHostHome(environment:)`, which is
+        // where the resolution actually lives now that `TBDApp` — which does
+        // not link `TBDDaemonLib` — needs it as well. This entry point stays as
+        // the daemon-side name every call site and doc reference already uses.
+        TBDConstants.claudeHostHome(environment: environment ?? ProcessInfo.processInfo.environment)
     }
 
     /// - Parameter hostEnvironment: the environment `TBD_CLAUDE_HOST_HOME` is

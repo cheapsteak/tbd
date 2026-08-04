@@ -79,4 +79,36 @@ struct ModelProfileKeychainTests {
         #expect(ModelProfileKeychain.storageDir(environment: [:]).path == expected)
         #expect(ModelProfileKeychain.storageDir(environment: ["TBD_HOME": ""]).path == expected)
     }
+
+    // MARK: - load falls back to the legacy path under an override
+
+    /// `TBD_HOME` is a general redirect, not only the test fence —
+    /// `scripts/mock.sh` exports it to run a real daemon and app. Without a
+    /// fallback read, anyone in that situation loses sight of every stored
+    /// token and is re-prompted to authenticate while the files sit on disk.
+    @Test("load tries the legacy path when TBD_HOME is overridden")
+    func loadCandidatesFallBackUnderOverride() {
+        let id = "acme-profile"
+        let candidates = ModelProfileKeychain.loadCandidates(
+            id: id, environment: ["TBD_HOME": "/tmp/acme-scratch-home"])
+        let legacy = ModelProfileKeychain.legacyStorageDir()
+            .appendingPathComponent("\(id).token", isDirectory: false).path
+        #expect(candidates.map(\.path) == [
+            "/tmp/acme-scratch-home/claude-tokens/\(id).token",
+            legacy
+        ])
+    }
+
+    /// The other branch. With no override the resolved dir already IS the
+    /// legacy dir, so there is exactly one candidate — a second, identical
+    /// `stat` would be dead weight and would misrepresent the contract.
+    @Test("load has a single candidate without an override")
+    func loadCandidatesSingleWithoutOverride() {
+        let id = "acme-profile"
+        let legacy = ModelProfileKeychain.legacyStorageDir()
+            .appendingPathComponent("\(id).token", isDirectory: false).path
+        #expect(ModelProfileKeychain.loadCandidates(id: id, environment: [:]).map(\.path) == [legacy])
+        #expect(ModelProfileKeychain.loadCandidates(
+            id: id, environment: ["TBD_HOME": ""]).map(\.path) == [legacy])
+    }
 }

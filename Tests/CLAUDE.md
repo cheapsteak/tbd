@@ -62,39 +62,58 @@ invalidates any measurement they are midway through.
 
 Every invocation in this file, in `test.yml` and in the pre-push hook goes
 through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
-scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME`. Bare `swift
-test` writes into the developer's real `~/tbd` and `~/.claude` — 18k orphan
-profile dirs and ~2.9k fake worktrees accumulated that way before anyone
-noticed. Read `swift test …` below as `scripts/test.sh …`.
+scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
+`TBD_TEST_CODEX_HOME`. Bare `swift test` writes into the developer's real
+`~/tbd`, `~/.claude` and `~/.codex` — 18k orphan profile dirs and ~2.9k fake
+worktrees accumulated that way before anyone noticed. Read `swift test …` below
+as `scripts/test.sh …`.
 
-Those three variables only fence code that *asks* where home is. The wrapper
+Those four variables only fence code that *asks* where home is. The wrapper
 also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
-`tbd` and `.claude` entries are pre-created mode `000`. That covers the code
-that assembles a path out of the home directory instead of asking: it gets
-`EACCES` at the call site, inside the failing test, with the offending path in
-the error.
+`tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
+the code that assembles a path out of the home directory instead of asking: it
+gets `EACCES` at the call site, inside the failing test, with the offending path
+in the error.
 
 **So if a test fails with "You don't have permission to save the file …" on a
-path ending in `/tbd/…` or `/.claude/…`, read it as: this code hand-built a home
-path instead of going through `TBDConstants` (for TBD's own dirs) or
-`ClaudeProfileConfigDirManager.resolveHostBaseDirectory` (for the host Claude
-store).** On a developer box the same line writes into the real store. Fix the
-resolution; never relax the decoy.
+path ending in `/tbd/…`, `/.claude/…` or `/.codex/…`, read it as: this code
+hand-built a home path instead of going through `TBDConstants` (for TBD's own
+dirs and, via `claudeHostHome`, the host Claude store) or `CodexHomeManager`
+(for the Codex store).** On a developer box the same line writes into the real
+store. Fix the resolution; never relax the decoy.
+
+That scratch home is itself checked before anything is chmod'd: it must be a
+real directory (never a symlink) owned by the calling uid, and it lives under
+`$TMPDIR`, which darwin makes per-user. Under `/tmp` — mode 1777 — anyone could
+pre-create the path as a symlink, and `mkdir -p` through a symlink-to-a-directory
+succeeds silently while `chmod` resolves straight through it; pointed at `$HOME`
+that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
+`~/.claude`. The decoys are re-checked *after* the run too, since code inside it
+owns them and can chmod them back.
 
 Two things the fence does *not* cover, so the existing disciplines stay
 load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
 `AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
 breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
 must be reached through an injection seam such as
-`ClaudeCredentialsKeychainDeleting`. `getpwuid`/`getpwnam` and hardcoded
-`/Users/` literals escape both variables outright and are rejected mechanically
-in `Sources/` by the `no_passwd_home_lookup` and `no_hardcoded_users_path`
-SwiftLint rules.
+`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+(`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
+`FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
+escape both variables outright and are rejected mechanically by the
+`no_passwd_home_lookup` and `no_hardcoded_users_path` SwiftLint rules — the
+second covers `Tests/TBDSharedTests` and `Tests/TBDAppTests` as well, matches
+the dash-encoded `-Users-<name>-` form Claude Code scratchpad paths use, and
+fires in comments too, because a real username in a doc comment is a leak in a
+public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
+in examples.
 
-The wrapper's last layer, a before/after fingerprint of the two real
-directories, is on by default and off with `--no-fingerprint`. CI runs it; the
-pre-push hook does not, because a live daemon and sibling worktrees write to
-`~/tbd` legitimately for the whole duration of a local run. It is a backstop,
+The wrapper's last layer, a before/after fingerprint of the three real
+directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
+locally and `--no-fingerprint` forces it off. The default follows the argument
+rather than contradicting it: a live daemon and sibling worktrees write to
+`~/tbd` legitimately for the whole duration of a local run, and any concurrent
+agent session starting in a new directory mints a fresh
+`~/.claude/projects/<cwd-hash>`. It is a backstop,
 not the primary guard: it compares directory *listings*, so a leak that writes
 to a fixed path — or one that cleans up after itself in a `defer` — is invisible
 to it, while the tripwire fails on the permission check every run regardless.
