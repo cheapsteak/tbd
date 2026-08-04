@@ -341,7 +341,7 @@ jobs:
               printf '%s\n' "<!-- claude-review-v2 -->"
               printf '%s\n' "<!-- last-reviewed-patch-id: $HEAD_PATCH_ID -->"
               printf '%s\n' "<!-- last-verdict: $VERDICT -->"
-              printf '%s\n' "_Review state marker for the [claude-review-v2 shadow check](https://github.com/$REPO/blob/$BASE_REF/.github/workflows/claude-code-review-v2.yml) — machine-read; see the review comment above._"
+              printf '%s\n' "_Review state marker for the [claude-review-v2 shadow check](https://github.com/$REPO/blob/$BASE_REF/.github/workflows/claude-code-review-v2.yml) — machine-read; see the latest review comment on this PR._"
               printf '\n%s\n' "> ⏭️ Review skipped — diff unchanged since the last review (patch-id match). Re-asserting the recorded verdict: $VERDICT. (The prior marker comment could not be found to update.)"
             } > "$note_file"
             gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$note_file" > /dev/null \
@@ -575,7 +575,7 @@ jobs:
             printf '%s\n' "<!-- claude-review-v2 -->"
             printf '%s\n' "<!-- last-reviewed-patch-id: $HEAD_PATCH_ID -->"
             printf '%s\n' "<!-- last-verdict: $verdict -->"
-            printf '%s\n' "_Review state marker for the [claude-review-v2 shadow check](https://github.com/$REPO/blob/$BASE_REF/.github/workflows/claude-code-review-v2.yml) — machine-read; see the review comment above._"
+            printf '%s\n' "_Review state marker for the [claude-review-v2 shadow check](https://github.com/$REPO/blob/$BASE_REF/.github/workflows/claude-code-review-v2.yml) — machine-read; see the latest review comment on this PR._"
           } > "$marker_file"
           if gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate > "$tmp/all-comments.json"; then
             # The startswith matcher is exact here: this workflow authors the
