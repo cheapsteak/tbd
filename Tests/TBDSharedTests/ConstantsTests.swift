@@ -95,6 +95,25 @@ import Foundation
         let url = TBDConstants.claudeScratchpadBase(environment: ["TBD_CLAUDE_SCRATCH_BASE": ""])
         #expect(url.path == "/private/tmp/claude-\(getuid())")
     }
+
+    /// The host Claude store's single resolution point. `TBDApp` reads it too
+    /// (`LegacyHookSettingsPath`), so it lives here rather than in the daemon.
+    @Test func claudeHostHomeHonorsOverride() {
+        let url = TBDConstants.claudeHostHome(
+            environment: ["TBD_CLAUDE_HOST_HOME": "/tmp/acme-claude-host"]
+        )
+        #expect(url.path == "/tmp/acme-claude-host")
+    }
+
+    /// The other branch, plus the empty-is-unset rule the other overrides
+    /// follow. Asserted with `homeDirectoryForCurrentUser` rather than a
+    /// literal so it holds under the wrapper's `CFFIXED_USER_HOME`.
+    @Test func claudeHostHomeFallsBackToDotClaude() {
+        let expected = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true).path
+        #expect(TBDConstants.claudeHostHome(environment: [:]).path == expected)
+        #expect(TBDConstants.claudeHostHome(environment: ["TBD_CLAUDE_HOST_HOME": ""]).path == expected)
+    }
 }
 
 /// Smoke-tests that the production computed vars are correctly wired to the
@@ -109,7 +128,9 @@ import Foundation
 /// Its wiring is covered transitively by the derived-path vars below.
 ///
 /// `socketPath` is safe to check with a suffix because no suite in this
-/// process sets TBD_SOCKET_PATH.
+/// process sets TBD_SOCKET_PATH, and `scripts/test.sh` — which does set it for
+/// the whole run — deliberately pins it to `$TBD_HOME/sock` so this suffix
+/// still holds.
 @Suite struct ProductionVarSmokeSuite {
     @Test func databasePathSuffix() {
         #expect(TBDConstants.databasePath.hasSuffix("/state.db"))

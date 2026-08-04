@@ -32,7 +32,7 @@ struct PluginDirWriter {
     }
 
     /// Absolute path to the plugin directory, e.g.
-    /// `/Users/chang/Library/Application Support/TBD/plugin`.
+    /// `/Users/me/Library/Application Support/TBD/plugin`.
     /// Used by `writePlugin()` and by tests that inject a custom root.
     func pluginDirPath() -> String {
         applicationSupportRoot + "/TBD/plugin"

@@ -211,9 +211,20 @@ final class LegacyHooksCoordinator {
 /// Constants the coordinator surfaces in the dialog body. Kept separate so
 /// the overlay hint stays in sync if we ever move the file.
 enum LegacyHookSettingsPath {
-    static let global: String = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude")
-        .appendingPathComponent("settings.json")
-        .path
+    /// Resolved through `TBDConstants.claudeHostHome`, the one place
+    /// `TBD_CLAUDE_HOST_HOME` is read, rather than hand-built from the home
+    /// directory. Display-only — this string goes into a dialog body — but the
+    /// hand-built form named the developer's real `~/.claude` under any
+    /// override, which is the same shape as the resolution bug the daemon side
+    /// just fixed, and a dialog that names a file the daemon is not reading is
+    /// worse than no dialog.
+    ///
+    /// A `var`, not a `let`: `claudeHostHome` re-reads the environment on every
+    /// access, and a stored `let` would freeze whatever it was at first touch.
+    static var global: String {
+        TBDConstants.claudeHostHome
+            .appendingPathComponent("settings.json")
+            .path
+    }
     static let overlayHint = "~/tbd/runtime/claude-overlay.json"
 }

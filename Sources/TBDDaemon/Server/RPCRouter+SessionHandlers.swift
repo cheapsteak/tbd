@@ -38,8 +38,16 @@ extension RPCRouter {
         // handleTerminalTranscript. The app supplies these via SessionSummary
         // entries that the daemon itself produced, but a crafted RPC could
         // ask for any user-accessible file otherwise.
-        let projectsBase = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".claude/projects")
+        //
+        // Resolved through the same single point as
+        // `ClaudeProjectDirectory.resolve`, so the guard and the resolver
+        // cannot disagree about where the store is. They did while this one
+        // hand-built the path: under `scripts/test.sh` the resolver honoured
+        // `TBD_CLAUDE_HOST_HOME` and this rejected everything it returned.
+        // With the variable unset both read `~/.claude/projects` — the
+        // boundary is unchanged in production.
+        let projectsBase = ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
+            .appendingPathComponent("projects", isDirectory: true)
             .standardizedFileURL.path
         let candidate = URL(fileURLWithPath: params.filePath).standardizedFileURL.path
         guard candidate.hasPrefix(projectsBase + "/") else {

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
@@ -112,9 +113,9 @@ extension TBDHomeSerialized {
         // Isolate from the developer's ~/tbd.
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -140,9 +141,9 @@ extension TBDHomeSerialized {
     @Test func resolveOverlayPathIsIdempotentForSameSessionKey() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -165,9 +166,9 @@ extension TBDHomeSerialized {
         // existing *regular file* so createDirectory(runtime) throws.
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -186,9 +187,9 @@ extension TBDHomeSerialized {
     @Test func removePerSessionOverlayDeletesTheFile() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -209,9 +210,9 @@ extension TBDHomeSerialized {
     @Test func pruneOrphanedSessionOverlaysKeepsLiveDeletesOrphans() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -239,9 +240,9 @@ extension TBDHomeSerialized {
     @Test func pruneOrphanedSessionOverlaysWithEmptyLiveSetDeletesAll() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -317,9 +318,9 @@ extension TBDHomeSerialized {
     @Test func resolveOverlayPathWithExtraSettingsWritesPerSessionMergedFile() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -345,9 +346,9 @@ extension TBDHomeSerialized {
     @Test func resolveOverlayPathWithMalformedExtraSettingsDoesNotThrowAndKeepsHooks() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -373,9 +374,9 @@ extension TBDHomeSerialized {
     @Test func repoSettingsFragmentReadsFileAndIsNilWhenMissing() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -415,9 +416,9 @@ extension TBDHomeSerialized {
     @Test func resolveOverlayPathWithNilRepoFragmentAndPerSpawnMatchesPerSpawnOnly() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -439,9 +440,9 @@ extension TBDHomeSerialized {
     @Test func resolveOverlayPathWithRepoFragmentAloneWritesPerSessionMergedFile() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -462,9 +463,9 @@ extension TBDHomeSerialized {
     @Test func repoAndPerSpawnFragmentsMergeWithPerSpawnWinningCollisions() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -490,9 +491,9 @@ extension TBDHomeSerialized {
     @Test func malformedRepoFragmentDegradesButValidPerSpawnStillApplies() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -511,9 +512,9 @@ extension TBDHomeSerialized {
     @Test func malformedPerSpawnFragmentDegradesButValidRepoStillApplies() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 
@@ -532,9 +533,9 @@ extension TBDHomeSerialized {
     @Test func bothFragmentsMalformedDegradesToHooksOnlyPerSessionFile() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
 

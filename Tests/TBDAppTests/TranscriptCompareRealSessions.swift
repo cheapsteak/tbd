@@ -76,9 +76,9 @@ enum TranscriptCompareRealSessions {
         // inside a long `<task-notification>` envelope which the parser renders
         // as a right-aligned blue USER bubble. We anchor on the phrase (rather
         // than a hardcoded index) so the committed scenario survives session
-        // edits, and so no real session-id is baked into the source. The path is
-        // env-overridable and defaults to the scratch copy; the JSONL itself is
-        // never committed.
+        // edits, and so no real session-id is baked into the source. The path
+        // comes from `TBD_COMPARE_THIS_SESSION` only; the JSONL itself is never
+        // committed.
         if let path = resolveThisSession() {
             result.append(Scenario(
                 name: "thisSession-phrase",
@@ -93,18 +93,22 @@ enum TranscriptCompareRealSessions {
         return result
     }
 
-    /// Resolve the "this session" JSONL: `TBD_COMPARE_THIS_SESSION` env override
-    /// first, else the conventional scratchpad copy path. Returns nil (scenario
-    /// skipped) when neither exists, so the gated run still succeeds elsewhere.
-    private static func resolveThisSession() -> String? {
+    /// Resolve the "this session" JSONL from `TBD_COMPARE_THIS_SESSION`.
+    /// Returns nil (scenario skipped) when it is unset or names a missing file,
+    /// so the gated run still succeeds elsewhere.
+    ///
+    /// **Env var only, by design.** This used to fall back to one developer's
+    /// scratchpad path, which committed that developer's username and a real
+    /// worktree name into a public, multi-tenant repo — and contradicted this
+    /// file's own doc comment above. Point the variable at a copy of whatever
+    /// session you are debugging.
+    static func resolveThisSession() -> String? {
         let fm = FileManager.default
         if let override = ProcessInfo.processInfo.environment["TBD_COMPARE_THIS_SESSION"],
            fm.fileExists(atPath: override) {
             return override
         }
-        let fallback = "/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-transcript-row-flatten"
-            + "/6F6A46F5-0E30-4CF8-A06C-A5C628760FF5/scratchpad/this-session-6F6A46F5.jsonl"
-        return fm.fileExists(atPath: fallback) ? fallback : nil
+        return nil
     }
 
     /// Resolve a JSONL path: env-var override first, else a recursive glob under

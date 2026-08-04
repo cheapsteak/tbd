@@ -104,12 +104,29 @@ public enum LegacyHookScanner {
         return removed
     }
 
-    /// Path to the user's global Claude settings.
-    public static var globalSettingsPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
+    /// Path to the user's global Claude settings, resolved from `environment`.
+    ///
+    /// Goes through `ClaudeProfileConfigDirManager.resolveHostBaseDirectory` —
+    /// the single resolution point for `TBD_CLAUDE_HOST_HOME` — rather than
+    /// hand-building `homeDirectoryForCurrentUser/.claude`. Hand-building it is
+    /// the leak shape `CLAUDE.md` names: it ignores the fence `scripts/test.sh`
+    /// puts around the developer's real `~/.claude`, so any test that reached
+    /// `handleDaemonRemoveLegacyGlobalHooks` would have rewritten the real
+    /// `settings.json` (and dropped a `SettingsJSONSafety` backup beside it).
+    /// Naming the path at the call site does not fence it; resolving it here
+    /// does. With the variable unset the result is `~/.claude/settings.json`,
+    /// exactly as before.
+    public static func globalSettingsPath(environment: [String: String]) -> String {
+        ClaudeProfileConfigDirManager.resolveHostBaseDirectory(environment: environment)
             .appendingPathComponent("settings.json")
             .path
+    }
+
+    /// The same path resolved from the process environment. Mirrors
+    /// `TBDConstants.configDir` / `configDir(environment:)`: the ambient
+    /// spelling for production call sites, the explicit one for tests.
+    public static var globalSettingsPath: String {
+        globalSettingsPath(environment: ProcessInfo.processInfo.environment)
     }
 
     /// Repo-level settings paths for every repo registered in the TBD DB.
@@ -131,8 +148,16 @@ public enum LegacyHookScanner {
     /// number of entries removed and the backup file path (if a backup was
     /// just created — nil means a prior backup already existed or the file
     /// was missing).
+    ///
+    /// `path` is required and deliberately undefaulted. A default of
+    /// `globalSettingsPath` reads as a convenience and is really an ambient
+    /// write to the developer's real `~/.claude/settings.json` that no call
+    /// site names — the same shape as the `resolveConfigDir` static that let
+    /// every injected test seam be decorative. The one production caller
+    /// passes `globalSettingsPath` explicitly, alongside the `detectEntries`
+    /// call that always did.
     @discardableResult
-    public static func removeGlobalEntries(at path: String = globalSettingsPath) throws -> RemoveLegacyGlobalHooksResult {
+    public static func removeGlobalEntries(at path: String) throws -> RemoveLegacyGlobalHooksResult {
         guard FileManager.default.fileExists(atPath: path) else {
             return RemoveLegacyGlobalHooksResult(removedCount: 0, backupPath: nil)
         }

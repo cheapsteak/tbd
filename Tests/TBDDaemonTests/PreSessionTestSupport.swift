@@ -21,9 +21,9 @@ func isolateTBDHome() -> (home: URL, cleanup: () -> Void) {
     let home = FileManager.default.temporaryDirectory
         .appendingPathComponent("tbd-presession-\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-    setenv("TBD_HOME", home.path, 1)
+    let priorTBDHome = setTBDHome(home.path)
     return (home, {
-        unsetenv("TBD_HOME")
+        restoreTBDHome(priorTBDHome)
         try? FileManager.default.removeItem(at: home)
     })
 }

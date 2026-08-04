@@ -23,9 +23,22 @@ enum ClaudeProjectDirectory {
     private nonisolated(unsafe) static var cache: [String: CacheEntry] = [:]
     private static let lock = NSLock()
 
+    /// - Parameter projectsBase: the `projects/` root to search, or `nil` for
+    ///   the host Claude store's.
+    ///
+    ///   That fallback goes through
+    ///   `ClaudeProfileConfigDirManager.resolveHostBaseDirectory` — the single
+    ///   resolution point for `TBD_CLAUDE_HOST_HOME` — rather than
+    ///   hand-building `NSHomeDirectory()/.claude/projects`. Hand-building it
+    ///   escaped the fence `scripts/test.sh` puts around the developer's real
+    ///   `~/.claude`, exactly as `LegacyHookScanner.globalSettingsPath` did:
+    ///   every RPC path that resolves a transcript reaches this line, and the
+    ///   suites covering them planted their JSONL fixtures in the real store to
+    ///   match. With the variable unset the result is `~/.claude/projects`,
+    ///   exactly as before.
     static func resolve(worktreePath: String, projectsBase: URL? = nil) -> URL? {
-        let base = projectsBase ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".claude/projects")
+        let base = projectsBase ?? ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
+            .appendingPathComponent("projects", isDirectory: true)
         // Key on BOTH the projects base and the worktree path: promote and the
         // per-profile transcript sync resolve the same worktree path under
         // different roots, and a path-only key would return the first root's
