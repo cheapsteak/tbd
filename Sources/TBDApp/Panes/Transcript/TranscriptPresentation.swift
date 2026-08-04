@@ -13,12 +13,17 @@ struct ActivityGroupSummary: Hashable {
     let requiresResponse: Bool
     let isExpanded: Bool
 
-    var statusLabel: String {
+    /// Trailing status text, or nil when every item in the group succeeded. A
+    /// fully-successful group says nothing: the row's own content already reads
+    /// as done, so a "complete" label was redundant chrome on the common case.
+    /// Non-nil exactly when `requiresResponse || errorCount > 0 ||
+    /// pendingCount > 0`.
+    var statusLabel: String? {
         if requiresResponse { return "Needs response" }
         if errorCount == 1 { return "1 failed" }
         if errorCount > 1 { return "\(errorCount) failed" }
         if pendingCount > 0 { return "In progress" }
-        return "Complete"
+        return nil
     }
 }
 
@@ -110,6 +115,16 @@ struct TranscriptPresentation {
 
         func flushActivity() {
             guard let first = pendingActivity.first else { return }
+            // A run of exactly one activity is not worth wrapping: a "Worked ·
+            // 1 action" summary repeats what the row underneath already says
+            // and offers a disclosure control with nothing behind it. Emit the
+            // row itself, as if it had never been grouped. Both renderers
+            // inherit this — neither can see a one-item summary node.
+            if pendingActivity.count == 1 {
+                projected.append(first)
+                pendingActivity.removeAll(keepingCapacity: true)
+                return
+            }
             let groupID = "\(first.id)#activity-group"
             let requiresResponse = pendingActivity.contains(where: isResponseRequired)
             let errorCount = pendingActivity.reduce(into: 0) { total, node in

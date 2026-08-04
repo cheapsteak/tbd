@@ -45,16 +45,6 @@ struct ChatBubbleView: View {
             bottom: 4,
             trailing: 12
         ))
-        .overlay(alignment: .leading) {
-            if !isUser {
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(Color.secondary.opacity(0.28))
-                    .frame(width: 2)
-                    .padding(.vertical, 4)
-                    .offset(x: 4)
-                    .accessibilityHidden(true)
-            }
-        }
     }
 
     @ViewBuilder

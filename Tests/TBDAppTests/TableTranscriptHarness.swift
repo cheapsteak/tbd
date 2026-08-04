@@ -1134,7 +1134,8 @@ struct TableTranscriptHarness {
         case .toolCall(_, let name, let inputJSON, _, let result, _):
             return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"
         case .activityGroupSummary(let summary):
-            return "Worked \(summary.labels.joined(separator: " ")) \(summary.statusLabel)"
+            return (["Worked"] + summary.labels + [summary.statusLabel].compactMap { $0 })
+                .joined(separator: " ")
         case .subagentSummary(_, _, let agentType):
             return agentType ?? "subagent"
         }

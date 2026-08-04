@@ -133,12 +133,11 @@ enum ActivityRowFormatter {
     }
 
     private static func activityGroup(_ summary: ActivityGroupSummary) -> ActivityRowPresentation {
+        // A summary node is only emitted for runs of two or more (a lone
+        // activity renders as its own row), so the count is always plural.
         var segments = [
             ActivityRowSegment(text: "Worked", style: .primary),
-            ActivityRowSegment(
-                text: "· \(summary.itemCount) \(summary.itemCount == 1 ? "action" : "actions")",
-                style: .secondary
-            )
+            ActivityRowSegment(text: "· \(summary.itemCount) actions", style: .secondary)
         ]
         if !summary.labels.isEmpty {
             segments.append(ActivityRowSegment(
@@ -146,15 +145,17 @@ enum ActivityRowFormatter {
                 style: .tertiary
             ))
         }
+        // No badge when everything in the group succeeded — `statusLabel` is nil
+        // exactly then, and a "complete" capsule was redundant chrome.
         var badges: [ActivityRowBadge] = []
-        if summary.requiresResponse {
-            badges.append(ActivityRowBadge(text: "needs response", kind: .error))
-        } else if summary.errorCount > 0 {
-            badges.append(ActivityRowBadge(text: summary.statusLabel.lowercased(), kind: .error))
-        } else if summary.pendingCount > 0 {
-            badges.append(ActivityRowBadge(text: "active", kind: .neutral))
-        } else {
-            badges.append(ActivityRowBadge(text: "complete", kind: .neutral))
+        if let status = summary.statusLabel {
+            if summary.requiresResponse {
+                badges.append(ActivityRowBadge(text: "needs response", kind: .error))
+            } else if summary.errorCount > 0 {
+                badges.append(ActivityRowBadge(text: status.lowercased(), kind: .error))
+            } else {
+                badges.append(ActivityRowBadge(text: "active", kind: .neutral))
+            }
         }
         return ActivityRowPresentation(
             iconSystemName: "point.3.connected.trianglepath.dotted",
@@ -166,7 +167,8 @@ enum ActivityRowFormatter {
             accessorySystemName: summary.isExpanded ? "chevron.down" : "chevron.right",
             accessoryAlwaysVisible: true,
             accessibilityLabel: "\(summary.isExpanded ? "Collapse" : "Expand") "
-                + "\(summary.itemCount) actions, \(summary.statusLabel)"
+                + "\(summary.itemCount) actions"
+                + (summary.statusLabel.map { ", \($0)" } ?? "")
         )
     }
 

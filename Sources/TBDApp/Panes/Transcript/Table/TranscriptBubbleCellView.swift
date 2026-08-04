@@ -327,7 +327,6 @@ final class TranscriptBubbleTextView: NSTextView {}
 @MainActor
 final class TranscriptBubbleCellView: NSTableCellView {
     private let backgroundBox = RoundedBoxView()
-    private let signalSpine = RoundedBoxView()
     private let header = NSTextField(labelWithString: "")
     /// Vertical stack of block subviews inside the bubble.
     private let blockStack = NSStackView()
@@ -363,10 +362,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
         backgroundBox.cornerRadius = TranscriptBubbleGeometry.cornerRadius
         backgroundBox.translatesAutoresizingMaskIntoConstraints = false
 
-        signalSpine.cornerRadius = 1
-        signalSpine.fillColor = NSColor.secondaryLabelColor.withAlphaComponent(0.28)
-        signalSpine.translatesAutoresizingMaskIntoConstraints = false
-
         header.font = TranscriptBubbleGeometry.headerFont
         header.textColor = .tertiaryLabelColor
         header.backgroundColor = .clear
@@ -385,7 +380,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
         // so the stack's text views are topmost and take the mouse for selection
         // while the bubble paints behind them.
         addSubview(backgroundBox)
-        addSubview(signalSpine)
         addSubview(header)
         addSubview(blockStack, positioned: .above, relativeTo: backgroundBox)
 
@@ -405,10 +399,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
         NSLayoutConstraint.activate([
             widthConstraint,
             heightConstraint,
-            signalSpine.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            signalSpine.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
-            signalSpine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -g.outerVertical),
-            signalSpine.widthAnchor.constraint(equalToConstant: 2),
             header.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
             backgroundBox.topAnchor.constraint(
                 equalTo: header.bottomAnchor, constant: g.headerBodyGap),
@@ -450,7 +440,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
 
         header.stringValue = headerText
         backgroundBox.fillColor = g.backgroundColor(for: role)
-        signalSpine.isHidden = role == .user
 
         rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
 

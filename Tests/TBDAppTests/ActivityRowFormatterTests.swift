@@ -240,6 +240,57 @@ struct ActivityRowFormatterTests {
         #expect(p.badges == [ActivityRowBadge(text: "failed", kind: .error)])
     }
 
+    // MARK: Activity group summary badges
+
+    private func groupNode(
+        errorCount: Int = 0,
+        pendingCount: Int = 0,
+        requiresResponse: Bool = false,
+        itemCount: Int = 3
+    ) -> TranscriptRenderNode {
+        let summary = ActivityGroupSummary(
+            id: "g1#activity-group",
+            itemCount: itemCount,
+            labels: ["Reads", "Commands"],
+            errorCount: errorCount,
+            pendingCount: pendingCount,
+            requiresResponse: requiresResponse,
+            isExpanded: false
+        )
+        return TranscriptRenderNode(id: summary.id, kind: .activityGroupSummary(summary), badgeUsage: nil)
+    }
+
+    @Test("Activity group where everything succeeded carries NO badge")
+    func activityGroupSucceededHasNoBadge() throws {
+        let p = try #require(ActivityRowFormatter.presentation(for: groupNode()))
+        #expect(p.badges.isEmpty)
+        #expect(!p.isError)
+        // …and the accessibility label drops the status clause entirely.
+        #expect(p.accessibilityLabel == "Expand 3 actions")
+    }
+
+    @Test("Activity group failures, questions and pending work still badge")
+    func activityGroupAttentionBadges() throws {
+        let failed = try #require(ActivityRowFormatter.presentation(for: groupNode(errorCount: 2)))
+        #expect(failed.badges == [ActivityRowBadge(text: "2 failed", kind: .error)])
+        #expect(failed.isError)
+
+        let asking = try #require(
+            ActivityRowFormatter.presentation(for: groupNode(requiresResponse: true)))
+        #expect(asking.badges == [ActivityRowBadge(text: "needs response", kind: .error)])
+
+        let pending = try #require(ActivityRowFormatter.presentation(for: groupNode(pendingCount: 1)))
+        #expect(pending.badges == [ActivityRowBadge(text: "active", kind: .neutral)])
+        #expect(!pending.isError)
+        #expect(pending.accessibilityLabel == "Expand 3 actions, In progress")
+    }
+
+    @Test("Activity group title is always plural (one-item runs are never wrapped)")
+    func activityGroupTitleIsPlural() throws {
+        let p = try #require(ActivityRowFormatter.presentation(for: groupNode(itemCount: 2)))
+        #expect(titleText(p).contains("· 2 actions"))
+    }
+
     @Test("Skill body → 'Skill' + skill-name segments")
     func skillBody() throws {
         let node = TranscriptRenderNode.makeSkillBody(

@@ -138,7 +138,9 @@ struct ActivityGroupSummaryRow: View {
                     .foregroundStyle(.secondary)
                 Text("Worked")
                     .font(.system(.subheadline, design: .rounded, weight: .medium))
-                Text("· \(summary.itemCount) \(summary.itemCount == 1 ? "action" : "actions")")
+                // Always plural: a lone activity renders as its own row, so no
+                // one-item summary node ever reaches a renderer.
+                Text("· \(summary.itemCount) actions")
                     .foregroundStyle(.secondary)
                 if !summary.labels.isEmpty {
                     Text("· \(summary.labels.joined(separator: " · "))")
@@ -146,9 +148,13 @@ struct ActivityGroupSummaryRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                Text(summary.statusLabel)
-                    .font(.caption2)
-                    .foregroundStyle(summary.errorCount > 0 ? Color.red : Color.secondary)
+                // Nil — and so nothing rendered — when every item succeeded,
+                // matching the native cell's badge logic.
+                if let status = summary.statusLabel {
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundStyle(summary.errorCount > 0 ? Color.red : Color.secondary)
+                }
                 Image(systemName: summary.isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
@@ -160,7 +166,8 @@ struct ActivityGroupSummaryRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(summary.isExpanded ? "Collapse" : "Expand") \(summary.itemCount) actions, \(summary.statusLabel)"
+            "\(summary.isExpanded ? "Collapse" : "Expand") \(summary.itemCount) actions"
+                + (summary.statusLabel.map { ", \($0)" } ?? "")
         )
     }
 }
