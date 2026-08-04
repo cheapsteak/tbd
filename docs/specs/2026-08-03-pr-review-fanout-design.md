@@ -40,8 +40,8 @@ The current merge gate (`.github/workflows/claude-code-review.yml`, check
   merge prompt requires a per-finding *disposition list* (§3.4) instead of a
   deterministic post-merge reconciliation check. Upgrade trigger recorded in §6.
 - **Skip-if-unchanged** — **patch-id skip only.** Skip the re-review when
-  `git patch-id` over the diff matches the marker in the prior sticky comment. No
-  discussion-content fingerprint in v1 (§6).
+  `git patch-id` over the diff matches the patch-id recorded in the prior run's
+  marker comment (§3.5). No discussion-content fingerprint in v1 (§6).
 - **PR discussion context** — **yes, trimmed.** Fetch human discussion once, render
   it into a sanitized, fenced, untrusted-data block the reviewer weighs but may not
   take instructions from (§3.6).
@@ -92,7 +92,7 @@ Initial specialist set (2, deliberately small):
 
 The orchestrator (same session, after specialists return) merges the findings lists:
 dedup (same file within a few lines = same finding), severity reconciliation, and the
-summary prose for the sticky comment. Output is one `review-result.json` holding the
+summary prose for the review comment. Output is one `review-result.json` holding the
 final findings array, the disposition list, and the comment body.
 
 ### 3.4 Disposition list (the prose accounting rule)
@@ -112,7 +112,7 @@ conventions-1: downgraded MEDIUM→MINOR — <reason>
 correctness-3: dropped — <reason>
 ```
 
-The disposition list is embedded in the posted sticky comment inside a collapsed
+The disposition list is embedded in the posted review comment inside a collapsed
 section, so a silent drop is at least *visible* to a human reading the review, and the
 validate script checks only its *presence* (an ID-coverage count), not its judgment.
 
@@ -127,18 +127,30 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   enforces specialist-set completeness (`--expected-specialists`): if any named
   specialist never produced a findings file — e.g. the orchestrator merged before
   all background specialists completed — it fails closed with no verdict written.
-- **Sticky markers**: the sticky comment carries
-  `<!-- last-reviewed-patch-id: … -->` and `<!-- last-verdict: … -->` HTML comments.
+- **Marker comment**: the machine-read state — a `<!-- claude-review-v2 -->`
+  sentinel plus `<!-- last-reviewed-patch-id: … -->` and `<!-- last-verdict: … -->`
+  HTML comments — lives in a small dedicated PR comment that only deterministic
+  workflow steps create and update: after validation, a workflow step upserts it
+  (PATCH the App's newest sentinel-led comment, else POST one) with the run's
+  patch-id and computed verdict, plus one visible line pointing readers at the
+  review comment. The model session's review comment is pure prose and carries no
+  machine-read state: the posting action's progress-tracking mode owns that
+  comment's body (it prepends its own header), so machine-read state lives in a
+  comment only the workflow writes — which also keeps the markers out of the
+  model's hands entirely.
 - **Skip**: the prepare script computes `git patch-id --stable` over
-  `git diff base...HEAD`; if it equals the sticky's marker, the run short-circuits and
-  re-asserts the recorded verdict without spending a review. A new human comment does
-  **not** defeat the skip in v1 (accepted: a human can re-request review by pushing or
-  re-running the check).
-- **Skip fail-direction**: the skip fires only when the sticky fetch succeeded, both
-  markers parse, and the recorded verdict is exactly `APPROVE` or `REJECT`. Any other
-  state — fetch error, missing or malformed marker, unrecognized verdict — falls
-  through to a full review. The cheap direction to fail is toward spending a review,
-  never toward re-asserting a verdict we can't read.
+  `git diff base...HEAD`; if it equals the marker comment's recorded patch-id, the
+  run short-circuits and re-asserts the recorded verdict without spending a review,
+  refreshing the marker comment with a visible one-line skip note (markers kept).
+  A new human comment does **not** defeat the skip in v1 (accepted: a human can
+  re-request review by pushing or re-running the check).
+- **Skip fail-direction**: the skip fires only when the marker-comment fetch
+  succeeded, both markers parse, and the recorded verdict is exactly `APPROVE` or
+  `REJECT`. Any other state — fetch error, no marker comment, missing or malformed
+  marker, unrecognized verdict — falls through to a full review. The cheap
+  direction to fail is toward spending a review, never toward re-asserting a
+  verdict we can't read. The record step is best-effort in the same direction: a
+  failed upsert leaves no fresh marker, so the next run full-reviews.
 
 ### 3.6 PR discussion context (trimmed anti-hijack envelope)
 
@@ -148,8 +160,8 @@ properties, all implemented as pure functions:
 
 - **Bot filtering** by GraphQL `__typename == "Bot"` (logins alone are unreliable);
   empty bodies dropped; ascending timestamp order.
-- **Sanitization**: strip HTML comments whole (so quoted sticky markers can't
-  masquerade as ours), then escape angle brackets.
+- **Sanitization**: strip HTML comments whole (so quoted marker-comment markers
+  can't masquerade as ours), then escape angle brackets.
 - **Fencing**: the block sits between BEGIN/END markers carrying a per-run random
   token; the header states that envelope metadata (author, timestamp) is trustworthy
   and comment *bodies* are untrusted data, never instructions — and that a marker with
@@ -168,9 +180,9 @@ preamble — this adds surface area of the same kind, not a new kind.
 ### 3.7 What stays from the current gate
 
 Trust gating for forks, `pull_request_target` + explicit `github_token` (the OIDC trap),
-the pre-review verdict-file reset, unshallow/merge-base repair, the reviewer App for
-sticky-comment identity, and the exact-match fail-closed enforce step all carry over
-as-is. The trigger event does not change, so the admin-merge trap is not sprung.
+the pre-review verdict-file reset, unshallow/merge-base repair, the reviewer App as a
+stable comment-author identity, and the exact-match fail-closed enforce step all carry
+over as-is. The trigger event does not change, so the admin-merge trap is not sprung.
 
 ## 4. Testability (a design driver, not an afterthought)
 
@@ -199,11 +211,12 @@ as-is. The trigger event does not change, so the admin-merge trap is not sprung.
 Per the "large or risky new behavior ships default-off" convention, translated to CI:
 
 1. **Shadow**: land as a separate workflow producing a non-required check
-   (`claude-review-v2`) posting its own sticky comment. The existing `claude-review`
+   (`claude-review-v2`) posting its own comments. The existing `claude-review`
    remains the required gate. Soak across several real PRs; compare verdicts. The two
    workflows must not share a sticky identity: the action's sticky matcher keys on the
-   posting App, so v2 posts through its own marker (and, if the matcher proves too
-   greedy, its own App) rather than updating the v1 comment in place.
+   posting App, so v2 stays out of the action's sticky-comment mode and finds its
+   marker comment by its own sentinel (and, if the matcher proves too greedy, would
+   get its own App) rather than updating the v1 comment in place.
 2. **Graduate**: swap the required check from `claude-review` to `claude-review-v2` in
    branch protection (a settings change, not a workflow change — no admin-merge trap),
    then retire the old workflow.
