@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 #
-# `swift test`, with the developer's real `~/tbd` and `~/.claude` fenced off.
+# The test suite, with the developer's real `~/tbd`, `~/.claude` and `~/.codex`
+# fenced off.
+#
+# SwiftPM is invoked through `scripts/swift-safe`, never directly: that wrapper
+# holds a machine-global admission lock and bounds compiler jobs so concurrent
+# TBD worktrees cannot each start a full compiler swarm, and the repo guardrail
+# blocks raw `swift build/test/run` for that reason. The two wrappers solve
+# orthogonal problems — admission control there, filesystem isolation here — so
+# they stack rather than replace one another, and every argument this script
+# does not consume is forwarded through to `swift test`.
 #
 # Three layers. The first two are always on; the third is CI-only.
 #
@@ -285,7 +294,7 @@ env \
   TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
   HOME="$fake_home" \
   CFFIXED_USER_HOME="$fake_home" \
-  swift test ${swift_test_args[@]+"${swift_test_args[@]}"}
+  scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}
 test_status=$?
 set -e
 

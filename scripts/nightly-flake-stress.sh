@@ -178,7 +178,7 @@ run_governed_swift() {
   local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
   run_with_deadline "$outer_deadline_s" "$log" env \
     TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
-    "$REPO_ROOT/scripts/swift-safe" "$@"
+    "$SCRIPT_DIR/swift-safe" "$@"
 }
 
 # Same governance as `run_governed_swift`, but through `scripts/test.sh` so the
@@ -192,7 +192,7 @@ run_governed_fenced() {
   local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
   run_with_deadline "$outer_deadline_s" "$log" env \
     TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
-    "$REPO_ROOT/scripts/test.sh" "$@"
+    "$SCRIPT_DIR/test.sh" "$@"
 }
 
 # The 1-MINUTE load average, which LAGS: measured here, the first iterations
