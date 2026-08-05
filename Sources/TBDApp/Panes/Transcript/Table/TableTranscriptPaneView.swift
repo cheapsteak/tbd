@@ -40,6 +40,10 @@ struct TableTranscriptPaneView: View {
     /// the last row.
     @State private var scrollToBottomToken: Int = 0
     @State private var activityGroupExpansion: [String: Bool] = [:]
+    /// Bumped alongside every write to `activityGroupExpansion`, so the table can
+    /// tell a user-driven disclosure toggle (anchor the clicked row) from a
+    /// streaming update (follow the tail).
+    @State private var activityToggleToken: Int = 0
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
@@ -190,6 +194,7 @@ struct TableTranscriptPaneView: View {
                 context: cardContext,
                 atBottom: $atBottom,
                 scrollToBottomToken: scrollToBottomToken,
+                activityToggleToken: activityToggleToken,
                 nodesProvider: { timedRenderNodes(presentation.nodes) }
             )
             // Compose the terminal with its current Claude session so a session
@@ -206,6 +211,7 @@ struct TableTranscriptPaneView: View {
 
     private func setActivityGroup(_ id: String, expanded: Bool) {
         activityGroupExpansion[id] = expanded
+        activityToggleToken &+= 1
     }
 
     // MARK: - Jump-to-Bottom

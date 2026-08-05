@@ -542,7 +542,16 @@ struct TableTranscriptHarness {
 
     /// Builds an offscreen 680x600 scroll view + table wired to an instrumented
     /// production Coordinator over `items`. Mirrors `makeNSView`'s setup.
-    private func makeScene(items: [TranscriptItem], appState: AppState, fixedSize: Bool) -> Scene {
+    ///
+    /// `nodes` overrides the render nodes the coordinator starts on — used by the
+    /// activity-group tests, whose lists come from `TranscriptPresentation.build`
+    /// (grouped/collapsed) rather than the raw per-item projection.
+    private func makeScene(
+        items: [TranscriptItem],
+        appState: AppState,
+        fixedSize: Bool,
+        nodes overrideNodes: [TranscriptRenderNode]? = nil
+    ) -> Scene {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
@@ -565,6 +574,17 @@ struct TableTranscriptHarness {
         tableView.delegate = coordinator
 
         let scrollView = NSScrollView()
+        // PIN THE SCROLLER GEOMETRY. `NSScroller.preferredScrollerStyle` follows the
+        // host's "Show scroll bars" setting and whether a scroll-capable pointing
+        // device is attached, so an unpinned scroll view is 680pt wide on a developer
+        // box with overlay scrollers and 663pt on a runner with legacy ones — and
+        // every measured row height is keyed by that width. Pin the LEGACY,
+        // autohiding shape (the moving one: the scroller claims its 17pt only once
+        // the document outgrows the viewport, i.e. after the first `reloadData`) so
+        // every environment exercises the same geometry AND the same mid-setup width
+        // change. `primeScene` is what absorbs that change.
+        scrollView.scrollerStyle = .legacy
+        scrollView.autohidesScrollers = true
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
@@ -572,7 +592,7 @@ struct TableTranscriptHarness {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
 
-        let nodes = transcriptRenderNodes(from: items)
+        let nodes = overrideNodes ?? transcriptRenderNodes(from: items)
         coordinator.nodes = nodes
         coordinator.previousNodes = nodes
 
@@ -971,6 +991,458 @@ struct TableTranscriptHarness {
                 "AskUserQuestion row must stay SwiftUI-hosted (TranscriptHostingCellView)")
     }
 
+    // MARK: - Activity-group disclosure (anchoring, caches, tail-follow)
+
+    /// Items shaped for the disclosure tests: `leadingBubbles` tall exchanges, then
+    /// a run of `groupSize` Read tool calls (which `TranscriptPresentation` folds
+    /// into ONE collapsible summary — the run needs ≥2 members to group at all),
+    /// then `trailingBubbles` exchanges to flush the run and give the list a tail.
+    private static func activityGroupFixture(
+        leadingBubbles: Int,
+        groupSize: Int,
+        trailingBubbles: Int
+    ) -> [TranscriptItem] {
+        func exchange(_ tag: String, _ index: Int) -> [TranscriptItem] {
+            [
+                .userPrompt(
+                    id: "\(tag)-u\(index)",
+                    text: "Question \(index): walk me through this part of the pipeline in "
+                        + "enough detail that the bubble wraps across several lines.",
+                    timestamp: nil
+                ),
+                .assistantText(
+                    id: "\(tag)-a\(index)",
+                    text: """
+                    Answer \(index): each upstream item becomes a render node cached by \
+                    `(id, contentVersion, width)`, so a re-poll never rebuilds an unchanged \
+                    row. This paragraph is deliberately long so the bubble has real height.
+
+                    A second paragraph adds vertical extent so scroll offsets can land in \
+                    the middle of a tall row.
+                    """,
+                    timestamp: nil,
+                    usage: nil
+                )
+            ]
+        }
+
+        var items: [TranscriptItem] = []
+        for i in 0..<leadingBubbles { items.append(contentsOf: exchange("lead", i)) }
+        for i in 0..<groupSize {
+            items.append(.toolCall(
+                id: "grp-t\(i)",
+                name: "Read",
+                inputJSON: #"{"file_path":"/x/Sources/Part\#(i).swift"}"#,
+                inputTruncatedTo: nil,
+                result: ToolResult(text: "1\timport AppKit\n", truncatedTo: nil, isError: false),
+                subagent: nil,
+                timestamp: nil
+            ))
+        }
+        for i in 0..<trailingBubbles { items.append(contentsOf: exchange("tail", i)) }
+        return items
+    }
+
+    /// The summary node id `TranscriptPresentation.build` mints for the fixture's
+    /// run of tool calls (first member's id + the group suffix).
+    private static let fixtureGroupID = "grp-t0#activity-group"
+
+    private static func groupNodes(_ items: [TranscriptItem], expanded: Bool) -> [TranscriptRenderNode] {
+        TranscriptPresentation.build(
+            items: items,
+            expansionOverrides: [fixtureGroupID: expanded]
+        ).nodes
+    }
+
+    /// Lets work the coordinator deferred with `DispatchQueue.main.async` — the
+    /// tail-follow `scrollToEnd` — actually run.
+    ///
+    /// `pump()` cannot do it: a Swift Testing `@MainActor` test body is ITSELF a
+    /// block executing on the serial main queue, so a nested run loop can never
+    /// re-enter that queue and the deferred block sits there until the test ends.
+    /// Suspending is what returns the queue, so the queued block runs and only
+    /// then does this continuation resume. Without this a test would "pass"
+    /// against a tail-follow that never fired.
+    private func drainMainQueue() async {
+        for _ in 0..<4 { await Task.yield() }
+    }
+
+    /// Primes `scene` on `nodes` exactly as production's first `updateNSView` does,
+    /// then keeps updating until the table's COLUMN WIDTH stops moving.
+    ///
+    /// The first `update` after `makeNSView` always takes the width-change branch
+    /// (`cachedColumnWidth` starts at 0): it measures the bottom window and reloads.
+    /// That reload is also what first makes the document taller than the viewport,
+    /// so an autohiding legacy scroller claims its 17pt on the NEXT layout pass —
+    /// AFTER those heights were cached. Every cache here is keyed by `(id,
+    /// contentVersion, width)`, so the whole cache is then unreachable, and the next
+    /// `update` legitimately takes the width-change branch again (wipe + re-measure)
+    /// instead of the `.rebuild` branch a disclosure test means to exercise. Rows
+    /// above the click fall back to the arithmetic estimate — which is ~30-45pt off
+    /// a measured bubble by design — and the anchor jumps by hundreds of points.
+    ///
+    /// So: settle the width FIRST, and only then take a "before" snapshot. Returns
+    /// the settled column width; fails the test if it never settles.
+    @discardableResult
+    private func primeScene(_ scene: Scene, nodes: [TranscriptRenderNode]) -> CGFloat {
+        for _ in 0..<4 {
+            let widthAtUpdate = scene.tableView.bounds.width
+            scene.coordinator.update(nodes: nodes, atBottom: .constant(true), activityToggleToken: 0)
+            settle(scene.tableView)
+            if scene.tableView.bounds.width == widthAtUpdate { return widthAtUpdate }
+        }
+        Issue.record("the table's column width never settled: \(scene.tableView.bounds.width)")
+        return scene.tableView.bounds.width
+    }
+
+    /// Realizes every row once — as a user who scrolled the whole transcript would —
+    /// so each carries an EXACT measured height rather than the cheap arithmetic
+    /// estimate `heightOfRow` serves for unrealized rows.
+    private func realizeAllRows(_ scene: Scene, count: Int) {
+        for row in 0..<count {
+            _ = scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
+        }
+        settle(scene.tableView)
+    }
+
+    /// Vertical gap between the viewport's bottom edge and the document bottom.
+    private func gapToBottom(_ scene: Scene) -> CGFloat {
+        let clip = scene.scrollView.contentView
+        return scene.tableView.frame.height - (clip.bounds.origin.y + clip.bounds.height)
+    }
+
+    /// Screen-space offset of `row`'s top edge from the top of the viewport.
+    private func screenOffset(of row: Int, in scene: Scene) -> CGFloat {
+        scene.tableView.rect(ofRow: row).origin.y - scene.scrollView.contentView.bounds.origin.y
+    }
+
+    /// REGRESSION GUARD: expanding a collapsed work group must leave the clicked
+    /// summary row exactly where it was on screen — only the content BELOW it may
+    /// move. The reported bug scrolled the whole view up by the height of the
+    /// revealed rows, because the toggle classifies as a `.rebuild` and the
+    /// rebuild's tail-follow re-pinned the bottom.
+    ///
+    /// Run from the bottom of the transcript (the reported case, where tail-follow
+    /// fires) and from a scrolled-up viewport (where the cache wipe's realize-time
+    /// height corrections were the drift source).
+    @Test("expanding a work group keeps the summary row anchored", arguments: [true, false])
+    func expandingGroupKeepsSummaryAnchored(atBottom: Bool) async throws {
+        let suiteName = "table-harness-group-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        // Shape of the fixture, both arms: more leading rows than the bottom-window
+        // precompute measures, so the rows ABOVE the anchor are ones only the CACHE
+        // can keep exact across the rebuild (a wipe sends them back to the arithmetic
+        // estimate and the anchor moves with them). The tail is short when the
+        // viewport must sit AT the bottom with the summary still on screen, and deep
+        // when the viewport must be clear of the tail-follow threshold.
+        let items = Self.activityGroupFixture(
+            leadingBubbles: 25, groupSize: 5, trailingBubbles: atBottom ? 1 : 8)
+        let collapsed = Self.groupNodes(items, expanded: false)
+        let expanded = Self.groupNodes(items, expanded: true)
+        #expect(expanded.count == collapsed.count + 5, "expansion must reveal the group's 5 rows")
+
+        let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+
+        // Prime exactly as production does, then let the column width settle (see
+        // `primeScene`) — a width that moves mid-test sends the toggle down the
+        // width-change branch, which wipes the caches for a reason that has nothing
+        // to do with what this test guards.
+        let primedWidth = primeScene(scene, nodes: collapsed)
+
+        let summaryRow = try #require(collapsed.firstIndex { $0.id == Self.fixtureGroupID })
+        let clip = scene.scrollView.contentView
+
+        // Realize every row, so the "before" snapshot is entirely EXACT measurements.
+        // Without this the rows above the anchor carry the arithmetic estimate, which
+        // is deliberately cheap and can sit tens of points off the measurement — so a
+        // later estimate→exact transition (from anything at all: a re-measure, a
+        // width change, a different host font) would masquerade as anchor drift. The
+        // guard below then reads exactly as written: heights that were exact before
+        // the click must still be exact, and identical, after it.
+        realizeAllRows(scene, count: collapsed.count)
+        let unmeasuredAbove = (0..<summaryRow)
+            .filter { scene.coordinator.cachedExactHeight(for: collapsed[$0]) == nil }
+        #expect(unmeasuredAbove.isEmpty,
+                Comment(rawValue: "every row above the anchor must be exactly measured before the "
+                    + "click, else an estimate→exact transition can masquerade as drift; "
+                    + "unmeasured rows: \(unmeasuredAbove.prefix(5))"))
+
+        if atBottom {
+            scene.coordinator.scrollToEnd(animated: false)
+            settle(scene.tableView)
+            #expect(gapToBottom(scene) <= 120,
+                    Comment(rawValue: "arm precondition: viewport must be within the tail-follow "
+                        + "threshold (gap=\(gapToBottom(scene)))"))
+        } else {
+            // Park the summary row ~200pt below the viewport top, so real rows sit
+            // above it (any of which drifting would move the anchor).
+            let target = max(0, scene.tableView.rect(ofRow: summaryRow).minY - 200)
+            clip.scroll(to: NSPoint(x: 0, y: target))
+            scene.scrollView.reflectScrolledClipView(clip)
+            settle(scene.tableView)
+            #expect(gapToBottom(scene) > 120,
+                    Comment(rawValue: "arm precondition: viewport must be clear of the tail-follow "
+                        + "threshold (gap=\(gapToBottom(scene)))"))
+        }
+        let visible = clip.documentVisibleRect
+        let summaryRect = scene.tableView.rect(ofRow: summaryRow)
+        #expect(visible.intersects(summaryRect), "the summary row must be on screen before the click")
+
+        let offsetBefore = screenOffset(of: summaryRow, in: scene)
+        let rectsAboveBefore = (0..<summaryRow).map { scene.tableView.rect(ofRow: $0) }
+
+        // The click: a new node array carrying the expanded group, with the toggle
+        // token bumped exactly as `setActivityGroup` does.
+        scene.coordinator.update(nodes: expanded, atBottom: .constant(true), activityToggleToken: 1)
+        scene.tableView.layoutSubtreeIfNeeded()
+        // The toggle must have gone through the `.rebuild` branch. If the column
+        // width moved, `update` took the width-change branch instead — a legitimate
+        // cache wipe for an unrelated reason — and everything below would be
+        // measuring that, not the anchor.
+        #expect(scene.tableView.bounds.width == primedWidth,
+                Comment(rawValue: "the column width moved across the click "
+                    + "(\(primedWidth) → \(scene.tableView.bounds.width)), so the toggle took the "
+                    + "width-change branch rather than `.rebuild`"))
+        // The FIRST frame after the click is what the user sees. Rows above the
+        // anchor must already be laid out at their unchanged heights here — if the
+        // rebuild dropped their cached exact heights they come back estimated, and
+        // the anchor jumps now even though later realize-time corrections settle it
+        // back.
+        let offsetFirstFrame = screenOffset(of: summaryRow, in: scene)
+        #expect(abs(offsetFirstFrame - offsetBefore) <= 1.0,
+                Comment(rawValue: "the clicked summary row moved in the first frame after the click: "
+                    + "before=\(offsetBefore) firstFrame=\(offsetFirstFrame)"))
+
+        // Give any deferred tail-follow its chance to run — without this the
+        // assertion would pass against a scroll that simply never fired.
+        await drainMainQueue()
+        settle(scene.tableView)
+
+        let offsetAfter = screenOffset(of: summaryRow, in: scene)
+        #expect(abs(offsetAfter - offsetBefore) <= 1.0,
+                Comment(rawValue: "the clicked summary row moved on screen: "
+                    + "before=\(offsetBefore) after=\(offsetAfter)"))
+
+        let rectsAboveAfter = (0..<summaryRow).map { scene.tableView.rect(ofRow: $0) }
+        var moved: [String] = []
+        for (row, (before, after)) in zip(rectsAboveBefore, rectsAboveAfter).enumerated()
+        where abs(before.origin.y - after.origin.y) > 0.5 || abs(before.height - after.height) > 0.5 {
+            moved.append("row \(row): \(before) → \(after)")
+        }
+        #expect(moved.isEmpty,
+                Comment(rawValue: "rows above the clicked row must keep identical rects: "
+                    + moved.joined(separator: "; ")))
+    }
+
+    /// FIX 2: the per-row caches are content-addressed by `(id, contentVersion,
+    /// width)`, so a rebuild may PRUNE them but must not wipe them. Rows the user
+    /// had already scrolled past stay EXACT across the rebuild rather than falling
+    /// back to the arithmetic estimate (whose realize-time correction is what
+    /// shifted rows underneath it).
+    @Test("a rebuild keeps exact heights for rows whose content did not change")
+    func rebuildKeepsContentAddressedHeights() throws {
+        let suiteName = "table-harness-cachekeep-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        // More rows than the bottom-window precompute measures, so a wipe cannot be
+        // masked by the post-rebuild `precomputeBottomWindow()`.
+        let items = Self.activityGroupFixture(leadingBubbles: 30, groupSize: 4, trailingBubbles: 2)
+        let collapsed = Self.groupNodes(items, expanded: false)
+        #expect(collapsed.count > TableTranscriptView.Coordinator.bottomEagerWindow,
+                "fixture must exceed the bottom-window precompute to be a real test")
+
+        let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: collapsed)
+
+        // Realize every row once — as a user scrolling the whole transcript would —
+        // which measures each exactly and caches it.
+        realizeAllRows(scene, count: collapsed.count)
+        let uncachedBefore = collapsed
+            .filter { scene.coordinator.cachedExactHeight(for: $0) == nil }
+            .map(\.id)
+        #expect(uncachedBefore.isEmpty,
+                Comment(rawValue: "every realized row should have an exact cached height; missing: "
+                    + uncachedBefore.prefix(5).joined(separator: ", ")))
+
+        let expanded = Self.groupNodes(items, expanded: true)
+        scene.coordinator.update(nodes: expanded, atBottom: .constant(true), activityToggleToken: 1)
+
+        // Every unchanged row keeps its exact height. The summary node itself is
+        // legitimately gone: `isExpanded` is part of its content, so the expanded
+        // summary is a different `contentVersion` and the old entry is unreachable.
+        let lost = collapsed
+            .filter { $0.id != Self.fixtureGroupID }
+            .filter { scene.coordinator.cachedExactHeight(for: $0) == nil }
+            .map(\.id)
+        #expect(lost.isEmpty,
+                Comment(rawValue: "rebuild dropped \(lost.count)/\(collapsed.count - 1) exact heights "
+                    + "for unchanged rows: \(lost.prefix(5).joined(separator: ", "))"))
+        #expect(scene.coordinator.cachedExactHeight(for: collapsed[
+            try #require(collapsed.firstIndex { $0.id == Self.fixtureGroupID })]) == nil,
+                "the superseded summary node's entry must be pruned")
+    }
+
+    /// FIX 2's growth story: keeping caches across rebuilds must not let them grow
+    /// without bound. Toggling a group open and shut repeatedly supersedes the
+    /// summary node's `contentVersion` every time and removes/reinstates its member
+    /// rows; the prune keeps the total pinned to the live row count.
+    @Test("cache growth stays bounded across repeated expand/collapse cycles")
+    func cacheGrowthIsBounded() throws {
+        let suiteName = "table-harness-cachebound-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = Self.activityGroupFixture(leadingBubbles: 30, groupSize: 4, trailingBubbles: 2)
+        let collapsed = Self.groupNodes(items, expanded: false)
+        let expanded = Self.groupNodes(items, expanded: true)
+
+        let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: collapsed)
+
+        // Four caches, at most one entry per live row each.
+        let ceiling = 4 * expanded.count
+        var token = 0
+        var peak = 0
+        for cycle in 0..<12 {
+            let nodes = cycle.isMultiple(of: 2) ? expanded : collapsed
+            token += 1
+            scene.coordinator.update(nodes: nodes, atBottom: .constant(true), activityToggleToken: token)
+            // Realize every row so the caches are filled to their maximum each cycle.
+            for row in 0..<nodes.count {
+                _ = scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
+            }
+            peak = max(peak, scene.coordinator.totalCachedEntryCount)
+        }
+        #expect(peak <= ceiling,
+                Comment(rawValue: "cache entries grew past one per live row per cache "
+                    + "(peak=\(peak) ceiling=\(ceiling))"))
+    }
+
+    /// FIX 1 must not over-reach: a genuine streaming append with the viewport at
+    /// the bottom STILL follows the tail. Only a bumped toggle token suppresses it.
+    @Test("a streaming append still follows the tail from the bottom")
+    func streamingAppendStillFollowsTail() async throws {
+        let suiteName = "table-harness-tailfollow-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = Self.activityGroupFixture(leadingBubbles: 8, groupSize: 5, trailingBubbles: 1)
+        let collapsed = Self.groupNodes(items, expanded: false)
+
+        let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: collapsed)
+        scene.coordinator.scrollToEnd(animated: false)
+        settle(scene.tableView)
+        #expect(gapToBottom(scene) <= 120, "precondition: the viewport starts at the bottom")
+
+        // A new assistant message lands, as it does mid-stream. The toggle token
+        // does NOT move — this is content the session produced.
+        var grown = items
+        grown.append(.assistantText(
+            id: "stream-new",
+            text: String(repeating: "A freshly streamed paragraph that wraps across the column. ", count: 12),
+            timestamp: nil,
+            usage: nil
+        ))
+        let appended = Self.groupNodes(grown, expanded: false)
+        #expect(appended.count == collapsed.count + 1)
+
+        scene.coordinator.update(nodes: appended, atBottom: .constant(true), activityToggleToken: 0)
+        // The tail-follow is deferred to the next run-loop turn, by which point a
+        // live app has laid the inserted row out; do that layout here so the
+        // queued `scrollToEnd` sees the grown document rather than the old bottom.
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        settle(scene.tableView)
+
+        #expect(gapToBottom(scene) <= 2.0,
+                Comment(rawValue: "a streaming append at the bottom must scroll to the new tail "
+                    + "(gap=\(gapToBottom(scene)))"))
+    }
+
+    // MARK: - Image-attachment height estimate
+
+    /// FIX 3: the arithmetic estimate must include an image term. The exact path
+    /// lays an attachment out at up to 200pt from a synchronous header probe, so
+    /// an estimate that only counted the marker's characters undershot by ~180pt —
+    /// a correction that big, applied when the row realizes, drags every row below
+    /// it.
+    @Test("an image attachment is estimated close to its exact measured height")
+    func imageAttachmentEstimateMatchesExact() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-image-estimate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let imagePath = dir.appendingPathComponent("shot.png").path
+        try Self.writePNG(width: 400, height: 300, to: imagePath)
+
+        let item = TranscriptItem.userPrompt(
+            id: "img-1",
+            text: "Here is the screenshot.\n\n[Image: source: \(imagePath)]",
+            timestamp: nil
+        )
+        let node = TranscriptRenderNode(id: "img-1", kind: .chatBubble(item), badgeUsage: nil)
+
+        let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: Self.width)
+        let exact = oracleHeight(for: node)
+
+        // The image alone is 150pt tall here (a 400x300 source contained in the
+        // 200pt square), so a missing image term shows up as a ~150pt undershoot.
+        #expect(exact > 150, Comment(rawValue: "fixture must actually carry a laid-out image (exact=\(exact))"))
+        #expect(abs(estimate - exact) <= 20,
+                Comment(rawValue: "image row estimate is far from the exact height: "
+                    + "estimate=\(estimate) exact=\(exact)"))
+    }
+
+    /// A marker-free bubble's estimate is unchanged by the image term — the split
+    /// fast path returns one text segment and the arithmetic is as before.
+    @Test("a bubble with no attachment still estimates from its prose alone")
+    func plainBubbleEstimateUnaffected() {
+        let item = TranscriptItem.assistantText(
+            id: "plain-1",
+            text: "A plain paragraph with no attachment marker, long enough to wrap "
+                + "across more than one line of the column.",
+            timestamp: nil,
+            usage: nil
+        )
+        let node = TranscriptRenderNode(id: "plain-1", kind: .chatBubble(item), badgeUsage: nil)
+        let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: Self.width)
+        let exact = oracleHeight(for: node)
+        #expect(abs(estimate - exact) <= 20,
+                Comment(rawValue: "plain bubble estimate drifted: estimate=\(estimate) exact=\(exact)"))
+    }
+
+    /// Writes a solid opaque PNG so `TranscriptImageService`'s header probe reads
+    /// real pixel dimensions.
+    private static func writePNG(width: Int, height: Int, to path: String) throws {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let png = rep.representation(using: .png, properties: [:]) else {
+            throw HarnessError.couldNotMakePNG
+        }
+        try png.write(to: URL(fileURLWithPath: path))
+    }
+
     // MARK: - Spot anchors (user-named clipping symptoms)
 
     /// Substring anchors for the user-named live-clipping rows, each with robust
@@ -1134,7 +1606,8 @@ struct TableTranscriptHarness {
         case .toolCall(_, let name, let inputJSON, _, let result, _):
             return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"
         case .activityGroupSummary(let summary):
-            return "Worked \(summary.labels.joined(separator: " ")) \(summary.statusLabel)"
+            return ([summary.activityPhrase] + [summary.statusLabel].compactMap { $0 })
+                .joined(separator: " ")
         case .subagentSummary(_, _, let agentType):
             return agentType ?? "subagent"
         }

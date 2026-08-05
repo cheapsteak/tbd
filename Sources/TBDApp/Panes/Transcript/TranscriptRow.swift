@@ -132,23 +132,28 @@ struct ActivityGroupSummaryRow: View {
         Button {
             toggleGroup?(summary.id, !summary.isExpanded)
         } label: {
+            // No leading icon: the persistent disclosure chevron already marks
+            // this as a group, so the phrase starts at the row's leading padding
+            // (matching the native cell, which collapses its icon column).
             HStack(spacing: 7) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Worked")
+                // The single shared phrase — the native cell renders this exact
+                // string, so the two renderers cannot drift.
+                Text(summary.activityPhrase)
                     .font(.system(.subheadline, design: .rounded, weight: .medium))
-                Text("· \(summary.itemCount) \(summary.itemCount == 1 ? "action" : "actions")")
+                    // Matches the native cell's `.secondary` segment style
+                    // (`secondaryLabelColor`): the summary is chrome and must
+                    // recede from the assistant prose around it.
                     .foregroundStyle(.secondary)
-                if !summary.labels.isEmpty {
-                    Text("· \(summary.labels.joined(separator: " · "))")
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
+                    .lineLimit(1)
                 Spacer(minLength: 8)
-                Text(summary.statusLabel)
-                    .font(.caption2)
-                    .foregroundStyle(summary.errorCount > 0 ? Color.red : Color.secondary)
+                // Nil — and so nothing rendered — unless the group failed or is
+                // waiting on the user; a running group says so in the phrase's
+                // tense. Matches the native cell's badge logic.
+                if let status = summary.statusLabel {
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundStyle(summary.errorCount > 0 ? Color.red : Color.secondary)
+                }
                 Image(systemName: summary.isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
@@ -160,7 +165,8 @@ struct ActivityGroupSummaryRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(summary.isExpanded ? "Collapse" : "Expand") \(summary.itemCount) actions, \(summary.statusLabel)"
+            "\(summary.isExpanded ? "Collapse" : "Expand") \(summary.activityPhrase)"
+                + (summary.statusLabel.map { ", \($0)" } ?? "")
         )
     }
 }
