@@ -422,12 +422,14 @@ that queue runs — including the deferred work the body is trying to observe.
 
 **Never spin a nested run loop to wait for something.** A nested
 `RunLoop.current.run(until:)` cannot re-enter the main queue, so it drains none
-of it. Three things were measured here, and all three hold both bare and after
-`NSApplication.shared` exists: a block enqueued with `DispatchQueue.main.async`
-immediately before a 0.3 s nested run loop had **still not run** when the loop
-returned; a suspended `@MainActor` task was **not** resumed by it; and neither
-was a task parked on a continuation resumed from a background queue — the shape
-a test awaiting a bounded-poll helper has.
+of it. Three things were measured here — each against a loop kept alive by an
+attached timer, so it genuinely spun for its full duration rather than returning
+early — and all three hold both bare and after `NSApplication.shared` exists: a
+block enqueued with `DispatchQueue.main.async` immediately before a 0.3 s nested
+run loop had **still not run** when the loop returned; a suspended `@MainActor`
+task was **not** resumed by it; and neither was a task parked on a continuation
+resumed from a background queue — the shape a test awaiting a bounded-poll
+helper has.
 
 **Suspending is the only thing that returns the queue.** `await Task.yield()`
 hands the main actor back, the queued block runs, and only then does the
@@ -457,9 +459,13 @@ input source or timer is attached to the loop — measured 0.000 s bare against
 0.321 s once a timer was added. A pump that appears to be doing something may be
 doing nothing at all, at either end of the range.
 
-The compiler already closes the worst half: `RunLoop.current` and `run(until:)`
-are `NS_SWIFT_UNAVAILABLE_FROM_ASYNC`, so a nested loop can only appear in a
-synchronous body or helper — exactly the context that can never suspend.
+The compiler already closes the worst half. `NSRunLoop.h` annotates every
+spinning method — `run`, `run(until:)`, `run(_:before:)`,
+`acceptInput(for:before:)` — plus the `current` property itself with
+`NS_SWIFT_UNAVAILABLE_FROM_ASYNC`; `main` is deliberately not annotated, so the
+methods are the enforcement point and `RunLoop.main.run(until:)` is refused
+just the same. A nested loop can therefore only appear in a synchronous body or
+helper — exactly the context that can never suspend.
 **Reaching for one from an `async` test and finding it won't compile is the
 signal to yield, not to hoist the spin into a sync helper.**
 
