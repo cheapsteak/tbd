@@ -323,36 +323,48 @@ This pipeline **is** the merge gate. Its job is named `claude-review` in
 `.github/workflows/claude-code-review.yml`, which is what satisfies the required
 `claude-review` check on `main`.
 
-### Why it was promoted when it was
+### What the promotion rests on
 
-The design originally set a specific bar for promotion: run as a non-required shadow
-check, then review the commits where the two pipelines disagreed, and promote on the
-strength of that review. **That review was not performed.** The pipeline was promoted
-because running both reviewers on every PR cost two full model reviews per push, and
-the second one was not worth its price — a cost argument, not a quality one. Recording
-that plainly matters more than the tidier story, because it names what is owed: the
-divergence review is unpaid, and deficiencies are expected to be found in flight and
-fixed as they surface rather than caught beforehand.
+**It rests on cost, not on a demonstration of superiority.** Two reviewers charge two
+full model reviews per push, and the second is not worth its price. Stating that
+plainly is what makes the rest of this section legible: this pipeline gates because
+one reviewer is what the project will pay for, not because a comparison established it
+as the better one.
 
-The soak measured this much. Over roughly a day, both pipelines ran on 21 commits
-across 7 branches; on the 17 where both produced a conclusion, 8 disagreed — and every
-disagreement ran the same direction, this pipeline failing where the single-session
-reviewer passed. That one-directional split is *not* evidence of a stricter reviewer,
-because at least two of the eight were traced to a schema bug that failed the gate
-closed with no verdict at all (nullable finding anchors, since fixed). A contaminated
-signal is why the divergence review would have had to triage each case individually,
-and why the count alone could not stand in for it.
+A stronger basis was available and is not claimed — triaging each commit where the two
+pipelines disagreed, and promoting on the strength of that triage. That triage is
+unpaid, so deficiencies in this gate are expected to surface in flight rather than to
+have been caught beforehand. The rollback trigger below exists for that reason.
 
-The countervailing evidence is qualitative and comes from the same window: on its own
-promotion PR this pipeline returned two accurate findings — a retained workflow that
-could not do the job its comments claimed, and this section dropping the graduation
-criterion instead of answering it — while the single-session reviewer approved the same
-diff. Both are recorded here because they are the argument.
+The evidence that does exist runs in both directions and is worth recording.
 
-The residual risk is concentrated and worth stating: with one reviewer there is no
-second opinion, and a bug that fails this gate closed blocks merges outright rather
-than producing a red advisory check beside a working gate. That is the cost accepted in
-exchange for halving review spend.
+- **The divergence count settles nothing.** Across a soak of 21 commits on 7 branches,
+  both pipelines concluded on 17; 8 of those disagreed, every one in the same direction
+  — this pipeline failing where the single-session reviewer passed. That reads as a
+  stricter reviewer only until the causes are separated: at least two were a schema bug
+  that failed the gate closed with no verdict at all (nullable finding anchors, since
+  fixed). A contaminated signal is precisely why a count cannot substitute for
+  per-case triage.
+- **The qualitative evidence is the stronger half.** On this pipeline's own promotion
+  PR it returned findings the single-session reviewer missed while approving the same
+  diff: a retained workflow that could not do the job its comments claimed, and a
+  graduation criterion asserted in this spec but left unanswered. Both were correct.
+  The reverse also holds — the single-session reviewer has caught convention breaches
+  in this spec that the fan-out missed — which is the case against retiring a second
+  opinion, made from the same window.
+
+**Residual risk.** With one reviewer there is no second opinion, and a bug that fails
+this gate closed blocks merges outright rather than showing a red advisory check beside
+a working gate. A PR that would *fix* such a bug is not exempt: the pipeline is always
+restored from the base branch, so a repair reaches the gate only after it merges, which
+is why the recovery path below is an admin merge rather than a re-run.
+
+**Rollback trigger.** Requiredness is reverted — this job renamed back and the
+single-session reviewer's `pull_request_target:` trigger restored — if the gate fails
+closed for infrastructure reasons rather than on a REJECT verdict on three PRs inside a
+week, or if one such failure blocks a merge for longer than a working day. Recovering a
+single blocked PR does not need the rollback: an admin merge of the fix is enough, and
+is the expected first response.
 
 The naming follows from how GitHub matches a required check: **by job name, not by
 workflow file**. That makes the job key the load-bearing identifier and gives the

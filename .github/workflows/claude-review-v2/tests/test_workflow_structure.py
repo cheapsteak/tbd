@@ -17,8 +17,15 @@ Every lookup is by exact step NAME, so renaming a step fails loudly.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from workflow_steps import read_workflow, run_block, step_index, step_source
+from workflow_steps import (
+    _WORKFLOWS_DIR,
+    read_workflow,
+    run_block,
+    step_index,
+    step_source,
+)
 
 RESTORE_STEP = "Restore the review pipeline from the base branch"
 RE_RESTORE_STEP = "Re-restore the review pipeline from the base branch"
@@ -100,3 +107,55 @@ def test_the_session_prompt_explains_the_restored_directory() -> None:
     assert PIPELINE_DIR in prompt
     assert "restores `.github/workflows/claude-review-v2/` from the base branch" in prompt
     assert "git show HEAD:<path>" in prompt
+
+
+# --- exactly one job may be named `claude-review` ---------------------------
+
+# Branch protection matches a required check by JOB NAME, not by workflow file.
+# Two jobs sharing the name would both report into the required `claude-review`
+# context and which one the gate reads becomes a race. The whole promotion rests
+# on this, and it is asserted as load-bearing in four prose places (this
+# workflow's banner, CLAUDE.md, docs/pr-review-gate.md, design spec §5) — none of
+# which a future edit has to read. Splitting the reviewer into
+# claude-code-review.yml + claude-code-review-legacy.yml is what created the
+# collision risk, so it is pinned here rather than left to review vigilance.
+
+
+def _job_keys(path: Path) -> list[str]:
+    """Top-level job keys, plus any job-level `name:` override.
+
+    Both matter: GitHub reports a job under its `name:` when one is set, and
+    under its key otherwise — so a `name: claude-review` override on a
+    differently-keyed job collides just as hard.
+    """
+    text = path.read_text(encoding="utf-8")
+    body = text.split("\njobs:\n", 1)[1] if "\njobs:\n" in text else ""
+    keys = re.findall(r"^  (?P<key>[A-Za-z0-9_-]+):\s*$", body, re.MULTILINE)
+    overrides = re.findall(r"^    name: (?P<name>.+?)\s*$", body, re.MULTILINE)
+    return keys + [name.strip("\"'") for name in overrides]
+
+
+def test_exactly_one_job_across_all_workflows_is_named_claude_review() -> None:
+    owners = [
+        path
+        for path in sorted(_WORKFLOWS_DIR.glob("*.yml"))
+        if "claude-review" in _job_keys(path)
+    ]
+    assert owners == [_WORKFLOWS_DIR / "claude-code-review.yml"], (
+        "exactly one job named `claude-review` may exist across .github/workflows "
+        f"— the required check matches by job name; found: {[p.name for p in owners]}"
+    )
+
+
+def test_the_legacy_reviewer_keeps_a_distinct_job_name() -> None:
+    keys = _job_keys(_WORKFLOWS_DIR / "claude-code-review-legacy.yml")
+    assert "claude-review" not in keys
+    assert "claude-review-legacy" in keys
+
+
+def test_the_legacy_reviewer_stays_dispatch_only() -> None:
+    # A PR trigger here would run two full model reviews per push — the cost
+    # retiring it removed — and its job would report a second check besides.
+    text = (_WORKFLOWS_DIR / "claude-code-review-legacy.yml").read_text(encoding="utf-8")
+    triggers = text.split("\non:\n", 1)[1].split("\nconcurrency:", 1)[0]
+    assert re.findall(r"^  (?P<t>[a-z_]+):", triggers, re.MULTILINE) == ["workflow_dispatch"]
