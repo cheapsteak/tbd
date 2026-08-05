@@ -42,7 +42,14 @@ struct TerminalSendTargetCheckTests {
         case matchingLowercased
         /// Alive, answering with somebody else's id.
         case stranger(String)
+        /// The consultation could not be run at all — a wedged tmux tripping
+        /// the subprocess timeout. Not an answer about the pane.
+        case unreachable
     }
+
+    /// The error a `.unreachable` consultation fails with, so the test can
+    /// assert the handler propagated *that* error rather than inventing one.
+    private struct WedgedTmux: Error {}
 
     /// Lets the dryRun hook — constructed before the terminal row exists —
     /// answer with that terminal's id once it does.
@@ -81,6 +88,7 @@ struct TerminalSendTargetCheckTests {
                 case .matching: return .live(terminalID: box.id)
                 case .matchingLowercased: return .live(terminalID: box.id.lowercased())
                 case .stranger(let other): return .live(terminalID: other)
+                case .unreachable: throw WedgedTmux()
                 }
             })
         let db = try TBDDatabase(inMemory: true)
@@ -155,11 +163,14 @@ struct TerminalSendTargetCheckTests {
 
         #expect(!response.success)
         #expect(fixture.recorder.calls.isEmpty)
-        let outcome = try lastOutcome(at: fixture.logPath)
+        let written = try rows(at: fixture.logPath)
+        // Exactly the request row and its outcome — a refusal must not also
+        // leave a second outcome behind.
+        #expect(written.count == 2)
+        let outcome = try #require(written.last)
         #expect(outcome["result"] as? String == "refused")
         #expect(outcome["reason"] as? String == "not-found")
-        #expect(!(try rows(at: fixture.logPath))
-            .contains { $0["result"] as? String == "dispatched" })
+        #expect(!written.contains { $0["result"] as? String == "dispatched" })
     }
 
     @Test("a pane that answers with a different terminal is refused, naming both ids")
@@ -175,11 +186,35 @@ struct TerminalSendTargetCheckTests {
         #expect(error.contains(fixture.terminal.id.uuidString))
         #expect(fixture.recorder.calls.isEmpty)
 
-        let outcome = try lastOutcome(at: fixture.logPath)
+        let written = try rows(at: fixture.logPath)
+        #expect(written.count == 2)
+        let outcome = try #require(written.last)
         #expect(outcome["result"] as? String == "refused")
         #expect(outcome["reason"] as? String == "target-mismatch")
-        #expect(!(try rows(at: fixture.logPath))
-            .contains { $0["result"] as? String == "dispatched" })
+        #expect(!written.contains { $0["result"] as? String == "dispatched" })
+    }
+
+    /// The consultation failing to *run* is not an answer about the pane, so it
+    /// is not a refusal: the daemon reached for the transport and the transport
+    /// did not answer. The caller gets the underlying error, not a verdict about
+    /// its target, and the record says `transport-failed`.
+    @Test("a consultation that cannot be run is a transport failure, not a refusal")
+    func unreachableConsultationIsTransportFailure() async throws {
+        let fixture = try await makeFixture(answer: .unreachable)
+
+        // The handler rethrows; the router turns that into an error response.
+        let response = try await send(fixture)
+        #expect(!response.success)
+        #expect(response.error?.contains("WedgedTmux") == true)
+        #expect(fixture.recorder.calls.isEmpty)
+
+        let written = try rows(at: fixture.logPath)
+        #expect(written.count == 2)
+        let outcome = try #require(written.last)
+        #expect(outcome["result"] as? String == "transport-failed")
+        // Not misfiled as any flavour of refusal.
+        #expect(outcome["reason"] == nil)
+        #expect(!written.contains { $0["result"] as? String == "dispatched" })
     }
 
     // MARK: - The branches that still send
@@ -232,10 +267,10 @@ struct TerminalSendTargetCheckTests {
         #expect(calls.count == 3)
 
         let load = try #require(calls.first { $0.contains("load-buffer") })
-        #expect(load[0] == "-L")
-        #expect(load[1] == "tbd-acme")
-        #expect(load[2] == "load-buffer")
-        #expect(load[3] == "-b")
+        // Compared as a prefix rather than by index: `#require` proves the call
+        // exists, not that it is four arguments long, and indexing past its end
+        // would crash the run instead of failing it.
+        #expect(load.prefix(4) == ["-L", "tbd-acme", "load-buffer", "-b"])
 
         let paste = try #require(calls.first { $0.contains("paste-buffer") })
         #expect(paste.contains("-d"))

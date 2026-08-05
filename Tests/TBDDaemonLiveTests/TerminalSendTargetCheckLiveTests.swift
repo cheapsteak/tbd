@@ -229,6 +229,50 @@ struct TerminalSendTargetCheckLiveTests {
         #expect(try lastOutcome(at: fixture.logPath)["result"] as? String == "dispatched")
     }
 
+    /// `list-panes -t %N` lists every pane in `%N`'s **window** — `%N` only
+    /// selects the window. So a user who splits a TBD window by hand makes the
+    /// consultation return two lines, and reading the first one would answer
+    /// with a stranger's identity and refuse a perfectly healthy send. This is
+    /// asserted against real tmux because the multi-line shape is tmux's
+    /// behavior, not TBD's, and a dry-run fixture cannot witness it.
+    @Test("a hand-split window does not make the send read the wrong pane")
+    func splitWindowDoesNotConfuseTheTarget() async throws {
+        guard await TmuxVersion.detect() != nil else { return }
+        let server = "tbd-test-send-split-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+
+        let manager = TmuxManager()
+        let cwd = FileManager.default.temporaryDirectory.path
+        try await manager.ensureServer(server: server, session: "main", cwd: cwd)
+        let terminalID = UUID()
+        let window = try await manager.createWindow(
+            server: server, session: "main", cwd: cwd, shellCommand: "sleep 300",
+            env: ["TBD_TERMINAL_ID": terminalID.uuidString])
+
+        // The user splits the tab. The new pane is not TBD's and carries no id.
+        let sibling = try #require(
+            tmuxCapture(["-L", server, "split-window", "-t", window.windowID, "-d",
+                         "-P", "-F", "#{pane_id}", "/bin/sh", "-c", "sleep 300"]))
+        #expect(sibling != window.paneID)
+        // Both panes really are in the answer — otherwise this proves nothing.
+        let listed = try #require(
+            tmuxCapture(["-L", server, "list-panes", "-t", window.paneID, "-F", "#{pane_id}"]))
+        #expect(listed.split(separator: "\n").count == 2)
+
+        // TBD's pane still answers for itself, and the stranger answers for its.
+        #expect(try await manager.paneSendTarget(server: server, paneID: window.paneID)
+            == .live(terminalID: terminalID.uuidString))
+        #expect(try await manager.paneSendTarget(server: server, paneID: sibling)
+            == .live(terminalID: nil))
+
+        let fixture = try await makeFixture(server: server)
+        let terminal = try await fixture.db.terminals.create(
+            id: terminalID, worktreeID: fixture.worktree.id,
+            tmuxWindowID: window.windowID, tmuxPaneID: window.paneID)
+        #expect(try await send(fixture, terminalID: terminal.id).success)
+        #expect(try lastOutcome(at: fixture.logPath)["result"] as? String == "dispatched")
+    }
+
     @Test("createWindow stamps the pane, and the stamped pane accepts its own sends")
     func createWindowStampsAndSends() async throws {
         guard await TmuxVersion.detect() != nil else { return }

@@ -1054,8 +1054,19 @@ extension RPCRouter {
             // the env. Without this set, the pane would inherit whatever TBD_WORKTREE_ID
             // got baked into the tmux server's global env, leaking another worktree's
             // identity into this one.
+            //
+            // TBD_TERMINAL_ID is set for the same reason, plus one more: it is
+            // what `createWindow` stamps onto the new pane as
+            // `@tbd_terminal_id`, and an unstamped pane is one `terminal.send`
+            // can never verify (absence is not disagreement, so it proceeds
+            // unchecked). Omitting it here would leave this branch — the only
+            // spawn path that ever did — minting fresh panes that opt out of
+            // the stale-coordinate check for the rest of their life.
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-            let env: [String: String] = ["TBD_WORKTREE_ID": worktree.id.uuidString]
+            let env: [String: String] = [
+                "TBD_WORKTREE_ID": worktree.id.uuidString,
+                "TBD_TERMINAL_ID": terminal.id.uuidString,
+            ]
             let updatedTerminal = try await actuating(actuationID) {
                 let window = try await tmux.createWindow(
                     server: worktree.tmuxServer,

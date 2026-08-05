@@ -84,7 +84,12 @@ public struct TmuxManager: Sendable {
     /// `.live(terminalID: nil)` — alive, carrying no identity — which is the
     /// branch that proceeds, so a fixture that never spawned a real pane keeps
     /// behaving exactly as it did before the send path started asking.
-    public let dryRunPaneSendTarget: (@Sendable (String, String) -> PaneSendTarget)?
+    ///
+    /// Throwing, because "the consultation could not be run at all" is one of
+    /// the answers: it is the wedged-tmux path the send classifies as a
+    /// transport failure rather than a refusal, and a non-throwing hook would
+    /// leave that branch with no way to be exercised.
+    public let dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)?
     /// Optional test hook for real (non-dryRun) mode: override the result of
     /// `windowExists(server:windowID:)`. Allows tests to force a window as dead
     /// while still having a live process running in the pane (for testing the
@@ -116,7 +121,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) -> PaneSendTarget)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -387,18 +392,21 @@ public struct TmuxManager: Sendable {
     /// Stamp `terminalID` onto a pane so it can identify itself later.
     ///
     /// `target` may be a pane id or a window id — tmux resolves a window target
-    /// to that window's active pane, and every TBD window has exactly one pane.
+    /// to that window's active pane. The window form is only used right after a
+    /// `respawn-window -k`, which collapses the window to its original single
+    /// pane, so "active pane" is unambiguously the terminal's own pane even if
+    /// the user had split it by hand a moment earlier.
     public static func setPaneTerminalIDCommand(
         server: String, target: String, terminalID: String
     ) -> [String] {
         ["-L", server, "set-option", "-p", "-t", target, terminalIDPaneOption, terminalID]
     }
 
-    /// Separator between the three fields of `paneSendTargetQuery`.
+    /// Separator between the four fields of `paneSendTargetQuery`.
     ///
-    /// A tab: neither `0`/`1` nor a UUID can contain one, and the only field
-    /// that could — the start command — is last, so it takes the remainder of
-    /// the line rather than being split.
+    /// A tab: neither a pane id, nor `0`/`1`, nor a UUID can contain one, and
+    /// the only field that could — the start command — is last, so it takes the
+    /// remainder of the line rather than being split.
     static let paneSendTargetSeparator: Character = "\t"
 
     /// One read-only consultation answering everything a send needs to know
@@ -410,26 +418,42 @@ public struct TmuxManager: Sendable {
     /// whereas `display-message -p` prints an empty line and exits 0 — which
     /// would report a vanished pane as a healthy one. It is also the primitive
     /// the sibling pane queries above already use.
+    ///
+    /// `#{pane_id}` leads the format because `list-panes -t %N` does NOT list
+    /// only `%N`: it lists every pane in `%N`'s **window**, `%N` merely picking
+    /// the window. A TBD window normally holds one pane, but a user can split
+    /// one by hand at any time, and then the first line answers for a pane the
+    /// send never named — a stranger's `pane_dead` and a stranger's identity,
+    /// which is precisely a false refusal. So the line is selected by pane id
+    /// rather than by position; see `parsePaneSendTarget`.
     public static func paneSendTargetQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F",
-         "#{pane_dead}\(paneSendTargetSeparator)"
+         "#{pane_id}\(paneSendTargetSeparator)"
+         + "#{pane_dead}\(paneSendTargetSeparator)"
          + "#{\(terminalIDPaneOption)}\(paneSendTargetSeparator)"
          + "#{pane_start_command}"]
     }
 
-    /// Classify `paneSendTargetQuery`'s stdout. Pure, so the classification is
-    /// unit-testable without a tmux server.
-    static func parsePaneSendTarget(_ output: String) -> PaneSendTarget {
-        guard let line = output.split(separator: "\n").first else {
-            // rc 0 with nothing on stdout: no pane answered.
-            return .missing
+    /// Classify `paneSendTargetQuery`'s stdout for the pane the send named.
+    /// Pure, so the classification is unit-testable without a tmux server.
+    ///
+    /// Only the line whose `#{pane_id}` is `paneID` counts — the query returns
+    /// one line per pane in the target's window. A run with no such line means
+    /// tmux answered about a window that no longer holds this pane, which is
+    /// the same fact as `can't find pane`: `.missing`.
+    static func parsePaneSendTarget(_ output: String, paneID: String) -> PaneSendTarget {
+        for line in output.split(separator: "\n") {
+            let fields = line.split(
+                separator: paneSendTargetSeparator, maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count == 4 else { continue }
+            guard fields[0].trimmingCharacters(in: .whitespaces) == paneID else { continue }
+            if fields[1].trimmingCharacters(in: .whitespaces) == "1" { return .dead }
+            return .live(terminalID: resolvePaneTerminalID(
+                paneOption: String(fields[2]), startCommand: String(fields[3])))
         }
-        let fields = line.split(
-            separator: paneSendTargetSeparator, maxSplits: 2, omittingEmptySubsequences: false)
-        guard fields.count == 3 else { return .missing }
-        if fields[0].trimmingCharacters(in: .whitespaces) == "1" { return .dead }
-        return .live(terminalID: resolvePaneTerminalID(
-            paneOption: String(fields[1]), startCommand: String(fields[2])))
+        // rc 0 but no line for this pane (including no output at all): nothing
+        // answered for the coordinate the send named.
+        return .missing
     }
 
     /// Which TBD terminal a pane says it is, or nil when the pane carries no
@@ -803,14 +827,19 @@ public struct TmuxManager: Sendable {
     /// its process is alive, and which TBD terminal it belongs to.
     ///
     /// Read-only — a query, not an actuation. Throws only when the query itself
-    /// could not be *run* (a wedged server tripping the subprocess timeout); a
-    /// tmux command failure means tmux answered "can't find pane", which is an
-    /// answer about the pane, not a failure of the consultation.
+    /// could not be *run*: a wedged server tripping the subprocess timeout
+    /// (`TmuxError.timedOut`) or a tmux that would not spawn at all, neither of
+    /// which this catch matches. A non-zero *exit* is read as an answer instead,
+    /// because the only way this fixed argv can exit non-zero is tmux failing to
+    /// resolve the target — `can't find pane`, or no server on that socket, both
+    /// of which mean the same thing for a send. (`paneSendTargetQuery`'s exact
+    /// argv is pinned by a unit test, so it cannot drift into a usage error that
+    /// would arrive here wearing the same clothes.)
     public func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
-        if dryRun { return dryRunPaneSendTarget?(server, paneID) ?? .live(terminalID: nil) }
+        if dryRun { return try dryRunPaneSendTarget?(server, paneID) ?? .live(terminalID: nil) }
         let args = Self.paneSendTargetQuery(server: server, paneID: paneID)
         do {
-            return Self.parsePaneSendTarget(try await runTmux(args))
+            return Self.parsePaneSendTarget(try await runTmux(args), paneID: paneID)
         } catch TmuxError.commandFailed {
             return .missing
         }
@@ -819,11 +848,14 @@ public struct TmuxManager: Sendable {
     /// Stamp `@tbd_terminal_id` onto a freshly created or respawned pane, when
     /// the spawn's environment says which terminal it is.
     ///
-    /// Called centrally from `createWindow` and `respawnWindow` so all ~12 spawn
-    /// call sites are covered without touching any of them. Best-effort: a
-    /// failed stamp is logged and swallowed, because `#{pane_start_command}`
-    /// carries the same id as a fallback (see `resolvePaneTerminalID`) and a
-    /// window that spawned fine must not be reported as failed over a label.
+    /// Called centrally from `createWindow` and `respawnWindow`, so every spawn
+    /// call site is covered by the one rule "whatever you plant as
+    /// `TBD_TERMINAL_ID` is what the pane will answer with" — a call site opts
+    /// out only by not planting the variable at all, which is a hole in the
+    /// send check rather than a local choice. Best-effort: a failed stamp is
+    /// logged and swallowed, because `#{pane_start_command}` carries the same
+    /// id as a fallback (see `resolvePaneTerminalID`) and a window that spawned
+    /// fine must not be reported as failed over a label.
     ///
     /// Deliberately NOT backfilled onto existing panes from the DB at startup.
     /// The DB's pane coordinate is exactly what goes stale when tmux reuses a
