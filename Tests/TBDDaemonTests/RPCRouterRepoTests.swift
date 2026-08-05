@@ -120,7 +120,7 @@ extension RPCRouterTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         router.orphanGC = OrphanGC(
             db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: base)
 
@@ -161,7 +161,7 @@ extension RPCRouterTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         router.orphanGC = OrphanGC(
             db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: base)
 

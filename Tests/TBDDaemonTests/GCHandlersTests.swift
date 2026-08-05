@@ -42,7 +42,8 @@ struct GCHandlersTests {
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
-            subscriptions: subscriptions
+            subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog()
         )
     }
 

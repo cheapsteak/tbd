@@ -57,13 +57,15 @@ extension RPCRouter {
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         _ = try await db.worktrees.createMain(repoID: repo.id, name: defaultBranch,
                                               branch: defaultBranch, path: path, tmuxServer: tmuxServer)
-        try? await lifecycle.reconcile(repoID: repo.id)
+        try? await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
         subscriptions.broadcast(delta: .repoAdded(RepoDelta(
             repoID: repo.id, path: repo.path, displayName: repo.displayName)))
         return repo
     }
 
-    func handleRepoRemove(_ paramsData: Data) async throws -> RPCResponse {
+    func handleRepoRemove(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRemoveParams.self, from: paramsData)
 
         guard let repo = try await db.repos.get(id: params.repoID) else {
@@ -75,9 +77,51 @@ extension RPCRouter {
 
         if !activeWorktrees.isEmpty {
             if params.force {
-                // Cascade-archive all active worktrees
+                // A forced removal tears down every active worktree's sessions,
+                // killing live windows the operator can see. One row per
+                // worktree, each naming that worktree with no terminal: the
+                // handler resolves the list itself and archives each through its
+                // own `archiveWorktree` call, so these are separate teardowns —
+                // the same reasoning that gives reconcile a row per act, and the
+                // same worktree-named shape `worktree.archive` uses for one.
+                //
+                // Every row is written BEFORE the first teardown, not
+                // interleaved. Fail-closed means an unrecordable act does not
+                // happen, and a cascade that stopped halfway would leave the
+                // repo half-dismantled; rowing the whole set first makes the
+                // refusal all-or-nothing, with the repo and every session it
+                // owns still standing.
+                // The edge that leaves: if an append throws partway through
+                // this loop, the rows already written stay unconfirmed and
+                // render that way — while nothing at all was torn down. That is
+                // the honest shape rather than a gap to repair. No refusal
+                // reason means "the record itself failed", and minting one here
+                // would grow the outcome contract for a case where the appends
+                // that carried it would very likely fail too — the log was
+                // unwritable one row ago.
+                var actuationIDs: [String] = []
                 for wt in activeWorktrees {
-                    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+                    actuationIDs.append(try await beginActuation(
+                        .repoRemove, actor: actor,
+                        target: ActuationTarget(worktree: wt.id.uuidString)))
+                }
+
+                // Cascade-archive all active worktrees
+                for (index, wt) in activeWorktrees.enumerated() {
+                    do {
+                        try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+                    } catch {
+                        // The throw ends the cascade, so this row and every row
+                        // behind it names a teardown that did not happen. They
+                        // are confirmed as transport-failed together rather than
+                        // left unconfirmed, which the record would otherwise
+                        // read as an outcome that was merely lost.
+                        for pending in actuationIDs[index...] {
+                            await finishActuation(pending, .transportFailed, error: "\(error)")
+                        }
+                        throw error
+                    }
+                    await finishActuation(actuationIDs[index], .dispatched)
                 }
             } else {
                 return RPCResponse(

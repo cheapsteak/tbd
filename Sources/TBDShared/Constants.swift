@@ -229,4 +229,16 @@ public enum TBDConstants {
     public static var agentProvidersPath: String {
         agentProvidersPath(environment: ProcessInfo.processInfo.environment)
     }
+
+    /// Path to the append-only actuation record: `~/tbd/actuations.jsonl`.
+    /// The daemon is its only writer; rotated day segments
+    /// (`actuations-<YYYY-MM-DD>.jsonl`) sit beside it in the same directory.
+    /// Honors `TBD_HOME` like every other derived path — never hand-build it
+    /// from `$HOME`.
+    public static func actuationLogPath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("actuations.jsonl").path
+    }
+    public static var actuationLogPath: String {
+        actuationLogPath(environment: ProcessInfo.processInfo.environment)
+    }
 }

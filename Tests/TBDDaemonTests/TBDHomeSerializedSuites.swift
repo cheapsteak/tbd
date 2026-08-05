@@ -15,6 +15,15 @@ import Testing
 /// `extension TBDHomeSerialized { ... }` so it becomes a nested (and therefore
 /// serialized) child of this suite.
 ///
+/// **Readers belong here too when they cannot use a seam.** A suite that only
+/// *depends on* `TBD_HOME` holding still is exposed to exactly the same race:
+/// production code that resolves the variable per call will answer differently
+/// on either side of a mutator's window, and in the fast parallel pass a test
+/// spends most of its wall time suspended, so that window is seconds wide.
+/// Prefer an injection seam; nest here when the code under test reaches the
+/// environment through static members that have none (`ModelProfileRPCTests`
+/// and `ModelProfileKeychain` are the standing example).
+///
 /// **Important — this domain only serializes suites WITHIN TBDDaemonTests.**
 /// All test targets (TBDSharedTests, TBDDaemonTests, TBDAppTests, …) compile
 /// into ONE process and Swift Testing runs suites across all targets in

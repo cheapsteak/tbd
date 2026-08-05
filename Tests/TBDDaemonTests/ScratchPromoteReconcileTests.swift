@@ -41,7 +41,8 @@ struct ScratchPromoteReconcileTests {
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
-            )
+            ),
+            actuationLog: makeTestActuationLog()
         )
     }
 
@@ -100,7 +101,7 @@ struct ScratchPromoteReconcileTests {
         // the live-session case reconcile must leave alone.
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID)
+        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 
         // The inherited tmux server survives reconcile.
         let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
@@ -157,7 +158,7 @@ struct ScratchPromoteReconcileTests {
             db: db, git: GitManager(),
             tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: survivor.id)
+        try await lifecycle.reconcile(repoID: survivor.id, actuationLog: makeTestActuationLog())
 
         let serverKills = recorder.snapshot().filter { $0.contains("kill-server") }
         #expect(serverKills.contains { $0.contains(promoted.scratch.tmuxServer) },
@@ -215,7 +216,7 @@ struct ScratchPromoteReconcileTests {
                         : []
                 }),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: survivor.id)
+        try await lifecycle.reconcile(repoID: survivor.id, actuationLog: makeTestActuationLog())
 
         let cmds = recorder.snapshot()
         #expect(!cmds.contains { $0.contains("kill-server") && $0.contains(scratchServer) },
@@ -243,7 +244,7 @@ struct ScratchPromoteReconcileTests {
             db: db, git: GitManager(),
             tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID)
+        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 
         let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
         let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))

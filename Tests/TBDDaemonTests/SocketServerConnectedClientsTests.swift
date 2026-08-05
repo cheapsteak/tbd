@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 // BUG 2: SocketServer must increment its connected-client count when a client
 // connects and decrement it when the client disconnects. The daemon.status
@@ -23,7 +24,8 @@ struct SocketServerConnectedClientsTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 

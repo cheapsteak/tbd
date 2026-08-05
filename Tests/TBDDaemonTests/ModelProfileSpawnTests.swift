@@ -60,7 +60,8 @@ struct ModelProfileSpawnTests {
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
-            configDirManager: isolatedConfigDirManager()
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, recorder)
     }
@@ -1107,7 +1108,8 @@ struct ModelProfileSpawnTests {
                 pumpTimeout: .seconds(5),
                 identityPollInterval: .milliseconds(5),
                 identityPollTimeout: .milliseconds(50)
-            ))
+            )),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, recorder, pane)
     }

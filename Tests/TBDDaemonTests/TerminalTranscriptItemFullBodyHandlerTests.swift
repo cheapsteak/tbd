@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 // Nested because this suite READS the process-global `TBD_CLAUDE_HOST_HOME` —
 // once via `resolveHostBaseDirectory()` when planting fixtures, and again when
@@ -29,7 +30,8 @@ struct TerminalTranscriptItemFullBodyHandlerTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 

@@ -40,7 +40,8 @@ struct ScratchPromoteMigrationTests {
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
-            )
+            ),
+            actuationLog: makeTestActuationLog()
         )
     }
 
@@ -215,7 +216,8 @@ struct WakePathGuardTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 
@@ -307,7 +309,8 @@ struct TerminalCreateResumeSyncWiringTests {
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
-            )
+            ),
+            actuationLog: makeTestActuationLog()
         )
 
         let wtDir = home.appendingPathComponent("wt", isDirectory: true)

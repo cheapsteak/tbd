@@ -17,7 +17,7 @@ struct RepoAddScratchGuardTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let scratchChild = TBDConstants.scratchDir.appendingPathComponent("some-project").path
         try FileManager.default.createDirectory(atPath: scratchChild, withIntermediateDirectories: true)
@@ -37,7 +37,7 @@ struct RepoAddScratchGuardTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         // Create a temporary git repo outside the scratch directory
         let repoPath = FileManager.default.temporaryDirectory.appendingPathComponent("normal-repo-\(UUID().uuidString)")
@@ -97,7 +97,7 @@ struct RepoAddScratchGuardTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         // Create a scratch child directory
         let scratchChild = TBDConstants.scratchDir.appendingPathComponent("symlink-test-project")

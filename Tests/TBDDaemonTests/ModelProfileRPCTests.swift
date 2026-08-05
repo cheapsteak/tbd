@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Stub fetcher with a queued response list.
 final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
@@ -26,6 +27,22 @@ final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
         return responses.removeFirst()
     }
 }
+
+// Nested under TBDHomeSerialized: this suite does not *mutate* `TBD_HOME`, it
+// depends on the value staying put. `ModelProfileKeychain` is a file store
+// under `$TBD_HOME/claude-tokens` and resolves that directory from the
+// process-global environment on every call, so a test that seeds a token and
+// then drives a handler which reads it back straddles two independent
+// resolutions. Run concurrently with a suite that points `TBD_HOME` at its own
+// temp directory, the seed and the read land in different homes and the
+// handler answers "Secret missing from keychain" — the observed failure. The
+// gap is seconds wide in the fast parallel pass, where a test spends most of
+// its wall time suspended between awaits.
+//
+// See `TBDHomeSerializedSuites.swift`: the serialized domain is the only
+// mutual exclusion available here, because the handlers reach
+// `ModelProfileKeychain` through static members with no injection seam.
+extension TBDHomeSerialized {
 
 @Suite("ModelProfile RPC Handlers")
 struct ModelProfileRPCTests {
@@ -54,7 +71,8 @@ struct ModelProfileRPCTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             usageFetcher: stub,
-            configDirManager: configDirManager
+            configDirManager: configDirManager,
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, stub)
     }
@@ -1043,4 +1061,6 @@ struct ModelProfileRPCTests {
         #expect(!resp.success)
         #expect(resp.error == "Profile not found")
     }
+}
+
 }

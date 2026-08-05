@@ -52,7 +52,9 @@ actor FiredBox {
             },
             worktreeRemover: { _, _ in }
         )
-        let coord = AutoArchiveOnMergeCoordinator(db: db, lifecycle: lifecycle, subscriptions: subs)
+        let coord = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subs,
+            actuationLog: makeTestActuationLog())
         return (coord, db)
     }
 

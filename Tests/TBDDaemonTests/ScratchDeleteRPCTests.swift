@@ -20,7 +20,7 @@ struct ScratchDeleteRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "gone")))
         let wt = try created.decodeResult(Worktree.self)
         #expect(FileManager.default.fileExists(atPath: wt.path))
@@ -37,7 +37,7 @@ struct ScratchDeleteRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-terminal")))
         let wt = try created.decodeResult(Worktree.self)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
@@ -71,7 +71,7 @@ struct ScratchDeleteRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "undeletable")))
         let wt = try created.decodeResult(Worktree.self)
 
@@ -95,7 +95,7 @@ struct ScratchDeleteRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let scratchpadBase = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratchdel-claudebase-\(UUID().uuidString)")
@@ -132,7 +132,7 @@ struct ScratchDeleteRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let scratchpadBase = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratchdel-claudebase-\(UUID().uuidString)")
@@ -163,7 +163,7 @@ struct ScratchDeleteRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
         let wt = try await db.worktrees.create(repoID: repo.id, name: "w", branch: "b",
                                                path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x")

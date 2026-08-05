@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// A `ClaudeProfileConfigDirManager` pointed at fresh temp dirs so nothing
 /// touches the developer's real `~/.claude` (mirrors HibernationCoordinatorTests).
@@ -24,13 +25,15 @@ struct AutoHibernateOnMergeCoordinatorTests {
         keepWarm: Bool = false,
         sessionID: String? = "sess-1",
         kind: TerminalKind? = .claude,
-        status: WorktreeStatus = .active
+        status: WorktreeStatus = .active,
+        logPath: String? = nil
     ) async throws -> (AutoHibernateOnMergeCoordinator, TBDDatabase, wtID: UUID, terminalID: UUID) {
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: isolatedConfigDirManager())
+            subscriptions: subs, configDirManager: isolatedConfigDirManager(),
+            actuationLog: logPath.map { ActuationLog(path: $0) } ?? makeTestActuationLog())
         let coord = AutoHibernateOnMergeCoordinator(
             db: db, hibernation: hibernation, subscriptions: subs)
 
@@ -202,5 +205,55 @@ struct AutoHibernateOnMergeCoordinatorTests {
         #expect(notifications.first?.type == .taskComplete)
         #expect(notifications.first?.message?.contains("2 sessions") == true)
         #expect(notifications.first?.message?.contains("#11") == true)
+    }
+
+    // MARK: - The rail's own actuation record
+
+    /// The fan-out is where a per-terminal record can go wrong in both
+    /// directions: one row for the whole merge would under-count the sessions
+    /// actually acted on, and a row written before the rails would count the
+    /// ones that were never touched. So: one request row per PARKED terminal,
+    /// each confirmed by exactly one outcome, and none for the refused one.
+    @Test func mergeParkWritesOneRequestAndOutcomePerParkedTerminal() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-authib-actuation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let logPath = directory.appendingPathComponent("actuations.jsonl").path
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let (coord, db, wtID, parkedID) = try await makeDeps(logPath: logPath)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        // A second, keep-warm terminal: armed, but the rails refuse it.
+        let keptWarm = try await db.terminals.create(
+            worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude2", claudeSessionID: "sess-2", kind: .claude)
+        try await db.terminals.setActivityState(id: keptWarm.id, activityState: .idle)
+        try await db.terminals.setKeepWarm(id: keptWarm.id, keepWarm: true)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 12)
+        #expect(try await db.terminals.get(id: parkedID)?.hibernatedAt != nil)
+        #expect(try await db.terminals.get(id: keptWarm.id)?.hibernatedAt == nil)
+
+        let written = try String(contentsOfFile: logPath, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+        let requests = written.filter { $0["kind"] as? String == "hibernate" }
+        #expect(requests.count == 1, "only the terminal the rail actually parked gets a row")
+        let request = try #require(requests.first)
+        #expect(request["method"] == nil)
+        let actor = try #require(request["actor"] as? [String: Any])
+        #expect(actor["rail"] as? String == "auto-hibernate-on-merge")
+        #expect((request["target"] as? [String: Any])?["terminal"] as? String
+            == parkedID.uuidString)
+
+        let outcomes = written.filter { $0["kind"] as? String == "outcome" }
+        #expect(outcomes.count == 1)
+        #expect(outcomes.first?["confirms"] as? String == request["id"] as? String)
+        #expect(outcomes.first?["result"] as? String == "dispatched")
+        #expect(written.count == 2, "nothing else is written for a merge fan-out")
     }
 }

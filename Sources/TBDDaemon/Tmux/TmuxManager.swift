@@ -58,6 +58,13 @@ public struct TmuxManager: Sendable {
     /// it, dryRun respawnWindow always succeeds, which makes the wake path's
     /// respawn-failure branch (`WakeResult.respawnFailed`) untestable.
     public let dryRunRespawnWindowError: (@Sendable (String) -> Error?)?
+    /// Optional test hook consulted by `killWindow` in dryRun mode: return a
+    /// non-nil error for a `(server, windowID)` pair to simulate the kill
+    /// failing (server wedged, window already reaped by someone else, …).
+    /// Without it, dryRun killWindow always succeeds, which makes the close
+    /// paths' transport-failure branch — the one the actuation record
+    /// classifies as `transport-failed` rather than `dispatched` — untestable.
+    public let dryRunKillWindowError: (@Sendable (String, String) -> Error?)?
     /// Optional test hook for real (non-dryRun) mode: override the result of
     /// `windowExists(server:windowID:)`. Allows tests to force a window as dead
     /// while still having a live process running in the pane (for testing the
@@ -89,7 +96,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -100,6 +107,7 @@ public struct TmuxManager: Sendable {
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
         self.dryRunCreateWindowError = dryRunCreateWindowError
         self.dryRunRespawnWindowError = dryRunRespawnWindowError
+        self.dryRunKillWindowError = dryRunKillWindowError
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
     }
@@ -517,6 +525,7 @@ public struct TmuxManager: Sendable {
         let args = Self.killWindowCommand(server: server, windowID: windowID)
         if dryRun {
             dryRunRecorder?(args)
+            if let error = dryRunKillWindowError?(server, windowID) { throw error }
             return
         }
         try await runTmux(args)

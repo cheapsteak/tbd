@@ -138,7 +138,8 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -195,7 +196,8 @@ func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -236,6 +238,152 @@ func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
     #expect(updated.isClaudeResumable, "parked terminal must remain Claude-resumable")
 }
 
+// MARK: - The re-park branch is an actuation, and carries its own row
+
+/// A readable actuation-log path for the two tests below, plus the rows in it.
+/// `makeTestActuationLog()` is deliberately opaque about its path; these tests
+/// assert on the record, so they build their own under `$TMPDIR`.
+private func makeReadableActuationLog() throws -> (log: ActuationLog, path: String) {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-actuation-repark-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let path = directory.appendingPathComponent("actuations.jsonl").path
+    return (ActuationLog(path: path), path)
+}
+
+/// A path that can never be opened: its parent is a regular file.
+private func makeUnwritableActuationLogPath() throws -> String {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-actuation-blocked-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let blocker = directory.appendingPathComponent("blocker")
+    try Data("not a directory".utf8).write(to: blocker)
+    return blocker.appendingPathComponent("actuations.jsonl").path
+}
+
+private func actuationRows(at path: String) throws -> [[String: Any]] {
+    guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+    return try contents
+        .split(separator: "\n", omittingEmptySubsequences: true)
+        .map { line in
+            try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        }
+}
+
+/// The re-park branch kills a window it read as dead and parks the session. It
+/// is an actuation, not a DB-only edit — the `windowExists` read one line
+/// earlier can be stale — so it writes its own `hibernate` row through
+/// `terminal.recreateWindow`'s door, the same act reconcile's recovery park
+/// records.
+@Test("the recreateWindow re-park writes one hibernate request and one dispatched outcome")
+func testRecreateWindowReparkWritesHibernateRow() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    // The window is genuinely DEAD: the premise of the re-park branch.
+    let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
+    let (log, logPath) = try makeReadableActuationLog()
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+        tmux: tmux,
+        actuationLog: log
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-repark-row", displayName: "test", defaultBranch: "main")
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-repark-row",
+        branch: "tbd/wt-repark-row",
+        path: "/tmp/fake-repo-repark-row/wt-repark-row",
+        tmuxServer: "tbd-4e9a4c01"
+    )
+    let sessionID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@dead-claude",
+        tmuxPaneID: "%dead-claude",
+        label: "claude",
+        claudeSessionID: sessionID,
+        kind: .claude
+    )
+
+    let response = await router.handle(try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id),
+        actor: ActuationActor.app))
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let written = try actuationRows(at: logPath)
+    #expect(written.count == 2, "exactly one request and one outcome; got \(written)")
+    let request = try #require(written.first)
+    // A park, recorded as one — not as the surface's usual spawn.
+    #expect(request["kind"] as? String == "hibernate")
+    #expect(request["method"] as? String == "terminal.recreateWindow")
+    let target = try #require(request["target"] as? [String: Any])
+    #expect(target["worktree"] as? String == wt.id.uuidString)
+    #expect(target["terminal"] as? String == terminal.id.uuidString)
+    let actor = try #require(request["actor"] as? [String: Any])
+    #expect(actor["kind"] as? String == "app")
+
+    let outcome = try #require(written.last)
+    #expect(outcome["kind"] as? String == "outcome")
+    #expect(outcome["confirms"] as? String == request["id"] as? String)
+    #expect(outcome["result"] as? String == "dispatched")
+
+    let updated = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(updated.isParked, "the park itself must still happen")
+}
+
+/// Fail-closed: an unwritable record refuses the re-park before the kill. The
+/// window is not killed and the row is not parked, and the caller gets the
+/// self-explaining log error rather than a silent, unrecorded teardown.
+@Test("an unwritable record refuses the recreateWindow re-park before the kill")
+func testRecreateWindowReparkRefusedWhenRecordUnwritable() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(
+        dryRun: true, dryRunRecorder: { recorded.append($0) }, dryRunWindowIsDead: { _ in true })
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+        tmux: tmux,
+        actuationLog: ActuationLog(path: try makeUnwritableActuationLogPath())
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-repark-refused", displayName: "test", defaultBranch: "main")
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-repark-refused",
+        branch: "tbd/wt-repark-refused",
+        path: "/tmp/fake-repo-repark-refused/wt-repark-refused",
+        tmuxServer: "tbd-4e9a4c02"
+    )
+    let sessionID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@dead-claude-refused",
+        tmuxPaneID: "%dead-claude-refused",
+        label: "claude",
+        claudeSessionID: sessionID,
+        kind: .claude
+    )
+
+    let response = await router.handle(try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+    #expect(!response.success, "an unrecordable park must not be performed")
+    #expect(response.error?.contains("actuation log") == true,
+            "the caller must see the self-explaining log error; got: \(response.error ?? "nil")")
+
+    let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+    #expect(!joined.contains { $0.contains("kill-window") },
+            "the kill must not run ahead of an unwritable record; got: \(joined)")
+
+    let updated = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(!updated.isParked, "the refused act must leave the row unparked")
+}
+
 /// Stale-caller gate: when the claude terminal's CURRENT window is actually
 /// ALIVE (the app's dead-window path raced a wake that just recreated the
 /// window and updated the row's ids), `handleTerminalRecreateWindow` must NOT
@@ -255,7 +403,8 @@ func testHandleTerminalRecreateWindowIgnoresStaleRequestWhenWindowAlive() async 
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -313,7 +462,8 @@ func testHandleTerminalRecreateWindowRebuildsShellAsShell() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -442,7 +592,8 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -500,7 +651,8 @@ struct CodexLaunchCommandTests {
                 tmux: tmux,
                 hooks: HookResolver()
             ),
-            tmux: tmux
+            tmux: tmux,
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(
@@ -554,7 +706,8 @@ struct CodexLaunchCommandTests {
                 tmux: tmux,
                 hooks: HookResolver()
             ),
-            tmux: tmux
+            tmux: tmux,
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(
@@ -618,7 +771,8 @@ struct CodexLaunchCommandTests {
                 tmux: tmux,
                 hooks: HookResolver()
             ),
-            tmux: tmux
+            tmux: tmux,
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(
