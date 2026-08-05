@@ -119,6 +119,18 @@ struct PaneSendTargetQueryTests {
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%12") == .live(terminalID: "MINE"))
     }
 
+    /// A pane started without an explicit command — `tmux new-session -d` with
+    /// no argument — reports an empty `#{pane_start_command}`, so the last
+    /// field is genuinely empty rather than absent. It must still parse as four
+    /// fields, not fall through to `.missing`.
+    @Test("an empty trailing start command is still a complete answer")
+    func parseEmptyStartCommand() {
+        #expect(TmuxManager.parsePaneSendTarget("%0\t0\t\t\n", paneID: "%0")
+            == .live(terminalID: nil))
+        #expect(TmuxManager.parsePaneSendTarget("%0\t0\tMINE\t\n", paneID: "%0")
+            == .live(terminalID: "MINE"))
+    }
+
     @Test("empty or malformed output names nothing")
     func parseEmpty() {
         #expect(TmuxManager.parsePaneSendTarget("", paneID: "%7") == .missing)
