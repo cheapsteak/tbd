@@ -32,7 +32,7 @@ extension AppState {
     /// Persist the auto-hibernate master switch + idle timeout, updating local
     /// published state optimistically.
     func setAutoHibernate(enabled: Bool, idleMinutes: Int) async {
-        let minutes = max(1, idleMinutes)
+        let minutes = min(max(Config.minHibernateIdleMinutes, idleMinutes), Config.maxHibernateIdleMinutes)
         do {
             try await daemonClient.setAutoHibernate(enabled: enabled, idleMinutes: minutes)
             autoHibernateEnabled = enabled
