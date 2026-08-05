@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -34,7 +35,10 @@ struct TranscriptImageAttachmentTests {
     }
 
     /// Writes a real PNG of the given pixel dimensions and returns its path.
-    private func writePNG(_ scratch: Scratch, name: String, width: Int, height: Int) throws -> String {
+    private func writePNG(
+        _ scratch: Scratch, name: String, width: Int, height: Int,
+        color: NSColor = .systemTeal
+    ) throws -> String {
         let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -42,7 +46,7 @@ struct TranscriptImageAttachmentTests {
         let unwrapped = try #require(rep)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: unwrapped)
-        NSColor.systemTeal.setFill()
+        color.setFill()
         NSRect(x: 0, y: 0, width: width, height: height).fill()
         NSGraphicsContext.restoreGraphicsState()
         let data = try #require(unwrapped.representation(using: .png, properties: [:]))
@@ -483,6 +487,90 @@ struct TranscriptImageAttachmentTests {
         // The bubble draws the picture, not the path.
         let drawn = Self.drawnStrings(in: cell)
         #expect(!drawn.contains { $0.contains(path) }, "the raw path must never be drawn, got \(drawn)")
+    }
+
+    // MARK: - Hosted (SwiftUI) reuse staleness
+
+    /// The SwiftUI image view renders inside `TableTranscriptView`'s shared
+    /// `NSHostingView` pool (reachable via `AskUserQuestionCard`'s embedded
+    /// `ChatBubbleView`), where a recycled cell has its `rootView` REPLACED rather
+    /// than being torn down. Its thumbnail lives in `@State` and `load()` bails
+    /// once that is non-nil, so a cell recycled onto a different message must be
+    /// made to fetch the NEW attachment — otherwise it keeps drawing the previous
+    /// message's picture.
+    ///
+    /// What is observable headlessly is the FETCH, not the pixels: SwiftUI content
+    /// is not captured by `cacheDisplay` or `CALayer.render` in this unbundled test
+    /// process, so the drawn image cannot be read back. The fetch is a sound proxy
+    /// — `load()` requests a thumbnail only when it holds no image, so a request
+    /// for the second attachment can only come from a view that dropped the first.
+    ///
+    /// Both fixtures are the same pixel size, so `maxPixelSize` is identical for
+    /// both and a cache hit cannot be confused for the wrong file.
+    @Test func recycledHostingViewFetchesTheNewAttachmentsThumbnail() async throws {
+        let scratch = Scratch()
+        TranscriptImageService.shared.clearCaches()
+        let first = try writePNG(scratch, name: "first.png", width: 160, height: 160, color: .red)
+        let second = try writePNG(scratch, name: "second.png", width: 160, height: 160, color: .blue)
+        let maxPixel = Self.hostedMaxPixelSize(forPath: first)
+
+        let host = NSHostingView(rootView: AnyView(Self.bubble(marker: marker(first))))
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
+        let window = NSWindow(
+            contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+
+        await pump(host) { TranscriptImageService.shared.hasCachedThumbnail(forPath: first, maxPixelSize: maxPixel) }
+        #expect(TranscriptImageService.shared.hasCachedThumbnail(forPath: first, maxPixelSize: maxPixel),
+                "precondition: the hosted view must fetch its own attachment at all")
+        #expect(!TranscriptImageService.shared.hasCachedThumbnail(forPath: second, maxPixelSize: maxPixel),
+                "precondition: nothing has asked for the second attachment yet")
+
+        // Recycle the cell onto a different message carrying a different image.
+        host.rootView = AnyView(Self.bubble(marker: marker(second)))
+        await pump(host) { TranscriptImageService.shared.hasCachedThumbnail(forPath: second, maxPixelSize: maxPixel) }
+        #expect(TranscriptImageService.shared.hasCachedThumbnail(forPath: second, maxPixelSize: maxPixel),
+                Comment(rawValue: "the recycled hosting view never fetched the new attachment, so "
+                    + "it is still drawing the previous message's thumbnail"))
+    }
+
+    /// The hosted shape the reuse pool actually renders: a chat bubble whose text
+    /// is one image marker.
+    @MainActor
+    private static func bubble(marker: String) -> some View {
+        ChatBubbleView(item: .userPrompt(id: "u1", text: marker, timestamp: nil))
+            .frame(width: 420, alignment: .leading)
+    }
+
+    /// The `maxPixelSize` `TranscriptImageAttachmentView.load` will ask for, derived
+    /// the same way it derives it — so the test reads the same cache slot the view
+    /// fills rather than a hardcoded one.
+    private static func hostedMaxPixelSize(forPath path: String) -> Int {
+        let display = TranscriptImageGeometry.displaySize(
+            metadata: TranscriptImageService.shared.metadata(forPath: path),
+            bodyWidth: TranscriptImageGeometry.maxEdge)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        return Int((max(display.width, display.height) * scale).rounded(.up))
+    }
+
+    /// Lays out, then yields the main actor until `done` or ~1s has passed.
+    ///
+    /// It YIELDS rather than spinning a nested `RunLoop.run`: the decode's
+    /// completion arrives via `DispatchQueue.main.async`, and suspending is what
+    /// lets the main queue deliver it. A nested run loop would deliver it too, but
+    /// it would also resume every other suspended `@MainActor` test in this
+    /// 200-suite process inside this test's body — including a sibling of this
+    /// `.serialized` suite parked on an `await`, whose `clearCaches()` then lands
+    /// mid-flight. Serialization does not cover that; not re-entering does.
+    ///
+    /// Bounded on purpose: a decode that never arrives must fail the assertion
+    /// below rather than hang the suite.
+    private func pump(_ view: NSView, until done: () -> Bool) async {
+        for _ in 0..<50 {
+            view.layoutSubtreeIfNeeded()
+            if done() { return }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     /// Every string actually drawn by `view`'s subtree.

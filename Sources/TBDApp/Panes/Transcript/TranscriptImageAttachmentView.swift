@@ -15,6 +15,12 @@ struct TranscriptImageAttachmentView: View {
     @State private var image: NSImage?
     @State private var hovering = false
 
+    /// Bumped on every load. An in-flight decode captures the value it was
+    /// dispatched with and drops its result if this view was pointed at a
+    /// different attachment meanwhile — the same staleness guard
+    /// `TranscriptImageBlockView.generation` enforces on the native path.
+    @State private var generation = 0
+
     /// Probed once per view identity. Cheap (header read, then cached by the
     /// service), and it is what makes the frame deterministic.
     private var metadata: TranscriptImageMetadata {
@@ -66,6 +72,20 @@ struct TranscriptImageAttachmentView: View {
                 attachment: attachment, metadata: metadata))
         .accessibilityHint(isPreviewable ? "Quick Look preview" : "")
         .onAppear(perform: load)
+        // This view renders inside `TableTranscriptView`'s shared `NSHostingView`
+        // pool, where a recycled cell has its `rootView` REPLACED rather than being
+        // torn down. Today `MarkdownSegments.Segment.id` keys image segments by
+        // path, so SwiftUI rebuilds this view with fresh `@State` and the thumbnail
+        // cannot survive onto another message — but that is the CALL SITE's
+        // property, not this view's, and `load` alone would never notice: it bails
+        // once `image` is non-nil and `onAppear` does not fire a second time. Own
+        // the invariant here, where the failure (the wrong picture, silently) would
+        // land.
+        .onChange(of: attachment) { _, _ in
+            image = nil
+            hovering = false
+            load()
+        }
     }
 
     private var sized: some View {
@@ -107,11 +127,16 @@ struct TranscriptImageAttachmentView: View {
 
     private func load() {
         guard case .ready = metadata.state, image == nil else { return }
+        generation &+= 1
+        let captured = generation
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let maxPixel = Int((max(displaySize.width, displaySize.height) * scale).rounded(.up))
         TranscriptImageService.shared.thumbnail(
             forPath: attachment.path, maxPixelSize: maxPixel
         ) { decoded in
+            // A decode dispatched for the PREVIOUS attachment must not paint over
+            // the current one when it lands late.
+            guard captured == generation else { return }
             image = decoded
         }
     }
