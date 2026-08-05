@@ -442,12 +442,12 @@ iteration cap so work that never arrives fails an assertion instead of hanging.
 This does not contradict the warning under "Clock and date seams" below that
 spinning `Task.yield()` **does not converge**. The two describe opposite
 situations. There, the waiter needs *scheduling progress somewhere else* before
-it can proceed, and yielding re-queues it ahead of the very work it is waiting
-on, so more yields make it worse. Here the work is already enqueued on the
-queue this body is holding, and letting go of it is the entire remedy — one
-handoff suffices, and the loop exists only to bound how long you wait for a
-decode that may never arrive. **Yield to release something you hold; never to
-hurry something you don't.**
+it can proceed, and yielding does not produce it — that section owns the
+queueing mechanics and the measurement behind them. Here the work is already
+enqueued on the queue this body is holding, so releasing that queue is the
+entire remedy, and the surrounding loop exists only to bound how long you wait
+for a decode that may never arrive. **Yield to release something you hold;
+never to hurry something you don't.**
 
 **The failure shape is why this rule is written down.** The deferred work does
 not vanish; it runs once the body ends, inside whatever test is running by then.
