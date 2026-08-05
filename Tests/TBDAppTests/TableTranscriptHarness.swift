@@ -1078,8 +1078,10 @@ struct TableTranscriptHarness {
     /// contentVersion, width)`, so the whole cache is then unreachable, and the next
     /// `update` legitimately takes the width-change branch again (wipe + re-measure)
     /// instead of the `.rebuild` branch a disclosure test means to exercise. Rows
-    /// above the click fall back to the arithmetic estimate — which is ~30-45pt off
-    /// a measured bubble by design — and the anchor jumps by hundreds of points.
+    /// above the click fall back to the arithmetic estimate, and even though that
+    /// estimate is now accurate to a point or two on these fixtures
+    /// (`TranscriptEstimatorAccuracyTests` pins it), a re-measure at a DIFFERENT
+    /// width re-flows every one of them, so the anchor still jumps.
     ///
     /// So: settle the width FIRST, and only then take a "before" snapshot. Returns
     /// the settled column width; fails the test if it never settles.
@@ -1157,19 +1159,47 @@ struct TableTranscriptHarness {
         let clip = scene.scrollView.contentView
 
         // Realize every row, so the "before" snapshot is entirely EXACT measurements.
-        // Without this the rows above the anchor carry the arithmetic estimate, which
-        // is deliberately cheap and can sit tens of points off the measurement — so a
+        // Without this the rows above the anchor carry the arithmetic estimate, and a
         // later estimate→exact transition (from anything at all: a re-measure, a
-        // width change, a different host font) would masquerade as anchor drift. The
+        // width change, a different host font) could masquerade as anchor drift. The
         // guard below then reads exactly as written: heights that were exact before
         // the click must still be exact, and identical, after it.
         realizeAllRows(scene, count: collapsed.count)
-        let unmeasuredAbove = (0..<summaryRow)
-            .filter { scene.coordinator.cachedExactHeight(for: collapsed[$0]) == nil }
-        #expect(unmeasuredAbove.isEmpty,
+        // One wrapped body line, from the theme's own font — the granularity the
+        // arithmetic estimate can resolve at all.
+        let oneRenderedLine = ceil(
+            NSLayoutManager().defaultLineHeight(for: TranscriptTextTheme.chatBubble.bodyFont))
+        var unpinnedAbove: [String] = []
+        for row in 0..<summaryRow {
+            let node = collapsed[row]
+            guard let exact = scene.coordinator.cachedExactHeight(for: node) else {
+                unpinnedAbove.append("row \(row) (\(node.id)): never measured")
+                continue
+            }
+            // TIGHTER than "is it measured": the estimate these rows would have
+            // carried has to be within one rendered LINE of the measurement, so the
+            // realization above is a scaffold rather than the thing holding the
+            // anchor up. Before this fixture's estimates were recalibrated they sat
+            // 28 pt — nearly two lines — above the measurement, and every one of
+            // those rows was free to jump when it realized.
+            //
+            // One line rather than one point, because that is the model's floor:
+            // this fixture's assistant paragraph lays out to 2.0016 × the body
+            // width at the harness's column, so which side of the wrap boundary it
+            // lands on is not a thing arithmetic over a mean character advance can
+            // see. `TranscriptEstimatorAccuracyTests` pins the per-kind budget and
+            // the direction; this pins the shapes the disclosure fixture uses.
+            let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: primedWidth)
+            if abs(estimate - exact) > oneRenderedLine {
+                unpinnedAbove.append("row \(row) (\(node.id)): estimate \(estimate) vs measured \(exact)")
+            }
+        }
+        #expect(unpinnedAbove.isEmpty,
                 Comment(rawValue: "every row above the anchor must be exactly measured before the "
-                    + "click, else an estimate→exact transition can masquerade as drift; "
-                    + "unmeasured rows: \(unmeasuredAbove.prefix(5))"))
+                    + "click AND carry an estimate within one rendered line "
+                    + "(\(oneRenderedLine) pt) of that measurement, else an estimate→exact "
+                    + "transition can masquerade as drift; offenders: "
+                    + unpinnedAbove.prefix(5).joined(separator: "; ")))
 
         if atBottom {
             scene.coordinator.scrollToEnd(animated: false)

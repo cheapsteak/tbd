@@ -489,10 +489,13 @@ struct TableTranscriptView: NSViewRepresentable {
             // a pure cache hit. Otherwise return a GOOD cheap per-kind estimate (no
             // TextKit/SwiftUI layout). The row is then measured exactly when it is
             // realized in `viewFor`, which corrects the estimate via
-            // `noteHeightOfRows`. We bias estimates slightly so corrections tend to
-            // GROW rows (less jarring than a shrink). Returning our OWN estimate —
-            // not relying on AppKit's single blended estimate (which we disabled) —
-            // is what keeps a deep scroll-up landing close before the correction.
+            // `noteHeightOfRows`. The estimate is calibrated to sit a little UNDER
+            // the measurement, so that correction GROWS the row — a row that grows
+            // pushes not-yet-read content down off screen, while one that shrinks
+            // pulls content up into the reading area as a visible jump. Returning
+            // our OWN estimate — not relying on AppKit's single blended estimate
+            // (which we disabled) — is what keeps a deep scroll-up landing close
+            // before the correction.
             let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
             if let cached = heightCache[key] { return cached }
             // Lazy estimate: serve a cached estimate if we already computed one for
@@ -750,36 +753,130 @@ struct TableTranscriptView: NSViewRepresentable {
 
         // MARK: Estimate
 
-        /// Average rendered width of a body character in the chat-bubble prose font
-        /// at the column's wrapping width — used to approximate the wrapped line
-        /// count for a chat bubble WITHOUT laying out any text. Empirical for the
-        /// system body font at this size; biased slightly LOW (fewer chars/line ⇒
-        /// MORE estimated lines) so estimates tend to over- rather than
-        /// under-shoot, which makes the on-realize correction GROW the row (a
-        /// shrink is more jarring than a grow). (#129)
-        private static let avgBubbleCharWidth: CGFloat = 7.0
-        /// Estimated rendered height of one wrapped prose line in the chat bubble.
-        private static let estimatedBubbleLineHeight: CGFloat = 18
-        /// Estimated height of one GFM table row (cell + border), and the header.
-        private static let estimatedTableRowHeight: CGFloat = 28
+        /// Rendered height of one line fragment set in `font`, which is what the
+        /// bubble's TextKit-1 `usedRect` reports per wrapped line. Derived from the
+        /// font rather than frozen as a number: the theme's body font is
+        /// `NSFont.preferredFont(forTextStyle: .body)`, so a host running a
+        /// different system text size renders taller lines and a constant would be
+        /// wrong there. `defaultLineHeight(for:)` is exactly the metric TextKit
+        /// lays a fragment out at — measured against the production renderer it
+        /// reproduces the true 16.0 pt body line for 13 pt SF to the point, which
+        /// `ceil(ascender - descender + leading)` does not for every face (the
+        /// monospaced code font rounds up from 15.31). (#129)
+        private static func lineHeight(of font: NSFont) -> CGFloat {
+            ceil(NSLayoutManager().defaultLineHeight(for: font))
+        }
+
+        /// Height of one wrapped prose line in a chat bubble (16.0 pt at 13 pt SF).
+        private static let bubbleLineHeight: CGFloat =
+            lineHeight(of: TranscriptTextTheme.chatBubble.bodyFont)
+        /// Height of one line inside a fenced code block. `codeFont` is the
+        /// monospaced face at the SAME point size as the body font, so this
+        /// currently equals `bubbleLineHeight` — kept separate because that is a
+        /// property of the theme, not a law.
+        private static let codeLineHeight: CGFloat =
+            lineHeight(of: TranscriptTextTheme.chatBubble.codeFont)
+        /// Height of the trailing token-usage badge's own line. The badge is set in
+        /// `NSFont.systemFont(ofSize: 9)` by `TranscriptBubbleGeometry.composedBlocks`.
+        private static let badgeLineHeight: CGFloat = lineHeight(of: NSFont.systemFont(ofSize: 9))
+        /// Line height of an ATX heading, indexed by `level - 1` (h1…h6). Headings
+        /// are set in a scaled semibold system font, so they are materially taller
+        /// than body prose (22 pt for h1 at 13 pt SF).
+        private static let headingLineHeights: [CGFloat] = (1...6).map {
+            lineHeight(of: TranscriptTextTheme.chatBubble.headingFont(level: $0))
+        }
+        /// Height of one GFM table grid row (header or body). MEASURED against the
+        /// production `TranscriptTableView` at 2 and 4 columns and 2–7 grid rows: a
+        /// non-wrapping row is 24.0 pt at every one of them. A row whose cell text
+        /// wraps is taller (48 pt for two lines) and is deliberately not modelled —
+        /// see `chatBubbleEstimate`.
+        private static let tableRowHeight: CGFloat = 24
+
+        /// Correction applied to the body font's raw mean character advance to turn
+        /// it into the divisor `ceil(len / charsPerLine)` wants. MEASURED, not
+        /// guessed: sweeping this factor against 1920 paragraph layouts (480
+        /// generated paragraphs laid out at each of the four body widths the pane
+        /// uses) and counting how often the arithmetic line count equals the
+        /// laid-out one puts the peak on a broad plateau over 0.992…1.004, around
+        /// 93% of paragraphs, falling away by more than ten points of exactness 4%
+        /// to either side. The value is picked from INSIDE that plateau, at the end
+        /// where the residual leans low: 106 paragraphs one line short against 38
+        /// one line long, a mean of −0.035 lines per paragraph.
+        ///
+        /// Two ~1% effects sit underneath it and pull opposite ways — word wrap's
+        /// ragged right edge fits ~1.2% fewer characters on a line than the pure
+        /// advance says, while `ceil` rounds up ~1.2% more often than the true line
+        /// count does. Both are small, which is why the plateau is broad; the old
+        /// 7.0 pt/char constant was 14% off and had no plateau to sit on.
+        ///
+        /// `TranscriptEstimatorAccuracyTests.wrapArithmeticStaysCalibrated` is the
+        /// standing guard: it re-runs the comparison (not the sweep) on every test
+        /// run and fails if exactness falls off the plateau or the residual stops
+        /// leaning low.
+        private static let wrapCalibration: CGFloat = 0.994
+
+        /// Representative English prose the mean character advance is taken from.
+        /// Any long natural-language sample works; this one is fixed so the derived
+        /// constant is reproducible.
+        private static let advanceSample = """
+            The table reserves space for an unrealized row with a cheap arithmetic \
+            estimate, then corrects it to the measured height the moment the row is \
+            realized, which means a biased estimate shows up to the reader as content \
+            sliding under the cursor rather than as a wrong number anywhere.
+            """
+
+        /// Horizontal advance charged per prose character when approximating the
+        /// wrapped line count — the theme body font's own mean advance over
+        /// representative prose (6.138 pt at 13 pt SF), times `wrapCalibration`.
+        /// Derived from the font for the same reason `bubbleLineHeight` is: a host
+        /// at a different system text size wraps at a different character count,
+        /// and the frozen 7.0 pt this replaces was 14% wrong even at the default
+        /// size.
+        ///
+        /// `bodyWidth / this` is the number of characters that fit on a FULL
+        /// (non-final) line, which is the quantity `ceil(len / charsPerLine)`
+        /// wants: a paragraph of `len` characters fills ⌈len ÷ full-line capacity⌉
+        /// lines. It yields 107 characters at the assistant body width of 656 pt,
+        /// against a measured mean of 105.3 characters per laid-out full line.
+        private static let bubbleCharAdvance: CGFloat = {
+            meanAdvance(of: TranscriptTextTheme.chatBubble.bodyFont) * wrapCalibration
+        }()
+
+        /// What one character of an inline `code span` costs in body characters.
+        /// The inline-code face is monospaced, so it is materially WIDER per
+        /// character than the proportional body font (1.17× at the default size)
+        /// — and this transcript's assistant prose is full of `file/paths` and
+        /// `symbolNames()`. Ignoring it made a 200-character paragraph carrying one
+        /// code span estimate two lines where it draws three.
+        private static let inlineCodeCharWeight: CGFloat = {
+            meanAdvance(of: TranscriptTextTheme.chatBubble.inlineCodeFont)
+                / meanAdvance(of: TranscriptTextTheme.chatBubble.bodyFont)
+        }()
+
+        private static func meanAdvance(of font: NSFont) -> CGFloat {
+            NSAttributedString(string: advanceSample, attributes: [.font: font]).size().width
+                / CGFloat(advanceSample.count)
+        }
 
         /// GOOD cheap per-kind height ESTIMATE — pure arithmetic, NO TextKit or
         /// SwiftUI layout — returned by `heightOfRow` for a row whose exact height
-        /// is not yet cached. Biased slightly so the on-realize correction tends to
-        /// GROW the row rather than shrink it. (#129)
+        /// is not yet cached, and corrected to the measured height when the row
+        /// realizes. Calibrated to land within a few points of the measurement, and
+        /// to leave what error remains on the LOW side so the correction GROWS the
+        /// row: a row that grows as it realizes pushes not-yet-read content further
+        /// down (off screen, unnoticed), while one that shrinks pulls content up
+        /// into the reading area as a visible jump. (#129)
         ///
-        /// * chatBubble: approximate wrapped-line count from the body text length
-        ///   (`ceil(textLength / charsPerLine)`, `charsPerLine ≈ bodyWidth /
-        ///   avgCharWidth`) × line height, + the bubble's fixed chrome. If the
-        ///   message contains a GFM table, the (cheap, regex-free) table row count
-        ///   contributes `rows × tableRowHeight + header`. An attached image
-        ///   contributes its TRUE laid-out height (see `chatBubbleEstimate`).
+        /// * chatBubble: `chatBubbleEstimate` walks the message's source lines once
+        ///   and sums what each will render as — wrapped prose lines, list items,
+        ///   fenced code, GFM table grid rows, attached images — plus the paragraph
+        ///   spacing between them and the bubble's fixed chrome.
         /// * activity rows (systemReminder / skillBody / non-Ask toolCall /
         ///   subagentSummary): the row is ONE truncated line, so its height is the
         ///   EXACT fixed chrome height (`activityRowHeight`) — cheap and exact, no
         ///   estimate error.
-        /// * askUserQuestion (a hosted toolCall): a rough constant; the realized
-        ///   card measures exactly and corrects.
+        /// * askUserQuestion (a hosted SwiftUI card): a calibrated constant; the
+        ///   realized card measures exactly and corrects.
         static func estimate(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
             guard let node else { return 32 }
             switch node.kind {
@@ -800,13 +897,51 @@ struct TableTranscriptView: NSViewRepresentable {
             }
         }
 
-        /// Rough constant for an unrealized AskUserQuestion card (header + a couple
-        /// of option bubbles). Corrected exactly when realized.
-        static let askUserQuestionEstimate: CGFloat = 180
+        /// Calibrated constant for an unrealized AskUserQuestion card, corrected
+        /// exactly when the card realizes.
+        ///
+        /// The card is a stack of chat bubbles — one per question, plus the answer
+        /// bubble, with every option's label and description shown (the table pane
+        /// renders these cards always-expanded and static). Its height is therefore
+        /// driven by how that text WRAPS, not by anything countable from the raw
+        /// JSON: measured against the production card, `1 question / 1 option` is
+        /// 66 pt, `1 / 2` is 118, `1 / 4` is 144, `2 / 2×2` is 131, and a
+        /// long-question / short-option card is 92 (680 pt column) or 105 (663) —
+        /// two cards with identical question and option COUNTS differ by 26 pt.
+        /// Scanning the JSON for `"question":` / `"label":` therefore buys nothing a
+        /// constant does not, so this is the mean of the measured range, nudged
+        /// down to keep the residual on the growing side for the common shapes.
+        /// Spread against those six samples: −40 pt to +38 pt, against the old
+        /// constant's +36 to +114 (it over-reserved on EVERY one of them).
+        static let askUserQuestionEstimate: CGFloat = 104
 
-        /// Arithmetic height estimate for a chat bubble: wrapped prose lines × line
-        /// height + any embedded GFM table + any attached image + fixed bubble
-        /// chrome. No text layout.
+        /// Arithmetic height estimate for a chat bubble. ONE pass over the message's
+        /// source lines, no markdown parse and no text layout.
+        ///
+        /// The model mirrors what `MarkdownAttributedRenderer.renderBlocks` +
+        /// `MessageBlockMeasurer` actually produce, which is what makes it accurate
+        /// rather than merely cheap:
+        ///
+        /// * The message renders as an ordered list of BLOCKS — runs of prose, GFM
+        ///   tables, attached images — separated by `interBlockSpacing`. Table and
+        ///   image source lines are therefore counted ONCE, by their own term; the
+        ///   prose loop skips them instead of also charging them as prose (charging
+        ///   both put a four-row table 140 pt over).
+        /// * Inside a prose block the renderer emits one paragraph per non-blank
+        ///   source line and stamps each with a TRAILING spacing — `paragraphSpacing`
+        ///   for ordinary text, the much tighter `listItemSpacing` for a list item —
+        ///   which the LAST paragraph of the block does not pay. Blank source lines
+        ///   render nothing at all: they are separators, not lines, so charging one
+        ///   for each was 2 pt of over-estimate per paragraph break.
+        /// * A fenced code block draws only its code lines; the ``` delimiters and
+        ///   the language tag are not drawn. When such a block is followed by more
+        ///   prose the visitor's trailing newline survives as one empty line
+        ///   fragment, which is charged here in place of paragraph spacing.
+        ///
+        /// Two shapes are deliberately NOT modelled, both because they need real
+        /// layout to see: a GFM cell whose text wraps (that grid row is 48 pt, not
+        /// 24), and a list item whose continuation lines wrap inside the 24 pt list
+        /// indent. Both make this estimate small, which is the safe direction.
         ///
         /// The image term is not an approximation at all: an attached image is laid
         /// out at `TranscriptImageGeometry.displaySize`, which derives from a
@@ -822,69 +957,259 @@ struct TableTranscriptView: NSViewRepresentable {
         ) -> CGFloat {
             let bodyWidth = TranscriptBubbleGeometry.bodyWidth(
                 columnWidth: columnWidth, role: TranscriptBubbleGeometry.role(for: item))
-            let charsPerLine = max(Int(bodyWidth / avgBubbleCharWidth), 12)
+            let charsPerLine = max(Int(bodyWidth / bubbleCharAdvance), 12)
             let text = TranscriptBubbleGeometry.text(for: item)
 
             // Split on image markers exactly as `renderBlocks` does, so the marker
             // text is not counted as prose and each image contributes its own block
             // height. Marker-free text (the overwhelmingly common case) costs one
-            // substring search and yields a single text segment — the arithmetic
-            // below is then identical to the marker-free estimate.
-            var proseLines = 0
-            var tableRows = 0
-            var imageCount = 0
-            var imagesHeight: CGFloat = 0
+            // substring search and yields a single text segment.
+            var blocks = BlockAccumulator(charsPerLine: charsPerLine)
             for segment in TranscriptImageMarker.split(text) {
                 switch segment {
                 case .text(let run):
-                    // Prose lines: count explicit newlines (each forces a line break)
-                    // plus the wrapped lines each non-empty paragraph contributes.
-                    for paragraph in run.split(separator: "\n", omittingEmptySubsequences: false) {
-                        let len = paragraph.count
-                        proseLines += max(1, (len + charsPerLine - 1) / charsPerLine)
-                    }
-                    // GFM table block: cheaply count pipe-prefixed-or-containing rows
-                    // in the source (header + separator + body) without rendering.
-                    // Each grid row is ~tableRowHeight tall.
-                    tableRows += estimatedTableRowCount(in: run)
+                    blocks.appendTextRun(run)
                 case .image(let attachment):
-                    imageCount += 1
-                    imagesHeight += MessageBlockMeasurer.imageSize(
-                        attachment, bodyWidth: bodyWidth).height
+                    blocks.appendBlock(
+                        MessageBlockMeasurer.imageSize(attachment, bodyWidth: bodyWidth).height)
                 }
             }
-            if proseLines == 0 && imageCount == 0 { proseLines = 1 }
-            // A bubble that carries a usage badge adds one trailing line.
-            if badgeUsage != nil { proseLines += 1 }
+            blocks.flushProse()
+            // The badge is appended to the LAST prose block (a new paragraph there,
+            // so the paragraph before it starts paying its trailing spacing), or —
+            // when the message has no prose at all — becomes a trailing prose block
+            // of its own.
+            if badgeUsage != nil { blocks.appendBadge() }
 
-            var blocksHeight = CGFloat(proseLines) * estimatedBubbleLineHeight
-            if tableRows > 0 {
-                blocksHeight += CGFloat(tableRows) * estimatedTableRowHeight
-                    + TranscriptBubbleGeometry.interBlockSpacing
-            }
-            if imageCount > 0 {
-                blocksHeight += imagesHeight
-                    + CGFloat(imageCount) * TranscriptBubbleGeometry.interBlockSpacing
-            }
-
-            return TranscriptBubbleGeometry.rowHeight(blocksHeight: max(blocksHeight, estimatedBubbleLineHeight))
+            return TranscriptBubbleGeometry.rowHeight(
+                blocksHeight: max(blocks.totalHeight, bubbleLineHeight))
         }
 
-        /// Cheap count of GFM table grid rows in `text` — lines that start (after
-        /// trimming) with `|`. Includes the header but EXCLUDES the `|---|`
-        /// separator line (which renders as a border, not a row). Pure string scan,
-        /// no markdown parse. (#129)
-        private static func estimatedTableRowCount(in text: String) -> Int {
-            var count = 0
-            for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-                let line = rawLine.trimmingCharacters(in: .whitespaces)
-                guard line.hasPrefix("|") else { continue }
-                // Skip the GFM separator row (only |, -, :, space).
-                let body = line.filter { $0 != "|" && $0 != "-" && $0 != ":" && $0 != " " }
-                if body.isEmpty { continue }
-                count += 1
+        /// Accumulates the estimated block structure of one chat message: a
+        /// sequence of prose / table / image blocks separated by
+        /// `interBlockSpacing`, where a prose block is a sequence of paragraph
+        /// units each of which pays a trailing spacing unless it is the block's
+        /// last. Pure arithmetic over source lines.
+        ///
+        /// `@MainActor` because it reads the main-actor theme and the lazy
+        /// font-derived constants above (a nested type does not inherit the
+        /// enclosing class's isolation); it is only ever built inside
+        /// `chatBubbleEstimate`, which is already on the main actor.
+        @MainActor
+        private struct BlockAccumulator {
+            let charsPerLine: Int
+
+            /// Summed heights of the blocks already closed.
+            private var closedBlocksHeight: CGFloat = 0
+            private var closedBlockCount = 0
+            /// Whether any closed block is prose — the badge merges into the last
+            /// such block rather than becoming a block of its own.
+            private var hasProseBlock = false
+            /// Height of the prose block currently being built, and the trailing
+            /// spacing owed by its most recent unit (charged only if another unit
+            /// follows).
+            private var proseHeight: CGFloat = 0
+            private var proseUnits = 0
+            private var pendingTrailing: CGFloat = 0
+
+            init(charsPerLine: Int) {
+                self.charsPerLine = charsPerLine
             }
-            return count
+
+            /// Total body height: every block plus the spacing between them.
+            var totalHeight: CGFloat {
+                guard closedBlockCount > 0 else { return 0 }
+                return closedBlocksHeight
+                    + TranscriptBubbleGeometry.interBlockSpacing * CGFloat(closedBlockCount - 1)
+            }
+
+            /// Adds one already-sized block (image or table).
+            mutating func appendBlock(_ height: CGFloat) {
+                flushProse()
+                closedBlocksHeight += height
+                closedBlockCount += 1
+            }
+
+            /// Closes the prose block under construction, if any.
+            mutating func flushProse() {
+                guard proseUnits > 0 else { return }
+                closedBlocksHeight += proseHeight
+                closedBlockCount += 1
+                hasProseBlock = true
+                proseHeight = 0
+                proseUnits = 0
+                pendingTrailing = 0
+            }
+
+            /// One rendered paragraph: `lines` fragments of `lineHeight`, followed
+            /// by `trailing` points of spacing IF another unit follows it in the
+            /// same block.
+            private mutating func appendUnit(lines: Int, lineHeight: CGFloat, trailing: CGFloat) {
+                if proseUnits > 0 { proseHeight += pendingTrailing }
+                proseHeight += CGFloat(max(lines, 1)) * lineHeight
+                pendingTrailing = trailing
+                proseUnits += 1
+            }
+
+            /// Wrapped line count of a source line at an effective wrap width of
+            /// `charsPerLine / widthScale` characters.
+            private func wrappedLines(_ line: String, widthScale: CGFloat = 1) -> Int {
+                let capacity = max(Int(CGFloat(charsPerLine) / widthScale), 1)
+                let length = Self.drawnLength(of: line)
+                return max(1, (length + capacity - 1) / capacity)
+            }
+
+            /// Length of `line` measured in BODY characters — what it will cost on
+            /// a wrapped line, rather than how many characters the markdown source
+            /// spends saying it. Backticks are markup and are not drawn, and the
+            /// characters between them are set in the wider monospaced inline-code
+            /// face, so a code span costs more than its character count.
+            ///
+            /// Deliberately does NOT try to undo emphasis or link syntax: `**` and
+            /// `*` are two-to-four characters against a whole line, and a link's
+            /// hidden URL makes the line estimate LONG — which reserves more space,
+            /// the safe direction. Code spans are singled out because they are both
+            /// pervasive here and biased the UNSAFE way.
+            private static func drawnLength(of line: String) -> Int {
+                guard line.contains("`") else { return line.count }
+                var total: CGFloat = 0
+                var inCode = false
+                for character in line {
+                    if character == "`" {
+                        inCode.toggle()
+                        continue
+                    }
+                    total += inCode ? inlineCodeCharWeight : 1
+                }
+                return Int(total.rounded())
+            }
+
+            /// Appends the blocks a marker-free run of message text renders as.
+            mutating func appendTextRun(_ run: String) {
+                let theme = TranscriptTextTheme.chatBubble
+                var inFence = false
+                var fenceLines = 0
+                var pendingTableRows = 0
+
+                func flushTable() {
+                    guard pendingTableRows > 0 else { return }
+                    appendBlock(CGFloat(pendingTableRows) * tableRowHeight)
+                    pendingTableRows = 0
+                }
+
+                for rawLine in run.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let line = rawLine.trimmingCharacters(in: .whitespaces)
+
+                    if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                        if inFence {
+                            // Closing delimiter: the block draws its code lines, and
+                            // the visitor's surviving trailing newline shows up as
+                            // one empty line fragment when more content follows.
+                            inFence = false
+                            appendUnit(lines: fenceLines, lineHeight: codeLineHeight,
+                                       trailing: bubbleLineHeight)
+                            fenceLines = 0
+                        } else {
+                            flushTable()
+                            inFence = true
+                            fenceLines = 0
+                        }
+                        continue
+                    }
+                    if inFence {
+                        // Code never wraps into fewer lines than it has; long lines
+                        // do wrap, but the tail indent makes that rare enough that
+                        // one source line == one drawn line is the better model.
+                        fenceLines += 1
+                        continue
+                    }
+
+                    if line.isEmpty {
+                        // A blank source line draws nothing — the separation it
+                        // expresses is already paid by the previous unit's trailing
+                        // spacing.
+                        flushTable()
+                        continue
+                    }
+
+                    if line.hasPrefix("|") {
+                        // GFM grid row. The `|---|` separator draws as a border
+                        // rather than a row, so it is not counted.
+                        let cells = line.filter { $0 != "|" && $0 != "-" && $0 != ":" && $0 != " " }
+                        if !cells.isEmpty { pendingTableRows += 1 }
+                        continue
+                    }
+                    flushTable()
+
+                    if let level = Self.headingLevel(of: line) {
+                        // A heading's font is scaled, so it both draws taller and
+                        // wraps at proportionally fewer characters.
+                        let scale = theme.headingFont(level: level).pointSize / theme.bodyFont.pointSize
+                        appendUnit(lines: wrappedLines(line, widthScale: scale),
+                                   lineHeight: headingLineHeights[level - 1],
+                                   trailing: theme.paragraphSpacing)
+                        continue
+                    }
+
+                    appendUnit(
+                        lines: wrappedLines(line),
+                        lineHeight: bubbleLineHeight,
+                        trailing: Self.isListItem(line) ? theme.listItemSpacing : theme.paragraphSpacing)
+                }
+
+                if inFence {
+                    // Unterminated fence (a code block still streaming in): the
+                    // renderer runs it to the end of the message, and being last it
+                    // has no trailing spacing.
+                    appendUnit(lines: fenceLines, lineHeight: codeLineHeight, trailing: 0)
+                }
+                flushTable()
+            }
+
+            /// Charges the trailing token-usage badge. It joins the last prose block
+            /// as a new paragraph — so the paragraph before it starts paying its
+            /// `paragraphSpacing` — or, with no prose to join, becomes its own block.
+            mutating func appendBadge() {
+                if hasProseBlock {
+                    closedBlocksHeight += TranscriptTextTheme.chatBubble.paragraphSpacing + badgeLineHeight
+                } else {
+                    appendBlock(badgeLineHeight)
+                }
+            }
+
+            /// ATX heading level (1…6) of `line`, or nil. `#hashtag` is not a
+            /// heading — CommonMark requires whitespace (or end of line) after the
+            /// hashes.
+            private static func headingLevel(of line: String) -> Int? {
+                var level = 0
+                for character in line {
+                    if character == "#" {
+                        level += 1
+                        if level > 6 { return nil }
+                    } else {
+                        return (level > 0 && character == " ") ? level : nil
+                    }
+                }
+                return level > 0 ? level : nil
+            }
+
+            /// Whether `line` opens a bullet or ordered list item — the units the
+            /// renderer spaces with the tight `listItemSpacing` instead of a full
+            /// paragraph break.
+            private static func isListItem(_ line: String) -> Bool {
+                if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return true }
+                var digits = 0
+                for character in line {
+                    if character.isNumber {
+                        digits += 1
+                        continue
+                    }
+                    guard digits > 0, character == "." || character == ")" else { return false }
+                    let rest = line.dropFirst(digits + 1)
+                    return rest.first == " "
+                }
+                return false
+            }
         }
 
         // MARK: Streaming update
