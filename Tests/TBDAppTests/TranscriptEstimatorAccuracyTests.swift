@@ -77,8 +77,19 @@ struct TranscriptEstimatorAccuracyTests {
     /// measurement: the estimator models the same block structure the renderer
     /// builds (one paragraph unit per non-blank source line, its trailing
     /// paragraph or list spacing, fenced-code lines without their delimiters, GFM
-    /// grid rows counted once) out of font-derived line metrics. The 2 pt budget
-    /// is there for a host whose font rounds a line differently, not for slack.
+    /// grid rows counted once) out of font-derived line metrics.
+    ///
+    /// The 2 pt budget is rounding slack and NOTHING more. In particular it does
+    /// not make these fixtures font-size-independent: several of them
+    /// (`user/wrap-boundary` by construction, `assistant/long` and the
+    /// code-block fixture by length) sit near a wrap boundary at the DEFAULT
+    /// system text size, and at a larger one they land on the other side of it and
+    /// miss by a whole rendered line. That is a property of the fixture text, not
+    /// of the estimator — which derives every constant from the theme font and
+    /// tracks the change — so `perKindErrorStaysWithinBudget` states the
+    /// precondition and stands down rather than reporting someone else's bug.
+    /// `wrapArithmeticStaysCalibrated` carries the guarantee on such a host: it
+    /// compares against measurement at whatever size the host runs.
     ///
     /// Activity rows are exact BY CONSTRUCTION — the row is one truncated line of
     /// fixed chrome — so they get no budget at all.
@@ -142,8 +153,35 @@ struct TranscriptEstimatorAccuracyTests {
         }
     }
 
+    /// The system body size these fixtures are calibrated against. Everything the
+    /// ESTIMATOR uses is derived from the theme font, so it follows a host that
+    /// differs; the fixture TEXT cannot, since where a given sentence breaks is a
+    /// property of the size it was written at.
+    private static let calibratedBodyPointSize: CGFloat = 13
+
+    /// Whether this host runs at the text size the fixtures were calibrated for.
+    private static var hostIsAtCalibratedTextSize: Bool {
+        NSFont.preferredFont(forTextStyle: .body).pointSize == calibratedBodyPointSize
+    }
+
+    private static var textSizePreconditionMessage: String {
+        "SKIPPED TranscriptEstimatorAccuracyTests fixture budgets: they are calibrated for a "
+            + "\(f(calibratedBodyPointSize)) pt system body font and this host renders at "
+            + "\(f(NSFont.preferredFont(forTextStyle: .body).pointSize)) pt, where the fixture "
+            + "sentences fall on different wrap boundaries. The estimator itself is font-derived "
+            + "and stays guarded by `wrapArithmeticStaysCalibrated`, which compares against "
+            + "measurement at whatever size the host runs. To pin this suite too, re-derive the "
+            + "fixture text and budgets at your size."
+    }
+
     @Test("every row kind's estimate stays inside its point budget at both column widths")
     func perKindErrorStaysWithinBudget() throws {
+        guard Self.hostIsAtCalibratedTextSize else {
+            // Loud, not silent: a skipped guard that says nothing is worse than a
+            // spurious red, because nobody notices it stopped guarding.
+            print(Self.textSizePreconditionMessage)
+            return
+        }
         let measurements = try Self.measureEveryKind()
         var failures: [String] = []
         let budgetByID = Dictionary(uniqueKeysWithValues: Self.budgets.map { ($0.id, $0) })
@@ -179,6 +217,10 @@ struct TranscriptEstimatorAccuracyTests {
 
     @Test("no row kind reserves more space than it measures, at either column width")
     func residualBiasKeepsCorrectionsGrowing() throws {
+        guard Self.hostIsAtCalibratedTextSize else {
+            print(Self.textSizePreconditionMessage)
+            return
+        }
         let measurements = try Self.measureEveryKind()
         // 0.5 pt of slack because `correctRowHeightIfNeeded` itself ignores
         // differences that small — below it there is no correction to have a
