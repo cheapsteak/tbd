@@ -494,8 +494,8 @@ enum ActivityRowFormatter {
         id: String, kind: SystemKind, text: String, timestamp: Date?,
         source: String?, truncatedTo: Int?
     ) -> ActivityRowPresentation {
-        // Background-task notifications get a richer presentation: a
-        // "Background · <summary>" title with the status surfaced as a badge.
+        // Background-task notifications read as one gray sentence instead of a
+        // labelled reminder — see `taskNotification` below.
         if kind == .taskNotification {
             return taskNotification(id: id, text: text, timestamp: timestamp)
         }
@@ -576,53 +576,99 @@ enum ActivityRowFormatter {
 
     // MARK: Task notification (background-task activity row)
 
-    /// Builds the activity-row presentation for a background-task notification.
-    /// Surfaces the `<summary>` as the row title and the `<status>` as a badge;
-    /// the full original text remains available via the click-to-open overlay.
+    /// The single-sentence phrasing of a `<task-notification>` envelope, plus the
+    /// one piece of status the sentence cannot be trusted to carry.
+    struct TaskNotificationPhrasing: Equatable {
+        /// One contiguous sentence, rendered as a single `.secondary` run.
+        let phrase: String
+        /// Non-nil ONLY when `<status>` reads as a failure — the sole surviving
+        /// badge. Completed, running and stopped states say so in `phrase`.
+        let failureStatus: String?
+    }
+
+    /// Builds the activity-row presentation for a background-task notification:
+    /// one gray sentence, no icon, no timestamp, and a badge only when the task
+    /// failed. The full original text remains available via click-to-open.
     private static func taskNotification(
         id: String, text: String, timestamp: Date?
     ) -> ActivityRowPresentation {
-        let (summary, status) = parseTaskNotification(text)
-        let titleSegments: [ActivityRowSegment] = [
-            ActivityRowSegment(text: "Background", style: .primary),
-            ActivityRowSegment(text: "·", style: .tertiary),
-            ActivityRowSegment(text: summary, style: .secondary)
-        ]
-        var badges: [ActivityRowBadge] = []
-        if !status.isEmpty {
-            let lower = status.lowercased()
-            let kind: ActivityRowBadge.Kind =
-                (lower.contains("fail") || lower.contains("error")) ? .error : .neutral
-            badges.append(ActivityRowBadge(text: status, kind: kind))
-        }
+        let phrasing = taskNotificationPhrasing(text)
+        let badges = phrasing.failureStatus.map {
+            [ActivityRowBadge(text: $0, kind: .error)]
+        } ?? []
         return ActivityRowPresentation(
-            iconSystemName: "clock.arrow.circlepath",
-            titleSegments: titleSegments,
-            timestamp: timestamp,
-            isError: false,
+            // No icon, no timestamp, one `.secondary` run — the treatment the
+            // activity-group summary already got. The envelope's own wording
+            // ("… finished", "… was stopped by user", "… completed (exit code
+            // 0)") IS the status report, so a clock glyph, a "completed" capsule
+            // and a date stamp were three restatements of a row nobody acts on.
+            iconSystemName: nil,
+            titleSegments: [ActivityRowSegment(text: phrasing.phrase, style: .secondary)],
+            timestamp: nil,
+            isError: phrasing.failureStatus != nil,
             badges: badges,
             openTargetID: id,
-            titleTruncation: .byTruncatingTail
+            titleTruncation: .byTruncatingTail,
+            // The timestamp left the visible row but not the record: VoiceOver
+            // still hears when the notification landed (bubble-header precedent).
+            accessibilityLabel: taskNotificationAccessibilityLabel(
+                text: text, timestamp: timestamp)
         )
     }
 
-    /// Extracts `(summary, status)` from a `<task-notification>` envelope using
-    /// plain string scanning (no regex). Returns the substrings between
-    /// `<summary>…</summary>` and `<status>…</status>`, trimmed. When `<summary>`
-    /// is absent, falls back to the status (or "Background task" if neither is
-    /// present). The status component is "" when absent.
-    static func parseTaskNotification(_ text: String) -> (summary: String, status: String) {
+    /// Phrases a `<task-notification>` envelope as one sentence, shared by the
+    /// native cell and `SystemReminderRow` so the two renderers cannot drift.
+    ///
+    /// Each `<summary>` already arrives as a self-describing sentence —
+    /// `Background command "…" completed (exit code 0)`, `Monitor "…" stream
+    /// ended`, `Stop hook …`, `Dynamic workflow "…" …`, `No completion record was
+    /// found for background agent …`. Only the agent shape opens with a bare
+    /// `Agent "…"`, so only that one absorbs the "Background" lead-in this row
+    /// used to wear as a separate bold token; prefixing the rest would stutter
+    /// ("Background Background command …"). Not every notification is an agent,
+    /// so nothing here may say "agent" unconditionally.
+    static func taskNotificationPhrasing(_ text: String) -> TaskNotificationPhrasing {
         let summary = extractTagBody(in: text, tag: "summary") ?? ""
         let status = extractTagBody(in: text, tag: "status") ?? ""
-        let resolvedSummary: String
-        if !summary.isEmpty {
-            resolvedSummary = summary
-        } else if !status.isEmpty {
-            resolvedSummary = status
+        let agentPrefix = "Agent "
+
+        let phrase: String
+        if summary.isEmpty {
+            // Status-only envelope — how a still-running task reports itself.
+            // Present participle plus "…", the activity-group summary's idiom
+            // for work still in flight.
+            if status.isEmpty {
+                phrase = "Background task"
+            } else if status.caseInsensitiveCompare("running") == .orderedSame {
+                phrase = "Background task running…"
+            } else {
+                phrase = "Background task \(status)"
+            }
+        } else if summary.hasPrefix(agentPrefix) {
+            phrase = "Background agent " + summary.dropFirst(agentPrefix.count)
         } else {
-            resolvedSummary = "Background task"
+            phrase = summary
         }
-        return (resolvedSummary, status)
+
+        let lower = status.lowercased()
+        let isFailure = lower.contains("fail") || lower.contains("error")
+        return TaskNotificationPhrasing(
+            phrase: phrase,
+            // A failure keeps its badge because the sentence is not guaranteed to
+            // name it: `<summary>` wording varies by task kind, and a long
+            // failure reason truncates. Completed/stopped/running badges are
+            // gone — those the sentence does carry.
+            failureStatus: isFailure ? status : nil
+        )
+    }
+
+    /// VoiceOver text for a background-task row: the sentence, the failure status
+    /// if any, and the timestamp the visible row no longer prints.
+    static func taskNotificationAccessibilityLabel(text: String, timestamp: Date?) -> String {
+        let phrasing = taskNotificationPhrasing(text)
+        return phrasing.phrase
+            + (phrasing.failureStatus.map { ", \($0)" } ?? "")
+            + (timestamp.map { ", \($0.absoluteShort)" } ?? "")
     }
 
     /// Returns the trimmed substring between `<tag>` and `</tag>`, or nil.
