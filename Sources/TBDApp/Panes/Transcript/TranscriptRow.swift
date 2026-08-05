@@ -140,6 +140,10 @@ struct ActivityGroupSummaryRow: View {
                 // string, so the two renderers cannot drift.
                 Text(summary.activityPhrase)
                     .font(.system(.subheadline, design: .rounded, weight: .medium))
+                    // Matches the native cell's `.secondary` segment style
+                    // (`secondaryLabelColor`): the summary is chrome and must
+                    // recede from the assistant prose around it.
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 // Nil — and so nothing rendered — unless the group failed or is

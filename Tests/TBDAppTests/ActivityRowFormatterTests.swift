@@ -288,11 +288,24 @@ struct ActivityRowFormatterTests {
         #expect(pending.accessibilityLabel == "Expand Reading 1 file, running 2 shell commands…")
     }
 
-    @Test("Activity group title is the whole phrase, in one primary run")
+    @Test("Activity group title is the whole phrase, in one secondary run")
     func activityGroupTitleIsThePhrase() throws {
         let p = try #require(ActivityRowFormatter.presentation(
             for: groupNode(itemCount: 2, bucketCounts: [.bash: 2])))
-        #expect(p.titleSegments == [ActivityRowSegment(text: "Ran 2 shell commands", style: .primary)])
+        #expect(p.titleSegments == [ActivityRowSegment(text: "Ran 2 shell commands", style: .secondary)])
+    }
+
+    @Test("Activity group summary is grayed down — never the primary label color")
+    func activityGroupSummaryRecedes() throws {
+        // The summary line is chrome between assistant prose; rendering it at
+        // `.primary` (labelColor) made it compete with the prose around it.
+        // `.secondary` keeps the subheadline size — it is greyed, not shrunk.
+        for node in [groupNode(), groupNode(errorCount: 2), groupNode(pendingCount: 1)] {
+            let p = try #require(ActivityRowFormatter.presentation(for: node))
+            #expect(p.titleSegments.count == 1)
+            #expect(p.titleSegments.allSatisfy { $0.style != .primary })
+            #expect(p.titleSegments.allSatisfy { $0.style == .secondary })
+        }
     }
 
     @Test("Skill body → 'Skill' + skill-name segments")

@@ -616,7 +616,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 blockHeights: blockHeights,
                 sourceText: TranscriptBubbleGeometry.text(for: item),
                 role: role,
-                header: TranscriptBubbleGeometry.header(for: item),
+                accessibilityAttribution: TranscriptBubbleGeometry.accessibilityAttribution(for: item),
                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
                 cachedHeight: height

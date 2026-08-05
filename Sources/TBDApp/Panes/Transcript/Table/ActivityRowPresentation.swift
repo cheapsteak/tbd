@@ -138,10 +138,13 @@ enum ActivityRowFormatter {
     private static func activityGroup(_ summary: ActivityGroupSummary) -> ActivityRowPresentation {
         // The whole title is one sentence built by `ActivityGroupSummary`, so
         // this renderer and `ActivityGroupSummaryRow` cannot phrase it
-        // differently. One `.primary` run: `ActivityRowSegment.Style` has no
-        // bold, so the numerals Claude Code emboldens stay plain here rather
-        // than growing a styling mechanism for one row kind.
-        let segments = [ActivityRowSegment(text: summary.activityPhrase, style: .primary)]
+        // differently. One `.secondary` run: the summary is chrome describing
+        // work that already happened, so it recedes from the assistant prose it
+        // sits between rather than competing with it. `.secondary` (subheadline
+        // + `secondaryLabelColor`) is the right weight — `.tertiary` would also
+        // drop to caption2, shrinking the row's only text below a glanceable
+        // size and drifting from `ActivityGroupSummaryRow`'s subheadline.
+        let segments = [ActivityRowSegment(text: summary.activityPhrase, style: .secondary)]
         // Attention badges only. Successful groups say nothing (a "complete"
         // capsule was redundant chrome) and running groups say it in the title's
         // tense — "Running 2 shell commands…" — so no "active" capsule either.
