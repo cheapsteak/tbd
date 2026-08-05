@@ -888,32 +888,65 @@ struct TableTranscriptView: NSViewRepresentable {
                 return activityRowHeight(style: .chrome)
             case .subagentSummary:
                 return activityRowHeight(style: .plainSummary)
-            case .toolCall(_, let name, _, _, _, _):
+            case .toolCall(_, let name, let inputJSON, _, _, _):
                 // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
                 // card (its activity presentation is nil); every other toolCall is
                 // a one-line chrome activity row.
-                if name == "AskUserQuestion" { return Self.askUserQuestionEstimate }
+                if name == "AskUserQuestion" { return askUserQuestionEstimate(inputJSON: inputJSON) }
                 return activityRowHeight(style: .chrome)
             }
         }
 
-        /// Calibrated constant for an unrealized AskUserQuestion card, corrected
+        /// Estimated height of an unrealized AskUserQuestion card, corrected
         /// exactly when the card realizes.
         ///
-        /// The card is a stack of chat bubbles — one per question, plus the answer
-        /// bubble, with every option's label and description shown (the table pane
-        /// renders these cards always-expanded and static). Its height is therefore
-        /// driven by how that text WRAPS, not by anything countable from the raw
-        /// JSON: measured against the production card, `1 question / 1 option` is
-        /// 66 pt, `1 / 2` is 118, `1 / 4` is 144, `2 / 2×2` is 131, and a
-        /// long-question / short-option card is 92 (680 pt column) or 105 (663) —
-        /// two cards with identical question and option COUNTS differ by 26 pt.
-        /// Scanning the JSON for `"question":` / `"label":` therefore buys nothing a
-        /// constant does not, so this is the mean of the measured range, nudged
-        /// down to keep the residual on the growing side for the common shapes.
-        /// Spread against those six samples: −40 pt to +38 pt, against the old
-        /// constant's +36 to +114 (it over-reserved on EVERY one of them).
-        static let askUserQuestionEstimate: CGFloat = 104
+        /// The card is a stack of chat bubbles — one per question, one per option
+        /// (the table pane renders these cards always-expanded and static), plus an
+        /// answer bubble. Measured against the production card, that structure is
+        /// startlingly linear in the COUNTS and almost flat in the text: 1 question
+        /// with 1/2/4/6 options is 171/213/297/381 pt (42 pt per option, dead
+        /// straight), and 1/2/3 questions with two options each is 213/378/543
+        /// (165 pt per question, likewise). A question whose text is four times
+        /// longer moves the card not at all. So counting is the right model here,
+        /// and `40 + 81·questions + 42·options` reproduces every one of those to
+        /// the point.
+        ///
+        /// The counts come from a substring scan, not a JSON parse — the estimate
+        /// runs from `heightOfRow`. `"question":` and `"label":` are matched WITH
+        /// their colon and without tolerating whitespace on purpose: a payload
+        /// pretty-printed as `"question" :` would then be under-counted rather than
+        /// over-counted, and under-counting is the safe direction. An input that
+        /// does not decode at all renders a fallback block (53 pt measured) and
+        /// scans as zero of each, which lands at the 40 pt base — also under.
+        ///
+        /// The base is 40 rather than the 48 the fit gives, which buys a uniform
+        /// 8 pt under-reservation on every answered card and lands exactly on a
+        /// PENDING one (measured 163 for 1×1 with no result yet, against 171
+        /// answered). Where the card does grow past the counts — a question or
+        /// description or free-form answer long enough to wrap — it grows, so the
+        /// estimate only ever falls further under: measured -50 pt at worst across
+        /// thirteen card shapes, against the -59 to -439 pt of the flat constant
+        /// this replaces.
+        static let askCardBase: CGFloat = 40
+        static let askCardPerQuestion: CGFloat = 81
+        static let askCardPerOption: CGFloat = 42
+
+        static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {
+            askCardBase
+                + askCardPerQuestion * CGFloat(occurrences(of: "\"question\":", in: inputJSON))
+                + askCardPerOption * CGFloat(occurrences(of: "\"label\":", in: inputJSON))
+        }
+
+        /// Non-overlapping occurrences of `needle` in `haystack`.
+        private static func occurrences(of needle: String, in haystack: String) -> Int {
+            var count = 0
+            var searchStart = haystack.startIndex
+            while let found = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
+                count += 1
+                searchStart = found.upperBound
+            }
+            return count
+        }
 
         /// Arithmetic height estimate for a chat bubble. ONE pass over the message's
         /// source lines, no markdown parse and no text layout.

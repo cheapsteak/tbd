@@ -107,8 +107,34 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "activity/task", points: 0.5, percent: 2.3, achieved: "0.0"),
         Budget(id: "grp-0#activity-group", points: 0.5, percent: 2.3, achieved: "0.0"),
         Budget(id: "activity/subagentSummary", points: 0.5, percent: 3.8, achieved: "0.0"),
-        Budget(id: "card/askUserQuestion", points: 20, percent: 16.9, achieved: "-14.0")
+        Budget(id: "card/askUserQuestion", points: 10, percent: 4.7, achieved: "-8.0"),
+        Budget(id: "card/askUserQuestion-min", points: 10, percent: 5.8, achieved: "-8.0"),
+        Budget(id: "card/askUserQuestion-max", points: 10, percent: 1.8, achieved: "-8.0"),
+        Budget(id: "card/askUserQuestion-wrapping", points: 40, percent: 16.6, achieved: "-36.0")
     ]
+
+    /// The AskUserQuestion fixtures are only worth anything if the card can
+    /// actually DECODE them. A payload that does not decode renders a fallback
+    /// block, and a fixture measuring the fallback pins nothing about the card —
+    /// which is exactly how the constant these budgets replaced came to be
+    /// calibrated against the wrong thing, by 439 pt at worst.
+    @Test("the AskUserQuestion fixtures decode as cards, not as the fallback block")
+    func askCardFixturesAreValidJSON() throws {
+        struct Option: Decodable { let label: String }
+        struct Question: Decodable { let question: String; let options: [Option] }
+        struct Input: Decodable { let questions: [Question] }
+
+        for fixture in Self.askCardFixtures {
+            #expect(!fixture.json.contains("\n") && !fixture.json.contains("\\"),
+                    Comment(rawValue: "\(fixture.id): the payload must be ONE line with no literal "
+                        + "backslash — a `#\"\"\"` raw string does not honour a trailing `\\` as a "
+                        + "line continuation, and the embedded characters make it undecodable"))
+            let decoded = try? JSONDecoder().decode(Input.self, from: Data(fixture.json.utf8))
+            #expect(decoded != nil,
+                    Comment(rawValue: "\(fixture.id): does not decode, so the fixture measures the "
+                        + "card's raw-JSON fallback block rather than a card"))
+        }
+    }
 
     @Test("every row kind's estimate stays inside its point budget at both column widths")
     func perKindErrorStaysWithinBudget() throws {
@@ -518,6 +544,30 @@ struct TranscriptEstimatorAccuracyTests {
         + "```swift\r\nlet a = 1\r\nlet b = 2\r\n```\r\n\r\n| Field | Value |\r\n| --- | --- |\r\n"
         + "| one | two |\r\n\r\nThat is the whole paste."
 
+    /// The smallest card the pane can show, the largest shape worth pinning, and
+    /// one whose question text wraps well past what the counts predict.
+    ///
+    /// Each payload MUST be a single line: a `#"""` raw string does not treat a
+    /// trailing `\` as a line continuation (raw strings need `\#`), so the
+    /// multi-line form this fixture used to carry embedded literal backslashes and
+    /// newlines, did not decode, and silently measured the card's raw-JSON
+    /// FALLBACK block instead of a card. `askCardFixturesAreValidJSON` holds that
+    /// shut.
+    private static let askCardFixtures: [(id: String, json: String, answer: String)] = [
+        (id: "card/askUserQuestion",
+         json: #"{"questions":[{"question":"Which sizing path should drive row height?","header":"Sizing","multiSelect":false,"options":[{"label":"Authoritative heightOfRow","description":"Measure the real height up front, cached."},{"label":"Estimate then correct","description":"Cheap estimate, patch via noteHeightOfRows."}]}]}"#,
+         answer: "Authoritative heightOfRow"),
+        (id: "card/askUserQuestion-min",
+         json: #"{"questions":[{"question":"Proceed?","header":"Go","multiSelect":false,"options":[{"label":"Yes","description":"Do it."}]}]}"#,
+         answer: "Yes"),
+        (id: "card/askUserQuestion-max",
+         json: #"{"questions":[{"question":"Path?","header":"A","multiSelect":false,"options":[{"label":"One","description":"x"},{"label":"Two","description":"y"}]},{"question":"Bias?","header":"B","multiSelect":false,"options":[{"label":"Low","description":"x"},{"label":"High","description":"y"}]},{"question":"Ship?","header":"C","multiSelect":false,"options":[{"label":"Now","description":"x"},{"label":"Later","description":"y"}]}]}"#,
+         answer: "One"),
+        (id: "card/askUserQuestion-wrapping",
+         json: #"{"questions":[{"question":"This question is deliberately very long indeed, so long that it must wrap across at least three separate lines inside the card at either of the column widths the transcript pane is ever laid out at, which is the shape a count-based model cannot see.","header":"Sizing","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}"#,
+         answer: "A")
+    ]
+
     /// Every row kind the guard covers, as render nodes. Kept under
     /// `bottomEagerWindow` so the precompute measures all of them exactly.
     private static func characterizationNodes(imagePath: String) -> [TranscriptRenderNode] {
@@ -574,19 +624,19 @@ struct TranscriptEstimatorAccuracyTests {
                 items: [.assistantText(id: "activity/task-a", text: "Looked at fittingHeight.",
                                        timestamp: nil, usage: nil)]),
             timestamp: nil))
-        items.append(.toolCall(
-            id: "card/askUserQuestion",
-            name: "AskUserQuestion",
-            inputJSON: #"""
-            {"questions":[{"question":"Which sizing path should drive row height?",\
-            "header":"Sizing","multiSelect":false,\
-            "options":[{"label":"Authoritative heightOfRow","description":"Measure the real height up front, cached."},\
-            {"label":"Estimate then correct","description":"Cheap estimate, patch via noteHeightOfRows."}]}]}
-            """#,
-            inputTruncatedTo: nil,
-            result: ToolResult(text: "Authoritative heightOfRow", truncatedTo: nil, isError: false),
-            subagent: nil,
-            timestamp: nil))
+        // AskUserQuestion cards, pinned at BOTH ends of the measured range rather
+        // than at one sample of it: the card's height is linear in its question and
+        // option counts, so a single shape leaves the slope unguarded.
+        for fixture in Self.askCardFixtures {
+            items.append(.toolCall(
+                id: fixture.id,
+                name: "AskUserQuestion",
+                inputJSON: fixture.json,
+                inputTruncatedTo: nil,
+                result: ToolResult(text: fixture.answer, truncatedTo: nil, isError: false),
+                subagent: nil,
+                timestamp: nil))
+        }
 
         var nodes = transcriptRenderNodes(from: items)
 
