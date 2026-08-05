@@ -898,6 +898,14 @@ public struct Config: Codable, Sendable, Equatable {
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
+    /// Floor for `hibernateIdleMinutes` — a zero/negative value would make the
+    /// idle sweep hibernate everything on its next tick.
+    public static let minHibernateIdleMinutes = 1
+    /// Ceiling for `hibernateIdleMinutes` — 99 days. Enforced at every layer:
+    /// the Settings amount+unit control clamps input to it, `ConfigStore`
+    /// clamps on both write and read, and `HibernationCoordinator.sweep()`
+    /// floors the value it reads for the idle timer.
+    public static let maxHibernateIdleMinutes = 99 * 24 * 60
     /// Default grace period before the orphan-GC sweep reaps a directory.
     public static let defaultGCGraceSeconds = 3600
     /// Default retention window for reap snapshots.
