@@ -6,11 +6,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "limitResume"
 
 /// The tmux surface the actuator needs. `TmuxManager` conforms; tests fake it.
 /// All sends go through the SAME methods `handleTerminalSend` uses — never
-/// raw tmux invocations (spec constraint).
+/// raw tmux invocations (spec constraint) — and, since this actuator types
+/// without a user gesture, behind the SAME target consultation
+/// (`paneSendTarget`) that `handleTerminalSend` runs before it types.
 public protocol ResumeSendingTmux: Sendable {
     func windowExists(server: String, windowID: String) async -> Bool
     func paneInMode(server: String, paneID: String) async throws -> Bool
     func panePID(server: String, paneID: String) async throws -> String
+    func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget
     func sendKeys(server: String, paneID: String, text: String) async throws
     func sendKey(server: String, paneID: String, key: String) async throws
 }
@@ -263,6 +266,25 @@ public struct LimitResumeActuator: LimitResumeActuating {
             return .notEligible(.terminalGone)
         }
 
+        // 1a. Ask the pane who it is, before any key is typed into it.
+        //     `windowExists` above proves a window id resolves to SOME window;
+        //     it cannot prove the pane still belongs to THIS terminal. tmux
+        //     reuses pane ids, so a stale `tmuxPaneID` names a live stranger
+        //     that passes every remaining check — window alive, Claude
+        //     foreground, not in copy-mode — and then gets "continue" typed
+        //     into it. That is issue #384 as it was actually observed: this
+        //     actuator, not a human's `terminal.send`, was the thing typing.
+        //
+        //     Same rule as the send path: refusal requires POSITIVE
+        //     disagreement. A pane that answers with no identity is sent to
+        //     exactly as before, so panes predating the stamp do not regress.
+        switch await paneTargetVerdict(server: server, terminal: terminal) {
+        case .proceed:
+            break
+        case .notEligible(let outcome):
+            return .notEligible(outcome)
+        }
+
         // 1b. Explicit-cancel-mid-flight: the row itself can be cancelled
         //     (`cancelPending`/`cancelAllPending`) while a prior attempt's
         //     verify window is running — e.g. the user clicked "Cancel
@@ -309,6 +331,78 @@ public struct LimitResumeActuator: LimitResumeActuating {
             server: server, paneID: terminal.tmuxPaneID, terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
             transcriptPath: terminal.transcriptPath, preSendTranscriptData: preSendTranscriptData))
+    }
+
+    /// What the pane consultation concluded for step 1a.
+    private enum PaneTargetVerdict {
+        case proceed
+        case notEligible(ResumeActuationOutcome)
+    }
+
+    /// Classify one `paneSendTarget` consultation into an eligibility verdict.
+    ///
+    /// The outcomes mirror how this actuator already treats the same facts:
+    /// a pane that is gone or whose process has exited is the `windowExists`
+    /// case one level finer, so it cancels silently as `.terminalGone`. A pane
+    /// that answers with a DIFFERENT terminal is not "gone" and not a
+    /// transient state to retry — the row's coordinate is stale and will stay
+    /// stale until something respawns the window, so retrying would only aim
+    /// at the same stranger again. It fails the row with a message naming both
+    /// ids, the way step 3's not-foreground check fails a row a retry cannot
+    /// help either.
+    private func paneTargetVerdict(
+        server: String, terminal: Terminal
+    ) async -> PaneTargetVerdict {
+        let target: PaneSendTarget
+        do {
+            target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
+        } catch {
+            // The consultation could not be RUN (a wedged tmux tripping the
+            // subprocess timeout) — not an answer about the pane. Step 3's
+            // `panePID` treats the same wedged server as `.failed`, and typing
+            // into a pane we could not look at is exactly what this check
+            // exists to stop.
+            return .notEligible(.failed("could not verify the target pane: \(error)"))
+        }
+
+        switch target {
+        case .missing:
+            logger.info("""
+                actuate: pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id.uuidString, privacy: .public) no longer exists — cancelling
+                """)
+            return .notEligible(.terminalGone)
+        case .dead:
+            logger.info("""
+                actuate: pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id.uuidString, privacy: .public) is dead — cancelling
+                """)
+            return .notEligible(.terminalGone)
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else {
+                // Absence is not disagreement: a pane spawned before TBD
+                // stamped identities carries none, and refusing on nothing
+                // would break auto-resume for every such session.
+                logger.debug("""
+                    actuate: pane \(terminal.tmuxPaneID, privacy: .public) claims no terminal \
+                    identity; proceeding without verifying it is terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+                return .proceed
+            }
+            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
+            else { return .proceed }
+            logger.warning("""
+                actuate: pane \(terminal.tmuxPaneID, privacy: .public) belongs to terminal \
+                \(paneTerminalID, privacy: .public), not \
+                \(terminal.id.uuidString, privacy: .public) — typing nothing
+                """)
+            return .notEligible(.failed("""
+                tmux pane \(terminal.tmuxPaneID) now belongs to terminal \(paneTerminalID), \
+                not the scheduled terminal \(terminal.id.uuidString) — nothing was sent \
+                (tmux reuses pane ids, so this coordinate is stale)
+                """))
+        }
     }
 
     /// The exact production send sequence (spec §Actuation 5):
