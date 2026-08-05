@@ -160,6 +160,80 @@ public struct GitManager: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Where a branch would push to, as resolved by git itself (`@{push}`).
+    ///
+    /// Deliberately tri-state. Collapsing "git says there is no push
+    /// destination" into the same value as "the lookup could not be performed"
+    /// would let a transient subprocess failure read as evidence about the
+    /// branch — and callers act on that evidence.
+    public enum PushBranchResolution: Sendable, Equatable {
+        /// `@{push}` resolved to this bare branch name (remote prefix stripped).
+        case resolved(String)
+        /// git ran and answered that the branch has no single push destination.
+        /// Under the default `push.default = simple`, this is exactly what a
+        /// branch whose upstream is its *base* (e.g. `refs/heads/main`) reports:
+        /// "cannot resolve 'simple' push to a single destination".
+        case noPushDestination
+        /// The lookup itself failed (subprocess error, timeout, unparseable
+        /// ref). Says nothing about the branch — treat as no evidence.
+        case lookupFailed
+    }
+
+    /// Resolves `<branch>@{push}` — the remote branch this branch would push to.
+    ///
+    /// This is the discriminator between a branch's *head* ref and its *base*:
+    /// `branch.<name>.merge` alone cannot tell them apart, because a worktree
+    /// branch cut from the base branch tracks the base. git refuses to resolve
+    /// `@{push}` in that case, which is the answer we want.
+    public func pushBranchName(worktreePath: String, branch: String) async -> PushBranchResolution {
+        do {
+            let output = try await run(
+                arguments: ["rev-parse", "--symbolic-full-name", "\(branch)@{push}"],
+                at: worktreePath
+            )
+            guard let name = Self.pushBranchShortName(fromFullRef: output) else {
+                logger.debug("pushBranchName: unparseable @{push} ref for \(branch, privacy: .public)")
+                return .lookupFailed
+            }
+            return .resolved(name)
+        } catch is GitError {
+            // git ran to completion and refused: no single push destination.
+            // A repo-level failure (path gone, not a git repository) also exits
+            // non-zero and lands here. That is safe for the one consumer that
+            // deletes state: it additionally requires the branch's tracking
+            // config, read from the same repo by the same kind of subprocess, so
+            // a broken checkout yields no evidence there either.
+            return .noPushDestination
+        } catch {
+            // Timeout or launch failure — the lookup never produced an answer.
+            logger.debug("pushBranchName: lookup failed for \(branch, privacy: .public): \(String(describing: error), privacy: .public)")
+            return .lookupFailed
+        }
+    }
+
+    /// Strip a fully-qualified push ref down to the bare branch name it names on
+    /// the remote: `refs/remotes/origin/tbd/my-branch` → `tbd/my-branch`. Branch
+    /// names may contain `/`; remote names may not, so exactly one component is
+    /// dropped for the remote. A local `refs/heads/...` destination (a push ref
+    /// pointing at this repo) is handled too. Any other shape returns nil so the
+    /// caller degrades to "no evidence" rather than inventing a branch name.
+    static func pushBranchShortName(fromFullRef ref: String) -> String? {
+        let parts = ref
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        let dropped: [String]
+        if parts.count >= 4, parts[0] == "refs", parts[1] == "remotes" {
+            dropped = Array(parts.dropFirst(3))
+        } else if parts.count >= 3, parts[0] == "refs", parts[1] == "heads" {
+            dropped = Array(parts.dropFirst(2))
+        } else {
+            return nil
+        }
+        let name = dropped.joined(separator: "/")
+        return name.isEmpty ? nil : name
+    }
+
     /// Fetches from origin for the given branch, with optional timeout override.
     public func fetch(repoPath: String, branch: String, timeout: Duration? = nil) async throws {
         _ = try await run(arguments: ["fetch", "origin", branch], at: repoPath, timeout: timeout)

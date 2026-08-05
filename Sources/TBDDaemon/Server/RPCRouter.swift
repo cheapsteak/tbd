@@ -104,9 +104,10 @@ public final class RPCRouter: Sendable {
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
     let prListCoordinator = PRListCoordinator()
-    /// TTL cache for per-worktree upstream branch lookups, so `pr.list` stops
-    /// spawning a `git config` subprocess per worktree on every poll.
-    let upstreamBranchCache = UpstreamBranchCache()
+    /// TTL cache for the per-worktree branch facts PR matching needs (upstream
+    /// and `@{push}`), so `pr.list` stops spawning git subprocesses per worktree
+    /// on every poll — and so the poll and an on-select refresh agree.
+    let branchTrackingCache = BranchTrackingCache()
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
@@ -547,36 +548,44 @@ public final class RPCRouter: Sendable {
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        // Each repo's default branch: a worktree branch cut from it records
-        // `branch.<name>.merge = refs/heads/<default>`, which is a base pointer,
-        // not a head ref — see `PRStatusManager.branchCandidates`. Fetched once
-        // per pass, not per worktree.
-        let defaultBranchByRepo = Dictionary(
-            uniqueKeysWithValues: (try await db.repos.list()).map { ($0.id, $0.defaultBranch) })
         var infos: [PRStatusManager.PollWorktree] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
-            // Route the per-worktree `git config` lookup through the TTL cache
-            // so a poll storm doesn't spawn one subprocess per worktree per poll.
-            let upstreamBranch = await upstreamBranchCache.upstreamBranchName(
-                worktreePath: wt.path,
-                branch: wt.branch
-            ) { [git] in
-                await git.upstreamBranchName(worktreePath: wt.path, branch: wt.branch)
-            }
+            let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
             infos.append((
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
-                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
+                pushBranch: pushBranch,
                 worktreePath: wt.path,
                 prNumber: wt.prNumber
             ))
         }
         await prManager.fetchAll(worktrees: infos)
         // Prune at the END so we never drop an entry this pass just populated.
-        await upstreamBranchCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
+        await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         return PRListResult(statuses: await prManager.allStatuses())
+    }
+
+    /// The per-branch git facts PR matching needs: the branch this one tracks,
+    /// and where git says it would push (`@{push}`). Both go through the TTL
+    /// cache so a poll storm doesn't spawn two subprocesses per worktree per
+    /// poll, and so every consumer — poll and on-select refresh alike — sees the
+    /// same answer within a TTL window.
+    private func branchFacts(
+        worktreePath: String, branch: String
+    ) async -> (upstream: String?, push: GitManager.PushBranchResolution) {
+        let upstream = await branchTrackingCache.upstreamBranchName(
+            worktreePath: worktreePath, branch: branch
+        ) { [git] in
+            await git.upstreamBranchName(worktreePath: worktreePath, branch: branch)
+        }
+        let push = await branchTrackingCache.pushBranch(
+            worktreePath: worktreePath, branch: branch
+        ) { [git] in
+            await git.pushBranchName(worktreePath: worktreePath, branch: branch)
+        }
+        return (upstream, push)
     }
 
     /// Scratch spaces are repo-less and have no PR — exclude them so the
@@ -595,22 +604,18 @@ public final class RPCRouter: Sendable {
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
-        let upstreamBranch = await git.upstreamBranchName(
-            worktreePath: wt.path,
-            branch: wt.branch
-        )
-        // Same base-vs-head distinction as the poll path: an upstream that names
-        // the repo's default branch is a base pointer, not a head ref.
-        var defaultBranch: String?
-        if let repoID = wt.repoID {
-            defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
-        }
+        // Read the branch facts through the SAME cache the poll uses. Reading
+        // git directly here would let a user refresh attach a PR that the very
+        // next poll — still inside the cache's TTL, still holding the older
+        // facts — judges by a different candidate list and clears again. Only
+        // the push branch is needed to match, but resolving both warms the pair
+        // the next poll reads.
+        let (_, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
-            upstreamBranch: upstreamBranch,
-            defaultBranch: defaultBranch,
+            pushBranch: pushBranch,
             repoPath: wt.path,
             prNumber: wt.prNumber
         )
