@@ -2,7 +2,8 @@ import AppKit
 import os
 
 /// The native (NSTableView) rendering of an attached image: a leading-aligned
-/// thumbnail that reveals the file in Finder when clicked.
+/// thumbnail that opens a Quick Look preview when clicked, with Finder and the
+/// pasteboard on its right-click menu.
 ///
 /// The view is width-pinned to the bubble's full body width by the block stack
 /// (like every other block), and draws its content at the leading edge in the
@@ -17,7 +18,12 @@ final class TranscriptImageBlockView: NSView {
     private let chipIcon = NSImageView()
 
     private var attachment: TranscriptImageAttachment?
-    private var isRevealable = false
+    /// A file that is there: clickable to preview, and worth a context menu.
+    /// False only for `.missing`, where there is nothing to show.
+    private var isPreviewable = false
+    /// True only for a decodable image, which is the one state where "Copy
+    /// Image" means anything.
+    private var isCopyable = false
 
     /// Bumped on every `configure`. An in-flight decode captures the value it was
     /// dispatched with and drops its result if the cell was recycled onto another
@@ -116,8 +122,9 @@ final class TranscriptImageBlockView: NSView {
 
         switch metadata.state {
         case .ready:
-            isRevealable = true
-            setAccessibilityHelp("Reveal in Finder")
+            isPreviewable = true
+            isCopyable = true
+            setAccessibilityHelp("Quick Look preview")
             chip.isHidden = true
             chipIcon.isHidden = true
             imageView.isHidden = false
@@ -143,19 +150,22 @@ final class TranscriptImageBlockView: NSView {
             }
 
         case .missing:
-            isRevealable = false
+            isPreviewable = false
+            isCopyable = false
             setAccessibilityHelp(nil)
             showChip(missing: true)
 
         case .unreadable:
-            // The file is there but is not a decodable image. Revealing it is
-            // still the useful gesture, so the chip stays clickable.
-            isRevealable = true
-            setAccessibilityHelp("Reveal in Finder")
+            // The file is there but is not a decodable image. Quick Look happily
+            // previews a text file or a PDF, so the chip stays clickable — only
+            // "Copy Image" drops off the menu.
+            isPreviewable = true
+            isCopyable = false
+            setAccessibilityHelp("Quick Look preview")
             showChip(missing: false)
         }
 
-        // A revealable/unrevealable switch changes whether we want the pointing
+        // A previewable/non-previewable switch changes whether we want the pointing
         // hand, and cursor rects are only rebuilt on request.
         window?.invalidateCursorRects(for: self)
     }
@@ -182,36 +192,77 @@ final class TranscriptImageBlockView: NSView {
         }
     }
 
-    // MARK: - Reveal affordance
+    // MARK: - Click and context menu
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard isRevealable else { return }
-        addCursorRect(
-            NSRect(origin: .zero, size: NSSize(
-                width: contentWidth.constant, height: contentHeight.constant)),
-            cursor: .pointingHand)
+        guard isPreviewable else { return }
+        addCursorRect(contentRect, cursor: .pointingHand)
+    }
+
+    /// The drawn thumbnail (or chip) inside this width-pinned block — clicks in
+    /// the empty trailing space are not ours.
+    private var contentRect: NSRect {
+        NSRect(
+            origin: .zero,
+            size: NSSize(width: contentWidth.constant, height: contentHeight.constant))
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard isRevealable, let attachment else {
+        guard isPreviewable, let attachment,
+              contentRect.contains(convert(event.locationInWindow, from: nil)) else {
             super.mouseDown(with: event)
             return
         }
-        let point = convert(event.locationInWindow, from: nil)
-        let content = NSRect(
-            origin: .zero,
-            size: NSSize(width: contentWidth.constant, height: contentHeight.constant))
-        guard content.contains(point) else {
-            super.mouseDown(with: event)
-            return
+        TranscriptImageActions.preview(path: attachment.path)
+    }
+
+    /// Right-click keeps Finder and the pasteboard reachable now that a plain
+    /// click previews. Returning nil outside the thumbnail (or for a missing
+    /// file) lets the enclosing bubble's "Copy message" menu answer instead.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard contentRect.contains(convert(event.locationInWindow, from: nil)) else { return nil }
+        return makeContextMenu()
+    }
+
+    /// The menu for the current chip state, independent of where the click
+    /// landed. Also the seam the tests drive, since a synthesized `NSEvent`
+    /// cannot be located inside a view that has no window.
+    func makeContextMenu() -> NSMenu? {
+        guard isPreviewable, attachment != nil else { return nil }
+        let menu = NSMenu()
+        menu.addItem(item(title: "Quick Look", action: #selector(quickLook(_:))))
+        if isCopyable {
+            menu.addItem(item(title: "Copy Image", action: #selector(copyImage(_:))))
         }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: attachment.path)])
+        menu.addItem(item(title: "Reveal in Finder", action: #selector(revealInFinder(_:))))
+        return menu
+    }
+
+    private func item(title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    @objc private func quickLook(_ sender: Any?) {
+        guard let attachment else { return }
+        TranscriptImageActions.preview(path: attachment.path)
+    }
+
+    @objc private func copyImage(_ sender: Any?) {
+        guard let attachment else { return }
+        TranscriptImageActions.copyImage(path: attachment.path)
+    }
+
+    @objc private func revealInFinder(_ sender: Any?) {
+        guard let attachment else { return }
+        TranscriptImageActions.revealInFinder(path: attachment.path)
     }
 
     override func accessibilityPerformPress() -> Bool {
-        guard isRevealable, let attachment else { return false }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: attachment.path)])
+        guard isPreviewable, let attachment else { return false }
+        TranscriptImageActions.preview(path: attachment.path)
         return true
     }
 

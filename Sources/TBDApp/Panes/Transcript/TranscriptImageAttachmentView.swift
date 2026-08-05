@@ -3,8 +3,9 @@ import SwiftUI
 
 /// SwiftUI rendering of an attached image, for the hosted-per-row transcript
 /// path. Deliberately the same geometry, the same off-main decode, the same
-/// caches and the same fallbacks as the native `TranscriptImageBlockView` — this
-/// repo's standing trap is the two renderers drifting apart.
+/// caches, the same click and menu actions and the same fallbacks as the native
+/// `TranscriptImageBlockView` — this repo's standing trap is the two renderers
+/// drifting apart.
 ///
 /// The frame is fixed from the synchronous header probe BEFORE the decode
 /// starts, so the row does not resize when the thumbnail lands.
@@ -22,29 +23,55 @@ struct TranscriptImageAttachmentView: View {
 
     private var displaySize: CGSize {
         TranscriptImageGeometry.displaySize(
-            metadata: metadata, bodyWidth: TranscriptImageGeometry.maxWidth)
+            metadata: metadata, bodyWidth: TranscriptImageGeometry.maxEdge)
     }
 
-    private var isRevealable: Bool { metadata.state != .missing }
+    /// A file that is there: clickable to preview, and worth a context menu.
+    private var isPreviewable: Bool { metadata.state != .missing }
+    /// Only a decodable image can meaningfully be copied as an image.
+    private var isCopyable: Bool { metadata.pixelSize != nil }
 
     var body: some View {
+        Group {
+            if isPreviewable {
+                // A Button rather than `.onTapGesture`: on macOS a tap gesture
+                // swallows the right-click that `.contextMenu` needs.
+                Button { TranscriptImageActions.preview(path: attachment.path) } label: {
+                    sized
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button("Quick Look") { TranscriptImageActions.preview(path: attachment.path) }
+                    if isCopyable {
+                        Button("Copy Image") { TranscriptImageActions.copyImage(path: attachment.path) }
+                    }
+                    Button("Reveal in Finder") {
+                        TranscriptImageActions.revealInFinder(path: attachment.path)
+                    }
+                }
+            } else {
+                sized
+            }
+        }
+        .onHover { inside in
+            hovering = inside
+            guard isPreviewable else { return }
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .help(attachment.displayPath)
+        .accessibilityElement()
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(
+            TranscriptImageBlockView.accessibilityLabel(
+                attachment: attachment, metadata: metadata))
+        .accessibilityHint(isPreviewable ? "Quick Look preview" : "")
+        .onAppear(perform: load)
+    }
+
+    private var sized: some View {
         content
             .frame(width: displaySize.width, height: displaySize.height, alignment: .leading)
             .contentShape(Rectangle())
-            .onTapGesture { reveal() }
-            .onHover { inside in
-                hovering = inside
-                guard isRevealable else { return }
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-            }
-            .help(attachment.displayPath)
-            .accessibilityElement()
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel(
-                TranscriptImageBlockView.accessibilityLabel(
-                    attachment: attachment, metadata: metadata))
-            .accessibilityHint(isRevealable ? "Reveal in Finder" : "")
-            .onAppear(perform: load)
     }
 
     @ViewBuilder
@@ -87,10 +114,5 @@ struct TranscriptImageAttachmentView: View {
         ) { decoded in
             image = decoded
         }
-    }
-
-    private func reveal() {
-        guard isRevealable else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: attachment.path)])
     }
 }

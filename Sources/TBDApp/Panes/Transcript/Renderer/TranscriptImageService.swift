@@ -217,18 +217,19 @@ final class TranscriptImageService: @unchecked Sendable {
 /// Deterministic on-screen size for an attached image, and the fallback chip's
 /// size when there is nothing to draw.
 ///
-/// The scheme fits the image inside a fixed box while preserving its true aspect
-/// ratio, and NEVER upscales. That works for both shapes the transcript actually
-/// sees: a wide screenshot binds on width and lands well under the height cap; a
-/// tall portrait binds on height and stays narrow. Because the aspect ratio comes
-/// from the synchronous header probe, this size is known before the decode starts,
-/// so the row height measured at open equals the row height after the image lands.
+/// The scheme CONTAINS the image inside a `maxEdge` × `maxEdge` square while
+/// preserving its true aspect ratio, and NEVER upscales — the same fit a Finder
+/// icon grid uses. One cap on both axes is what keeps a thumbnail recognisably a
+/// thumbnail: a wide screenshot binds on width and comes out short, a tall
+/// portrait binds on height and comes out narrow, and neither shape can dominate
+/// the bubble. Because the aspect ratio comes from the synchronous header probe,
+/// this size is known before the decode starts, so the row height measured at
+/// open equals the row height after the image lands.
 @MainActor
 enum TranscriptImageGeometry {
-    /// Longest the thumbnail may be vertically.
-    static let maxHeight: CGFloat = 200
-    /// Widest the thumbnail may be, before the body width clamps it further.
-    static let maxWidth: CGFloat = 420
+    /// Longest the thumbnail may be on EITHER axis — the side of the square it
+    /// is contained in.
+    static let maxEdge: CGFloat = 200
     /// Height of the one-line chip shown for a missing or undecodable file.
     static let fallbackHeight: CGFloat = 20
     /// Width of that chip (clamped to the body width).
@@ -240,8 +241,10 @@ enum TranscriptImageGeometry {
         guard let pixelSize = metadata.pixelSize, pixelSize.width > 0, pixelSize.height > 0 else {
             return CGSize(width: min(max(bodyWidth, 1), fallbackWidth), height: fallbackHeight)
         }
-        let availableWidth = min(max(bodyWidth, 1), maxWidth)
-        let scale = min(availableWidth / pixelSize.width, maxHeight / pixelSize.height, 1)
+        // A bubble narrower than the box clamps the square further; nothing may
+        // overflow the body.
+        let availableWidth = min(max(bodyWidth, 1), maxEdge)
+        let scale = min(availableWidth / pixelSize.width, maxEdge / pixelSize.height, 1)
         return CGSize(
             width: max((pixelSize.width * scale).rounded(.down), 1),
             height: max((pixelSize.height * scale).rounded(.down), 1)

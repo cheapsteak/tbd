@@ -152,7 +152,9 @@ struct TranscriptImageAttachmentTests {
 
     // MARK: - Sizing
 
-    @Test func wideImageBindsOnWidthAndTallImageBindsOnHeight() throws {
+    /// The thumbnail is CONTAINED in a `maxEdge` square: a wide image binds on
+    /// width, a tall one on height, and neither exceeds the box on either axis.
+    @Test func imagesAreContainedInTheSquareOnTheirLongEdge() throws {
         let scratch = Scratch()
         TranscriptImageService.shared.clearCaches()
         let wide = try writePNG(scratch, name: "wide.png", width: 1200, height: 800)
@@ -164,11 +166,25 @@ struct TranscriptImageAttachmentTests {
         let tallSize = TranscriptImageGeometry.displaySize(
             metadata: TranscriptImageService.shared.metadata(forPath: tall), bodyWidth: bodyWidth)
 
-        // Both fit the box, both keep their true aspect ratio.
-        #expect(wideSize == CGSize(width: 300, height: 200))
+        // 1200×800 binds on WIDTH now (3:2 → 200×133), 400×1600 on height.
+        #expect(wideSize == CGSize(width: 200, height: 133))
         #expect(tallSize == CGSize(width: 50, height: 200))
-        #expect(wideSize.width <= TranscriptImageGeometry.maxWidth)
-        #expect(tallSize.height <= TranscriptImageGeometry.maxHeight)
+        for size in [wideSize, tallSize] {
+            #expect(size.width <= TranscriptImageGeometry.maxEdge)
+            #expect(size.height <= TranscriptImageGeometry.maxEdge)
+        }
+    }
+
+    /// A square image fills the box exactly — the case that would expose a cap
+    /// applied to only one axis.
+    @Test func squareImageFillsTheBoxOnBothAxes() throws {
+        let scratch = Scratch()
+        TranscriptImageService.shared.clearCaches()
+        let square = try writePNG(scratch, name: "square.png", width: 900, height: 900)
+        let size = TranscriptImageGeometry.displaySize(
+            metadata: TranscriptImageService.shared.metadata(forPath: square), bodyWidth: 702)
+        #expect(size == CGSize(
+            width: TranscriptImageGeometry.maxEdge, height: TranscriptImageGeometry.maxEdge))
     }
 
     /// A thumbnail is never blown up past its natural pixel size.
@@ -181,7 +197,7 @@ struct TranscriptImageAttachmentTests {
         #expect(size == CGSize(width: 32, height: 24))
     }
 
-    /// A narrow bubble clamps the thumbnail to the body width, not the 420pt cap.
+    /// A narrow bubble clamps the thumbnail to the body width, not the 200pt box.
     @Test func narrowBodyWidthClampsTheThumbnail() throws {
         let scratch = Scratch()
         TranscriptImageService.shared.clearCaches()
@@ -226,7 +242,7 @@ struct TranscriptImageAttachmentTests {
 
     /// A marker naming something that is not an image at all — including a file
     /// that merely LOOKS like one by extension.
-    @Test func nonImageFileRendersAChipAndStaysRevealable() throws {
+    @Test func nonImageFileRendersAChipAndStaysClickable() throws {
         let scratch = Scratch()
         TranscriptImageService.shared.clearCaches()
         let path = scratch.path("notreally.png")
@@ -252,6 +268,92 @@ struct TranscriptImageAttachmentTests {
         let scratch = Scratch()
         #expect(TranscriptImageService.shared.metadata(forPath: scratch.url.path).state == .missing)
         #expect(TranscriptImageService.shared.metadata(forPath: "").state == .missing)
+    }
+
+    // MARK: - Click and context menu
+
+    /// Counts how many times a click asked for the Quick Look panel. A class so
+    /// the stub presenter can mutate it after escaping.
+    private final class PanelShows { var count = 0 }
+
+    /// Runs `body` with the Quick Look panel presentation stubbed out — a real
+    /// panel would pop over the screen of whoever is running the suite, and needs
+    /// a key window this process does not have.
+    private func withStubbedPanel(_ body: (PanelShows) throws -> Void) rethrows {
+        let shows = PanelShows()
+        let previous = TranscriptQuickLook.shared.showPanel
+        TranscriptQuickLook.shared.showPanel = { shows.count += 1 }
+        defer { TranscriptQuickLook.shared.showPanel = previous }
+        try body(shows)
+    }
+
+    private func configuredView(path: String) -> TranscriptImageBlockView {
+        let metadata = TranscriptImageService.shared.metadata(forPath: path)
+        let view = TranscriptImageBlockView()
+        view.configure(
+            attachment: .init(path: path), metadata: metadata,
+            displaySize: TranscriptImageGeometry.displaySize(metadata: metadata, bodyWidth: 702))
+        return view
+    }
+
+    /// A click previews THAT file — the whole point of the gesture change. The
+    /// panel itself cannot be driven headlessly, so what is asserted is the
+    /// wiring: the presenter is asked exactly once, for exactly this URL.
+    @Test func clickingAThumbnailPreviewsThatExactFile() throws {
+        let scratch = Scratch()
+        TranscriptImageService.shared.clearCaches()
+        let path = try writePNG(scratch, name: "shot.png", width: 800, height: 600)
+        let view = configuredView(path: path)
+
+        try withStubbedPanel { shows in
+            #expect(view.accessibilityPerformPress())
+            #expect(shows.count == 1)
+            #expect(TranscriptQuickLook.shared.previewURL?.path == path)
+        }
+        #expect(view.accessibilityHelp() == "Quick Look preview")
+    }
+
+    /// Reveal in Finder did not disappear when click stopped doing it — it moved
+    /// to the right-click menu, alongside Copy Image.
+    @Test func contextMenuKeepsRevealInFinderAndCopyReachable() throws {
+        let scratch = Scratch()
+        TranscriptImageService.shared.clearCaches()
+        let path = try writePNG(scratch, name: "shot.png", width: 800, height: 600)
+        let menu = try #require(configuredView(path: path).makeContextMenu())
+        #expect(menu.items.map(\.title) == ["Quick Look", "Copy Image", "Reveal in Finder"])
+    }
+
+    /// An `.unreadable` file stays clickable — Quick Look previews a PDF or a
+    /// text file perfectly well — but there is no image to copy.
+    @Test func unreadableFileStaysPreviewableWithoutCopyImage() throws {
+        let scratch = Scratch()
+        TranscriptImageService.shared.clearCaches()
+        let path = scratch.path("notreally.png")
+        try Data("this is plain text, not a PNG".utf8).write(to: URL(fileURLWithPath: path))
+        let view = configuredView(path: path)
+
+        let menu = try #require(view.makeContextMenu())
+        #expect(menu.items.map(\.title) == ["Quick Look", "Reveal in Finder"])
+
+        try withStubbedPanel { shows in
+            #expect(view.accessibilityPerformPress())
+            #expect(shows.count == 1)
+            #expect(TranscriptQuickLook.shared.previewURL?.path == path)
+        }
+    }
+
+    /// A `.missing` file is inert: no click, no menu. There is nothing on disk to
+    /// preview or reveal.
+    @Test func missingFileIsNotClickableAndHasNoMenu() throws {
+        let scratch = Scratch()
+        TranscriptImageService.shared.clearCaches()
+        let view = configuredView(path: scratch.path("gone.png"))
+
+        #expect(view.makeContextMenu() == nil)
+        try withStubbedPanel { shows in
+            #expect(view.accessibilityPerformPress() == false)
+            #expect(shows.count == 0)
+        }
     }
 
     // MARK: - Decode and cache
