@@ -413,6 +413,60 @@ Four rules. Each traces to a real flake — provenance kept so the rule sticks.
 
 Full rationale: `docs/specs/2026-07-24-test-hardening-design.md` §6.
 
+## `@MainActor` tests: suspend to drain, never pump
+
+A `@MainActor` test body **is** a block executing on the serial main queue, and in
+this test process that queue is drained by libdispatch's own main-thread drain,
+not by CFRunLoop. So for as long as the body runs synchronously, nothing else on
+that queue runs — including the deferred work the body is trying to observe.
+
+**Never spin a nested run loop to wait for something.** A nested
+`RunLoop.current.run(until:)` cannot re-enter the main queue, so it drains none
+of it. Measured here: a block enqueued with `DispatchQueue.main.async`
+immediately before a 0.3 s nested run loop had **still not run** when the loop
+returned, and a suspended `@MainActor` task was **not** resumed by it either.
+The same three assertions hold after `NSApplication.shared` exists.
+
+**Suspending is the only thing that returns the queue.** `await Task.yield()`
+hands the main actor back, the queued block runs, and only then does the
+continuation resume — so the test observes the effect it came to assert. Bound
+the wait (assertion-hygiene rule 3 above): poll with `Task.sleep` against an
+iteration cap so work that never arrives fails an assertion instead of hanging.
+`TableTranscriptHarness.drainMainQueue()` is the minimal shape and
+`TranscriptImageAttachmentTests.pump(_:until:)` the bounded-poll one.
+
+**The failure shape is why this rule is written down.** The deferred work does
+not vanish; it runs once the body ends, inside whatever test is running by then.
+So the offending test **passes in isolation** and reds a *sibling* — the reported
+failure names innocent code. Shared process-wide state makes it concrete: a
+block that repopulates `TranscriptImageService.shared` after another test called
+`clearCaches()` corrupts that test, not its own. **`.serialized` does not help**,
+because it orders test *bodies* and this work escaped one.
+
+**What a nested run loop legitimately does** is run-loop-scheduled work only:
+`NSTimer`, `CFRunLoopSource`, AppKit display and layout. Driving those from a
+synchronous body is its one honest use, and the two `pump()` helpers in
+`Tests/TBDAppTests` exist for it. It is never a synchronization primitive for
+`DispatchQueue.main.async` or Swift concurrency — if a helper's docstring claims
+to "drain" either, the claim is false.
+
+**And it can be a silent no-op.** `run(until:)` returns immediately when no
+input source or timer is attached to the loop — measured 0.000 s bare against
+0.321 s once a timer was added. A pump that appears to be doing something may be
+doing nothing at all, at either end of the range.
+
+The compiler already closes the worst half: `RunLoop.current` and `run(until:)`
+are `NS_SWIFT_UNAVAILABLE_FROM_ASYNC`, so a nested loop can only appear in a
+synchronous body or helper — exactly the context that can never suspend.
+**Reaching for one from an `async` test and finding it won't compile is the
+signal to yield, not to hoist the spin into a sync helper.**
+
+There is no lint rule for this, deliberately, and for the same reason rule 4
+above has none: nothing mechanical can tell "drive AppKit layout" from "wait for
+a callback" at a `RunLoop.run` call site. A rule banning the syntax would fire
+on both, would start life fully suppressed against the legitimate sites, and
+would be one people disable.
+
 ## Clock and date seams
 
 Governing rule: **`Duration` is behavior, `Date` is data.** The two seams are
