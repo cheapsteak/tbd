@@ -60,6 +60,9 @@ def _attribution() -> str:
 _ALL_BRANCHES = {
     "normal prose": _result(comment_body="✅ Looks good.\n\nNothing to flag."),
     "blank prose with findings": _result(findings=[_finding()]),
+    "blank prose with an unanchored finding": _result(
+        findings=[_finding(file=None, line=None)]
+    ),
     "blank prose without findings": _result(),
     "whitespace-only prose": _result(comment_body="   \n\t\n  "),
     "unreadable result": None,
@@ -206,6 +209,66 @@ def test_fallback_omits_line_when_absent_and_survives_missing_fields() -> None:
     assert fallback_body([{}], "APPROVE").splitlines()[-1] == (
         "- **UNKNOWN** — (no title recorded)"
     )
+
+
+def test_fallback_renders_a_finding_with_no_file_anchor() -> None:
+    # `file` is nullable in the schema: a repo-wide or architectural finding is
+    # a property of the tree, not of one file. The bullet must still carry the
+    # finding — dropping only the location it doesn't have.
+    body, _ = _render(
+        _result(
+            findings=[
+                _finding(
+                    id="conventions-2",
+                    file=None,
+                    line=None,
+                    severity="MEDIUM",
+                    title="convention holds across the tree",
+                )
+            ]
+        )
+    )
+    # The exact bullet: nothing sits between the severity and the title, which
+    # is where a location would have gone.
+    assert "- **MEDIUM** — convention holds across the tree" in body
+    assert "None" not in body
+
+
+def test_fallback_renders_a_null_file_beside_an_anchored_finding() -> None:
+    # The mixed run: one finding keeps its file:line, the other has neither.
+    # Both appear, and neither leaks a placeholder.
+    body, warning = _render(
+        _result(
+            findings=[
+                _finding(),
+                _finding(id="conventions-2", file=None, line=None, title="tree-wide"),
+            ]
+        )
+    )
+    assert warning is not None and "2 finding(s)" in warning
+    assert "`Sources/Acme/Widget.swift:42`" in body
+    assert "- **HIGH** — tree-wide" in body
+    for placeholder in ("None", "file:null", "null:"):
+        assert placeholder not in body
+
+
+def test_fallback_with_no_file_drops_a_stray_line_rather_than_dangling_it() -> None:
+    # A line without a file anchors nothing a reader can follow; rendering it
+    # would produce ":42" or "None:42".
+    rendered = fallback_body([_finding(file=None, line=42)], "REJECT")
+    assert "42" not in rendered
+    assert "None" not in rendered
+    assert "the retry loop never terminates" in rendered
+
+
+def test_fallback_renders_a_finding_whose_body_is_null() -> None:
+    # `body` is nullable too — the bullet keeps its title and adds nothing.
+    rendered = fallback_body([_finding(body=None)], "REJECT")
+    assert rendered.splitlines()[-1] == (
+        "- **HIGH** — `Sources/Acme/Widget.swift:42` — the retry loop never "
+        "terminates"
+    )
+    assert "None" not in rendered
 
 
 def test_fallback_ignores_non_object_findings_entries() -> None:
