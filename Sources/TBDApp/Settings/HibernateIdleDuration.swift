@@ -109,3 +109,57 @@ struct HibernateIdleDuration: Equatable {
         return min(parsed, targetUnit.maxAmount)
     }
 }
+
+/// The outcome of reconciling the Settings field with a freshly read
+/// `appState.hibernateIdleMinutes` — see
+/// `HibernateIdleDuration.syncing(current:persistedMinutes:isFocused:force:)`.
+struct HibernateIdleSyncResult: Equatable {
+    var duration: HibernateIdleDuration
+    var amountText: String
+}
+
+extension HibernateIdleDuration {
+    /// Pure decision behind `SettingsView.syncHibernateIdleFromAppState`:
+    /// whether, and how, to reconcile the field with the daemon's
+    /// persisted value. Free of SwiftUI so it unit-tests without a view
+    /// host; the view owns only the SwiftUI plumbing (`.onAppear`,
+    /// `.onChange`, `@FocusState`) that calls this and applies the result.
+    ///
+    /// `isFocused` guards against an *external* delta stomping an
+    /// in-progress edit; it is skipped when `force` is true, which marks
+    /// this view reconciling its own settled commit RPC rather than an
+    /// external change (success or failure — see
+    /// `SettingsView.applyHibernateIdleDuration`). Returns `nil` — no
+    /// change — only when that guard blocks the sync outright.
+    ///
+    /// When the guard passes, `duration` re-derives amount+unit from
+    /// `persistedMinutes` ONLY when the totals actually differ — a
+    /// genuine external delta. Re-deriving unconditionally would undo the
+    /// user's deliberately chosen unit: committing "120" with unit
+    /// Minutes would otherwise silently renormalize to "2 Hours" the
+    /// moment the round-trip lands and this fires again with an unchanged
+    /// total.
+    ///
+    /// `amountText`, however, is always recomputed from the (possibly
+    /// unchanged) `duration.amount` whenever the guard passes — it does
+    /// NOT share the totals-differ condition above. That distinction is
+    /// what keeps the field populated the first time this fires: on
+    /// `.onAppear`, `current` (the view's `@State` default) and
+    /// `persistedMinutes` (loaded from the daemon) both routinely equal
+    /// the shipped 30-minute default, so totals agree and `duration`
+    /// stays as-is — but the text field still needs its initial value
+    /// written, or it renders blank for the session (the regression this
+    /// type exists to make testable).
+    static func syncing(
+        current: HibernateIdleDuration,
+        persistedMinutes: Int,
+        isFocused: Bool,
+        force: Bool
+    ) -> HibernateIdleSyncResult? {
+        guard force || !isFocused else { return nil }
+        let duration = current.totalMinutes != persistedMinutes
+            ? HibernateIdleDuration(totalMinutes: persistedMinutes)
+            : current
+        return HibernateIdleSyncResult(duration: duration, amountText: String(duration.amount))
+    }
+}

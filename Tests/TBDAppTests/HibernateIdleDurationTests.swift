@@ -184,4 +184,87 @@ struct HibernateIdleDurationTests {
         let last = HibernateIdleDuration(amount: 30, unit: .minutes)
         #expect(last.resolveAmount(fromText: "30", targetUnit: .minutes) == 30)
     }
+
+    // MARK: - syncing: the pure decision behind
+    // SettingsView.syncHibernateIdleFromAppState. Regression coverage for
+    // the shipped-default-blank-field bug: the totals-agree guard must stop
+    // amount+unit from being re-derived, but must NOT also suppress writing
+    // the display text.
+
+    @Test func syncingWithMatchingDefaultPopulatesText() {
+        // The exact regression: current is the view's @State default (30
+        // min, the shipped default) and the daemon's persisted value is
+        // also 30 — the common case for most users on first appearance.
+        // The old totals-agree early return skipped everything, including
+        // the text write, leaving the field blank for the view's lifetime.
+        let current = HibernateIdleDuration(totalMinutes: 30)
+        let result = HibernateIdleDuration.syncing(
+            current: current,
+            persistedMinutes: 30,
+            isFocused: false,
+            force: false
+        )
+        #expect(result?.amountText == "30")
+        #expect(result?.duration == current)
+    }
+
+    @Test func syncingCommittedMinutesRoundTripKeepsUnit() {
+        // Committing "120 Minutes" leaves the totals equal on the next
+        // sync (e.g. the settle-sync after commit, or a later .onAppear).
+        // Re-deriving from the total would renormalize to "2 Hours" even
+        // though nothing external changed — the unit must survive.
+        let committed = HibernateIdleDuration(amount: 120, unit: .minutes)
+        let result = HibernateIdleDuration.syncing(
+            current: committed,
+            persistedMinutes: 120,
+            isFocused: false,
+            force: false
+        )
+        #expect(result?.duration.unit == .minutes)
+        #expect(result?.duration.amount == 120)
+        #expect(result?.amountText == "120")
+    }
+
+    @Test func syncingGenuineExternalDeltaRederivesAmountAndUnit() {
+        // A different total (another window/session changed the config)
+        // must re-derive amount+unit from the new total, not just refresh
+        // the text of the stale duration.
+        let current = HibernateIdleDuration(amount: 30, unit: .minutes)
+        let result = HibernateIdleDuration.syncing(
+            current: current,
+            persistedMinutes: 120,
+            isFocused: false,
+            force: false
+        )
+        #expect(result?.duration.unit == .hours)
+        #expect(result?.duration.amount == 2)
+        #expect(result?.amountText == "2")
+    }
+
+    @Test func syncingFocusedNotForcedMakesNoChange() {
+        // An external delta must not stomp an in-progress edit.
+        let current = HibernateIdleDuration(amount: 30, unit: .minutes)
+        let result = HibernateIdleDuration.syncing(
+            current: current,
+            persistedMinutes: 120,
+            isFocused: true,
+            force: false
+        )
+        #expect(result == nil)
+    }
+
+    @Test func syncingFocusedForcedStillApplies() {
+        // The view's own settled commit RPC must apply even if the field
+        // is still focused (`.onSubmit` doesn't resign first responder).
+        let current = HibernateIdleDuration(amount: 30, unit: .minutes)
+        let result = HibernateIdleDuration.syncing(
+            current: current,
+            persistedMinutes: 120,
+            isFocused: true,
+            force: true
+        )
+        #expect(result?.duration.unit == .hours)
+        #expect(result?.duration.amount == 2)
+        #expect(result?.amountText == "2")
+    }
 }

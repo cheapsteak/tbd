@@ -391,20 +391,27 @@ struct GeneralSettingsTab: View {
     /// This view reconciling its own settled write is not an external
     /// delta, so it always applies regardless of focus.
     ///
-    /// Returns early — force or not — when the local duration's total
-    /// already agrees with `appState.hibernateIdleMinutes`: there is nothing
-    /// to sync, and re-deriving amount+unit from the total would undo the
-    /// user's deliberately chosen unit even though nothing actually changed
-    /// — typing "120" with unit Minutes and clicking away would otherwise
-    /// silently renormalize to "2 Hours" the moment the commit round-trips
-    /// and this fires from `.onChange(of: appState.hibernateIdleMinutes)`.
-    /// Only a genuine external delta — a different total — re-derives the
-    /// unit.
+    /// The decision itself lives in the pure, view-free
+    /// `HibernateIdleDuration.syncing(current:persistedMinutes:isFocused:force:)`
+    /// (unit-tested in `HibernateIdleDurationTests`): amount+unit re-derive
+    /// from the persisted total only on a genuine external delta (so a
+    /// same-total round-trip does not renormalize "120 Minutes" to
+    /// "2 Hours"), but the displayed text always refreshes from the
+    /// resulting amount whenever the focus guard allows a sync at all —
+    /// including when the total didn't change, which is what keeps the
+    /// field populated on first appearance instead of rendering blank for
+    /// the whole view lifetime when the persisted value already equals this
+    /// view's `@State` default (the shipped 30-minute default, for most
+    /// users).
     private func syncHibernateIdleFromAppState(force: Bool = false) {
-        guard force || !hibernateIdleFieldFocused else { return }
-        guard hibernateIdleDuration.totalMinutes != appState.hibernateIdleMinutes else { return }
-        hibernateIdleDuration = HibernateIdleDuration(totalMinutes: appState.hibernateIdleMinutes)
-        hibernateIdleAmountText = String(hibernateIdleDuration.amount)
+        guard let result = HibernateIdleDuration.syncing(
+            current: hibernateIdleDuration,
+            persistedMinutes: appState.hibernateIdleMinutes,
+            isFocused: hibernateIdleFieldFocused,
+            force: force
+        ) else { return }
+        hibernateIdleDuration = result.duration
+        hibernateIdleAmountText = result.amountText
     }
 
     /// Commit the typed amount for the current unit. See
@@ -422,9 +429,11 @@ struct GeneralSettingsTab: View {
     /// `force: true` because this is the view reconciling its own settled
     /// write, not an external delta, so the focus guard in
     /// `syncHibernateIdleFromAppState` must not apply here (see that
-    /// method's doc comment). On success the force-sync is still a no-op
-    /// (the persisted total now matches, so the totals-agree early return
-    /// fires and the chosen unit survives); on failure
+    /// method's doc comment). On success the force-sync re-applies the same
+    /// amount/text this method already set locally — the persisted total
+    /// now matches, so `HibernateIdleDuration.syncing` skips re-deriving
+    /// amount+unit and the chosen unit survives, while the text it writes
+    /// is identical to what is already on screen; on failure
     /// `appState.hibernateIdleMinutes` never moved, so the re-sync reverts
     /// the field to what is actually persisted instead of stranding an
     /// unsaved value that silently looks committed.
