@@ -985,6 +985,18 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   while its `> ` markers are still counted as drawn characters —
         ///   measured exact to 12 wrapped lines and -16 pt (one line) at 20.
         ///
+        /// One family is unmodelled for a different reason, and deliberately so:
+        /// a NESTED list (`- outer` / `  - inner`) and a list-item continuation
+        /// that follows a BLANK line both collapse to a single rendered line today,
+        /// because `visitListItem` flattens an item's children inline and a nested
+        /// list or a second paragraph arrives with no break between them. The
+        /// arithmetic here predicts what those SHOULD draw — 2 lines at
+        /// `listItemSpacing` for the nested pair, which is exactly what it returns
+        /// — so it reads as a +20 to +40 pt over-reservation only for as long as
+        /// the renderer mangles them. Teaching the estimator to reproduce the
+        /// collapse would encode the defect in a second place and make fixing the
+        /// renderer a silent two-file trap.
+        ///
         /// The image term is not an approximation at all: an attached image is laid
         /// out at `TranscriptImageGeometry.displaySize`, which derives from a
         /// SYNCHRONOUS header-only probe (~0.1 ms, cached per file) rather than a
@@ -1157,9 +1169,15 @@ struct TableTranscriptView: NSViewRepresentable {
                     pendingTableRows = 0
                 }
 
+                // Whether the unit most recently appended was a list item, so an
+                // INDENTED line following it can be recognised as that item's
+                // continuation rather than as a paragraph of its own.
+                var lastUnitWasListItem = false
+
                 for rawLine in run.split(omittingEmptySubsequences: false,
                                         whereSeparator: Self.isLineTerminator) {
                     let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let isIndented = rawLine.first == " " || rawLine.first == "\t"
 
                     if line.hasPrefix("```") || line.hasPrefix("~~~") {
                         if inFence {
@@ -1188,8 +1206,10 @@ struct TableTranscriptView: NSViewRepresentable {
                     if line.isEmpty {
                         // A blank source line draws nothing — the separation it
                         // expresses is already paid by the previous unit's trailing
-                        // spacing.
+                        // spacing. It does end a list, though: what follows is a
+                        // fresh block, not a continuation.
                         flushTable()
+                        lastUnitWasListItem = false
                         continue
                     }
 
@@ -1209,13 +1229,22 @@ struct TableTranscriptView: NSViewRepresentable {
                         appendUnit(lines: wrappedLines(line, widthScale: scale),
                                    lineHeight: headingLineHeights[level - 1],
                                    trailing: theme.paragraphSpacing)
+                        lastUnitWasListItem = false
                         continue
                     }
 
+                    // A line that opens a list item, and an INDENTED line carrying
+                    // an open item's continuation, are both spaced with the tight
+                    // `listItemSpacing`: `visitListItem` pulls the item's inline
+                    // children out, so the soft break before a continuation sits
+                    // inside the item's own paragraph style rather than starting a
+                    // fresh 16 pt paragraph.
+                    let isListItem = Self.isListItem(line) || (isIndented && lastUnitWasListItem)
                     appendUnit(
                         lines: wrappedLines(line),
                         lineHeight: bubbleLineHeight,
-                        trailing: Self.isListItem(line) ? theme.listItemSpacing : theme.paragraphSpacing)
+                        trailing: isListItem ? theme.listItemSpacing : theme.paragraphSpacing)
+                    lastUnitWasListItem = isListItem
                 }
 
                 if inFence {

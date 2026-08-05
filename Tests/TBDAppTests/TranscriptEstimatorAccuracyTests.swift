@@ -93,6 +93,7 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "assistant/long", points: 2, percent: 0.4, achieved: "0.0"),
         Budget(id: "assistant/code-block", points: 2, percent: 1.1, achieved: "0.0"),
         Budget(id: "assistant/bullet-list", points: 2, percent: 1.3, achieved: "0.0"),
+        Budget(id: "assistant/list-continuation", points: 2, percent: 1.1, achieved: "0.0"),
         Budget(id: "assistant/gfm-table", points: 2, percent: 1.2, achieved: "0.0"),
         Budget(id: "assistant/image", points: 2, percent: 1.0, achieved: "0.0"),
         Budget(id: "assistant/soft-breaks", points: 2, percent: 0.9, achieved: "0.0"),
@@ -497,6 +498,24 @@ struct TranscriptEstimatorAccuracyTests {
         Each contributes independently to the total error.
         """
 
+    /// A list whose items carry INDENTED continuation lines, with one in the
+    /// middle of the list rather than trailing it. `visitListItem` flattens an
+    /// item's inline children, so the soft break before a continuation sits inside
+    /// the item's own paragraph style and costs the tight `listItemSpacing` (4) —
+    /// classifying the continuation as an ordinary paragraph charged 16 and
+    /// over-reserved 12 pt per continuation. `assistant/bullet-list` has no
+    /// continuations and cannot see it.
+    private static let listContinuationText = """
+        The estimator handles three list shapes:
+
+        - a plain item that fits on one line
+          and a continuation line belonging to that same item
+        - a second item, to prove the continuation did not end the list
+        - a third item to close it out
+
+        Each continuation costs a list gap, not a paragraph break.
+        """
+
     /// The table's source lines render as a grid block, NOT as prose. Charging
     /// them as both was 140 pt — an 81% over-reservation, the worst single defect
     /// this file guards.
@@ -614,6 +633,8 @@ struct TranscriptEstimatorAccuracyTests {
             text: "Here is the screenshot.\n\n[Image: source: \(imagePath)]",
             timestamp: nil,
             usage: nil))
+        items.append(.assistantText(id: "assistant/list-continuation", text: listContinuationText,
+                                    timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/soft-breaks", text: softBreakText,
                                     timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/crlf", text: crlfText,
