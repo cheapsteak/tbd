@@ -177,6 +177,36 @@ struct ActuationLogWiringTests {
         #expect(written.last?["result"] as? String == "dispatched")
     }
 
+    /// A spawn the daemon declines *after* the row is written — the request row
+    /// still stands, and its outcome says refused rather than being left
+    /// unconfirmed. (The worktree-not-found and archived-worktree checks sit
+    /// ahead of the row and write nothing at all; this is the first refusal
+    /// downstream of it.)
+    @Test("a spawn the daemon declines after the row is written reads as refused")
+    func createRefusalIsConfirmedAsRefused() async throws {
+        let fixture = try makeFixture()
+        let worktree = try await makeWorktree(in: fixture.db)
+
+        // A login session with no profile to log into: the daemon refuses
+        // before it touches the transport.
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: worktree.id, type: .claude, loginSession: true),
+            actor: .app))
+        #expect(!response.success)
+
+        let written = try rows(at: fixture.logPath)
+        #expect(written.count == 2)
+        #expect(written.first?["kind"] as? String == "spawn")
+        #expect(written.first?["method"] as? String == "terminal.create")
+        let outcome = try #require(written.last)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["error"] as? String == response.error)
+        // Refused means refused: no terminal row came out of it.
+        #expect(try await fixture.db.terminals.list(worktreeID: worktree.id).isEmpty)
+    }
+
     @Test("terminal.delete writes a dispose row")
     func deleteWritesDisposeRow() async throws {
         let fixture = try makeFixture()

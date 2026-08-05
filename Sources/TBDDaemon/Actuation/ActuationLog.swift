@@ -76,6 +76,18 @@ public actor ActuationLog {
     /// determined yet"; an empty or absent file needs no rotation.
     private var segmentDay: String?
 
+    /// Set when the tail read that learns `segmentDay` finds the file ending
+    /// mid-line, and consumed by that same append: the row goes out behind a
+    /// newline so the dangling bytes terminate as their own junk line instead
+    /// of fusing with it.
+    ///
+    /// Within one call the write loop's own recovery handles a fragment it
+    /// created itself; this covers the fragment nobody is left to recover —
+    /// a crash between `write` and `fsync`, a double failure, a hand-edit.
+    /// Both failure paths reset `segmentDay`, so a retried append re-reads the
+    /// tail and re-arms this rather than losing it.
+    private var fragmentPendingIsolation = false
+
     public init(path: String, now: @Sendable @escaping () -> Date = { Date() }) {
         self.init(path: path, now: now, syscalls: .system)
     }
@@ -171,9 +183,11 @@ public actor ActuationLog {
         /// Nothing reached the file (encode, rotate, open, or a `write` that
         /// failed on its first byte). A plain re-append is safe.
         case nothingWritten(any Error)
-        /// A prefix of the line reached the file. The retry prepends a newline
-        /// so the fragment terminates as its own isolated junk line.
-        case partiallyWritten(any Error)
+        /// A prefix of the line reached the file. The retry finishes the line
+        /// where it stopped rather than rewriting it, so it carries the exact
+        /// bytes it was writing, how many of them the kernel took, and the file
+        /// they went into (`nil` only if even `fstat` failed).
+        case partiallyWritten(any Error, line: Data, offset: Int, identity: FileIdentity?)
         /// The whole line reached the file but `fsync` failed. The bytes are
         /// there; only the flush is owed. `identity` is the file they went
         /// into, so the retry can tell "still the same file" from "replaced
@@ -189,14 +203,16 @@ public actor ActuationLog {
 
     /// Append with exactly one recovery attempt, shaped by how far the first
     /// attempt got (see `AppendFailure`): a plain retry when nothing was
-    /// written, a newline-prefixed retry that isolates a fragment when part of
-    /// the line was, and — when only the flush failed — a reopen-and-`fsync`
-    /// that never rewrites the row.
+    /// written, a resume-from-offset that finishes a half-written line where it
+    /// stopped, and — when only the flush failed — a reopen-and-`fsync` that
+    /// never rewrites the row.
     ///
-    /// Either way the row lands **at most once**. On a second failure the
-    /// caller's contract takes over: request rows throw (fail-closed, so the
-    /// actuation does not proceed), outcome rows are `.fault`-logged and
-    /// swallowed.
+    /// Every branch is decided by bytes already on disk rather than by
+    /// guessing, so the row lands **at most once**: nothing was written and it
+    /// is written; part was written and only the rest is; all of it was written
+    /// and only the flush is retried. On a second failure the caller's contract
+    /// takes over: request rows throw (fail-closed, so the actuation does not
+    /// proceed), outcome rows are `.fault`-logged and swallowed.
     private func appendWithOneRetry(_ row: ActuationRow, failClosed: Bool) throws {
         let firstFailure: AppendFailure
         do {
@@ -218,8 +234,8 @@ public actor ActuationLog {
             switch firstFailure {
             case .nothingWritten:
                 try appendOnce(row)
-            case .partiallyWritten:
-                try appendOnce(row, isolatingFragment: true)
+            case .partiallyWritten(_, let line, let offset, let identity):
+                try resumePartialWrite(row, line: line, offset: offset, identity: identity)
             case .unflushed(_, let identity):
                 try flushAlreadyWrittenRow(row, identity: identity)
             }
@@ -250,6 +266,56 @@ public actor ActuationLog {
         guard syscalls.fsync(descriptor) == 0 else { throw Self.posixError("fsync") }
     }
 
+    /// Recovery for a line the kernel accepted only part of: reopen and write
+    /// the remaining bytes, finishing the row where it stopped.
+    ///
+    /// `offset` is exactly what the file took — a failed `write(2)` returns -1
+    /// having written nothing — and this actor serializes its appends onto an
+    /// `O_APPEND` handle, so while the reopened path is the same file the
+    /// fragment is still its last bytes and the remainder completes it. The row
+    /// then lands once, whole, with no junk line at all. Rewriting it instead
+    /// would duplicate it in the boundary case: a short write that persisted
+    /// everything but the trailing newline leaves a "fragment" that is already
+    /// a complete, parseable row.
+    ///
+    /// A different inode means the fragment went into a file nobody will read —
+    /// re-append the whole row, which cannot duplicate on a fresh file. An
+    /// unknown identity proves neither, so it takes the newline-isolating
+    /// re-append: the fragment survives as its own junk line and the row still
+    /// parses on a line of its own.
+    private func resumePartialWrite(
+        _ row: ActuationRow, line: Data, offset: Int, identity: FileIdentity?
+    ) throws {
+        let descriptor = try openHandle()
+        guard let identity, let reopened = fileIdentity(of: descriptor) else {
+            try appendOnce(row, isolatingFragment: true)
+            return
+        }
+        guard reopened == identity else {
+            try appendOnce(row)
+            return
+        }
+        var written = 0
+        try writeAll(Data(line.dropFirst(offset)), to: descriptor, written: &written)
+        guard syscalls.fsync(descriptor) == 0 else { throw Self.posixError("fsync") }
+    }
+
+    /// Write every byte of `data`, returning only when all of it landed.
+    /// `written` reports how many bytes the file accepted, and stays accurate
+    /// when this throws — the failing `write` call itself wrote nothing.
+    private func writeAll(_ data: Data, to descriptor: Int32, written: inout Int) throws {
+        var offset = written
+        defer { written = offset }
+        try data.withUnsafeBytes { buffer in
+            while offset < buffer.count {
+                let count = syscalls.write(
+                    descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                guard count > 0 else { throw Self.posixError("write") }
+                offset += count
+            }
+        }
+    }
+
     private func appendOnce(_ row: ActuationRow, isolatingFragment: Bool = false) throws {
         var row = row
         let stampedAt = now()
@@ -270,28 +336,25 @@ public actor ActuationLog {
         let descriptor = try openHandle()
 
         var line = Data()
-        // A previous attempt left a fragment of a line in the file. Open this
-        // one with a newline so the fragment terminates as its own isolated
-        // junk line and this row still parses on a line of its own: a
+        // The file ends mid-line — a fragment this call's own recovery cannot
+        // account for, so it was left by a crash or a double failure. Open this
+        // row with a newline so those bytes terminate as their own isolated
+        // junk line and the row still parses on a line of its own: a
         // line-oriented reader skips the junk and sees the row exactly once.
-        if isolatingFragment { line.append(0x0A) }
+        if isolatingFragment || fragmentPendingIsolation { line.append(0x0A) }
+        fragmentPendingIsolation = false
         line.append(try encoder.encode(row))
         line.append(0x0A)
 
         var offset = 0
         do {
-            try line.withUnsafeBytes { buffer in
-                while offset < buffer.count {
-                    let written = syscalls.write(
-                        descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
-                    guard written > 0 else { throw Self.posixError("write") }
-                    offset += written
-                }
-            }
+            try writeAll(line, to: descriptor, written: &offset)
         } catch {
             throw offset == 0
                 ? AppendFailure.nothingWritten(error)
-                : AppendFailure.partiallyWritten(error)
+                : AppendFailure.partiallyWritten(
+                    error, line: line, offset: offset,
+                    identity: fileIdentity(of: descriptor))
         }
         // fsync per row is affordable at actuation rates (human/agent scale,
         // not packet scale). `F_FULLFSYNC` is deliberately declined: the
@@ -358,6 +421,9 @@ public actor ActuationLog {
         let destination = try rotationDestination(day: day)
         try FileManager.default.moveItem(atPath: path, toPath: destination)
         segmentDay = nil
+        // Any dangling fragment left the active file with the segment it
+        // belongs to; the fresh file starts clean and needs no isolation.
+        fragmentPendingIsolation = false
     }
 
     /// A name collision can only come from a crash-window edge (two segments
@@ -383,6 +449,11 @@ public actor ActuationLog {
     /// that restarts mid-day rotates against the record rather than against its
     /// own uptime. Reads only the file's tail — a segment can be large.
     /// Returns `nil` when there is nothing to rotate.
+    ///
+    /// The same tail read is where a fragment left by a *previous* process (or
+    /// by an append that failed twice) is noticed: a file whose last byte is
+    /// not a newline ends mid-line, and `fragmentPendingIsolation` makes the
+    /// append now in flight open with one so the two never fuse.
     private func determineSegmentDay() throws -> String? {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: path) else { return nil }
@@ -394,6 +465,7 @@ public actor ActuationLog {
         let window: UInt64 = 64 * 1024
         try handle.seek(toOffset: size > window ? size - window : 0)
         let tail = (try? handle.readToEnd()) ?? Data()
+        if let lastByte = tail.last, lastByte != 0x0A { fragmentPendingIsolation = true }
         let lines = tail.split(separator: 0x0A, omittingEmptySubsequences: true)
         guard let last = lines.last,
               let parsed = try? JSONDecoder().decode(TimestampProbe.self, from: Data(last)),

@@ -352,6 +352,45 @@ struct RPCRouterRemoteTests: ~Copyable {
         #expect(response.error?.contains("branch required") == true)
     }
 
+    /// A provider that exits 0 and hands back a truncated payload has failed at
+    /// the transport, however healthy its exit code looks. The decode throw
+    /// must confirm the request row as `transport-failed` — an unconfirmed row
+    /// is indistinguishable from a lost outcome — and still surface unchanged
+    /// to the caller.
+    @Test func createRecordsTransportFailureWhenTheProviderPayloadDoesNotDecode() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let logPath = dir.appendingPathComponent("create-decode-actuations.jsonl").path
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs,
+            runner: FakeProviderInvoker(script: [providerOK(#"{"id": "new-1", "sta"#)]),
+            registryURL: registryURL)
+        let r = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            subscriptions: subs,
+            remoteManager: manager, actuationLog: ActuationLog(path: logPath))
+
+        let response = await call(r, "remote.create", #"{"provider": "fake", "paramsJSON": "{}"}"#)
+        #expect(response.success == false)
+
+        let written = try String(contentsOfFile: logPath, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+        #expect(written.count == 2)
+        #expect(written.first?["kind"] as? String == "spawn")
+        #expect(written.first?["method"] as? String == "remote.create")
+        let outcome = try #require(written.last)
+        #expect(outcome["kind"] as? String == "outcome")
+        #expect(outcome["confirms"] as? String == written.first?["id"] as? String)
+        #expect(outcome["result"] as? String == "transport-failed")
+    }
+
     @Test func logDecodesRawBytes() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [

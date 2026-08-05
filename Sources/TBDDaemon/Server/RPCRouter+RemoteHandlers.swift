@@ -135,7 +135,14 @@ extension RPCRouter {
             await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
-        let session = try result.decoded(RemoteSessionPayload.self)
+        // A provider that exits 0 and returns garbage has lied at the transport
+        // level, so its decode failure is an outcome like any other: without
+        // this the throw would leave the request row unconfirmed forever, and
+        // the record could not tell "the create failed" from "the outcome was
+        // lost". The error propagates unchanged.
+        let session = try await actuating(actuationID) {
+            try result.decoded(RemoteSessionPayload.self)
+        }
         // Adopt immediately so the sidebar shows `starting` before the next poll.
         await manager.applyUpsert(session, provider: params.provider)
         await finishActuation(actuationID, .dispatched)

@@ -1065,6 +1065,107 @@ struct HibernationCoordinatorTests {
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
                 "a keep-warm session must never be auto-hibernated")
     }
+
+    // MARK: - Idle sweep: the rail's own actuation record
+
+    /// A log at a fresh temp path, plus a coordinator wired to it whose date
+    /// seam the test drives. The verify-exit poll is paced down to virtual-ish
+    /// speed (`exitPollInterval`) because this test is about the record, not
+    /// about how long a polite `/exit` waits.
+    private func sweepCoordinator(
+        _ db: TBDDatabase, logPath: String, dates: TestDateSource
+    ) -> HibernationCoordinator {
+        HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            configDirManager: isolatedConfigDirManager(),
+            now: dates.provider,
+            exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            actuationLog: ActuationLog(path: logPath))
+    }
+
+    private func sweepLogPath() throws -> String {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-sweep-actuation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("actuations.jsonl").path
+    }
+
+    private func logRows(at path: String) throws -> [[String: Any]] {
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return try contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+    }
+
+    /// Walk one terminal all the way through the sweep's poll/decide sequence:
+    /// seed the idle marker, cross the idle window to arm the debounce, then
+    /// let the settle window elapse so the rail actually parks it. The date
+    /// seam does the waiting, so no wall time is spent.
+    private func sweepUntilParked(
+        _ coord: HibernationCoordinator, dates: TestDateSource, idleMinutes: Int = 1
+    ) async {
+        await coord.sweep()                                        // seed idleSince
+        dates.advance(by: TimeInterval(idleMinutes) * 60 + 1)
+        await coord.sweep()                                        // arm the debounce
+        dates.advance(by: HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()                                        // act
+    }
+
+    /// The idle rail's success path. Everything else about the sweep is gating;
+    /// this is the one branch that actuates, and it must leave the same
+    /// request-then-outcome pair as any RPC surface — under its own rail name,
+    /// with no `method`, because no RPC carried it.
+    @Test func sweepParkWritesItsOwnRailRowAndOutcome() async throws {
+        let (db, worktreeID, terminalID) = try await setup(activityState: .idle)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        let coord = sweepCoordinator(db, logPath: logPath, dates: dates)
+
+        await sweepUntilParked(coord, dates: dates)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil)
+        let written = try logRows(at: logPath)
+        #expect(written.count == 2, "exactly one request row and its outcome")
+        let request = try #require(written.first)
+        #expect(request["kind"] as? String == "hibernate")
+        #expect(request["method"] == nil)
+        let actor = try #require(request["actor"] as? [String: Any])
+        #expect(actor["kind"] as? String == "daemon")
+        #expect(actor["rail"] as? String == "auto-hibernate")
+        let target = try #require(request["target"] as? [String: Any])
+        #expect(target["worktree"] as? String == worktreeID.uuidString)
+        #expect(target["terminal"] as? String == terminalID.uuidString)
+        let outcome = try #require(written.last)
+        #expect(outcome["kind"] as? String == "outcome")
+        #expect(outcome["confirms"] as? String == request["id"] as? String)
+        #expect(outcome["result"] as? String == "dispatched")
+    }
+
+    /// Fail-closed on a daemon-internal rail: an unrecordable park does not
+    /// happen. The sweep has no caller to return an error to, so the property
+    /// is the park itself — skipped, silently to the user, loudly in the log.
+    @Test func sweepSkipsTheParkWhenTheRecordIsUnwritable() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        // A path that can never be opened: its parent is a regular file.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-sweep-blocked-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let blocker = directory.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let dates = TestDateSource()
+        let coord = sweepCoordinator(
+            db, logPath: blocker.appendingPathComponent("actuations.jsonl").path, dates: dates)
+
+        await sweepUntilParked(coord, dates: dates)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
+                "an unrecordable park must not happen")
+    }
 }
 
 /// `terminal.wake` RPC error mapping. The shared `RPCRouterTests` harness pins

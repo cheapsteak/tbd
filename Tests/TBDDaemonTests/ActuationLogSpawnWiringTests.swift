@@ -161,6 +161,7 @@ struct ActuationLogSpawnWiringTests {
         let target = try #require(request["target"] as? [String: Any])
         #expect(target["worktree"] as? String == pending.id.uuidString)
         #expect(target["terminal"] == nil)
+        #expect((request["actor"] as? [String: Any])?["kind"] as? String == "app")
         #expect(written.last?["result"] as? String == "dispatched")
 
         // Let the background phase finish before the fixture repo goes away.

@@ -144,8 +144,44 @@ struct ActuationLogRetryTests {
 
     // MARK: - write failed
 
-    @Test("a half-written line is isolated, and the retried row parses on its own line")
-    func partialWriteIsolatesTheFragment() async throws {
+    /// The write stops with everything but the trailing newline persisted, so
+    /// the "fragment" left behind is a complete, parseable row. Rewriting the
+    /// row here would put the same actuation in the file twice — the one
+    /// corruption a reader cannot recover from, because both copies parse.
+    @Test("a write that stops exactly at the newline boundary still records the act once")
+    func partialWriteAtTheNewlineBoundaryDoesNotDuplicate() async throws {
+        let path = try makePath()
+        let counter = CallCounter()
+        let log = ActuationLog(path: path, syscalls: ActuationLogSyscalls(
+            write: { descriptor, buffer, count in
+                switch counter.next() {
+                case 1:
+                    // Everything except the row's own terminating newline.
+                    return Foundation.write(descriptor, buffer, count - 1)
+                case 2:
+                    errno = EIO
+                    return -1
+                default:
+                    return Foundation.write(descriptor, buffer, count)
+                }
+            },
+            fsync: { descriptor in Foundation.fsync(descriptor) }))
+
+        let id = try await log.appendRequest(sendRow())
+
+        let lines = contents(at: path).split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 1, "the resumed write must finish the line, not start another")
+        let rows = parsedRows(at: path)
+        #expect(rows.count == 1)
+        #expect(rows.first?["id"] as? String == id, "the row must round-trip as JSON, once")
+        #expect(rows.first?["message"] as? String == "please rebase onto main")
+    }
+
+    /// The general case of the same recovery: a short write anywhere inside the
+    /// line is finished from its own offset, so the file holds one whole row
+    /// and no junk at all.
+    @Test("a write that stops mid-line is resumed from its offset, leaving no junk line")
+    func partialWriteOffBoundaryResumesFromOffset() async throws {
         let path = try makePath()
         let counter = CallCounter()
         let log = ActuationLog(path: path, syscalls: ActuationLogSyscalls(
@@ -168,13 +204,61 @@ struct ActuationLogRetryTests {
         let id = try await log.appendRequest(sendRow())
 
         let lines = contents(at: path).split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == 2, "the fragment must terminate as a line of its own")
-        // The fragment is junk a reader skips; the row is intact and appears once.
-        #expect(
-            (try? JSONSerialization.jsonObject(with: Data(lines[0].utf8))) == nil,
-            "the fragment must not be fused with the retried row")
+        #expect(lines.count == 1)
         let rows = parsedRows(at: path)
         #expect(rows.count == 1)
+        #expect(rows.first?["id"] as? String == id)
+        #expect(rows.first?["message"] as? String == "please rebase onto main")
+    }
+
+    /// Resume-from-offset is only sound while the fragment is still the file's
+    /// last bytes. A file replaced under us voids that, and the row exists
+    /// nowhere a reader will look — so the whole row is re-appended, which
+    /// cannot duplicate on a fresh inode.
+    @Test("a half-written line whose file was replaced is re-appended whole, once")
+    func partialWriteOntoAReplacedFileReAppends() async throws {
+        let path = try makePath()
+        let counter = CallCounter()
+        let log = ActuationLog(path: path, syscalls: ActuationLogSyscalls(
+            write: { descriptor, buffer, count in
+                switch counter.next() {
+                case 1:
+                    return Foundation.write(descriptor, buffer, count / 2)
+                case 2:
+                    // A cleanup script took the file the fragment went into.
+                    try? FileManager.default.removeItem(atPath: path)
+                    errno = EIO
+                    return -1
+                default:
+                    return Foundation.write(descriptor, buffer, count)
+                }
+            },
+            fsync: { descriptor in Foundation.fsync(descriptor) }))
+
+        let id = try await log.appendRequest(sendRow())
+
+        let rows = parsedRows(at: path)
+        #expect(rows.count == 1)
+        #expect(rows.first?["id"] as? String == id)
+    }
+
+    /// A fragment nobody is left to recover — a crash between `write` and
+    /// `fsync`, or an append that failed twice — is still in the file when a
+    /// later daemon opens it. The next append must not weld itself onto it.
+    @Test("a dangling fragment from an earlier process is isolated, not fused")
+    func danglingFragmentFromAnEarlierProcessIsIsolated() async throws {
+        let path = try makePath()
+        let fragment = #"{"actor":{"kind":"app"},"id":"aaaaaaaaaaaa","kind":"se"#
+        try Data(fragment.utf8).write(to: URL(fileURLWithPath: path))
+
+        let log = ActuationLog(path: path)
+        let id = try await log.appendRequest(sendRow())
+
+        let lines = contents(at: path).split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 2, "the fragment must terminate as a line of its own")
+        #expect(lines.first == fragment[...], "the fragment must survive verbatim")
+        let rows = parsedRows(at: path)
+        #expect(rows.count == 1, "only the new row parses; the fragment stays junk a reader skips")
         #expect(rows.first?["id"] as? String == id)
     }
 

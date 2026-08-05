@@ -7,6 +7,13 @@ import Foundation
 /// The writer creates its directory and file lazily, at the first append, so a
 /// test that never actuates touches no disk at all.
 ///
+/// No teardown, deliberately: the directory lives under `$TMPDIR` (per-user on
+/// darwin, and the run's own scratch home under `scripts/test.sh`), which the
+/// OS reaps, and the only tests that write through it are the ones asserting on
+/// the record — those build their own path and clean it up. Returning a cleanup
+/// closure instead would put a `defer` at ~45 call sites that never touch the
+/// file. `makeIsolatedConfigDirManager` is the same shape for the same reason.
+///
 /// This exists because the production types must NOT default the parameter to
 /// `ActuationLog(path: TBDConstants.actuationLogPath)`. That default is the
 /// "helper ignores its caller's injected seam" shape: ~45 construction sites
