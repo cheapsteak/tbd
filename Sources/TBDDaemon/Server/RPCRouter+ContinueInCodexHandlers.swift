@@ -16,8 +16,9 @@ private enum ContinueInCodexHandlerError: LocalizedError {
 }
 
 extension RPCRouter {
-    func handleTerminalContinueInCodex(_ paramsData: Data) async throws
-        -> RPCResponse {
+    func handleTerminalContinueInCodex(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(
             TerminalContinueInCodexParams.self, from: paramsData)
 
@@ -109,22 +110,35 @@ extension RPCRouter {
             executablePath: preparation.executablePath,
             profileFlag: profileFlag)
 
-        _ = try await tmux.ensureServer(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            cols: TmuxManager.defaultCols,
-            rows: TmuxManager.defaultRows)
-        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
-        let window = try await tmux.createWindow(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            shellCommand: command,
-            env: codexEnv,
-            sensitiveEnv: sensitiveEnv,
-            cols: TmuxManager.defaultCols,
-            rows: TmuxManager.defaultRows)
+        // The import above created Codex state but touched no session; the
+        // tmux calls below are the actuation, so the row goes here.
+        let actuationID = try await beginActuation(
+            .terminalContinueInCodex, actor: actor,
+            target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+            agent: TerminalKind.codex.rawValue)
+
+        let window: (windowID: String, paneID: String)
+        do {
+            _ = try await tmux.ensureServer(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                cols: TmuxManager.defaultCols,
+                rows: TmuxManager.defaultRows)
+            await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
+            window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: command,
+                env: codexEnv,
+                sensitiveEnv: sensitiveEnv,
+                cols: TmuxManager.defaultCols,
+                rows: TmuxManager.defaultRows)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
 
         let terminal: Terminal
         do {
@@ -139,6 +153,7 @@ extension RPCRouter {
             try? await tmux.killWindow(
                 server: worktree.tmuxServer,
                 windowID: window.windowID)
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
         }
 
@@ -148,6 +163,7 @@ extension RPCRouter {
             label: terminal.label)))
         continueInCodexLogger.info(
             "Continued Claude terminal \(source.id, privacy: .public) in Codex terminal \(terminal.id, privacy: .public)")
+        await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: TerminalContinueInCodexResult(
             terminalID: terminal.id,
             threadID: threadID))

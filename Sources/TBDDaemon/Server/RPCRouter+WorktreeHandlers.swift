@@ -223,20 +223,35 @@ extension RPCRouter {
         ))
     }
 
-    func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
+    func handleWorktreeRevive(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
+        // The row names the worktree, not a terminal: revive spawns its
+        // primary terminals inside the lifecycle's own (possibly detached,
+        // pre-session-gated) phase, so no terminal ID exists to name yet.
+        let actuationID = try await beginActuation(
+            .worktreeRevive, actor: actor,
+            target: ActuationTarget(worktree: params.worktreeID.uuidString))
         // Non-blocking: when a preSession hook gates the primary terminals,
         // this returns promptly with the row in `.creating` (which is what
         // the app gates its pre-session UI on — beginReviveWorktree flips it
         // before returning) and the detached phase-3 task finishes the revive
         // in the background. Blocking here for up to the hook timeout (600s)
         // would starve the RPC connection.
-        let completion = try await lifecycle.beginReviveWorktree(
-            worktreeID: params.worktreeID,
-            cols: params.cols,
-            rows: params.rows,
-            preferredSessionID: params.preferredSessionID
-        )
+        let completion: WorktreeReviveCompletion
+        do {
+            completion = try await lifecycle.beginReviveWorktree(
+                worktreeID: params.worktreeID,
+                cols: params.cols,
+                rows: params.rows,
+                preferredSessionID: params.preferredSessionID
+            )
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        await finishActuation(actuationID, .dispatched)
         let worktree = completion.worktree
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
@@ -248,7 +263,7 @@ extension RPCRouter {
     }
 
     func handleWorktreeReviveConversationFresh(
-        _ paramsData: Data
+        _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(
             WorktreeReviveConversationFreshParams.self,
@@ -266,28 +281,42 @@ extension RPCRouter {
             )
         }
 
+        // As in `handleWorktreeRevive`: the new worktree and its terminals are
+        // minted inside the lifecycle, so the row names the source worktree
+        // whose conversation is being brought back.
+        let actuationID = try await beginActuation(
+            .worktreeReviveConversationFresh, actor: actor,
+            target: ActuationTarget(worktree: params.archivedWorktreeID.uuidString))
+
         let lifecycle = self.lifecycle
         let outcome: (
             completion: WorktreeCreateCompletion,
             result: WorktreeReviveConversationFreshResult
-        ) = try await withCheckedThrowingContinuation { continuation in
-            Task {
-                await repoSerializer.submit(repoID: repoID) {
-                    do {
-                        let outcome = try await lifecycle
-                            .reviveConversationOnFreshBranch(
-                                archivedWorktreeID: params.archivedWorktreeID,
-                                sessionID: params.sessionID,
-                                cols: params.cols,
-                                rows: params.rows
-                            )
-                        continuation.resume(returning: outcome)
-                    } catch {
-                        continuation.resume(throwing: error)
+        )
+        do {
+            outcome = try await withCheckedThrowingContinuation { continuation in
+                Task {
+                    await repoSerializer.submit(repoID: repoID) {
+                        do {
+                            let outcome = try await lifecycle
+                                .reviveConversationOnFreshBranch(
+                                    archivedWorktreeID: params.archivedWorktreeID,
+                                    sessionID: params.sessionID,
+                                    cols: params.cols,
+                                    rows: params.rows
+                                )
+                            continuation.resume(returning: outcome)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
                     }
                 }
             }
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
         }
+        await finishActuation(actuationID, .dispatched)
 
         let created = outcome.result.worktree
         switch outcome.completion {

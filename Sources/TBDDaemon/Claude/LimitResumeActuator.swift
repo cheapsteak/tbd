@@ -61,6 +61,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
     // MARK: - Timing constants (spec §Actuation 5-6)
 
     static let interKeyPause: Duration = .milliseconds(150)
+    /// The literal typed into the pane, recorded verbatim in the rail's row.
+    static let continueMessage = "continue"
     static let verifyPollInterval: Duration = .seconds(1)
     static let verifyPolls = 20   // ~20s window
 
@@ -73,6 +75,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
     private let transcriptModifiedAt: @Sendable (String) -> Date?
     /// Injectable sleep so unit tests run instantly.
     private let waiter: @Sendable (Duration) async -> Void
+    /// The daemon's actuation record. This rail bypasses the RPC router, so it
+    /// writes its own row — with no `method`, and an actor naming the rail.
+    private let actuationLog: ActuationLog
 
     public init(
         db: TBDDatabase,
@@ -80,7 +85,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
         inspector: any PaneProcessInspecting,
         readTranscript: @escaping @Sendable (String) -> Data?,
         transcriptModifiedAt: @escaping @Sendable (String) -> Date?,
-        waiter: @escaping @Sendable (Duration) async -> Void
+        waiter: @escaping @Sendable (Duration) async -> Void,
+        actuationLog: ActuationLog? = nil
     ) {
         self.db = db
         self.tmux = tmux
@@ -88,6 +94,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         self.readTranscript = readTranscript
         self.transcriptModifiedAt = transcriptModifiedAt
         self.waiter = waiter
+        self.actuationLog = actuationLog ?? ActuationLog(path: TBDConstants.actuationLogPath)
     }
 
     /// Early-cancel probe (see `LimitResumeActuating.userAlreadyContinued`).
@@ -162,10 +169,26 @@ public struct LimitResumeActuator: LimitResumeActuating {
                 }
             }
 
+            // The rail's own request row, immediately before the keys go out.
+            // The Escape, the literal "continue" and the Enter are sub-steps of
+            // one send, so they share one row. Fail-closed: an unrecordable
+            // send is not sent.
+            var row = ActuationRow(
+                actor: .daemon(rail: ActuationRail.limitResume), kind: .send)
+            row.target = .local(worktree: context.worktreeID, terminal: context.terminalID)
+            row.message = Self.continueMessage
+            row.submit = true
+            guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                return .failed("could not record the resume in the actuation log")
+            }
+
             do {
                 try await Self.sendContinueSequence(
                     tmux: tmux, server: context.server, paneID: context.paneID, waiter: waiter)
+                await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
             } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
                 // Treat a thrown send like a failed verification: retry
                 // (with a fresh eligibility re-check) rather than failing
                 // instantly — only give up after attempt 2 also fails.
@@ -194,6 +217,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         let server: String
         let paneID: String
         let terminalID: UUID
+        let worktreeID: UUID
         let transcriptPath: String?
         /// Transcript bytes read during THIS eligibility pass's
         /// user-already-continued check (step 2) — reused as the growth
@@ -283,6 +307,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
 
         return .eligible(EligibilityContext(
             server: server, paneID: terminal.tmuxPaneID, terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
             transcriptPath: terminal.transcriptPath, preSendTranscriptData: preSendTranscriptData))
     }
 
@@ -302,7 +327,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
     ) async throws {
         try await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
         await waiter(interKeyPause)
-        try await tmux.sendKeys(server: server, paneID: paneID, text: "continue")
+        try await tmux.sendKeys(server: server, paneID: paneID, text: continueMessage)
         await waiter(interKeyPause)
         try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
     }

@@ -38,6 +38,9 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Without it the 10-minute window is unreachable in a test, which is why the
     /// guard went so long with no observable beyond "doesn't throw".
     private let now: @Sendable () -> Date
+    /// The daemon's actuation record. The desk's pastes bypass the RPC router,
+    /// so this rail writes its own rows.
+    private let actuationLog: ActuationLog
 
     // MARK: - State
 
@@ -103,7 +106,8 @@ public actor DeskSessionManager: DeskSessionManaging {
         tmux: TmuxManager,
         skillDir: String,
         subscriptions: StateSubscriptionManager? = nil,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        actuationLog: ActuationLog? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -111,6 +115,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         self.subscriptions = subscriptions
         self.skillDir = skillDir
         self.now = now
+        self.actuationLog = actuationLog ?? ActuationLog(path: TBDConstants.actuationLogPath)
         self.deskWorktreeID = nil
     }
 
@@ -448,19 +453,34 @@ public actor DeskSessionManager: DeskSessionManaging {
                 return
             }
 
-            // Paste the wrap-up prompt text
-            try await tmux.pasteText(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                bytes: Data(NightwatchDeskPrompts.wrapUpPrompt.utf8)
-            )
+            // Request row before the paste; the paste and the Enter are one
+            // send. Fail-closed: an unrecordable wrap-up is not posted.
+            guard let actuationID = try? await recordDeskSend(
+                worktreeID: worktreeID,
+                terminalID: agentTerminal.id,
+                message: NightwatchDeskPrompts.wrapUpPrompt)
+            else { return }
 
-            // Send Enter to submit
-            try await tmux.sendKey(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                key: "Enter"
-            )
+            do {
+                // Paste the wrap-up prompt text
+                try await tmux.pasteText(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    bytes: Data(NightwatchDeskPrompts.wrapUpPrompt.utf8)
+                )
+
+                // Send Enter to submit
+                try await tmux.sendKey(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    key: "Enter"
+                )
+            } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
+                throw error
+            }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
             // Fire a completion notification
             _ = try await db.notifications.create(
@@ -564,19 +584,35 @@ public actor DeskSessionManager: DeskSessionManaging {
                 prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
             }
 
-            // Paste the prompt text (matches handleTerminalSend pattern for reliability)
-            try await tmux.pasteText(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                bytes: Data(prompt.utf8)
-            )
+            // Request row before the paste; the paste and the Enter are one
+            // send. Fail-closed: an unrecordable nudge is not sent, and
+            // `lastNudgeTime` below is left alone so the next tick retries.
+            guard let actuationID = try? await recordDeskSend(
+                worktreeID: worktreeID,
+                terminalID: agentTerminal.id,
+                message: prompt)
+            else { return }
 
-            // Send Enter to submit
-            try await tmux.sendKey(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                key: "Enter"
-            )
+            do {
+                // Paste the prompt text (matches handleTerminalSend pattern for reliability)
+                try await tmux.pasteText(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    bytes: Data(prompt.utf8)
+                )
+
+                // Send Enter to submit
+                try await tmux.sendKey(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    key: "Enter"
+                )
+            } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
+                throw error
+            }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
             // Record nudge time for overlap guard. `lastNudgedMode` is set only
             // here, after the paste actually went out — a nudge that failed to
@@ -589,6 +625,20 @@ public actor DeskSessionManager: DeskSessionManaging {
         } catch {
             logger.error("Failed to nudge desk session: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// One request row for a desk paste, carrying the payload verbatim.
+    /// Returns the minted id; throws when the record is unwritable even after
+    /// the writer's reopen-retry, in which case the caller must not paste.
+    private func recordDeskSend(
+        worktreeID: UUID, terminalID: UUID, message: String
+    ) async throws -> String {
+        var row = ActuationRow(
+            actor: .daemon(rail: ActuationRail.nightwatchDesk), kind: .send)
+        row.target = .local(worktree: worktreeID, terminal: terminalID)
+        row.message = message
+        row.submit = true
+        return try await actuationLog.appendRequest(row)
     }
 
     /// Gracefully close the desk session (archive it).

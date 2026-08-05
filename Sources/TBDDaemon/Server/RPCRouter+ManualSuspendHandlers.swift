@@ -14,8 +14,13 @@ import TBDShared
 ///   - `worktree.resume`   → wake every parked Claude terminal
 extension RPCRouter {
 
-    func handleTerminalSuspend(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalSuspend(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSuspendParams.self, from: paramsData)
+        let actuationID = try await beginActuation(
+            .terminalSuspend, actor: actor,
+            target: await resolvedTerminalTarget(params.terminalID))
         // Parking (formerly suspend) routes to the unified HibernationCoordinator.
         // Cancel any pending auto-resume up-front and unconditionally (spec
         // §Cancellation, preserving #341's shim behavior): the intent to park
@@ -27,6 +32,9 @@ extension RPCRouter {
             await limitResumeScheduler?.wake()
         }
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
+        await finishActuation(
+            actuationID, ActuationResult.classify(result),
+            error: ActuationResult.detail(result))
         switch result {
         case .ok, .alreadyHibernated:
             return .ok()
@@ -37,9 +45,17 @@ extension RPCRouter {
         }
     }
 
-    func handleTerminalResume(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalResume(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalResumeParams.self, from: paramsData)
+        let actuationID = try await beginActuation(
+            .terminalResume, actor: actor,
+            target: await resolvedTerminalTarget(params.terminalID))
         let result = await hibernationCoordinator.wake(terminalID: params.terminalID)
+        await finishActuation(
+            actuationID, ActuationResult.classify(result),
+            error: ActuationResult.detail(result))
         switch result {
         case .ok, .notHibernated, .inFlight:
             // notHibernated / inFlight are benign no-ops for an idempotent wake.
@@ -61,7 +77,9 @@ extension RPCRouter {
         }
     }
 
-    func handleWorktreeSuspend(_ paramsData: Data) async throws -> RPCResponse {
+    func handleWorktreeSuspend(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeSuspendParams.self, from: paramsData)
         guard let terminals = try? await db.terminals.list(worktreeID: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found")
@@ -80,16 +98,33 @@ extension RPCRouter {
 
         // Fire in background — RPC returns immediately so the app can show
         // the parking overlay while the daemon does its work.
-        Task { [hibernationCoordinator] in
+        //
+        // One row per terminal, written at THAT terminal's own act moment
+        // rather than one row for the fan-out: the record's unit is an
+        // actuation on a session. A terminal whose request row cannot be
+        // persisted is skipped (fail-closed) — the RPC already returned, so
+        // there is nothing left to refuse but the act itself.
+        let worktreeID = params.worktreeID
+        Task { [hibernationCoordinator, actuationLog] in
             for terminal in eligible {
-                _ = await hibernationCoordinator.manualHibernate(terminalID: terminal.id)
+                var row = ActuationRow(actor: actor ?? .anonymous, kind: ActuationSurface.worktreeSuspend.kind)
+                row.method = ActuationSurface.worktreeSuspend.method
+                row.target = .local(worktree: worktreeID, terminal: terminal.id)
+                guard let actuationID = try? await actuationLog.appendRequest(row) else { continue }
+                let result = await hibernationCoordinator.manualHibernate(terminalID: terminal.id)
+                await actuationLog.appendOutcome(
+                    confirms: actuationID,
+                    result: ActuationResult.classify(result),
+                    error: ActuationResult.detail(result))
             }
         }
 
         return .ok()
     }
 
-    func handleWorktreeResume(_ paramsData: Data) async throws -> RPCResponse {
+    func handleWorktreeResume(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeResumeParams.self, from: paramsData)
         guard let terminals = try? await db.terminals.list(worktreeID: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found")
@@ -97,9 +132,18 @@ extension RPCRouter {
 
         // Wake every parked terminal (authoritative or legacy). The coordinator
         // is an actor so calls serialize anyway.
+        // One row per terminal, at each terminal's own act moment (see the
+        // note in `handleWorktreeSuspend`). This fan-out runs inline, so an
+        // unwritable record refuses the whole call before the first wake.
         let parked = terminals.filter { $0.isParked && $0.isClaudeResumable }
         for terminal in parked {
-            _ = await hibernationCoordinator.wake(terminalID: terminal.id)
+            let actuationID = try await beginActuation(
+                .worktreeResume, actor: actor,
+                target: .local(worktree: params.worktreeID, terminal: terminal.id))
+            let result = await hibernationCoordinator.wake(terminalID: terminal.id)
+            await finishActuation(
+                actuationID, ActuationResult.classify(result),
+                error: ActuationResult.detail(result))
         }
 
         return .ok()

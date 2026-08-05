@@ -15,6 +15,12 @@ public final class RPCRouter: Sendable {
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
     public let hibernationCoordinator: HibernationCoordinator
+    /// Append-only record of every state-changing actuation this router
+    /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
+    /// the whole daemon writes one file. Handlers append a request row before
+    /// their first mutating step and an outcome row after the act returns —
+    /// see `RPCRouter+Actuation.swift`.
+    public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
@@ -131,8 +137,12 @@ public final class RPCRouter: Sendable {
         loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
         remoteManager: RemoteProviderManager? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
-        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        actuationLog: ActuationLog? = nil
     ) {
+        let resolvedActuationLog = actuationLog
+            ?? ActuationLog(path: TBDConstants.actuationLogPath)
+        self.actuationLog = resolvedActuationLog
         self.db = db
         self.lifecycle = lifecycle
         self.tmux = tmux
@@ -148,7 +158,8 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
-            subscriptions: subscriptions, configDirManager: configDirManager
+            subscriptions: subscriptions, configDirManager: configDirManager,
+            actuationLog: resolvedActuationLog
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
@@ -226,9 +237,9 @@ public final class RPCRouter: Sendable {
             case RPCMethod.worktreeRerunPreSession:
                 return try await handleWorktreeRerunPreSession(request.paramsData)
             case RPCMethod.worktreeRevive:
-                return try await handleWorktreeRevive(request.paramsData)
+                return try await handleWorktreeRevive(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeReviveConversationFresh:
-                return try await handleWorktreeReviveConversationFresh(request.paramsData)
+                return try await handleWorktreeReviveConversationFresh(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeAdopt:
                 return try await handleWorktreeAdopt(request.paramsData)
             case RPCMethod.worktreeRename:
@@ -240,19 +251,19 @@ public final class RPCRouter: Sendable {
             case RPCMethod.worktreeForget:
                 return try await handleWorktreeForget(request.paramsData)
             case RPCMethod.terminalCreate:
-                return try await handleTerminalCreate(request.paramsData)
+                return try await handleTerminalCreate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalContinueInCodex:
-                return try await handleTerminalContinueInCodex(request.paramsData)
+                return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
-                return try await handleTerminalSend(request.paramsData)
+                return try await handleTerminalSend(request.paramsData, actor: request.actor)
             case RPCMethod.terminalDelete:
-                return try await handleTerminalDelete(request.paramsData)
+                return try await handleTerminalDelete(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
             case RPCMethod.terminalSwapProfile:
-                return try await handleTerminalSwapProfile(request.paramsData)
+                return try await handleTerminalSwapProfile(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSessionEvent:
                 return try await handleTerminalSessionEvent(request.paramsData)
             case RPCMethod.terminalActivityEvent:
@@ -294,15 +305,15 @@ public final class RPCRouter: Sendable {
             case RPCMethod.daemonCapabilities:
                 return try await handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
-                return try await handleTerminalSuspend(request.paramsData)
+                return try await handleTerminalSuspend(request.paramsData, actor: request.actor)
             case RPCMethod.terminalResume:
-                return try await handleTerminalResume(request.paramsData)
+                return try await handleTerminalResume(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeSuspend:
-                return try await handleWorktreeSuspend(request.paramsData)
+                return try await handleWorktreeSuspend(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeResume:
-                return try await handleWorktreeResume(request.paramsData)
+                return try await handleWorktreeResume(request.paramsData, actor: request.actor)
             case RPCMethod.terminalRecreateWindow:
-                return try await handleTerminalRecreateWindow(request.paramsData)
+                return try await handleTerminalRecreateWindow(request.paramsData, actor: request.actor)
             case RPCMethod.noteCreate:
                 return try await handleNoteCreate(request.paramsData)
             case RPCMethod.noteGet:
@@ -316,7 +327,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalHistoryList:
                 return try await handleTerminalHistoryList(request.paramsData)
             case RPCMethod.terminalHistoryRevive:
-                return try await handleTerminalHistoryRevive(request.paramsData)
+                return try await handleTerminalHistoryRevive(request.paramsData, actor: request.actor)
             case RPCMethod.terminalOutput:
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:
@@ -431,9 +442,9 @@ public final class RPCRouter: Sendable {
             case RPCMethod.nightwatchLeaseRelease:
                 return try await handleNightwatchLeaseRelease(request.paramsData)
             case RPCMethod.terminalHibernate:
-                return try await handleTerminalHibernate(request.paramsData)
+                return try await handleTerminalHibernate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalWake:
-                return try await handleTerminalWake(request.paramsData)
+                return try await handleTerminalWake(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetKeepWarm:
                 return try await handleTerminalSetKeepWarm(request.paramsData)
             case RPCMethod.configSetAutoHibernate:
@@ -453,11 +464,11 @@ public final class RPCRouter: Sendable {
             case RPCMethod.remoteSessions:
                 return try await handleRemoteSessions()
             case RPCMethod.remoteCreate:
-                return try await handleRemoteCreate(request.paramsData)
+                return try await handleRemoteCreate(request.paramsData, actor: request.actor)
             case RPCMethod.remoteStop:
-                return try await handleRemoteStop(request.paramsData)
+                return try await handleRemoteStop(request.paramsData, actor: request.actor)
             case RPCMethod.remoteSend:
-                return try await handleRemoteSend(request.paramsData)
+                return try await handleRemoteSend(request.paramsData, actor: request.actor)
             case RPCMethod.remoteLog:
                 return try await handleRemoteLog(request.paramsData)
             case RPCMethod.remoteRename:

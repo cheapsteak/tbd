@@ -5,9 +5,17 @@ extension RPCRouter {
 
     /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
     /// process, keep the tmux window). Honors the running/permission rails.
-    func handleTerminalHibernate(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalHibernate(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalHibernateParams.self, from: paramsData)
+        let actuationID = try await beginActuation(
+            .terminalHibernate, actor: actor,
+            target: await resolvedTerminalTarget(params.terminalID))
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
+        await finishActuation(
+            actuationID, ActuationResult.classify(result),
+            error: ActuationResult.detail(result))
         switch result {
         case .ok:
             // Hibernating cancels any pending auto-resume inside the
@@ -26,13 +34,22 @@ extension RPCRouter {
 
     /// `terminal.wake` — respawn `claude --resume <id>` in the hibernated
     /// terminal's kept-alive window. Idempotent.
-    func handleTerminalWake(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalWake(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalWakeParams.self, from: paramsData)
+        let actuationID = try await beginActuation(
+            .terminalWake, actor: actor,
+            target: await resolvedTerminalTarget(params.terminalID),
+            prompt: params.prompt)
         let result = await hibernationCoordinator.wake(
             terminalID: params.terminalID, cols: params.cols, rows: params.rows,
             allowDefaultProfileFallback: params.fallbackToDefaultProfile ?? false,
             initialPrompt: params.prompt
         )
+        await finishActuation(
+            actuationID, ActuationResult.classify(result),
+            error: ActuationResult.detail(result))
         switch result {
         case .ok:
             return try RPCResponse(result: TerminalWakeResult(woken: true))

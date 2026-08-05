@@ -434,7 +434,13 @@ public final class Daemon: Sendable {
             try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
         }
 
-        // 8. Initialize RPC router
+        // 8. Initialize RPC router.
+        //
+        // One `ActuationLog` for the whole daemon: the router hands it to the
+        // hibernation coordinator, and it is passed to every daemon-internal
+        // rail below, so all of them append to the same file through the same
+        // actor (which is what serializes the appends).
+        let actuationLog = ActuationLog(path: TBDConstants.actuationLogPath)
         let rpcRouter = RPCRouter(
             db: database,
             lifecycle: lifecycle,
@@ -445,7 +451,8 @@ public final class Daemon: Sendable {
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions,
-            remoteManager: remoteManager
+            remoteManager: remoteManager,
+            actuationLog: actuationLog
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
@@ -701,7 +708,8 @@ public final class Daemon: Sendable {
                     (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
                 },
                 // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the production value of `LimitResumeActuator`'s non-defaulted `waiter:` parameter (the seam itself), exercised by Tests/TBDDaemonTests/LimitResumeActuatorTests.swift which injects `waiter: { _ in }` at 5 construction sites; see docs/specs/2026-07-24-test-hardening-design.md
-                waiter: { duration in _ = try? await Task.sleep(for: duration) }
+                waiter: { duration in _ = try? await Task.sleep(for: duration) },
+                actuationLog: actuationLog
             )
             let resumeScheduler = LimitResumeScheduler(
                 store: database.scheduledResumes,
@@ -750,7 +758,8 @@ public final class Daemon: Sendable {
                 lifecycle: lifecycle,
                 tmux: tmux,
                 skillDir: skillDir,
-                subscriptions: subs
+                subscriptions: subs,
+                actuationLog: actuationLog
             )
 
             let runner = DaywatchRunner(

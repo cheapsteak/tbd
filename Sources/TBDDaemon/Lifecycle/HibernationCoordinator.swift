@@ -143,6 +143,13 @@ public actor HibernationCoordinator {
     /// "escalate after exactly N attempts" boundary is exact.
     private let clock: any Clock<Duration>
 
+    /// The daemon's actuation record. The idle sweep is a daemon-internal
+    /// actuation site — it bypasses the router, so the rail logs its own row.
+    /// Deliberately NOT logged inside `performHibernate`: the RPC handlers call
+    /// that same method after writing their own row, and a row there would
+    /// double-count every manual park.
+    private let actuationLog: ActuationLog
+
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
@@ -156,7 +163,8 @@ public actor HibernationCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         exitPollAttempts: Int = 15,
         exitPollInterval: Duration = .milliseconds(200),
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        actuationLog: ActuationLog? = nil
     ) {
         self.db = db
         self.tmux = tmux
@@ -169,6 +177,7 @@ public actor HibernationCoordinator {
         self.exitPollAttempts = exitPollAttempts
         self.exitPollInterval = exitPollInterval
         self.clock = clock
+        self.actuationLog = actuationLog ?? ActuationLog(path: TBDConstants.actuationLogPath)
     }
 
     /// Projects root for a wake spawn's resolved profile config dir path,
@@ -830,7 +839,21 @@ public actor HibernationCoordinator {
                 }
                 if let pending = pendingKillSince[terminal.id] {
                     if reference.timeIntervalSince(pending) >= Self.killDebounce {
-                        _ = await performHibernate(terminal: terminal, reason: .auto)
+                        // The rail's own row, written at its act moment. A
+                        // request row that cannot be persisted refuses the act
+                        // (fail-closed) — an unrecorded auto-park is exactly the
+                        // silent gap the record exists to forbid.
+                        var row = ActuationRow(
+                            actor: .daemon(rail: ActuationRail.autoHibernate), kind: .hibernate)
+                        row.target = .local(worktree: terminal.worktreeID, terminal: terminal.id)
+                        guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                            continue
+                        }
+                        let result = await performHibernate(terminal: terminal, reason: .auto)
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID,
+                            result: ActuationResult.classify(result),
+                            error: ActuationResult.detail(result))
                     }
                 } else {
                     pendingKillSince[terminal.id] = reference
