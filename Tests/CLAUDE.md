@@ -433,11 +433,19 @@ helper has.
 
 **Suspending is the only thing that returns the queue.** `await Task.yield()`
 hands the main actor back, the queued block runs, and only then does the
-continuation resume — so the test observes the effect it came to assert. Bound
-the wait (assertion-hygiene rule 3 above): poll with `Task.sleep` against an
-iteration cap so work that never arrives fails an assertion instead of hanging.
-`TableTranscriptHarness.drainMainQueue()` is the minimal shape and
-`TranscriptImageAttachmentTests.pump(_:until:)` the bounded-poll one.
+continuation resume — so the test observes the effect it came to assert.
+
+Two shapes, and they are not interchangeable.
+`TableTranscriptHarness.drainMainQueue()` is the minimal one — a few bare
+`Task.yield()`s, no condition and no sleep. That is enough when the work is
+already on the queue and handing it back is all that was missing, but it checks
+nothing and so **carries no failure signal**: if the work needs longer than the
+yields it gets, the test proceeds as though it arrived. Use it only where the
+work is certainly enqueued. When you are waiting on something that may never
+arrive — a decode, a file read — poll instead (assertion-hygiene rule 3 above):
+`Task.sleep` between checks of a done condition, against an iteration cap, so a
+no-show fails an assertion rather than passing quietly.
+`TranscriptImageAttachmentTests.pump(_:until:)` is that shape.
 
 This does not contradict the warning under "Clock and date seams" below that
 spinning `Task.yield()` **does not converge**. The two describe opposite
