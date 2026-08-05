@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Covers the account-swap transcript carry: when "Switch account" forks a new
 /// `claude --resume <id>` under a DIFFERENT config dir, the session transcript
@@ -217,7 +218,8 @@ struct SwapTranscriptCarryTests {
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
-            configDirManager: manager
+            configDirManager: manager,
+            actuationLog: makeTestActuationLog()
         )
 
         // Seed repo + worktree.

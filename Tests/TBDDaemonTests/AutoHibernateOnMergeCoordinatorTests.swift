@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// A `ClaudeProfileConfigDirManager` pointed at fresh temp dirs so nothing
 /// touches the developer's real `~/.claude` (mirrors HibernationCoordinatorTests).
@@ -30,7 +31,7 @@ struct AutoHibernateOnMergeCoordinatorTests {
         let subs = StateSubscriptionManager()
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: isolatedConfigDirManager())
+            subscriptions: subs, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
         let coord = AutoHibernateOnMergeCoordinator(
             db: db, hibernation: hibernation, subscriptions: subs)
 

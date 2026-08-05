@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Stop-hook (activity → idle) lazy transcript sync: when a terminal's stored
 /// transcriptPath lies outside the project dir derived from the worktree's
@@ -30,7 +31,8 @@ struct StopHookTranscriptSyncTests {
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
-            )
+            ),
+            actuationLog: makeTestActuationLog()
         )
     }
 

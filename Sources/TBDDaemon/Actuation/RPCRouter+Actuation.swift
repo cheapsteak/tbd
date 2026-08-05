@@ -47,6 +47,23 @@ extension RPCRouter {
             worktree: terminal?.worktreeID.uuidString, terminal: terminalID.uuidString)
     }
 
+    /// Run one acting step of a wired handler, recording a throw as
+    /// `transport-failed` before it propagates.
+    ///
+    /// The error is rethrown **unchanged**: the RPC's error surface must stay
+    /// byte-identical, and the router's blanket catch keeps formatting it. What
+    /// this adds is the outcome row that catch cannot write — without it a
+    /// throw leaves the request row unconfirmed, and the record cannot tell
+    /// "the act failed" from "the outcome was lost".
+    func actuating<T>(_ id: String, _ step: () async throws -> T) async throws -> T {
+        do {
+            return try await step()
+        } catch {
+            await finishActuation(id, .transportFailed, error: "\(error)")
+            throw error
+        }
+    }
+
     /// Append the synchronous outcome row for a request. Never fails the call:
     /// the act already ran, so a lost outcome row leaves the request
     /// unconfirmed rather than retroactively refused.

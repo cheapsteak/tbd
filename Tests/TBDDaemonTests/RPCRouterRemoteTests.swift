@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Thread-safe collector for broadcast StateDeltas. Mirrors the pattern in
 /// `RemoteProviderManagerTests`'s private `BroadcastDeltas` (not reusable
@@ -64,7 +65,7 @@ struct RPCRouterRemoteTests: ~Copyable {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
-            remoteManager: manager)
+            remoteManager: manager, actuationLog: makeTestActuationLog())
     }
 
     private func router(invoker: FakeProviderInvoker) -> RPCRouter {

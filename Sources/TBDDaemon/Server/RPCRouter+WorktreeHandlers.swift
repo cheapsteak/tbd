@@ -8,7 +8,9 @@ extension RPCRouter {
 
     // MARK: - Worktree Handlers
 
-    func handleWorktreeCreate(_ paramsData: Data) async throws -> RPCResponse {
+    func handleWorktreeCreate(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
         let useExistingBranch = params.useExistingBranch ?? false
 
@@ -26,14 +28,35 @@ extension RPCRouter {
             prNumber: params.prNumber
         )
 
+        // Creation ends in a spawn — the lifecycle's phase 2/3 opens this
+        // worktree's primary terminals, the same call `worktree.revive` reaches
+        // — so it gets the same shape of row: one per call, naming the worktree,
+        // with no terminal (those are minted inside the lifecycle phase). Phase
+        // 1 above is DB-only and touches no process, which is why the row can
+        // sit after it and still precede every acting step.
+        let actuationID: String
+        do {
+            actuationID = try await beginActuation(
+                .worktreeCreate, actor: actor,
+                target: ActuationTarget(worktree: pending.id.uuidString))
+        } catch {
+            // Same cleanup the repo guard below does: an unrecordable spawn is
+            // refused, so don't leave the `.creating` row orphaned forever.
+            try? await db.worktrees.delete(id: pending.id)
+            throw error
+        }
+
         // Phase 1.5: Fetch from origin (coalesced, with tight timeout)
         // Fire off as a background task so it doesn't block the RPC response.
         // Phase 2 will re-await before git worktree add; FetchCache's singleflight
         // means the second await joins the in-flight fetch or is a no-op if cached.
-        guard let repo = try await db.repos.get(id: params.repoID) else {
+        let repoRow = try await actuating(actuationID) { try await db.repos.get(id: params.repoID) }
+        guard let repo = repoRow else {
             // Mirror completeCreateWorktree's guard: clean up the .creating row
             // inserted by beginCreateWorktree so it can't be orphaned forever.
             try? await db.worktrees.delete(id: pending.id)
+            await finishActuation(
+                actuationID, .refused, error: "Repo not found: \(params.repoID)")
             throw WorktreeLifecycleError.repoNotFound(params.repoID)
         }
 
@@ -122,6 +145,11 @@ extension RPCRouter {
             }
         }
 
+        // Dispatched once the synchronous phase returned, exactly as
+        // `worktree.revive` records it: the spawn itself runs in the lifecycle's
+        // own background phase, and what this rung can honestly claim is that
+        // the daemon handed it off.
+        await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: pending)
     }
 

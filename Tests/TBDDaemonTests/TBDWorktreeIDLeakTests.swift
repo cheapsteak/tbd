@@ -138,7 +138,8 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -195,7 +196,8 @@ func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -255,7 +257,8 @@ func testHandleTerminalRecreateWindowIgnoresStaleRequestWhenWindowAlive() async 
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -313,7 +316,8 @@ func testHandleTerminalRecreateWindowRebuildsShellAsShell() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -442,7 +446,8 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
             tmux: tmux,
             hooks: HookResolver()
         ),
-        tmux: tmux
+        tmux: tmux,
+        actuationLog: makeTestActuationLog()
     )
 
     let repo = try await db.repos.create(
@@ -500,7 +505,8 @@ struct CodexLaunchCommandTests {
                 tmux: tmux,
                 hooks: HookResolver()
             ),
-            tmux: tmux
+            tmux: tmux,
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(
@@ -554,7 +560,8 @@ struct CodexLaunchCommandTests {
                 tmux: tmux,
                 hooks: HookResolver()
             ),
-            tmux: tmux
+            tmux: tmux,
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(
@@ -618,7 +625,8 @@ struct CodexLaunchCommandTests {
                 tmux: tmux,
                 hooks: HookResolver()
             ),
-            tmux: tmux
+            tmux: tmux,
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(

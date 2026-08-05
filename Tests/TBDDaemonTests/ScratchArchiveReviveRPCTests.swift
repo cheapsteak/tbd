@@ -29,7 +29,7 @@ struct ScratchArchiveReviveRPCTests {
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
-            subscriptions: subs)
+            subscriptions: subs, actuationLog: makeTestActuationLog())
         return (router, deltas)
     }
 

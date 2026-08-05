@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// `WorktreeStore.promoteScratchMigration` — the single-transaction row
 /// migration behind `scratch.promote`. Pure in-memory-DB tests: no TBD_HOME,
@@ -90,7 +91,8 @@ struct TerminalCreateArchivedWorktreeGuardTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 

@@ -134,7 +134,10 @@ extension RPCRouter {
         // is an actor so calls serialize anyway.
         // One row per terminal, at each terminal's own act moment (see the
         // note in `handleWorktreeSuspend`). This fan-out runs inline, so an
-        // unwritable record refuses the whole call before the first wake.
+        // unwritable record fails the RPC — but only the terminals whose rows
+        // had not been written yet are spared: the wakes already performed
+        // stand, each with its own request and outcome row, and the error the
+        // caller sees names a fan-out that stopped partway.
         let parked = terminals.filter { $0.isParked && $0.isClaudeResumable }
         for terminal in parked {
             let actuationID = try await beginActuation(

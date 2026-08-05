@@ -3,6 +3,7 @@ import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Worktree auto-trust RPC tests. Covers the `config.setAutoTrustWorktrees`
 /// RPC, the `daemon.capabilities` field carrying the flag, and the Codable
@@ -26,7 +27,8 @@ struct AutoTrustWorktreesRPCTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db)
     }

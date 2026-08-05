@@ -21,7 +21,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let request = try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil))
         let response = await router.handle(request)
@@ -46,7 +46,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let response = await router.handle(
             try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
@@ -87,7 +87,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let response = await router.handle(
             try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
@@ -107,7 +107,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let r1 = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "notes")))
         let w1 = try r1.decodeResult(Worktree.self)

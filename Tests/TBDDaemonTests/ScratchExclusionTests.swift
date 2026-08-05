@@ -33,7 +33,7 @@ struct ScratchExclusionTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let scratch = try await db.worktrees.createScratch(
             name: "s", displayName: "s", path: "/tmp/scr-\(UUID().uuidString)", tmuxServer: "tbd-scratch")
 

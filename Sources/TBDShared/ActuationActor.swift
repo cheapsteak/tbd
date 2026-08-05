@@ -32,7 +32,8 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     public var kind: String
     /// Names the daemon-internal subsystem for `kind == "daemon"` acts that a
     /// rail performed on its own schedule (`limit-resume`, `auto-hibernate`,
-    /// `nightwatch-desk`). Absent for daemon acts with no rail.
+    /// `auto-hibernate-on-merge`, `nightwatch-desk`). Absent for daemon acts
+    /// with no rail.
     public var rail: String?
     /// Uppercase worktree UUID string, for `kind == "session"`.
     public var worktree: String?

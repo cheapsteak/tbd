@@ -6,7 +6,9 @@ private let scratchLogger = Logger(subsystem: "com.tbd.daemon", category: "scrat
 
 extension RPCRouter {
 
-    func handleScratchCreate(_ paramsData: Data) async throws -> RPCResponse {
+    func handleScratchCreate(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchCreateParams.self, from: paramsData)
         let fm = FileManager.default
         let base = TBDConstants.scratchDir
@@ -48,6 +50,18 @@ extension RPCRouter {
             throw error
         }
 
+        // The same lifecycle spawn `worktree.create` and `worktree.revive`
+        // reach, so it gets the same row: one per call, naming the scratch
+        // space, with no terminal (those are minted inside the spawn). The
+        // folder and the DB row above are not actuations — nothing there
+        // reaches a process — so the row still precedes the first acting step.
+        // An unwritable record refuses the spawn and fails the call; the scratch
+        // space itself stays on disk and usable, which is the same state a
+        // failed spawn already leaves (add a terminal by hand).
+        let actuationID = try await beginActuation(
+            .scratchCreate, actor: actor,
+            target: ActuationTarget(worktree: wt.id.uuidString))
+
         // Spawn the default primary agent terminal (Claude/Codex/shell per the
         // global primary-agent preference), mirroring what repo worktrees get on
         // creation. Best-effort: a spawn failure must not fail scratch creation —
@@ -56,8 +70,13 @@ extension RPCRouter {
         do {
             createdTerminals = try await lifecycle.spawnPrimaryTerminals(
                 worktree: wt, repo: nil, skipClaude: false, preSessionTerminalID: nil)
+            await finishActuation(actuationID, .dispatched)
         } catch {
             scratchLogger.warning("scratch.create: primary terminal spawn failed for \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            // The RPC still succeeds (pre-existing contract — the row and the
+            // folder exist and the user can add a terminal by hand), but the
+            // record must not claim a spawn that failed inside tmux.
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
         }
 
         subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(

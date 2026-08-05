@@ -107,7 +107,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         skillDir: String,
         subscriptions: StateSubscriptionManager? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
-        actuationLog: ActuationLog? = nil
+        actuationLog: ActuationLog
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -115,7 +115,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         self.subscriptions = subscriptions
         self.skillDir = skillDir
         self.now = now
-        self.actuationLog = actuationLog ?? ActuationLog(path: TBDConstants.actuationLogPath)
+        self.actuationLog = actuationLog
         self.deskWorktreeID = nil
     }
 

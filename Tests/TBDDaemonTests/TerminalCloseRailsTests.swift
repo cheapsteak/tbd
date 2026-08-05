@@ -47,7 +47,7 @@ struct TerminalCloseRailsTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
-            startTime: Date())
+            startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     private func close(

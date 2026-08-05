@@ -117,7 +117,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // First call creates
@@ -159,7 +160,8 @@ extension TBDHomeSerialized {
                     db: db,
                     lifecycle: lifecycle,
                         tmux: TmuxManager(dryRun: true),
-                    skillDir: skillDir
+                    skillDir: skillDir,
+                    actuationLog: makeTestActuationLog()
                 )
 
                 let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -190,7 +192,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Nudge with non-existent ID should not throw
@@ -220,7 +223,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -258,7 +262,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let dayDesk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -294,7 +299,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Ensure creates desk with terminal
@@ -344,7 +350,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create a desk with a Claude terminal so nudges don't fail on missing terminal
@@ -389,7 +396,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .nightwatch)
@@ -449,7 +457,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -504,7 +513,8 @@ extension TBDHomeSerialized {
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir,
-                now: clock.provider
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -564,7 +574,8 @@ extension TBDHomeSerialized {
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir,
-                now: clock.provider
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -612,7 +623,8 @@ extension TBDHomeSerialized {
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir,
-                now: clock.provider
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .nightwatch)
@@ -657,7 +669,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: "/tmp/skill"
+                skillDir: "/tmp/skill",
+                actuationLog: makeTestActuationLog()
             )
 
             // Fire two ensures concurrently: without the FIFO gate both pass the
@@ -694,7 +707,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create initial desk (caches ID internally)
@@ -740,7 +754,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create a desk
@@ -794,7 +809,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create initial desk (caches ID internally)
@@ -864,7 +880,8 @@ extension TBDHomeSerialized {
                     dryRunWindowIsDead: { dead.isDead($0) },
                     dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) }
                 ),
-                skillDir: home.appendingPathComponent("skills/nightwatch").path
+                skillDir: home.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog()
             )
             return (db, manager, recorder, dead, commands, spawnFailures, home, priorTBDHome)
         }
@@ -1103,7 +1120,7 @@ extension TBDHomeSerialized {
                     dryRunRecorder: { f.recorder.record($0) },
                     dryRunWindowIsDead: { f.dead.isDead($0) },
                     dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
-                skillDir: f.home.appendingPathComponent("skills/nightwatch").path)
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path, actuationLog: makeTestActuationLog())
             _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
             let before = f.recorder.pastedPanes.count
             await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
@@ -1141,7 +1158,7 @@ extension TBDHomeSerialized {
                     dryRunRecorder: { f.recorder.record($0) },
                     dryRunWindowIsDead: { f.dead.isDead($0) },
                     dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
-                skillDir: f.home.appendingPathComponent("skills/nightwatch").path)
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path, actuationLog: makeTestActuationLog())
             _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
             await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
 

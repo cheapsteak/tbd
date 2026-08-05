@@ -41,7 +41,8 @@ struct ScratchPromoteReconcileTests {
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
-            )
+            ),
+            actuationLog: makeTestActuationLog()
         )
     }
 

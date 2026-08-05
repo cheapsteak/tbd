@@ -843,7 +843,8 @@ struct WorktreeReviveFreshTests {
             db: db,
             lifecycle: lifecycle,
             tmux: lifecycle.tmux,
-            subscriptions: subscriptions
+            subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog()
         )
     }
 

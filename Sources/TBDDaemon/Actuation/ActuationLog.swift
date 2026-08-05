@@ -24,6 +24,21 @@ struct ActuationLogUnwritable: LocalizedError, CustomStringConvertible, Equatabl
     var errorDescription: String? { description }
 }
 
+/// The `write`/`fsync` pair the log appends through.
+///
+/// A seam, not a configuration knob: no filesystem state can make a `write`
+/// return short or an `fsync` fail on demand, so the three recovery phases in
+/// `appendWithOneRetry` are otherwise untestable. Production always uses
+/// `.system`.
+struct ActuationLogSyscalls: Sendable {
+    var write: @Sendable (Int32, UnsafeRawPointer, Int) -> Int
+    var fsync: @Sendable (Int32) -> Int32
+
+    static let system = ActuationLogSyscalls(
+        write: { descriptor, buffer, count in Foundation.write(descriptor, buffer, count) },
+        fsync: { descriptor in Foundation.fsync(descriptor) })
+}
+
 /// The daemon's append-only record of every state-changing actuation it
 /// performs on a session: one JSON object per line, request row first, then the
 /// synchronous outcome row that confirms it.
@@ -33,6 +48,12 @@ struct ActuationLogUnwritable: LocalizedError, CustomStringConvertible, Equatabl
 /// one append runs at a time, whole-line, so interleaved partial lines are
 /// impossible by construction.
 ///
+/// That claim is scoped to *this process*. The file is an `O_APPEND` handle,
+/// not a lock: a second daemon — a stale build from another worktree, say —
+/// pointed at the same path can still interleave its own appends, and TBD's
+/// pid-liveness check is not a lock either. One daemon per `TBD_HOME` is the
+/// assumption the record inherits from every other file under it.
+///
 /// Timestamps come through the `now` date seam, never a `Clock`: they are
 /// persisted data, not behavior. The same seam decides the UTC day boundary, so
 /// rotation is testable without wall time.
@@ -41,6 +62,7 @@ public actor ActuationLog {
     public let path: String
 
     private let now: @Sendable () -> Date
+    private let syscalls: ActuationLogSyscalls
     private let encoder: JSONEncoder
     private let timestampFormatter: ISO8601DateFormatter
     private let dayFormatter: DateFormatter
@@ -55,8 +77,17 @@ public actor ActuationLog {
     private var segmentDay: String?
 
     public init(path: String, now: @Sendable @escaping () -> Date = { Date() }) {
+        self.init(path: path, now: now, syscalls: .system)
+    }
+
+    init(
+        path: String,
+        now: @Sendable @escaping () -> Date = { Date() },
+        syscalls: ActuationLogSyscalls
+    ) {
         self.path = path
         self.now = now
+        self.syscalls = syscalls
 
         let encoder = JSONEncoder()
         // Sorted keys so a line is stable and diffable; no pretty-printing so
@@ -131,18 +162,67 @@ public actor ActuationLog {
         try? appendWithOneRetry(row, failClosed: false)
     }
 
+    /// How far an append got before it failed — which is what decides what the
+    /// single recovery attempt is allowed to do. Re-appending a row whose bytes
+    /// already reached the file would duplicate it; re-appending after a
+    /// half-written line would glue the retry onto the fragment and make one
+    /// unparseable line out of two rows.
+    private enum AppendFailure: Error {
+        /// Nothing reached the file (encode, rotate, open, or a `write` that
+        /// failed on its first byte). A plain re-append is safe.
+        case nothingWritten(any Error)
+        /// A prefix of the line reached the file. The retry prepends a newline
+        /// so the fragment terminates as its own isolated junk line.
+        case partiallyWritten(any Error)
+        /// The whole line reached the file but `fsync` failed. The bytes are
+        /// there; only the flush is owed. `identity` is the file they went
+        /// into, so the retry can tell "still the same file" from "replaced
+        /// under us" — `nil` only if even `fstat` on the open descriptor failed.
+        case unflushed(any Error, identity: FileIdentity?)
+    }
+
+    /// The `(device, inode)` pair naming one file on disk.
+    private struct FileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    /// Append with exactly one recovery attempt, shaped by how far the first
+    /// attempt got (see `AppendFailure`): a plain retry when nothing was
+    /// written, a newline-prefixed retry that isolates a fragment when part of
+    /// the line was, and — when only the flush failed — a reopen-and-`fsync`
+    /// that never rewrites the row.
+    ///
+    /// Either way the row lands **at most once**. On a second failure the
+    /// caller's contract takes over: request rows throw (fail-closed, so the
+    /// actuation does not proceed), outcome rows are `.fault`-logged and
+    /// swallowed.
     private func appendWithOneRetry(_ row: ActuationRow, failClosed: Bool) throws {
+        let firstFailure: AppendFailure
         do {
             try appendOnce(row)
             return
+        } catch let failure as AppendFailure {
+            firstFailure = failure
         } catch {
-            // A transient or single-bad-file condition self-heals: drop the
-            // handle, reopen (recreating the file if it vanished), retry once.
-            closeHandle()
-            segmentDay = nil
+            // Everything outside the write/fsync pair fails before any byte
+            // leaves this process: encoding, rotation, opening the file.
+            firstFailure = .nothingWritten(error)
         }
+
+        // A transient or single-bad-file condition self-heals: drop the handle,
+        // reopen (recreating the file if it vanished), recover once.
+        closeHandle()
+        segmentDay = nil
         do {
-            try appendOnce(row)
+            switch firstFailure {
+            case .nothingWritten:
+                try appendOnce(row)
+            case .partiallyWritten:
+                try appendOnce(row, isolatingFragment: true)
+            case .unflushed(_, let identity):
+                try flushAlreadyWrittenRow(row, identity: identity)
+            }
         } catch {
             let failure = ActuationLogUnwritable(
                 path: path, reason: (error as NSError).localizedDescription)
@@ -151,7 +231,26 @@ public actor ActuationLog {
         }
     }
 
-    private func appendOnce(_ row: ActuationRow) throws {
+    /// Recovery for a row whose bytes are already in the file but unflushed:
+    /// reopen the path and `fsync` again. `fsync` flushes the file's dirty
+    /// pages regardless of which descriptor wrote them, so this needs no
+    /// rewrite — and a rewrite is exactly what would duplicate the row.
+    ///
+    /// Unless the file at `path` is no longer the one those bytes went into:
+    /// replaced or deleted under us, the persisted-bytes assumption is void and
+    /// the row exists nowhere a reader will look. Then a full re-append is the
+    /// only way it survives, and it cannot duplicate — it lands on a different
+    /// inode. An unknown identity takes the no-duplication branch.
+    private func flushAlreadyWrittenRow(_ row: ActuationRow, identity: FileIdentity?) throws {
+        let descriptor = try openHandle()
+        if let identity, let reopened = fileIdentity(of: descriptor), reopened != identity {
+            try appendOnce(row)
+            return
+        }
+        guard syscalls.fsync(descriptor) == 0 else { throw Self.posixError("fsync") }
+    }
+
+    private func appendOnce(_ row: ActuationRow, isolatingFragment: Bool = false) throws {
         var row = row
         let stampedAt = now()
         row.ts = timestampFormatter.string(from: stampedAt)
@@ -170,23 +269,38 @@ public actor ActuationLog {
         try rotateIfNeeded(today: today)
         let descriptor = try openHandle()
 
-        var line = try encoder.encode(row)
+        var line = Data()
+        // A previous attempt left a fragment of a line in the file. Open this
+        // one with a newline so the fragment terminates as its own isolated
+        // junk line and this row still parses on a line of its own: a
+        // line-oriented reader skips the junk and sees the row exactly once.
+        if isolatingFragment { line.append(0x0A) }
+        line.append(try encoder.encode(row))
         line.append(0x0A)
 
-        try line.withUnsafeBytes { buffer in
-            var offset = 0
-            while offset < buffer.count {
-                let written = write(
-                    descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
-                guard written > 0 else { throw Self.posixError("write") }
-                offset += written
+        var offset = 0
+        do {
+            try line.withUnsafeBytes { buffer in
+                while offset < buffer.count {
+                    let written = syscalls.write(
+                        descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                    guard written > 0 else { throw Self.posixError("write") }
+                    offset += written
+                }
             }
+        } catch {
+            throw offset == 0
+                ? AppendFailure.nothingWritten(error)
+                : AppendFailure.partiallyWritten(error)
         }
         // fsync per row is affordable at actuation rates (human/agent scale,
         // not packet scale). `F_FULLFSYNC` is deliberately declined: the
         // residual power-loss window it would close also loses the actuation
         // itself, so the record stays truthful without it.
-        guard fsync(descriptor) == 0 else { throw Self.posixError("fsync") }
+        guard syscalls.fsync(descriptor) == 0 else {
+            throw AppendFailure.unflushed(
+                Self.posixError("fsync"), identity: fileIdentity(of: descriptor))
+        }
         segmentDay = today
     }
 
@@ -209,10 +323,18 @@ public actor ActuationLog {
     /// Cheap (two stats) and paid once per actuation, which is human/agent
     /// scale — not packet scale.
     private func handleStillPointsAtPath() -> Bool {
-        var openFile = stat()
         var pathFile = stat()
-        guard fstat(fd, &openFile) == 0, stat(path, &pathFile) == 0 else { return false }
-        return openFile.st_dev == pathFile.st_dev && openFile.st_ino == pathFile.st_ino
+        guard let openFile = fileIdentity(of: fd), stat(path, &pathFile) == 0 else { return false }
+        return openFile == FileIdentity(device: pathFile.st_dev, inode: pathFile.st_ino)
+    }
+
+    /// Which file an open descriptor names. `nil` when even `fstat` fails,
+    /// which on a live descriptor means the caller cannot prove identity either
+    /// way and must take whichever branch is safe without it.
+    private func fileIdentity(of descriptor: Int32) -> FileIdentity? {
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else { return nil }
+        return FileIdentity(device: info.st_dev, inode: info.st_ino)
     }
 
     private func closeHandle() {
@@ -250,7 +372,11 @@ public actor ActuationLog {
             let candidate = (directory as NSString).appendingPathComponent(name)
             if !fileManager.fileExists(atPath: candidate) { return candidate }
         }
-        throw Self.posixError("rotate")
+        // Not a syscall failure: `fileExists` succeeded 1000 times, so `errno`
+        // holds whatever some unrelated call left there. Say what happened.
+        throw Self.logError(
+            "could not find a free name for the rotated segment \(base).jsonl in \(directory) "
+                + "— 1000 candidates are already taken")
     }
 
     /// The UTC day of the newest row already in the active file, so a daemon
@@ -284,6 +410,13 @@ public actor ActuationLog {
 
     /// Just enough of a row to read its day back.
     private struct TimestampProbe: Decodable { let ts: String }
+
+    /// A failure of the log's own making, with no meaningful `errno` behind it.
+    private static func logError(_ reason: String) -> NSError {
+        NSError(
+            domain: "com.tbd.daemon.actuation-log", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: reason])
+    }
 
     private static func pathError(_ reason: String) -> NSError {
         NSError(

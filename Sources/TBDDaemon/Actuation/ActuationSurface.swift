@@ -14,6 +14,11 @@ import TBDShared
 //    the Escape/C-c and the SIGTERM inside a hibernate, the interrupt inside
 //    a profile swap, the paste-then-Enter inside a send — one row per
 //    actuation-level intent, at the moment the intent is acted on.
+//    The auto-`/login` pump a login spawn arms (`armLoginSession`) is a
+//    sub-step too, even though its `/login` paste lands seconds later: the
+//    operator asked for one thing — a session logged into this profile — and
+//    the typing is how the spawn finishes, not a second intent. When the
+//    observed rung lands it will confirm that spawn's row, not open a new one.
 //
 // The wired set lives here, in one file next to the writer, so a reviewer can
 // see it at a glance: `method` names the door a request came through and
@@ -42,6 +47,12 @@ enum ActuationSurface: CaseIterable, Sendable {
     case terminalSwapProfile
     case terminalContinueInCodex
     case terminalHistoryRevive
+    /// Creates a worktree and spawns its primary terminals. The row names the
+    /// worktree, not a terminal: those are minted inside the lifecycle phase.
+    case worktreeCreate
+    /// Creates a scratch space and spawns its primary terminal — same shape as
+    /// `worktreeCreate`, through the same lifecycle spawn.
+    case scratchCreate
     case worktreeRevive
     case worktreeReviveConversationFresh
     case remoteCreate
@@ -64,6 +75,8 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalSwapProfile: return RPCMethod.terminalSwapProfile
         case .terminalContinueInCodex: return RPCMethod.terminalContinueInCodex
         case .terminalHistoryRevive: return RPCMethod.terminalHistoryRevive
+        case .worktreeCreate: return RPCMethod.worktreeCreate
+        case .scratchCreate: return RPCMethod.scratchCreate
         case .worktreeRevive: return RPCMethod.worktreeRevive
         case .worktreeReviveConversationFresh: return RPCMethod.worktreeReviveConversationFresh
         case .remoteCreate: return RPCMethod.remoteCreate
@@ -79,8 +92,9 @@ enum ActuationSurface: CaseIterable, Sendable {
         switch self {
         case .terminalSend, .remoteSend: return .send
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
-             .terminalContinueInCodex, .terminalHistoryRevive, .worktreeRevive,
-             .worktreeReviveConversationFresh, .remoteCreate: return .spawn
+             .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
+             .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
+             .remoteCreate: return .spawn
         case .terminalDelete, .remoteStop: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
@@ -95,6 +109,9 @@ enum ActuationRail {
     static let limitResume = "limit-resume"
     /// The idle sweep's trigger into `HibernationCoordinator`.
     static let autoHibernate = "auto-hibernate"
+    /// `AutoHibernateOnMergeCoordinator` parking a worktree's sessions once its
+    /// PR merged — a separate rail from the idle sweep, with its own switch.
+    static let autoHibernateOnMerge = "auto-hibernate-on-merge"
     /// The Watch Desk's wrap-up and nudge pastes.
     static let nightwatchDesk = "nightwatch-desk"
 }

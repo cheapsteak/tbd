@@ -86,7 +86,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         readTranscript: @escaping @Sendable (String) -> Data?,
         transcriptModifiedAt: @escaping @Sendable (String) -> Date?,
         waiter: @escaping @Sendable (Duration) async -> Void,
-        actuationLog: ActuationLog? = nil
+        actuationLog: ActuationLog
     ) {
         self.db = db
         self.tmux = tmux
@@ -94,7 +94,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         self.readTranscript = readTranscript
         self.transcriptModifiedAt = transcriptModifiedAt
         self.waiter = waiter
-        self.actuationLog = actuationLog ?? ActuationLog(path: TBDConstants.actuationLogPath)
+        self.actuationLog = actuationLog
     }
 
     /// Early-cancel probe (see `LimitResumeActuating.userAlreadyContinued`).

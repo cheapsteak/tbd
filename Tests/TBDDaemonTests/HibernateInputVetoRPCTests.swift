@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Pending-input veto for auto-hibernate RPC tests. Covers the
 /// `config.setHibernateInputVeto` RPC and the extended `daemon.capabilities`
@@ -20,7 +21,8 @@ struct HibernateInputVetoRPCTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db)
     }

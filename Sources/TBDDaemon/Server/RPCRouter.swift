@@ -138,11 +138,9 @@ public final class RPCRouter: Sendable {
         remoteManager: RemoteProviderManager? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
-        actuationLog: ActuationLog? = nil
+        actuationLog: ActuationLog
     ) {
-        let resolvedActuationLog = actuationLog
-            ?? ActuationLog(path: TBDConstants.actuationLogPath)
-        self.actuationLog = resolvedActuationLog
+        self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle
         self.tmux = tmux
@@ -159,7 +157,7 @@ public final class RPCRouter: Sendable {
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
-            actuationLog: resolvedActuationLog
+            actuationLog: actuationLog
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
@@ -205,7 +203,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.repoList:
                 return try await handleRepoList()
             case RPCMethod.scratchCreate:
-                return try await handleScratchCreate(request.paramsData)
+                return try await handleScratchCreate(request.paramsData, actor: request.actor)
             case RPCMethod.scratchDelete:
                 return try await handleScratchDelete(request.paramsData)
             case RPCMethod.scratchPromote:
@@ -229,7 +227,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.repoListOpenPRs:
                 return try await handleRepoListOpenPRs(request.paramsData)
             case RPCMethod.worktreeCreate:
-                return try await handleWorktreeCreate(request.paramsData)
+                return try await handleWorktreeCreate(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeList:
                 return try await handleWorktreeList(request.paramsData)
             case RPCMethod.worktreeArchive:

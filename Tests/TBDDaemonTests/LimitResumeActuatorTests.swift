@@ -3,6 +3,7 @@ import os
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 struct FakeTmuxSendError: Error {}
 
@@ -96,7 +97,7 @@ struct FakeInspector: PaneProcessInspecting {
             db: db, tmux: tmux, inspector: inspector,
             readTranscript: { _ in transcript },
             transcriptModifiedAt: { _ in transcriptMtime },
-            waiter: { _ in })   // no real sleeping in unit tests
+            waiter: { _ in }, actuationLog: makeTestActuationLog())   // no real sleeping in unit tests
     }
 
     @Test func missingTerminalIsTerminalGone() async throws {
@@ -185,7 +186,7 @@ struct FakeInspector: PaneProcessInspecting {
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: growing,
-            transcriptModifiedAt: { _ in nil }, waiter: { _ in })
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .sent)
     }
@@ -226,7 +227,7 @@ struct FakeInspector: PaneProcessInspecting {
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: flipping,
-            transcriptModifiedAt: { _ in nil }, waiter: { _ in })
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .userAlreadyContinued)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -253,7 +254,7 @@ struct FakeInspector: PaneProcessInspecting {
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in Data("{}\n".utf8) },
             transcriptModifiedAt: { _ in nil },
-            waiter: flippingWaiter)
+            waiter: flippingWaiter, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
@@ -337,7 +338,7 @@ struct FakeInspector: PaneProcessInspecting {
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in Data("{}\n".utf8) },
             transcriptModifiedAt: { _ in nil },
-            waiter: cancellingWaiter)
+            waiter: cancellingWaiter, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
@@ -395,7 +396,7 @@ struct FakeInspector: PaneProcessInspecting {
                 reads.withLock { $0 += 1 }
                 return newerRecord
             },
-            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in })
+            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued == false)
         #expect(reads.withLock { $0 } == 0)
@@ -412,7 +413,7 @@ struct FakeInspector: PaneProcessInspecting {
                 reads.withLock { $0 += 1 }
                 return newerRecord
             },
-            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in })
+            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued)
         #expect(reads.withLock { $0 } == 1)

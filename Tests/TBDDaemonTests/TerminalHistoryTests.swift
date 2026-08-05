@@ -52,7 +52,7 @@ import Testing
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
-            startTime: Date())
+            startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     // MARK: - Capture on terminal.delete

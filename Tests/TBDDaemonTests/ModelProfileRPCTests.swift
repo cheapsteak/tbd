@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Stub fetcher with a queued response list.
 final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
@@ -54,7 +55,8 @@ struct ModelProfileRPCTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             usageFetcher: stub,
-            configDirManager: configDirManager
+            configDirManager: configDirManager,
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, stub)
     }
