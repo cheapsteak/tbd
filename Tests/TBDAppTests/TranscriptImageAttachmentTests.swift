@@ -274,6 +274,47 @@ struct TranscriptImageAttachmentTests {
         #expect(TranscriptImageService.shared.metadata(forPath: "").state == .missing)
     }
 
+    /// Carries a probe's result back from a worker thread. A class so the escaping
+    /// closure can write it; the semaphore in the test is the ordering.
+    private final class ProbeResult: @unchecked Sendable {
+        var state: TranscriptImageMetadata.State?
+    }
+
+    /// The hazard `fileStamp`'s `.typeRegular` check is named for, exercised with a
+    /// real one: `open(2)` on a fifo with no writer never returns, so a probe that
+    /// opened the file would wedge the measurement thread forever. A directory —
+    /// what `nonRegularFileProbesAsMissing` covers — degrades for a different
+    /// reason (it opens fine and simply has no image header) and cannot catch this.
+    ///
+    /// The probe therefore runs OFF the main thread behind a deadline, so a
+    /// regression fails this test instead of hanging the suite; if it does block,
+    /// the test opens the write end to release the stuck opener before finishing.
+    @Test func fifoProbesAsMissingWithoutBlockingTheReader() throws {
+        TranscriptImageService.shared.clearCaches()
+        let scratch = Scratch()
+        let path = scratch.path("pipe.png")
+        try #require(mkfifo(path, 0o600) == 0,
+                     Comment(rawValue: "mkfifo failed: \(String(cString: strerror(errno)))"))
+        defer { unlink(path) }
+
+        let result = ProbeResult()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            result.state = TranscriptImageService.shared.metadata(forPath: path).state
+            finished.signal()
+        }
+        let blocked = finished.wait(timeout: .now() + 5) == .timedOut
+        if blocked {
+            // Release the stuck `open(2)` so the worker thread is not leaked in a
+            // permanently blocking syscall, then report.
+            let writeEnd = open(path, O_WRONLY | O_NONBLOCK)
+            if writeEnd >= 0 { close(writeEnd) }
+            _ = finished.wait(timeout: .now() + 2)
+        }
+        #expect(!blocked, "the probe blocked opening a fifo — the .typeRegular guard is gone")
+        #expect(result.state == .missing)
+    }
+
     // MARK: - Click and context menu
 
     /// Counts how many times a click asked for the Quick Look panel. A class so
@@ -559,9 +600,7 @@ struct TranscriptImageAttachmentTests {
     /// completion arrives via `DispatchQueue.main.async`, and suspending is what
     /// lets the main queue deliver it. A nested run loop would deliver it too, but
     /// it would also resume every other suspended `@MainActor` test in this
-    /// 200-suite process inside this test's body — including a sibling of this
-    /// `.serialized` suite parked on an `await`, whose `clearCaches()` then lands
-    /// mid-flight. Serialization does not cover that; not re-entering does.
+    /// 200-suite process inside this test's body.
     ///
     /// Bounded on purpose: a decode that never arrives must fail the assertion
     /// below rather than hang the suite.
