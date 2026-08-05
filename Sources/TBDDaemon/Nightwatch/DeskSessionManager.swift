@@ -670,11 +670,32 @@ public actor DeskSessionManager: DeskSessionManaging {
                 return
             }
 
-            // Kill tmux windows
             let terminals = try await db.terminals.list(worktreeID: wt.id)
+
+            // This rail kills the desk's windows itself rather than through a
+            // lifecycle an RPC handler already rowed, so it writes its own —
+            // one dispose naming the desk worktree, the shape `worktree.archive`
+            // uses, because the per-terminal kills below are how this one intent
+            // is carried out. Fail-closed like the wrap-up and the nudge: an
+            // unrecordable close does not happen, and `deskWorktreeID` is left
+            // set (this returns before the reset at the end) so the next close
+            // still knows which desk to tear down.
+            var row = ActuationRow(
+                actor: .daemon(rail: ActuationRail.nightwatchDesk), kind: .dispose)
+            row.target = ActuationTarget(worktree: wt.id.uuidString)
+            let actuationID: String
+            do {
+                actuationID = try await actuationLog.appendRequest(row)
+            } catch {
+                logger.warning("Skipping Watch Desk close: \(error, privacy: .public)")
+                return
+            }
+
+            // Kill tmux windows
             for t in terminals {
                 try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
             }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
             // Delete terminal rows
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -806,14 +827,34 @@ public actor DeskSessionManager: DeskSessionManaging {
             logger.debug("Wrote judge instructions to \(path, privacy: .public)")
         }
 
+        // The rail spawns an agent session here with nobody having asked, so it
+        // writes its own row — one naming the desk worktree and no terminal, the
+        // shape `worktree.revive` uses, because the terminals are minted inside
+        // `spawnPrimaryTerminals`. This is the one chokepoint all three spawn
+        // paths pass through (fresh create, recovery, pre-nudge respawn), so a
+        // row here counts each spawn exactly once. Fail-closed: the throw
+        // reaches the same callers that already treat a failed spawn as
+        // best-effort, so an unrecordable spawn simply does not happen.
+        var row = ActuationRow(
+            actor: .daemon(rail: ActuationRail.nightwatchDesk), kind: .spawn)
+        row.target = ActuationTarget(worktree: worktree.id.uuidString)
+        let actuationID = try await actuationLog.appendRequest(row)
+
         // Use production spawn path which handles trust, overlay, and all lifecycle concerns
-        _ = try await lifecycle.spawnPrimaryTerminals(
-            worktree: worktree,
-            repo: nil,
-            skipClaude: false,
-            initialPrompt: initialPrompt,
-            preSessionTerminalID: nil
-        )
+        do {
+            _ = try await lifecycle.spawnPrimaryTerminals(
+                worktree: worktree,
+                repo: nil,
+                skipClaude: false,
+                initialPrompt: initialPrompt,
+                preSessionTerminalID: nil
+            )
+        } catch {
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            throw error
+        }
+        await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
         // Model follows the profile spawnPrimaryTerminals resolves internally —
         // resolving here too would just double the keychain-backed lookup.
         logger.info("Spawned desk terminal in \(worktree.id, privacy: .public)")

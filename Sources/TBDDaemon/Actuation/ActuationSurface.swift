@@ -34,7 +34,10 @@ import TBDShared
 // naming the worktree, with no terminal: the caller asked for one thing and the
 // per-terminal kills are how the lifecycle carries it out. Reconcile writes one
 // row PER act, because each kill or park it performs is an independent decision
-// it made about a terminal it has already resolved.
+// it made about a terminal it has already resolved. `repo.remove`'s cascade sits
+// between the two and follows reconcile: the handler resolves a LIST of
+// worktrees and archives each one through a separate lifecycle call, so each is
+// its own teardown and gets its own worktree-named row.
 //
 // The wired set lives here, in one file next to the writer, so a reviewer can
 // see it at a glance: `method` names the door a request came through and
@@ -55,6 +58,13 @@ enum ActuationSurface: CaseIterable, Sendable {
     case worktreeArchive
     /// Same teardown as archive, minus the disk removal: one row, worktree-named.
     case worktreeForget
+    /// A forced repo removal cascade-archives every active worktree the repo
+    /// owns, killing their live windows. One row per worktree torn down, each
+    /// naming that worktree — the handler resolves them itself and archives each
+    /// through its own lifecycle call, so they are separate teardowns rather
+    /// than sub-steps of one. An unforced removal with live worktrees is
+    /// declined before any row exists.
+    case repoRemove
     /// Spawns a fresh hook terminal. The terminal is minted inside the
     /// lifecycle, so the row names the worktree — as `worktree.revive` does.
     case worktreeRerunPreSession
@@ -96,6 +106,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalDelete: return RPCMethod.terminalDelete
         case .worktreeArchive: return RPCMethod.worktreeArchive
         case .worktreeForget: return RPCMethod.worktreeForget
+        case .repoRemove: return RPCMethod.repoRemove
         case .worktreeRerunPreSession: return RPCMethod.worktreeRerunPreSession
         case .scratchDelete: return RPCMethod.scratchDelete
         case .scratchArchive: return RPCMethod.scratchArchive
@@ -129,8 +140,8 @@ enum ActuationSurface: CaseIterable, Sendable {
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
              .worktreeRerunPreSession, .remoteCreate: return .spawn
-        case .terminalDelete, .worktreeArchive, .worktreeForget, .scratchDelete,
-             .scratchArchive, .remoteStop: return .dispose
+        case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,
+             .scratchDelete, .scratchArchive, .remoteStop: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
         }
@@ -150,7 +161,9 @@ enum ActuationRail {
     /// `AutoArchiveOnMergeCoordinator` archiving a whole worktree once its PR
     /// merged, tearing down its sessions with it.
     static let autoArchiveOnMerge = "auto-archive-on-merge"
-    /// The Watch Desk's wrap-up and nudge pastes.
+    /// The Watch Desk's wrap-up and nudge pastes, the spawn that opens its
+    /// judge session, and the close that kills that session's windows — all
+    /// acts the desk performs on its own, with no RPC behind them.
     static let nightwatchDesk = "nightwatch-desk"
     /// The boot-time (and post-`cleanup`) reconcile sweep: it kills the windows
     /// of worktrees that left disk, parks sessions whose window is gone, and

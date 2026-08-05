@@ -307,6 +307,118 @@ struct ActuationLogTeardownWiringTests {
         #expect(try await db.terminals.list(worktreeID: scratch.id).count == 2)
     }
 
+    // MARK: - repo.remove: the cascade that archives a repo's worktrees
+
+    @Test("a forced repo.remove writes one dispose row per worktree it tears down")
+    func repoRemoveWritesRowPerCascadedWorktree() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        var worktreeIDs: Set<String> = []
+        for index in 0..<2 {
+            let worktree = try await db.worktrees.create(
+                repoID: repo.id, name: "acme-wt-\(index)", branch: "acme-branch-\(index)",
+                path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
+            _ = try await db.terminals.create(
+                worktreeID: worktree.id, tmuxWindowID: "@\(index)", tmuxPaneID: "%\(index)")
+            worktreeIDs.insert(worktree.id.uuidString)
+        }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: true),
+            actor: .app))
+        #expect(response.success)
+
+        let written = try rows(at: logPath)
+        let requests = written.filter { $0["kind"] as? String != "outcome" }
+        // Two worktrees torn down through two separate lifecycle calls — so two
+        // rows, each naming its own worktree and no terminal.
+        #expect(requests.count == 2)
+        #expect(requests.allSatisfy { $0["kind"] as? String == "dispose" })
+        #expect(requests.allSatisfy { $0["method"] as? String == "repo.remove" })
+        #expect(requests.allSatisfy {
+            ($0["actor"] as? [String: Any])?["kind"] as? String == "app"
+        })
+        let named = Set(requests.compactMap {
+            ($0["target"] as? [String: Any])?["worktree"] as? String
+        })
+        #expect(named == worktreeIDs)
+        #expect(requests.allSatisfy { ($0["target"] as? [String: Any])?["terminal"] == nil })
+
+        let outcomes = written.filter { $0["kind"] as? String == "outcome" }
+        #expect(outcomes.count == 2)
+        #expect(outcomes.allSatisfy { $0["result"] as? String == "dispatched" })
+        let confirmed = Set(outcomes.compactMap { $0["confirms"] as? String })
+        #expect(confirmed == Set(requests.compactMap { $0["id"] as? String }))
+    }
+
+    @Test("a repo with nothing active to tear down writes no row")
+    func repoRemoveWithoutWorktreesWritesNothing() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: true)))
+        #expect(response.success)
+        #expect(try rows(at: logPath).isEmpty)
+    }
+
+    @Test("a repo that does not exist is declined before any row exists")
+    func repoRemoveOfAbsentRepoWritesNothing() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: UUID(), force: true)))
+        #expect(!response.success)
+        #expect(try rows(at: logPath).isEmpty)
+    }
+
+    /// The unforced refusal is pre-row validation too: nothing is torn down, so
+    /// nothing claims it was about to be.
+    @Test("an unforced removal that finds live worktrees writes no row")
+    func repoRemoveWithoutForceWritesNothing() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let worktree = try await makeWorktree(in: db)
+        let repoID = try #require(try await db.worktrees.get(id: worktree.id)?.repoID)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repoID, force: false)))
+        #expect(!response.success)
+        #expect(try rows(at: logPath).isEmpty)
+        #expect(try await db.terminals.list(worktreeID: worktree.id).count == 2)
+    }
+
+    @Test("an unwritable record refuses the whole cascade — the repo survives intact")
+    func unwritableRecordRefusesRepoRemove() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: try makeUnwritablePath())
+        let worktree = try await makeWorktree(in: db)
+        let repoID = try #require(try await db.worktrees.get(id: worktree.id)?.repoID)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repoID, force: true)))
+
+        #expect(!response.success)
+        #expect(try #require(response.error).contains("actuation log"))
+        #expect(try await db.repos.get(id: repoID) != nil)
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+        #expect(try await db.terminals.list(worktreeID: worktree.id).count == 2)
+    }
+
     // MARK: - terminal.delete: a kill that failed is not a dispatch
 
     @Test("terminal.delete records a failed kill as transport-failed, and still closes")

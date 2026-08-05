@@ -63,7 +63,9 @@ extension RPCRouter {
         return repo
     }
 
-    func handleRepoRemove(_ paramsData: Data) async throws -> RPCResponse {
+    func handleRepoRemove(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRemoveParams.self, from: paramsData)
 
         guard let repo = try await db.repos.get(id: params.repoID) else {
@@ -75,9 +77,43 @@ extension RPCRouter {
 
         if !activeWorktrees.isEmpty {
             if params.force {
-                // Cascade-archive all active worktrees
+                // A forced removal tears down every active worktree's sessions,
+                // killing live windows the operator can see. One row per
+                // worktree, each naming that worktree with no terminal: the
+                // handler resolves the list itself and archives each through its
+                // own `archiveWorktree` call, so these are separate teardowns —
+                // the same reasoning that gives reconcile a row per act, and the
+                // same worktree-named shape `worktree.archive` uses for one.
+                //
+                // Every row is written BEFORE the first teardown, not
+                // interleaved. Fail-closed means an unrecordable act does not
+                // happen, and a cascade that stopped halfway would leave the
+                // repo half-dismantled; rowing the whole set first makes the
+                // refusal all-or-nothing, with the repo and every session it
+                // owns still standing.
+                var actuationIDs: [String] = []
                 for wt in activeWorktrees {
-                    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+                    actuationIDs.append(try await beginActuation(
+                        .repoRemove, actor: actor,
+                        target: ActuationTarget(worktree: wt.id.uuidString)))
+                }
+
+                // Cascade-archive all active worktrees
+                for (index, wt) in activeWorktrees.enumerated() {
+                    do {
+                        try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+                    } catch {
+                        // The throw ends the cascade, so this row and every row
+                        // behind it names a teardown that did not happen. They
+                        // are confirmed as transport-failed together rather than
+                        // left unconfirmed, which the record would otherwise
+                        // read as an outcome that was merely lost.
+                        for pending in actuationIDs[index...] {
+                            await finishActuation(pending, .transportFailed, error: "\(error)")
+                        }
+                        throw error
+                    }
+                    await finishActuation(actuationIDs[index], .dispatched)
                 }
             } else {
                 return RPCResponse(
