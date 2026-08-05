@@ -24,53 +24,41 @@ struct ChatBubbleView: View {
 
     private var roleLabel: String { isUser ? "You" : "Claude" }
 
+    /// Speaker attribution for assistive technology only — never drawn. A
+    /// transcript is not a group chat, so the bubble shows no role/timestamp
+    /// header and relies on position and tint; VoiceOver has no position cue, so
+    /// the bubble carries the attribution as its accessibility label. Mirrors
+    /// `TranscriptBubbleGeometry.accessibilityAttribution(for:)`.
+    private var accessibilityAttribution: String {
+        guard let ts = item.timestamp?.absoluteShort else { return roleLabel }
+        return isUser ? "\(ts) · \(roleLabel)" : "\(roleLabel) · \(ts)"
+    }
+
     var body: some View {
         // Flattened row wrapper (issue #129 per-row layout-depth): the prior
         // `HStack { Spacer ; column.frame(maxWidth:.infinity) ; Spacer }` is
         // layout-equivalent to a single column that fills width and reserves the
         // 52pt opposite-side gutter via padding. Dropping the outer HStack +
         // Spacer removes a StackLayout node from every bubble row's measure pass.
-        VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-            roleHeader
-            bubbleBody
-        }
-        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-        // Single EdgeInsets folds the 52pt opposite-side gutter into the 4/12
-        // chrome insets (12 + 52 = 64) — one _PaddingLayout instead of two,
-        // per bubble row. Nested uniform paddings compose additively, so this
-        // is layout-identical to the prior two-`.padding` chain.
-        .padding(EdgeInsets(
-            top: 4,
-            leading: isUser ? 64 : 16,
-            bottom: 4,
-            trailing: 12
-        ))
-        .overlay(alignment: .leading) {
-            if !isUser {
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(Color.secondary.opacity(0.28))
-                    .frame(width: 2)
-                    .padding(.vertical, 4)
-                    .offset(x: 4)
-                    .accessibilityHidden(true)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var roleHeader: some View {
-        HStack(spacing: 4) {
-            if isUser, let ts = item.timestamp {
-                Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
-                Text("·").foregroundStyle(.quaternary).font(.caption2)
-            }
-            Text(roleLabel).font(.caption2).foregroundStyle(.tertiary)
-            if !isUser, let ts = item.timestamp {
-                Text("·").foregroundStyle(.quaternary).font(.caption2)
-                Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
-            }
-        }
-        .padding(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
+        // The role/timestamp header is gone too, which took the enclosing VStack
+        // with it — one fewer StackLayout node per bubble row.
+        bubbleBody
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            // Single EdgeInsets folds the 52pt opposite-side gutter into the 8/12
+            // chrome insets (12 + 52 = 64) — one _PaddingLayout instead of two,
+            // per bubble row. Nested uniform paddings compose additively, so this
+            // is layout-identical to the prior two-`.padding` chain. The 8pt
+            // top/bottom matches `TranscriptBubbleGeometry.outerVertical`: with no
+            // header line between them it is the only thing separating one message
+            // from the next.
+            .padding(EdgeInsets(
+                top: 8,
+                leading: isUser ? 64 : 16,
+                bottom: 8,
+                trailing: 12
+            ))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(accessibilityAttribution)
     }
 
     private var bubbleBody: some View {
@@ -95,6 +83,8 @@ struct ChatBubbleView: View {
                         .transcriptSelectableText()
                 case .code(let lang, let body):
                     codeBlock(language: lang, content: body)
+                case .image(let attachment):
+                    TranscriptImageAttachmentView(attachment: attachment)
                 }
             }
         }

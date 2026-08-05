@@ -10,11 +10,27 @@ enum MarkdownSegments {
     enum Segment: Equatable {
         case prose(String)
         case code(language: String?, content: String)
+        case image(TranscriptImageAttachment)
     }
 
+    /// Splits at attached-image markers first (they are not markdown), then
+    /// splits each remaining text run at code fences. Mirrors the native path's
+    /// `MarkdownAttributedRenderer.renderBlocks`, which does the same two-stage
+    /// split — the two renderers must not diverge.
     static func split(_ text: String) -> [Segment] {
         let signpostState = TranscriptSignposts.signposter.beginInterval("transcript.markdown.segment")
         defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.segment", signpostState) }
+        var segments: [Segment] = []
+        for segment in TranscriptImageMarker.split(text) {
+            switch segment {
+            case .image(let attachment): segments.append(.image(attachment))
+            case .text(let run): segments.append(contentsOf: splitFences(run))
+            }
+        }
+        return segments
+    }
+
+    private static func splitFences(_ text: String) -> [Segment] {
         var segments: [Segment] = []
         let lines = text.components(separatedBy: "\n")
 
@@ -80,6 +96,8 @@ extension MarkdownSegments.Segment: Identifiable {
             return "p:\(text.hashValue)"
         case .code(let language, let content):
             return "c:\(language ?? ""):\(content.hashValue)"
+        case .image(let attachment):
+            return "i:\(attachment.path)"
         }
     }
 }

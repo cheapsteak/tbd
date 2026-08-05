@@ -24,6 +24,11 @@ struct TableTranscriptView: NSViewRepresentable {
     /// Jump-to-bottom request token: incrementing it asks the coordinator to
     /// scroll to the last row.
     let scrollToBottomToken: Int
+    /// Bumped by the pane whenever the USER toggles an activity group open or
+    /// shut. The node array that arrives with a bumped token is the result of a
+    /// disclosure gesture, not of streaming, so the coordinator anchors the
+    /// clicked row instead of following the tail (see `update`).
+    let activityToggleToken: Int
     let nodesProvider: @MainActor () -> [TranscriptRenderNode]
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
@@ -86,6 +91,7 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
+        coordinator.lastActivityToggleToken = activityToggleToken
         coordinator.atBottomBinding = $atBottom
         // Track the live scroll position so the jump-to-bottom button hides the
         // moment the viewport reaches the bottom — by the button OR a manual
@@ -151,7 +157,11 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
         }
-        coordinator.update(nodes: nodesProvider(), atBottom: $atBottom)
+        coordinator.update(
+            nodes: nodesProvider(),
+            atBottom: $atBottom,
+            activityToggleToken: activityToggleToken
+        )
     }
 
     // MARK: - Coordinator
@@ -171,6 +181,11 @@ struct TableTranscriptView: NSViewRepresentable {
         var nodes: [TranscriptRenderNode] = []
         var previousNodes: [TranscriptRenderNode] = []
         var lastScrollToken = 0
+        /// Last activity-group toggle token seen by `update`. A token that has
+        /// MOVED means this node array came from the user opening or shutting a
+        /// group, which must keep the clicked row where it is rather than
+        /// re-pinning the tail.
+        var lastActivityToggleToken = 0
 
         /// Live binding driving the floating jump-to-bottom button. Held so the
         /// clip-bounds observer can keep it in sync with the ACTUAL scroll
@@ -186,8 +201,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// message text; caching the estimate turns those repeat scans into hash
         /// hits (~3× fewer `estimate(...)` computes per open). An entry here is
         /// SUPERSEDED by the exact height the moment a row is realized + measured
-        /// in `viewFor` (the exact cache is consulted first), and both caches are
-        /// cleared together on a width change / rebuild. (#129)
+        /// in `viewFor` (the exact cache is consulted first). Both caches are
+        /// cleared together on a width change and PRUNED (not cleared) to the live
+        /// rows on a rebuild — see `pruneCaches`. (#129)
         private var estimateCache: [HeightKey: CGFloat] = [:]
         /// The column width the cache was last computed against. When the table's
         /// width changes, the cache is cleared and the table reloaded.
@@ -209,8 +225,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// Composed `[MessageBlock]` for chat-bubble rows, keyed by
         /// `(node.id, contentVersion)`. The blocks `heightOfRow` measures are the
         /// SAME values `viewFor` installs into the cell, so render == measure by
-        /// construction. Invalidated for a node on `updateLast` (growing stream)
-        /// and cleared wholesale on a width-change reload.
+        /// construction. Invalidated for a node on `updateLast` (growing stream),
+        /// pruned to the live rows on a rebuild, and cleared wholesale on a
+        /// width-change reload.
         private var composedCache: [ComposedKey: [MessageBlock]] = [:]
 
         struct ComposedKey: Hashable {
@@ -225,8 +242,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// scroll-reused `TranscriptBubbleCellView` lays its blocks out from the
         /// cache instead of re-measuring — notably avoiding a fresh
         /// `NSHostingController.sizeThatFits` for every `.table` block on every
-        /// dequeue. Cleared alongside `heightCache`/`estimateCache` on a
-        /// width-change / rebuild, and per-node on `updateLast`. (#129)
+        /// dequeue. Cleared alongside `heightCache`/`estimateCache` on a width
+        /// change, pruned to the live rows on a rebuild, and dropped per-node on
+        /// `updateLast`. (#129)
         private var blockHeightCache: [BlockHeightKey: [CGFloat]] = [:]
 
         struct BlockHeightKey: Hashable {
@@ -616,7 +634,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 blockHeights: blockHeights,
                 sourceText: TranscriptBubbleGeometry.text(for: item),
                 role: role,
-                header: TranscriptBubbleGeometry.header(for: item),
+                accessibilityAttribution: TranscriptBubbleGeometry.accessibilityAttribution(for: item),
                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
                 cachedHeight: height
@@ -754,7 +772,8 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   (`ceil(textLength / charsPerLine)`, `charsPerLine ≈ bodyWidth /
         ///   avgCharWidth`) × line height, + the bubble's fixed chrome. If the
         ///   message contains a GFM table, the (cheap, regex-free) table row count
-        ///   contributes `rows × tableRowHeight + header`.
+        ///   contributes `rows × tableRowHeight + header`. An attached image
+        ///   contributes its TRUE laid-out height (see `chatBubbleEstimate`).
         /// * activity rows (systemReminder / skillBody / non-Ask toolCall /
         ///   subagentSummary): the row is ONE truncated line, so its height is the
         ///   EXACT fixed chrome height (`activityRowHeight`) — cheap and exact, no
@@ -786,7 +805,16 @@ struct TableTranscriptView: NSViewRepresentable {
         static let askUserQuestionEstimate: CGFloat = 180
 
         /// Arithmetic height estimate for a chat bubble: wrapped prose lines × line
-        /// height + any embedded GFM table + fixed bubble chrome. No layout.
+        /// height + any embedded GFM table + any attached image + fixed bubble
+        /// chrome. No text layout.
+        ///
+        /// The image term is not an approximation at all: an attached image is laid
+        /// out at `TranscriptImageGeometry.displaySize`, which derives from a
+        /// SYNCHRONOUS header-only probe (~0.1 ms, cached per file) rather than a
+        /// decode — so the estimate can read the same true size the exact
+        /// measurement will. Without it a screenshot row estimated ~1 line of prose
+        /// for the marker text and then corrected by up to ~200pt on realize,
+        /// dragging every row below it.
         private static func chatBubbleEstimate(
             _ item: TranscriptItem,
             badgeUsage: TokenUsage?,
@@ -797,26 +825,46 @@ struct TableTranscriptView: NSViewRepresentable {
             let charsPerLine = max(Int(bodyWidth / avgBubbleCharWidth), 12)
             let text = TranscriptBubbleGeometry.text(for: item)
 
-            // Prose lines: count explicit newlines (each forces a line break) plus
-            // the wrapped lines each non-empty paragraph contributes. A bubble that
-            // carries a usage badge adds one trailing line.
+            // Split on image markers exactly as `renderBlocks` does, so the marker
+            // text is not counted as prose and each image contributes its own block
+            // height. Marker-free text (the overwhelmingly common case) costs one
+            // substring search and yields a single text segment — the arithmetic
+            // below is then identical to the marker-free estimate.
             var proseLines = 0
-            for paragraph in text.split(separator: "\n", omittingEmptySubsequences: false) {
-                let len = paragraph.count
-                proseLines += max(1, (len + charsPerLine - 1) / charsPerLine)
+            var tableRows = 0
+            var imageCount = 0
+            var imagesHeight: CGFloat = 0
+            for segment in TranscriptImageMarker.split(text) {
+                switch segment {
+                case .text(let run):
+                    // Prose lines: count explicit newlines (each forces a line break)
+                    // plus the wrapped lines each non-empty paragraph contributes.
+                    for paragraph in run.split(separator: "\n", omittingEmptySubsequences: false) {
+                        let len = paragraph.count
+                        proseLines += max(1, (len + charsPerLine - 1) / charsPerLine)
+                    }
+                    // GFM table block: cheaply count pipe-prefixed-or-containing rows
+                    // in the source (header + separator + body) without rendering.
+                    // Each grid row is ~tableRowHeight tall.
+                    tableRows += estimatedTableRowCount(in: run)
+                case .image(let attachment):
+                    imageCount += 1
+                    imagesHeight += MessageBlockMeasurer.imageSize(
+                        attachment, bodyWidth: bodyWidth).height
+                }
             }
-            if proseLines == 0 { proseLines = 1 }
+            if proseLines == 0 && imageCount == 0 { proseLines = 1 }
+            // A bubble that carries a usage badge adds one trailing line.
             if badgeUsage != nil { proseLines += 1 }
 
             var blocksHeight = CGFloat(proseLines) * estimatedBubbleLineHeight
-
-            // GFM table block: cheaply count pipe-prefixed-or-containing rows in the
-            // source (header + separator + body) without rendering. Each grid row
-            // is ~tableRowHeight tall.
-            let tableRows = estimatedTableRowCount(in: text)
             if tableRows > 0 {
                 blocksHeight += CGFloat(tableRows) * estimatedTableRowHeight
                     + TranscriptBubbleGeometry.interBlockSpacing
+            }
+            if imageCount > 0 {
+                blocksHeight += imagesHeight
+                    + CGFloat(imageCount) * TranscriptBubbleGeometry.interBlockSpacing
             }
 
             return TranscriptBubbleGeometry.rowHeight(blocksHeight: max(blocksHeight, estimatedBubbleLineHeight))
@@ -844,10 +892,30 @@ struct TableTranscriptView: NSViewRepresentable {
         /// Apply a new poll result with a minimal table op derived from
         /// `TranscriptStreamPlan`. Captures at-bottom BEFORE the edit so a grown
         /// document doesn't misjudge whether to follow the tail.
-        func update(nodes newNodes: [TranscriptRenderNode], atBottom: Binding<Bool>) {
+        ///
+        /// `activityToggleToken` distinguishes the two reasons a node array can
+        /// change shape. Streaming grows the transcript at the tail, and a viewer
+        /// parked at the bottom expects to follow it. A disclosure toggle instead
+        /// splices rows in (or out) UNDER the row the user just clicked, and there
+        /// the only acceptable outcome is that the clicked row does not move: the
+        /// toggle also classifies as a `.rebuild` (indices shift and the summary
+        /// node's `contentVersion` folds in `isExpanded`), so without this signal
+        /// the tail-follow below would re-pin the bottom and translate everything
+        /// on screen upward by the height of the rows just revealed.
+        func update(
+            nodes newNodes: [TranscriptRenderNode],
+            atBottom: Binding<Bool>,
+            activityToggleToken: Int
+        ) {
             // Keep the observer's binding fresh (SwiftUI hands us a new binding
             // each update).
             atBottomBinding = atBottom
+            // Consume the toggle token unconditionally — BEFORE any early return —
+            // so a toggle that lands on a `.noop` (or on a torn-down view) cannot
+            // leave the signal armed and suppress the tail-follow of a later,
+            // genuine streaming append.
+            let isActivityToggle = activityToggleToken != lastActivityToggleToken
+            lastActivityToggleToken = activityToggleToken
             // `scrollView` must exist (downstream `scrollToEnd` / `isAtBottom`
             // read it via the stored property); bind it only to gate on presence.
             guard let tableView, scrollView != nil else { return }
@@ -886,21 +954,18 @@ struct TableTranscriptView: NSViewRepresentable {
             case .noop:
                 break
             case .rebuild:
-                // True rebuild: clear the cache, measure the bottom window exactly,
-                // reload (older rows lazily estimate + correct on realize).
-                heightCache.removeAll(keepingCapacity: true)
-                estimateCache.removeAll(keepingCapacity: true)
-                composedCache.removeAll(keepingCapacity: true)
-                blockHeightCache.removeAll(keepingCapacity: true)
+                // True rebuild: the row ORDER changed, but every cache here is
+                // content-addressed by `(id, contentVersion[, width])`, so a
+                // surviving entry still describes the row it was measured for.
+                // Prune to what the new list can reach, measure the bottom window
+                // exactly, reload (older rows lazily estimate + correct on realize).
+                pruneCaches(to: newNodes)
                 precomputeBottomWindow()
                 tableView.reloadData()
             case let .append(fromIndex):
                 let newCount = newNodes.count
                 guard newCount > fromIndex, fromIndex <= oldCount else {
-                    heightCache.removeAll(keepingCapacity: true)
-                    estimateCache.removeAll(keepingCapacity: true)
-                    composedCache.removeAll(keepingCapacity: true)
-                    blockHeightCache.removeAll(keepingCapacity: true)
+                    pruneCaches(to: newNodes)
                     precomputeBottomWindow()
                     tableView.reloadData()
                     break
@@ -939,7 +1004,12 @@ struct TableTranscriptView: NSViewRepresentable {
                 }
             }
 
-            if wasAtBottom {
+            // Follow the tail only for content the SESSION produced. A user-driven
+            // disclosure toggle keeps the viewport exactly where it is, so the row
+            // that was clicked stays under the pointer and only the content below
+            // it moves. (Everything above the clicked row keeps its cached exact
+            // height across the rebuild, so its rows do not re-lay either.)
+            if wasAtBottom && !isActivityToggle {
                 DispatchQueue.main.async { [weak self] in
                     self?.scrollToEnd(animated: false)
                     self?.recomputeAtBottom(atBottom)
@@ -947,6 +1017,51 @@ struct TableTranscriptView: NSViewRepresentable {
             } else {
                 recomputeAtBottom(atBottom)
             }
+        }
+
+        /// Drops every cache entry that the new node list can no longer reach,
+        /// keeping the rest.
+        ///
+        /// Every cache here is keyed by `(id, contentVersion[, width])`, so a
+        /// stale entry — one whose row changed content, or which is gone from the
+        /// list — is unreachable by construction: a lookup for the row's NEW
+        /// version simply misses. Clearing them on a rebuild was therefore pure
+        /// pessimism with a real cost: a row measured EXACTLY fell back to the
+        /// arithmetic estimate, got re-measured on realize, and was corrected via
+        /// `noteHeightOfRows` with no scroll compensation — so a visible row above
+        /// the user's focus that corrected by δ dragged everything below it by δ.
+        ///
+        /// Keeping them needs a growth story, which is what this prune is: after
+        /// it, the caches hold at most one entry per LIVE row per cache (plus
+        /// whatever the width-change path already clears wholesale). Between
+        /// prunes only live rows are ever measured — `.append` adds entries for
+        /// the rows it appended, and `.updateLast` invalidates the grown row's
+        /// entries by id before re-measuring — so a long streaming session cannot
+        /// accumulate one entry per superseded `contentVersion`.
+        private func pruneCaches(to newNodes: [TranscriptRenderNode]) {
+            var live = Set<ComposedKey>(minimumCapacity: newNodes.count)
+            for node in newNodes {
+                live.insert(ComposedKey(id: node.id, version: node.contentVersion))
+            }
+            heightCache = heightCache.filter { live.contains(ComposedKey(id: $0.key.id, version: $0.key.version)) }
+            estimateCache = estimateCache.filter { live.contains(ComposedKey(id: $0.key.id, version: $0.key.version)) }
+            composedCache = composedCache.filter { live.contains($0.key) }
+            blockHeightCache = blockHeightCache.filter {
+                live.contains(ComposedKey(id: $0.key.id, version: $0.key.version))
+            }
+        }
+
+        /// Test backstop: total entries held across every per-row cache. Bounds the
+        /// growth story in `pruneCaches` — after a rebuild this cannot exceed a
+        /// small multiple of the live row count.
+        var totalCachedEntryCount: Int {
+            heightCache.count + estimateCache.count + composedCache.count + blockHeightCache.count
+        }
+
+        /// Test backstop: the cached EXACT height for `node` at the current column
+        /// width, or nil when the row would be sized by the estimate instead.
+        func cachedExactHeight(for node: TranscriptRenderNode) -> CGFloat? {
+            heightCache[HeightKey(id: node.id, version: node.contentVersion, width: columnWidth)]
         }
 
         private func invalidateHeight(for node: TranscriptRenderNode) {

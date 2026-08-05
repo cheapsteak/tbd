@@ -5,7 +5,11 @@ import TBDShared
 /// Provides the full-bleed row layout, header (icon + title + timestamp),
 /// and a header-only click-to-overlay interaction (see #129 spec).
 struct ActivityRowChrome<Header: View>: View {
-    let icon: String
+    /// Leading SF Symbol, or nil for a row that renders no icon at all. Nil
+    /// collapses the icon column entirely so the header sits at the row's
+    /// leading inset — it does NOT leave an empty gutter. Mirrors
+    /// `ActivityRowPresentation.iconSystemName` on the native path.
+    let icon: String?
     let timestamp: Date?
     let onOpen: () -> Void
     let headerContent: () -> Header
@@ -13,7 +17,7 @@ struct ActivityRowChrome<Header: View>: View {
     @State private var hovering = false
 
     init(
-        icon: String,
+        icon: String?,
         timestamp: Date?,
         onOpen: @escaping () -> Void,
         @ViewBuilder header: @escaping () -> Header
@@ -27,10 +31,12 @@ struct ActivityRowChrome<Header: View>: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14)
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+                }
                 headerContent()
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

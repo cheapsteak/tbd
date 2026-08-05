@@ -369,6 +369,10 @@ struct SessionTranscriptView: View {
     /// the last row (NSTableView renderer path).
     @State private var scrollToBottomToken: Int = 0
     @State private var activityGroupExpansion: [String: Bool] = [:]
+    /// Bumped alongside every write to `activityGroupExpansion`, so the table can
+    /// tell a user-driven disclosure toggle (anchor the clicked row) from a
+    /// streaming update (follow the tail).
+    @State private var activityToggleToken: Int = 0
 
     @State private var isFreshBranchReviveInFlight = false
 
@@ -462,6 +466,7 @@ struct SessionTranscriptView: View {
                         ),
                         atBottom: $atBottom,
                         scrollToBottomToken: scrollToBottomToken,
+                        activityToggleToken: activityToggleToken,
                         nodesProvider: { presentation.nodes }
                     )
                     .overlay(alignment: .bottomTrailing) {
@@ -525,6 +530,7 @@ struct SessionTranscriptView: View {
 
     private func setActivityGroup(_ id: String, expanded: Bool) {
         activityGroupExpansion[id] = expanded
+        activityToggleToken &+= 1
     }
 
     @ViewBuilder

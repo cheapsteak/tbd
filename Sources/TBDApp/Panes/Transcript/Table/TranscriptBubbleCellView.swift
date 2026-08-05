@@ -34,12 +34,15 @@ enum TranscriptBubbleGeometry {
     /// side additionally carries the 52pt gutter (12 + 52 = 64); an assistant bubble
     /// carries just the 12pt chrome inset on the opposite side (no gutter).
     static let outerNear: CGFloat = 12
-    /// Outer top/bottom padding.
-    static let outerVertical: CGFloat = 4
+    /// Outer top/bottom padding. Bubbles carry no role/timestamp header — position
+    /// alone says who spoke — so this inset is the ONLY thing separating one
+    /// message from the next, and it absorbs the vertical role the header line used
+    /// to play: 8pt per side gives a 16pt gutter between adjacent bubbles.
+    static let outerVertical: CGFloat = 8
     /// bubbleBody inner horizontal insets. User bubbles keep an 11pt inset on each
     /// side (visible chat-bubble padding). Assistant messages have no visible bubble,
     /// so they use ZERO horizontal inset — content sits flush at the box edge so it
-    /// aligns with the header and the 12pt tool-row inset.
+    /// aligns with the 12pt tool-row inset.
     static func bodyHorizontal(for role: Role) -> CGFloat {
         switch role {
         case .user: return 22
@@ -48,12 +51,8 @@ enum TranscriptBubbleGeometry {
     }
     /// bubbleBody inner vertical insets (8 top + 8 bottom).
     static let bodyVertical: CGFloat = 16
-    /// VStack header→body spacing.
-    static let headerBodyGap: CGFloat = 3
     /// Bubble corner radius.
     static let cornerRadius: CGFloat = 10
-    /// Header text horizontal inset (matches ChatBubbleView's roleHeader padding).
-    static let headerInset: CGFloat = 4
     /// Vertical gap BETWEEN stacked blocks inside one bubble (prose→table etc.).
     static let interBlockSpacing: CGFloat = 6
 
@@ -67,28 +66,22 @@ enum TranscriptBubbleGeometry {
     }
 
     /// Total row height: summed block heights + inter-block spacing + fixed chrome
-    /// (header line + header→body gap + body vertical insets + outer vertical
-    /// padding).
+    /// (body vertical insets + outer vertical padding). There is no header line to
+    /// account for — bubbles carry no visible role/timestamp attribution.
     static func rowHeight(blocksHeight: CGFloat) -> CGFloat {
-        blocksHeight + headerLineHeight + headerBodyGap + bodyVertical + outerVertical * 2
+        blocksHeight + bodyVertical + outerVertical * 2
     }
-
-    /// Measured single-line height of the caption2 header font.
-    static let headerLineHeight: CGFloat = {
-        let font = NSFont.preferredFont(forTextStyle: .caption2)
-        return ceil(font.ascender - font.descender + font.leading)
-    }()
-
-    static let headerFont: NSFont = .preferredFont(forTextStyle: .caption2)
 
     static func role(for item: TranscriptItem) -> Role {
         if case .userPrompt = item { return .user }
         return .assistant
     }
 
-    /// Header line, matching ChatBubbleView: user shows "ts · You",
-    /// assistant shows "Claude · ts".
-    static func header(for item: TranscriptItem) -> String {
+    /// Speaker attribution for ASSISTIVE technology only — it is deliberately not
+    /// drawn. The bubble shows no role/timestamp header (position says who spoke),
+    /// but VoiceOver has no position cue, so the cell carries this as its
+    /// accessibility label: user reads "ts · You", assistant "Claude · ts".
+    static func accessibilityAttribution(for item: TranscriptItem) -> String {
         let ts = item.timestamp?.absoluteShort
         switch role(for: item) {
         case .user:
@@ -209,7 +202,20 @@ final class MessageBlockMeasurer {
             return proseMeasurer.textHeight(of: string, width: bodyWidth)
         case .table(let data):
             return Self.tableHeight(data, bodyWidth: bodyWidth)
+        case .image(let attachment):
+            return Self.imageSize(attachment, bodyWidth: bodyWidth).height
         }
+    }
+
+    /// Laid-out size of an attached image. The aspect ratio comes from a
+    /// SYNCHRONOUS header-only probe (`CGImageSourceCopyPropertiesAtIndex` reads
+    /// the header, it does not decode), so the height is exact from the first
+    /// measurement and does not move when the downsampled thumbnail arrives on
+    /// the main thread later. A missing or undecodable file falls back to the
+    /// chip's fixed size — also deterministic.
+    static func imageSize(_ attachment: TranscriptImageAttachment, bodyWidth: CGFloat) -> CGSize {
+        let metadata = TranscriptImageService.shared.metadata(forPath: attachment.path)
+        return TranscriptImageGeometry.displaySize(metadata: metadata, bodyWidth: bodyWidth)
     }
 
     /// Per-block measured heights at `bodyWidth`, in block order. The summed-plus-
@@ -318,7 +324,9 @@ private final class RoundedBoxView: NSView {
 final class TranscriptBubbleTextView: NSTextView {}
 
 /// `NSTableCellView` that renders a chat message as a vertical stack of typed
-/// block views inside ONE rounded bubble, with a caption2 header above. Prose
+/// block views inside ONE rounded bubble. There is no role/timestamp header —
+/// a transcript is not a group chat, and the bubble's side and tint already say
+/// who spoke; the attribution survives as the cell's accessibility label. Prose
 /// blocks render in selectable TextKit-1 `NSTextView`s; table blocks render in an
 /// `NSHostingView` over the native grid. The row height (from `heightOfRow`) is
 /// pinned via `columnWidth × cachedHeight`, and each block is laid out at the SAME
@@ -327,8 +335,6 @@ final class TranscriptBubbleTextView: NSTextView {}
 @MainActor
 final class TranscriptBubbleCellView: NSTableCellView {
     private let backgroundBox = RoundedBoxView()
-    private let signalSpine = RoundedBoxView()
-    private let header = NSTextField(labelWithString: "")
     /// Vertical stack of block subviews inside the bubble.
     private let blockStack = NSStackView()
     private let measurer = MessageBlockMeasurer()
@@ -345,8 +351,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
     // Cell-box + role-dependent anchoring constraints (assigned post-super.init).
     private var widthConstraint: NSLayoutConstraint!
     private var heightConstraint: NSLayoutConstraint!
-    private var headerLeading: NSLayoutConstraint!
-    private var headerTrailing: NSLayoutConstraint!
     private var boxLeading: NSLayoutConstraint!
     private var boxTrailing: NSLayoutConstraint!
     private var boxWidth: NSLayoutConstraint!
@@ -363,18 +367,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
         backgroundBox.cornerRadius = TranscriptBubbleGeometry.cornerRadius
         backgroundBox.translatesAutoresizingMaskIntoConstraints = false
 
-        signalSpine.cornerRadius = 1
-        signalSpine.fillColor = NSColor.secondaryLabelColor.withAlphaComponent(0.28)
-        signalSpine.translatesAutoresizingMaskIntoConstraints = false
-
-        header.font = TranscriptBubbleGeometry.headerFont
-        header.textColor = .tertiaryLabelColor
-        header.backgroundColor = .clear
-        header.isBezeled = false
-        header.isEditable = false
-        header.drawsBackground = false
-        header.translatesAutoresizingMaskIntoConstraints = false
-
         blockStack.orientation = .vertical
         blockStack.alignment = .leading
         blockStack.distribution = .fill
@@ -385,15 +377,9 @@ final class TranscriptBubbleCellView: NSTableCellView {
         // so the stack's text views are topmost and take the mouse for selection
         // while the bubble paints behind them.
         addSubview(backgroundBox)
-        addSubview(signalSpine)
-        addSubview(header)
         addSubview(blockStack, positioned: .above, relativeTo: backgroundBox)
 
         let g = TranscriptBubbleGeometry.self
-        headerLeading = header.leadingAnchor.constraint(
-            equalTo: leadingAnchor, constant: g.headerInset)
-        headerTrailing = header.trailingAnchor.constraint(
-            equalTo: trailingAnchor, constant: -g.headerInset)
         boxLeading = backgroundBox.leadingAnchor.constraint(equalTo: leadingAnchor)
         boxTrailing = backgroundBox.trailingAnchor.constraint(equalTo: trailingAnchor)
         boxWidth = backgroundBox.widthAnchor.constraint(equalToConstant: 1)
@@ -405,13 +391,10 @@ final class TranscriptBubbleCellView: NSTableCellView {
         NSLayoutConstraint.activate([
             widthConstraint,
             heightConstraint,
-            signalSpine.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            signalSpine.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
-            signalSpine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -g.outerVertical),
-            signalSpine.widthAnchor.constraint(equalToConstant: 2),
-            header.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
-            backgroundBox.topAnchor.constraint(
-                equalTo: header.bottomAnchor, constant: g.headerBodyGap),
+            // With the attribution header gone the box hangs straight off the row
+            // top; `outerVertical` is the whole top chrome (and matches
+            // `rowHeight`'s `outerVertical * 2`).
+            backgroundBox.topAnchor.constraint(equalTo: topAnchor, constant: g.outerVertical),
             // The block stack fills the box minus the body insets. The box owns the
             // rounded-rect frame; the stack sits inside it with symmetric padding.
             blockStack.topAnchor.constraint(
@@ -434,7 +417,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
         blockHeights: [CGFloat],
         sourceText: String,
         role: TranscriptBubbleGeometry.Role,
-        header headerText: String,
+        accessibilityAttribution: String,
         bodyWidth: CGFloat,
         columnWidth: CGFloat,
         cachedHeight: CGFloat
@@ -448,15 +431,18 @@ final class TranscriptBubbleCellView: NSTableCellView {
         if abs(widthConstraint.constant - w) > 0.5 { widthConstraint.constant = w }
         if abs(heightConstraint.constant - h) > 0.5 { heightConstraint.constant = h }
 
-        header.stringValue = headerText
+        // The speaker is conveyed visually by position and tint, which VoiceOver
+        // cannot perceive — so the attribution the header used to show is spoken
+        // as the cell's label instead.
+        setAccessibilityLabel(accessibilityAttribution)
+        setAccessibilityRole(.group)
         backgroundBox.fillColor = g.backgroundColor(for: role)
-        signalSpine.isHidden = role == .user
 
         rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
 
         // Box width: user bubbles shrink-to-fit (right-anchored), assistant fills.
         // Per-role block-stack inset: user keeps the 11pt-per-side bubble padding,
-        // assistant sits flush at the box edge (0) so content aligns with the header.
+        // assistant sits flush at the box edge (0), aligning with the tool rows.
         let bodyInset = g.bodyHorizontal(for: role) / 2
         blockLeading.constant = bodyInset
         blockTrailing.constant = -bodyInset
@@ -507,6 +493,8 @@ final class TranscriptBubbleCellView: NSTableCellView {
                 view = makeProseView(string, bodyWidth: width)
             case .table(let data):
                 view = makeTableView(data, bodyWidth: width)
+            case .image(let attachment):
+                view = makeImageView(attachment, bodyWidth: width)
             }
             view.translatesAutoresizingMaskIntoConstraints = false
             blockStack.addArrangedSubview(view)
@@ -577,6 +565,18 @@ final class TranscriptBubbleCellView: NSTableCellView {
         }
     }
 
+    /// An attached-image block: a leading-aligned thumbnail at exactly the size
+    /// the measurer reserved, decoded off-main and revealed in Finder on click.
+    private func makeImageView(_ attachment: TranscriptImageAttachment, bodyWidth: CGFloat) -> NSView {
+        let metadata = TranscriptImageService.shared.metadata(forPath: attachment.path)
+        let view = TranscriptImageBlockView()
+        view.configure(
+            attachment: attachment,
+            metadata: metadata,
+            displaySize: TranscriptImageGeometry.displaySize(metadata: metadata, bodyWidth: bodyWidth))
+        return view
+    }
+
     /// A table block hosted in an `NSHostingView` over the native grid.
     private func makeTableView(_ data: TranscriptTableData, bodyWidth: CGFloat) -> NSView {
         let view = TranscriptTableView(
@@ -597,13 +597,16 @@ final class TranscriptBubbleCellView: NSTableCellView {
             case .table:
                 // A table always wants the full body width.
                 widest = bodyWidth
+            case .image(let attachment):
+                // A thumbnail wants exactly its laid-out width, so a bubble that
+                // is just an image hugs the picture instead of spanning the column.
+                widest = max(widest, MessageBlockMeasurer.imageSize(attachment, bodyWidth: bodyWidth).width)
             }
         }
         return widest
     }
 
-    /// Right-anchor the box, fixed to the measured content width, with the
-    /// header right-aligned to match.
+    /// Right-anchor the box, fixed to the measured content width.
     private func applyUserAnchor(width: CGFloat) {
         let g = TranscriptBubbleGeometry.self
         boxLeading.isActive = false
@@ -611,11 +614,6 @@ final class TranscriptBubbleCellView: NSTableCellView {
         boxTrailing.constant = -g.outerNear  // trailing 12
         boxWidth.isActive = true
         boxWidth.constant = width
-
-        headerLeading.isActive = false
-        headerTrailing.isActive = true
-        headerTrailing.constant = -(g.outerNear + g.headerInset)
-        header.alignment = .right
     }
 
     /// Left-anchor the box filling the assistant bubble width.
@@ -625,14 +623,9 @@ final class TranscriptBubbleCellView: NSTableCellView {
         boxWidth.isActive = true
         boxWidth.constant = bubbleWidth
         boxLeading.isActive = true
+        // Flush at `outerNear` (12) — the same x as the assistant body (zero body
+        // inset) and the 12pt tool-row inset — forming one vertical line.
         boxLeading.constant = g.outerNear  // leading 12
-
-        headerTrailing.isActive = false
-        headerLeading.isActive = true
-        // Header sits flush at `outerNear` (12) — the same x as the assistant body
-        // (zero body inset) and the 12pt tool-row inset — forming one vertical line.
-        headerLeading.constant = g.outerNear
-        header.alignment = .left
     }
 
     // MARK: - Copy message

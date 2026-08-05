@@ -54,6 +54,10 @@ final class ActivityRowCellView: NSTableCellView {
     private var widthConstraint: NSLayoutConstraint!
     private var heightConstraint: NSLayoutConstraint!
     private var iconLeading: NSLayoutConstraint!
+    /// Both zeroed for an icon-less presentation, so the title lands exactly on
+    /// the row's leading inset instead of hanging off an empty icon column.
+    private var iconWidth: NSLayoutConstraint!
+    private var titleLeading: NSLayoutConstraint!
 
     // MARK: State
 
@@ -123,6 +127,9 @@ final class ActivityRowCellView: NSTableCellView {
 
         let m = Metrics.self
         iconLeading = iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m.insetLeading)
+        iconWidth = iconView.widthAnchor.constraint(equalToConstant: m.iconWidth)
+        titleLeading = titleField.leadingAnchor.constraint(
+            equalTo: iconView.trailingAnchor, constant: m.hStackSpacing)
 
         NSLayoutConstraint.activate([
             widthConstraint,
@@ -135,9 +142,9 @@ final class ActivityRowCellView: NSTableCellView {
 
             iconLeading,
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: m.iconWidth),
+            iconWidth,
 
-            titleField.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: m.hStackSpacing),
+            titleLeading,
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             badgeStack.leadingAnchor.constraint(
@@ -181,7 +188,20 @@ final class ActivityRowCellView: NSTableCellView {
         if abs(widthConstraint.constant - w) > 0.5 { widthConstraint.constant = w }
         if abs(heightConstraint.constant - h) > 0.5 { heightConstraint.constant = h }
 
-        iconView.image = NSImage(systemSymbolName: presentation.iconSystemName, accessibilityDescription: nil)
+        if let icon = presentation.iconSystemName {
+            iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+            iconView.isHidden = false
+            iconWidth.constant = Metrics.iconWidth
+            titleLeading.constant = Metrics.hStackSpacing
+        } else {
+            // Collapse the icon column rather than leaving a hole: an empty
+            // 14pt gutter next to sibling rows that fill theirs reads as a
+            // failed image, so the title takes the leading inset itself.
+            iconView.image = nil
+            iconView.isHidden = true
+            iconWidth.constant = 0
+            titleLeading.constant = 0
+        }
 
         titleField.attributedStringValue = Self.attributedTitle(
             presentation.titleSegments, truncation: presentation.titleTruncation)
