@@ -246,12 +246,13 @@ struct ActivityRowFormatterTests {
         errorCount: Int = 0,
         pendingCount: Int = 0,
         requiresResponse: Bool = false,
-        itemCount: Int = 3
+        itemCount: Int = 3,
+        bucketCounts: [ActivityBucket: Int] = [.read: 1, .bash: 2]
     ) -> TranscriptRenderNode {
         let summary = ActivityGroupSummary(
             id: "g1#activity-group",
             itemCount: itemCount,
-            labels: ["Reads", "Commands"],
+            bucketCounts: bucketCounts,
             errorCount: errorCount,
             pendingCount: pendingCount,
             requiresResponse: requiresResponse,
@@ -266,10 +267,10 @@ struct ActivityRowFormatterTests {
         #expect(p.badges.isEmpty)
         #expect(!p.isError)
         // …and the accessibility label drops the status clause entirely.
-        #expect(p.accessibilityLabel == "Expand 3 actions")
+        #expect(p.accessibilityLabel == "Expand Read 1 file, ran 2 shell commands")
     }
 
-    @Test("Activity group failures, questions and pending work still badge")
+    @Test("Activity group failures and questions still badge; running work does not")
     func activityGroupAttentionBadges() throws {
         let failed = try #require(ActivityRowFormatter.presentation(for: groupNode(errorCount: 2)))
         #expect(failed.badges == [ActivityRowBadge(text: "2 failed", kind: .error)])
@@ -279,16 +280,19 @@ struct ActivityRowFormatterTests {
             ActivityRowFormatter.presentation(for: groupNode(requiresResponse: true)))
         #expect(asking.badges == [ActivityRowBadge(text: "needs response", kind: .error)])
 
+        // The old "active" capsule is gone: the phrase's tense carries it.
         let pending = try #require(ActivityRowFormatter.presentation(for: groupNode(pendingCount: 1)))
-        #expect(pending.badges == [ActivityRowBadge(text: "active", kind: .neutral)])
+        #expect(pending.badges.isEmpty)
         #expect(!pending.isError)
-        #expect(pending.accessibilityLabel == "Expand 3 actions, In progress")
+        #expect(titleText(pending) == "Reading 1 file, running 2 shell commands…")
+        #expect(pending.accessibilityLabel == "Expand Reading 1 file, running 2 shell commands…")
     }
 
-    @Test("Activity group title is always plural (one-item runs are never wrapped)")
-    func activityGroupTitleIsPlural() throws {
-        let p = try #require(ActivityRowFormatter.presentation(for: groupNode(itemCount: 2)))
-        #expect(titleText(p).contains("· 2 actions"))
+    @Test("Activity group title is the whole phrase, in one primary run")
+    func activityGroupTitleIsThePhrase() throws {
+        let p = try #require(ActivityRowFormatter.presentation(
+            for: groupNode(itemCount: 2, bucketCounts: [.bash: 2])))
+        #expect(p.titleSegments == [ActivityRowSegment(text: "Ran 2 shell commands", style: .primary)])
     }
 
     @Test("Skill body → 'Skill' + skill-name segments")

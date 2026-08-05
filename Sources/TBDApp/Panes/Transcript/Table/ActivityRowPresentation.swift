@@ -136,29 +136,21 @@ enum ActivityRowFormatter {
     }
 
     private static func activityGroup(_ summary: ActivityGroupSummary) -> ActivityRowPresentation {
-        // A summary node is only emitted for runs of two or more (a lone
-        // activity renders as its own row), so the count is always plural.
-        var segments = [
-            ActivityRowSegment(text: "Worked", style: .primary),
-            ActivityRowSegment(text: "· \(summary.itemCount) actions", style: .secondary)
-        ]
-        if !summary.labels.isEmpty {
-            segments.append(ActivityRowSegment(
-                text: "· \(summary.labels.joined(separator: " · "))",
-                style: .tertiary
-            ))
-        }
-        // No badge when everything in the group succeeded — `statusLabel` is nil
-        // exactly then, and a "complete" capsule was redundant chrome.
+        // The whole title is one sentence built by `ActivityGroupSummary`, so
+        // this renderer and `ActivityGroupSummaryRow` cannot phrase it
+        // differently. One `.primary` run: `ActivityRowSegment.Style` has no
+        // bold, so the numerals Claude Code emboldens stay plain here rather
+        // than growing a styling mechanism for one row kind.
+        let segments = [ActivityRowSegment(text: summary.activityPhrase, style: .primary)]
+        // Attention badges only. Successful groups say nothing (a "complete"
+        // capsule was redundant chrome) and running groups say it in the title's
+        // tense — "Running 2 shell commands…" — so no "active" capsule either.
         var badges: [ActivityRowBadge] = []
         if let status = summary.statusLabel {
-            if summary.requiresResponse {
-                badges.append(ActivityRowBadge(text: "needs response", kind: .error))
-            } else if summary.errorCount > 0 {
-                badges.append(ActivityRowBadge(text: status.lowercased(), kind: .error))
-            } else {
-                badges.append(ActivityRowBadge(text: "active", kind: .neutral))
-            }
+            badges.append(ActivityRowBadge(
+                text: summary.requiresResponse ? "needs response" : status.lowercased(),
+                kind: .error
+            ))
         }
         return ActivityRowPresentation(
             // No icon: the group summary already announces itself with the
@@ -173,7 +165,7 @@ enum ActivityRowFormatter {
             accessorySystemName: summary.isExpanded ? "chevron.down" : "chevron.right",
             accessoryAlwaysVisible: true,
             accessibilityLabel: "\(summary.isExpanded ? "Collapse" : "Expand") "
-                + "\(summary.itemCount) actions"
+                + summary.activityPhrase
                 + (summary.statusLabel.map { ", \($0)" } ?? "")
         )
     }

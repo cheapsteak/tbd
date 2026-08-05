@@ -77,8 +77,11 @@ Reference light colors map to dynamic AppKit semantic colors in production:
 - **Fault:** the system error color.
 
 SF Pro Text carries prose. SF Pro Rounded appears only in small group labels and counts. SF Mono
-carries paths, commands, and other machine identifiers. The signature element is a quiet vertical
-**signal spine**. It encodes the alternation between narrative and work; it is not decorative.
+carries paths, commands, and other machine identifiers. The alternation between narrative and work
+is carried by the rhythm of the rows themselves — filled accent bubbles for prompts, unfilled prose
+for narrative, a single summary line for each run of work. Assistant prose takes no leading rule or
+border: a vertical bar down every message reads as a blockquote and turns the whole transcript into
+quoted matter.
 
 ### 5.2 Wide layout
 
@@ -90,7 +93,7 @@ At widths of 980 points or more, the session index occupies a 248-point trailing
 │  │                                        │  report.md          2× │
 │  ● Assistant narrative, full-width,       │ SOURCES                │
 │  │ unfilled, readable measure             │  TranscriptItem.swift  │
-│  ◇ Worked · 6 actions · all passed  [>]   │ WEB                    │
+│  Edited 2 files, ran 4 shell commands [>] │ WEB                    │
 │  │                                        │  SwiftUI documentation │
 │  ● Assistant narrative                    │ DELEGATES              │
 │                                           │  Design review       1 │
@@ -104,14 +107,14 @@ transcript and consistent with TBD's pane system.
 
 Below 980 points, the rail becomes a trailing inspector button with the number of indexed
 references. The button opens a popover that contains the same sections and actions. Below 680
-points, prompts and assistant prose both use 12-point horizontal insets; role, color, and the
-signal spine preserve their distinction.
+points, prompts and assistant prose both use 12-point horizontal insets; role and color preserve
+their distinction.
 
 ```text
 ┌ Transcript                                  [index 7] ┐
 │ You [prompt]                                          │
 │ ● Assistant narrative                                │
-│ ◇ Worked · 6 actions · all passed [>]                │
+│ Edited 2 files, ran 4 shell commands [>]              │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -120,13 +123,17 @@ signal spine preserve their distinction.
 ### 6.1 Narrative
 
 User prompts remain compact accent bubbles. Assistant prose becomes an unfilled, left-aligned
-reading block with a restrained line length and a marker on the signal spine. Markdown and code
-rendering retain their existing behavior.
+reading block with a restrained line length and no leading rule. Markdown and code rendering
+retain their existing behavior.
 
 ### 6.2 Work groups
 
-Consecutive non-narrative items between narrative items form one work group. Groups start
-collapsed. Their summaries show the number of actions, execution state, and representative verbs.
+Consecutive non-narrative items between narrative items form one work group. A run of two or more
+collapses; a lone item renders as its own row, since there is nothing to summarize. Groups start
+collapsed. A summary reads as one sentence naming what was done — a clause per kind of work, joined
+by commas, capitalized once: `Edited 2 files, ran 4 shell commands`. Verb tense carries execution
+state, present participle while the work runs and past tense once it finishes, so a running group
+needs no separate status badge.
 Expanding a group reveals the existing compact activity rows. Clicking a child row continues to
 open the existing item overlay.
 

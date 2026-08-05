@@ -133,23 +133,18 @@ struct ActivityGroupSummaryRow: View {
             toggleGroup?(summary.id, !summary.isExpanded)
         } label: {
             // No leading icon: the persistent disclosure chevron already marks
-            // this as a group, so "Worked" starts at the row's leading padding
+            // this as a group, so the phrase starts at the row's leading padding
             // (matching the native cell, which collapses its icon column).
             HStack(spacing: 7) {
-                Text("Worked")
+                // The single shared phrase — the native cell renders this exact
+                // string, so the two renderers cannot drift.
+                Text(summary.activityPhrase)
                     .font(.system(.subheadline, design: .rounded, weight: .medium))
-                // Always plural: a lone activity renders as its own row, so no
-                // one-item summary node ever reaches a renderer.
-                Text("· \(summary.itemCount) actions")
-                    .foregroundStyle(.secondary)
-                if !summary.labels.isEmpty {
-                    Text("· \(summary.labels.joined(separator: " · "))")
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
+                    .lineLimit(1)
                 Spacer(minLength: 8)
-                // Nil — and so nothing rendered — when every item succeeded,
-                // matching the native cell's badge logic.
+                // Nil — and so nothing rendered — unless the group failed or is
+                // waiting on the user; a running group says so in the phrase's
+                // tense. Matches the native cell's badge logic.
                 if let status = summary.statusLabel {
                     Text(status)
                         .font(.caption2)
@@ -166,7 +161,7 @@ struct ActivityGroupSummaryRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(summary.isExpanded ? "Collapse" : "Expand") \(summary.itemCount) actions"
+            "\(summary.isExpanded ? "Collapse" : "Expand") \(summary.activityPhrase)"
                 + (summary.statusLabel.map { ", \($0)" } ?? "")
         )
     }
