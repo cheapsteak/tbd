@@ -165,11 +165,16 @@ public actor ActuationLog {
     /// act is impossible, so a second failure is `.fault`-logged and swallowed.
     /// The record then shows a request with no outcome, which reads as
     /// unconfirmed — honest by construction.
-    func appendOutcome(confirms: String, result: ActuationResult, error: String? = nil) {
+    ///
+    /// `result` and `reason` both come off the one `ActuationOutcome`, so a row
+    /// carries a reason exactly when it says `refused` — the caller cannot
+    /// forget one or attach the other.
+    func appendOutcome(confirms: String, result: ActuationOutcome, error: String? = nil) {
         var row = ActuationRow(actor: .daemon(), kind: .outcome)
         row.id = Self.mintID()
         row.confirms = confirms
-        row.result = result
+        row.result = result.result
+        row.reason = result.reason
         row.error = error
         try? appendWithOneRetry(row, failClosed: false)
     }

@@ -14,8 +14,8 @@ extension RPCRouter {
             target: await resolvedTerminalTarget(params.terminalID))
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
         await finishActuation(
-            actuationID, ActuationResult.classify(result),
-            error: ActuationResult.detail(result))
+            actuationID, ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         switch result {
         case .ok:
             // Hibernating cancels any pending auto-resume inside the
@@ -48,8 +48,8 @@ extension RPCRouter {
             initialPrompt: params.prompt
         )
         await finishActuation(
-            actuationID, ActuationResult.classify(result),
-            error: ActuationResult.detail(result))
+            actuationID, ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         switch result {
         case .ok:
             return try RPCResponse(result: TerminalWakeResult(woken: true))

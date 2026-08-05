@@ -1143,6 +1143,8 @@ struct HibernationCoordinatorTests {
         #expect(outcome["kind"] as? String == "outcome")
         #expect(outcome["confirms"] as? String == request["id"] as? String)
         #expect(outcome["result"] as? String == "dispatched")
+        // The rail acted; there is no refusal, so there is no reason.
+        #expect(outcome["reason"] == nil)
     }
 
     /// Fail-closed on a daemon-internal rail: an unrecordable park does not

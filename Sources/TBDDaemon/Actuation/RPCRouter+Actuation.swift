@@ -68,20 +68,24 @@ extension RPCRouter {
     /// the act already ran, so a lost outcome row leaves the request
     /// unconfirmed rather than retroactively refused.
     func finishActuation(
-        _ id: String, _ result: ActuationResult, error: String? = nil
+        _ id: String, _ result: ActuationOutcome, error: String? = nil
     ) async {
         await actuationLog.appendOutcome(confirms: id, result: result, error: error)
     }
 
     /// Convenience for handlers whose only post-row failure mode is the daemon
     /// declining before it touches the transport. A successful response is
-    /// `dispatched`; anything else is `refused`. Handlers that CAN fail inside
-    /// the transport classify explicitly instead.
-    func finishActuation(_ id: String, response: RPCResponse) async {
+    /// `dispatched`; anything else is a refusal for the reason the caller names
+    /// here — the handler knows what its own failure response means, and the
+    /// record must not have to read it back out of the error text. Handlers
+    /// that CAN fail inside the transport classify explicitly instead.
+    func finishActuation(
+        _ id: String, response: RPCResponse, refusedAs reason: RefusedReason
+    ) async {
         if response.success {
             await finishActuation(id, .dispatched)
         } else {
-            await finishActuation(id, .refused, error: response.error)
+            await finishActuation(id, .refused(reason), error: response.error)
         }
     }
 }

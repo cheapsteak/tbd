@@ -105,6 +105,8 @@ struct ActuationLogWiringTests {
         #expect(outcome["kind"] as? String == "outcome")
         #expect(outcome["confirms"] as? String == request["id"] as? String)
         #expect(outcome["result"] as? String == "dispatched")
+        // Only a refusal has a reason to name.
+        #expect(outcome["reason"] == nil)
     }
 
     @Test("a request declaring no identity is recorded as anonymous, explicitly")
@@ -202,6 +204,9 @@ struct ActuationLogWiringTests {
         #expect(written.first?["method"] as? String == "terminal.create")
         let outcome = try #require(written.last)
         #expect(outcome["result"] as? String == "refused")
+        // A decline, not an idempotent no-op — and the record says which
+        // without anyone having to read the detail string.
+        #expect(outcome["reason"] as? String == "not-eligible")
         #expect(outcome["error"] as? String == response.error)
         // Refused means refused: no terminal row came out of it.
         #expect(try await fixture.db.terminals.list(worktreeID: worktree.id).isEmpty)
@@ -258,6 +263,7 @@ struct ActuationLogWiringTests {
         #expect(written.first?["kind"] as? String == "hibernate")
         #expect(written.first?["method"] as? String == "terminal.hibernate")
         #expect(written.last?["result"] as? String == "refused")
+        #expect(written.last?["reason"] as? String == "not-eligible")
         #expect(written.last?["error"] as? String != nil)
     }
 
@@ -293,8 +299,11 @@ struct ActuationLogWiringTests {
         #expect(request["kind"] as? String == "wake")
         #expect(request["method"] as? String == "terminal.wake")
         #expect(request["prompt"] as? String == "carry on")
-        // Nothing was parked, so the daemon declined without touching tmux.
+        // Nothing was parked, so the daemon declined without touching tmux —
+        // and waking something that was never parked is the idempotent no-op,
+        // not a decline the operator's controls made.
         #expect(written.last?["result"] as? String == "refused")
+        #expect(written.last?["reason"] as? String == "noop")
     }
 
     @Test("worktree.resume fans out one row per parked terminal")

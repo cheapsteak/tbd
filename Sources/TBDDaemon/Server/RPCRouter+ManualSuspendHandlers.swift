@@ -33,8 +33,8 @@ extension RPCRouter {
         }
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
         await finishActuation(
-            actuationID, ActuationResult.classify(result),
-            error: ActuationResult.detail(result))
+            actuationID, ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         switch result {
         case .ok, .alreadyHibernated:
             return .ok()
@@ -54,8 +54,8 @@ extension RPCRouter {
             target: await resolvedTerminalTarget(params.terminalID))
         let result = await hibernationCoordinator.wake(terminalID: params.terminalID)
         await finishActuation(
-            actuationID, ActuationResult.classify(result),
-            error: ActuationResult.detail(result))
+            actuationID, ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         switch result {
         case .ok, .notHibernated, .inFlight:
             // notHibernated / inFlight are benign no-ops for an idempotent wake.
@@ -114,8 +114,8 @@ extension RPCRouter {
                 let result = await hibernationCoordinator.manualHibernate(terminalID: terminal.id)
                 await actuationLog.appendOutcome(
                     confirms: actuationID,
-                    result: ActuationResult.classify(result),
-                    error: ActuationResult.detail(result))
+                    result: ActuationOutcome.classify(result),
+                    error: ActuationOutcome.detail(result))
             }
         }
 
@@ -145,8 +145,8 @@ extension RPCRouter {
                 target: .local(worktree: params.worktreeID, terminal: terminal.id))
             let result = await hibernationCoordinator.wake(terminalID: terminal.id)
             await finishActuation(
-                actuationID, ActuationResult.classify(result),
-                error: ActuationResult.detail(result))
+                actuationID, ActuationOutcome.classify(result),
+                error: ActuationOutcome.detail(result))
         }
 
         return .ok()

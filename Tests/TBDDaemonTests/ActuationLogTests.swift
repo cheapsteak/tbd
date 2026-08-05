@@ -138,11 +138,78 @@ struct ActuationLogTests {
         let path = directory.appendingPathComponent("actuations.jsonl").path
         let log = ActuationLog(path: path)
         let requestID = try await log.appendRequest(sendRow())
-        for result in [ActuationResult.dispatched, .refused, .transportFailed] {
+        for result in [ActuationOutcome.dispatched, .refused(.noop), .transportFailed] {
             await log.appendOutcome(confirms: requestID, result: result)
         }
         let results = try rows(at: path).compactMap { $0["result"] as? String }
         #expect(Set(results) == ["dispatched", "refused", "transport-failed"])
+    }
+
+    // MARK: - Why a refusal refused
+
+    @Test("a refused outcome names a closed reason beside the human-facing detail")
+    func refusedOutcomeCarriesItsReason() async throws {
+        let directory = try Self.makeDirectory()
+        let path = directory.appendingPathComponent("actuations.jsonl").path
+        let log = ActuationLog(path: path)
+
+        let requestID = try await log.appendRequest(sendRow())
+        await log.appendOutcome(
+            confirms: requestID, result: .refused(.notEligible), error: "Not hibernatable")
+
+        let outcome = try #require(try rows(at: path).last)
+        // Whitelist: exactly the keys a refused outcome is allowed to carry.
+        #expect(Set(outcome.keys)
+            == ["actor", "confirms", "error", "id", "kind", "reason", "result", "ts"])
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
+        // The detail stays exactly as the daemon phrased it for a human.
+        #expect(outcome["error"] as? String == "Not hibernatable")
+    }
+
+    @Test("only refusals carry a reason — a dispatch and a transport failure carry none")
+    func onlyRefusalsCarryAReason() async throws {
+        let directory = try Self.makeDirectory()
+        let path = directory.appendingPathComponent("actuations.jsonl").path
+        let log = ActuationLog(path: path)
+
+        let requestID = try await log.appendRequest(sendRow())
+        await log.appendOutcome(confirms: requestID, result: .dispatched)
+        await log.appendOutcome(confirms: requestID, result: .transportFailed, error: "tmux exited 1")
+        await log.appendOutcome(confirms: requestID, result: .refused(.inFlight))
+
+        let outcomes = try rows(at: path).filter { $0["kind"] as? String == "outcome" }
+        #expect(outcomes.count == 3)
+        let reasoned = outcomes.filter { $0["reason"] != nil }
+        #expect(reasoned.count == 1)
+        #expect(reasoned.first?["result"] as? String == "refused")
+        #expect(reasoned.first?["reason"] as? String == "in-flight")
+    }
+
+    @Test("the refusal vocabulary is closed, and every name is query-shaped")
+    func refusedReasonVocabulary() {
+        #expect(Set(RefusedReason.allCases.map(\.rawValue))
+            == ["noop", "not-found", "not-eligible", "in-flight"])
+    }
+
+    @Test("park and wake results classify onto the vocabulary, no-ops apart from declines")
+    func parkAndWakeClassification() {
+        #expect(ActuationOutcome.classify(HibernateResult.ok) == .dispatched)
+        #expect(ActuationOutcome.classify(HibernateResult.alreadyHibernated) == .refused(.noop))
+        #expect(ActuationOutcome.classify(HibernateResult.notEligible(reason: "running"))
+            == .refused(.notEligible))
+        #expect(ActuationOutcome.classify(HibernateResult.notFound) == .refused(.notFound))
+
+        #expect(ActuationOutcome.classify(WakeResult.ok) == .dispatched)
+        #expect(ActuationOutcome.classify(WakeResult.respawnFailed(reason: "tmux")) == .transportFailed)
+        #expect(ActuationOutcome.classify(WakeResult.notHibernated) == .refused(.noop))
+        #expect(ActuationOutcome.classify(WakeResult.inFlight) == .refused(.inFlight))
+        #expect(ActuationOutcome.classify(WakeResult.notFound) == .refused(.notFound))
+        #expect(ActuationOutcome.classify(WakeResult.worktreeMissing(path: "/tmp/acme"))
+            == .refused(.notFound))
+        #expect(ActuationOutcome.classify(WakeResult.noSessionID) == .refused(.notEligible))
+        #expect(ActuationOutcome.classify(WakeResult.profileMissing(profileID: UUID()))
+            == .refused(.notEligible))
     }
 
     // MARK: - Rotation

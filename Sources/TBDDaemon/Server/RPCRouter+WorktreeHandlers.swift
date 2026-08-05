@@ -56,7 +56,7 @@ extension RPCRouter {
             // inserted by beginCreateWorktree so it can't be orphaned forever.
             try? await db.worktrees.delete(id: pending.id)
             await finishActuation(
-                actuationID, .refused, error: "Repo not found: \(params.repoID)")
+                actuationID, .refused(.notFound), error: "Repo not found: \(params.repoID)")
             throw WorktreeLifecycleError.repoNotFound(params.repoID)
         }
 

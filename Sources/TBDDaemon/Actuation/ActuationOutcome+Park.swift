@@ -5,15 +5,19 @@ import Foundation
 /// modern RPCs, their two legacy shims, the two worktree fan-outs and the idle
 /// sweep — reads them the same way.
 ///
-/// `refused` covers the idempotent no-ops (already parked, not parked, a wake
-/// already in flight) as well as the outright declines. The RPC contract keeps
-/// returning success for those, but the record must not claim an act happened
-/// when the daemon never touched the transport.
-extension ActuationResult {
-    static func classify(_ result: HibernateResult) -> ActuationResult {
+/// `refused` covers the idempotent no-ops (already parked, not parked) as well
+/// as the outright declines, so each one names its `RefusedReason`: a reader
+/// asking which acts the daemon's controls stopped must not have to tell those
+/// apart by their detail strings. The RPC contract keeps returning success for
+/// the no-ops, but the record must not claim an act happened when the daemon
+/// never touched the transport.
+extension ActuationOutcome {
+    static func classify(_ result: HibernateResult) -> ActuationOutcome {
         switch result {
         case .ok: return .dispatched
-        case .alreadyHibernated, .notEligible, .notFound: return .refused
+        case .alreadyHibernated: return .refused(.noop)
+        case .notEligible: return .refused(.notEligible)
+        case .notFound: return .refused(.notFound)
         }
     }
 
@@ -26,15 +30,21 @@ extension ActuationResult {
         }
     }
 
-    static func classify(_ result: WakeResult) -> ActuationResult {
+    static func classify(_ result: WakeResult) -> ActuationOutcome {
         switch result {
         case .ok: return .dispatched
         // The respawn reached tmux and tmux failed — the one wake path that is
         // a transport failure rather than a decline.
         case .respawnFailed: return .transportFailed
-        case .notHibernated, .inFlight, .notFound, .noSessionID,
-             .worktreeMissing, .profileMissing:
-            return .refused
+        // Waking something that was never parked is the wake's idempotent
+        // no-op, not a decline.
+        case .notHibernated: return .refused(.noop)
+        case .inFlight: return .refused(.inFlight)
+        // The terminal row is gone, or the directory its worktree named is.
+        case .notFound, .worktreeMissing: return .refused(.notFound)
+        // The row is there but cannot be woken as asked: nothing to resume, or
+        // the profile it was pinned to no longer exists.
+        case .noSessionID, .profileMissing: return .refused(.notEligible)
         }
     }
 

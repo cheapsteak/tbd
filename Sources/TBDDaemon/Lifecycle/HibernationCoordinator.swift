@@ -287,8 +287,8 @@ public actor HibernationCoordinator {
         let result = await performHibernate(terminal: terminal, reason: .merged)
         await actuationLog.appendOutcome(
             confirms: actuationID,
-            result: ActuationResult.classify(result),
-            error: ActuationResult.detail(result))
+            result: ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         return result
     }
 
@@ -878,8 +878,8 @@ public actor HibernationCoordinator {
                         let result = await performHibernate(terminal: terminal, reason: .auto)
                         await actuationLog.appendOutcome(
                             confirms: actuationID,
-                            result: ActuationResult.classify(result),
-                            error: ActuationResult.detail(result))
+                            result: ActuationOutcome.classify(result),
+                            error: ActuationOutcome.detail(result))
                     }
                 } else {
                     pendingKillSince[terminal.id] = reference

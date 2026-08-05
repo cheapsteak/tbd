@@ -181,7 +181,7 @@ extension RPCRouter {
         if params.type == .codex {
             guard let codexPreparation else {
                 await finishActuation(
-                    actuationID, .refused,
+                    actuationID, .refused(.notEligible),
                     error: "Codex launch preparation unexpectedly returned no result.")
                 return RPCResponse(
                     error: "Codex launch preparation unexpectedly returned no result.")
@@ -278,17 +278,17 @@ extension RPCRouter {
         if isLoginSession {
             guard isClaudeType else {
                 let message = "Login sessions must be Claude terminals (type: claude)"
-                await finishActuation(actuationID, .refused, error: message)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
             guard params.overrideProfileID != nil else {
                 let message = "Login sessions require a profile (overrideProfileID)"
-                await finishActuation(actuationID, .refused, error: message)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
             guard resolvedProfile != nil else {
                 let message = "Profile not found or unreadable — cannot open a login session for it"
-                await finishActuation(actuationID, .refused, error: message)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
         }
@@ -547,7 +547,7 @@ extension RPCRouter {
                 let message = "Terminal \(params.terminalID) is \(what) "
                     + "(activityState=\(terminal.activityState.rawValue)). "
                     + "Closing now would kill in-flight work. Pass --force to close anyway."
-                await finishActuation(actuationID, .refused, error: message)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(
                     error: message,
                     code: RPCErrorCode.terminalBusy.rawValue
@@ -953,7 +953,7 @@ extension RPCRouter {
             // Recreate as codex — preserve identity
             guard let codexPreparation else {
                 let message = "Codex launch preparation was unavailable"
-                await finishActuation(actuationID, .refused, error: message)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
             var codexEnv: [String: String] = [:]
@@ -1008,7 +1008,8 @@ extension RPCRouter {
 
             // Return updated terminal
             guard let updated = updatedTerminal else {
-                await finishActuation(actuationID, .refused, error: "Terminal not found after update")
+                await finishActuation(
+                    actuationID, .refused(.notFound), error: "Terminal not found after update")
                 return RPCResponse(error: "Terminal not found after update")
             }
 
@@ -1048,7 +1049,8 @@ extension RPCRouter {
 
             // Return updated terminal
             guard let updated = updatedTerminal else {
-                await finishActuation(actuationID, .refused, error: "Terminal not found after update")
+                await finishActuation(
+                    actuationID, .refused(.notFound), error: "Terminal not found after update")
                 return RPCResponse(error: "Terminal not found after update")
             }
 
@@ -1615,7 +1617,9 @@ extension RPCRouter {
         if let respawnFailure {
             await finishActuation(actuationID, .transportFailed, error: respawnFailure)
         } else {
-            await finishActuation(actuationID, response: response)
+            // The only unsuccessful response either swap branch returns is
+            // "Terminal vanished after swap" — the row it respawned is gone.
+            await finishActuation(actuationID, response: response, refusedAs: .notFound)
         }
         return response
     }
