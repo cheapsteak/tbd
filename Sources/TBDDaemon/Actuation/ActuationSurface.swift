@@ -42,6 +42,11 @@ import TBDShared
 // The wired set lives here, in one file next to the writer, so a reviewer can
 // see it at a glance: `method` names the door a request came through and
 // `kind` names the act, and both are spelled once, per surface.
+//
+// The mechanical guard is the SwiftLint custom rule `actuation_primitive_allowlist`
+// in `.swiftlint.yml`: calling a tmux/park primitive from a daemon file outside
+// the audited set fails the build, so a new actuation surface has to be wired
+// here before it can be written.
 
 /// The public RPC surfaces that actuate a session, and what each one is.
 ///

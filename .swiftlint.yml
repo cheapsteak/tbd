@@ -254,3 +254,62 @@ custom_rules:
       - string
     message: "capture-pane text may only be passed through verbatim (display/transport/snapshot) from allowlisted files — never parsed for agent state. See CLAUDE.md 'No TUI screen-scraping'."
     severity: error
+
+  actuation_primitive_allowlist:
+    name: "Actuation primitive called outside the audited set"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    # Only the daemon actuates sessions; the app and the CLI reach it by RPC.
+    included:
+      - "Sources/TBDDaemon/.*\\.swift"
+    excluded:
+      # THE ALLOWLIST: every file the actuation-log audit traced to a covering
+      # row. It exists because the wired set was found incomplete nine times
+      # across five review passes — each miss was a new call site nobody thought
+      # to check. Adding a file here means asserting that its acts are already
+      # recorded, and draws the same review scrutiny as capture_pane_allowlist.
+      #
+      # Granularity, stated plainly: this is FILE-level, like the rule above. A
+      # new call inside an already-allowlisted file is not caught — a reviewer
+      # still has to read those files. What it does catch is the shape the
+      # misses actually took: a primitive called from a file that had never
+      # actuated before.
+      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                          # defines the primitives; the implementation, not a caller
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers; each writes its own row before acting
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.create/delete/archive; one scratch-named row per call
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInCodexHandlers\\.swift" # terminal.continueInCodex; spawn row + rollback kill
+      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"          # park/wake engine: RPC rows plus the auto-hibernate rail's entry point
+      # The shared lifecycle internals and phases. They stay deliberately
+      # silent — `worktree.archive` and the reconcile sweep both reach them, and
+      # a row down here would double-count every teardown — so their acts are
+      # covered by the handler or rail row written one layer up.
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"               # killWindowAndReap / captureThenKillWindow themselves
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Archive\\.swift"     # archive teardown; covered by worktree.archive / auto-archive-on-merge
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Forget\\.swift"      # forget teardown; covered by worktree.forget
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Create\\.swift"      # primary-terminal spawn; covered by worktree.create / scratch.create / revive
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal spawn and close; covered by worktree.rerunPreSession / create
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
+      - "Sources/TBDDaemon/Nightwatch/DeskSessionManager\\.swift"             # the nightwatch-desk rail: its pastes, spawn and close
+      - "Sources/TBDDaemon/Claude/LimitResumeActuator\\.swift"                # the limit-resume rail: Escape / continue / Enter
+    # Call sites only, which decides both odd-looking pieces of this regex:
+    #
+    #   - `(?<!func )` skips DECLARATIONS. TmuxManager's `public func
+    #     killWindow`, TerminalStore's `setHibernated`, and the protocol
+    #     witnesses LimitResumeActuator declares are the primitives being
+    #     defined, not acts being performed — and skipping them keeps
+    #     TerminalStore.swift (a DB layer that must never actuate) fully
+    #     covered instead of allowlisted for a declaration.
+    #   - `sendCommand` requires a `server:` label ahead of it, via a zero-width
+    #     lookahead so the label stays outside the matched range. Control mode's
+    #     `TmuxControlConnection.sendCommand(_ command: String)` is an unrelated
+    #     method that happens to share the name: it writes a line to the tmux
+    #     control socket. Matching on the label distinguishes the two by shape
+    #     rather than allowlisting the control-mode plumbing, which would blind
+    #     the rule to a real actuation added there later.
+    regex: '(?<!func )\b(?:killWindowAndReap|captureThenKillWindow|killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\(|(?<!func )\bsendCommand\s*\((?=\s*server:)'
+    # Code only. Several doc comments name these primitives while explaining the
+    # boundary (`ClaudeSpawnCommandBuilder` points at `createWindow(sensitiveEnv:)`),
+    # and firing on the prose that documents the rule is how a rule gets disabled.
+    match_kinds:
+      - identifier
+    message: "Acts that touch a session's process, pty or lifecycle must be recorded by exactly one actuation row — written by the RPC handler the request came through, or by the entry point of the rail that started it — so calling one of these primitives from a file outside the audited set means the act would go unrecorded. Read Sources/TBDDaemon/Actuation/ActuationSurface.swift for the boundary rule and the wiring pattern, wire the row, then add the file to this allowlist in the same commit."
+    severity: error
