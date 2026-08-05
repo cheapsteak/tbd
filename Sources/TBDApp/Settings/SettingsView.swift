@@ -54,6 +54,10 @@ struct GeneralSettingsTab: View {
     @State private var hibernateIdleAmountText: String = ""
     @State private var hibernateIdleDuration = HibernateIdleDuration(totalMinutes: Config.defaultHibernateIdleMinutes)
     @FocusState private var hibernateIdleFieldFocused: Bool
+    /// Bumped on every `applyHibernateIdleDuration` call so a commit's
+    /// post-await re-sync can detect a newer commit landed while it was in
+    /// flight and skip applying its now-stale response.
+    @State private var hibernateIdleCommitGeneration = 0
 
     private var systemSounds: [String] { NotificationSoundPlayer.systemSoundNames() }
     private let soundPlayer = NotificationSoundPlayer()
@@ -372,23 +376,32 @@ struct GeneralSettingsTab: View {
     }
 
     /// Re-sync the field from the daemon's current value. Called on appear,
-    /// after this view's own commit RPC settles (`applyHibernateIdleDuration`
-    /// — success or failure), and whenever `appState.hibernateIdleMinutes`
-    /// changes externally (a config delta from another window/session) — but
-    /// never while the field is focused, so it can't stomp on an in-progress
-    /// edit.
+    /// whenever `appState.hibernateIdleMinutes` changes externally (a config
+    /// delta from another window/session), and — with `force: true` — after
+    /// this view's own commit RPC settles (`applyHibernateIdleDuration` —
+    /// success or failure).
     ///
-    /// Returns early when the local duration's total already agrees with
-    /// `appState.hibernateIdleMinutes`: there is nothing to sync, and
-    /// re-deriving amount+unit from the total would undo the user's
-    /// deliberately chosen unit even though nothing actually changed —
-    /// typing "120" with unit Minutes and clicking away would otherwise
+    /// The focus guard exists only to stop an *external* delta from stomping
+    /// an in-progress edit; it is skipped when `force` is true. That
+    /// distinction matters because `.onSubmit` does not resign first
+    /// responder on macOS: pressing Return leaves the field focused while
+    /// its own commit RPC is in flight, so a non-forced sync would silently
+    /// swallow the revert-on-failure this view relies on, leaving an
+    /// unpersisted value on screen until the user happens to click away.
+    /// This view reconciling its own settled write is not an external
+    /// delta, so it always applies regardless of focus.
+    ///
+    /// Returns early — force or not — when the local duration's total
+    /// already agrees with `appState.hibernateIdleMinutes`: there is nothing
+    /// to sync, and re-deriving amount+unit from the total would undo the
+    /// user's deliberately chosen unit even though nothing actually changed
+    /// — typing "120" with unit Minutes and clicking away would otherwise
     /// silently renormalize to "2 Hours" the moment the commit round-trips
     /// and this fires from `.onChange(of: appState.hibernateIdleMinutes)`.
     /// Only a genuine external delta — a different total — re-derives the
     /// unit.
-    private func syncHibernateIdleFromAppState() {
-        guard !hibernateIdleFieldFocused else { return }
+    private func syncHibernateIdleFromAppState(force: Bool = false) {
+        guard force || !hibernateIdleFieldFocused else { return }
         guard hibernateIdleDuration.totalMinutes != appState.hibernateIdleMinutes else { return }
         hibernateIdleDuration = HibernateIdleDuration(totalMinutes: appState.hibernateIdleMinutes)
         hibernateIdleAmountText = String(hibernateIdleDuration.amount)
@@ -405,18 +418,31 @@ struct GeneralSettingsTab: View {
     /// Commit a validated duration: update local state immediately (so the
     /// field/picker reflect it without waiting on the RPC round-trip),
     /// persist via the same `setAutoHibernate` path the master-switch toggle
-    /// uses, and then re-sync from `appState` once the RPC settles. On
-    /// success this is a no-op (the persisted total now matches, so
-    /// `syncHibernateIdleFromAppState` returns early and the chosen unit
-    /// survives); on failure `appState.hibernateIdleMinutes` never moved, so
-    /// the re-sync reverts the field to what is actually persisted instead
-    /// of stranding an unsaved value that silently looks committed.
+    /// uses, and then force a re-sync from `appState` once the RPC settles —
+    /// `force: true` because this is the view reconciling its own settled
+    /// write, not an external delta, so the focus guard in
+    /// `syncHibernateIdleFromAppState` must not apply here (see that
+    /// method's doc comment). On success the force-sync is still a no-op
+    /// (the persisted total now matches, so the totals-agree early return
+    /// fires and the chosen unit survives); on failure
+    /// `appState.hibernateIdleMinutes` never moved, so the re-sync reverts
+    /// the field to what is actually persisted instead of stranding an
+    /// unsaved value that silently looks committed.
+    ///
+    /// The amount commit and the unit-picker commit can each land in this
+    /// method while the other's RPC is still in flight. `hibernateIdleCommitGeneration`
+    /// tags each call so a response that settles after a newer commit was
+    /// already issued skips its re-sync instead of clobbering the newer
+    /// commit's local state with a stale round-trip.
     private func applyHibernateIdleDuration(_ duration: HibernateIdleDuration) {
         hibernateIdleDuration = duration
         hibernateIdleAmountText = String(duration.amount)
+        hibernateIdleCommitGeneration += 1
+        let generation = hibernateIdleCommitGeneration
         Task {
             await appState.setAutoHibernate(enabled: appState.autoHibernateEnabled, idleMinutes: duration.totalMinutes)
-            syncHibernateIdleFromAppState()
+            guard generation == hibernateIdleCommitGeneration else { return }
+            syncHibernateIdleFromAppState(force: true)
         }
     }
 
