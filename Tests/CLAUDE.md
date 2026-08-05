@@ -422,10 +422,12 @@ that queue runs — including the deferred work the body is trying to observe.
 
 **Never spin a nested run loop to wait for something.** A nested
 `RunLoop.current.run(until:)` cannot re-enter the main queue, so it drains none
-of it. Measured here: a block enqueued with `DispatchQueue.main.async`
+of it. Three things were measured here, and all three hold both bare and after
+`NSApplication.shared` exists: a block enqueued with `DispatchQueue.main.async`
 immediately before a 0.3 s nested run loop had **still not run** when the loop
-returned, and a suspended `@MainActor` task was **not** resumed by it either.
-The same three assertions hold after `NSApplication.shared` exists.
+returned; a suspended `@MainActor` task was **not** resumed by it; and neither
+was a task parked on a continuation resumed from a background queue — the shape
+a test awaiting a bounded-poll helper has.
 
 **Suspending is the only thing that returns the queue.** `await Task.yield()`
 hands the main actor back, the queued block runs, and only then does the
