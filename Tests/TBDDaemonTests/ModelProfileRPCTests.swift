@@ -28,6 +28,22 @@ final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
     }
 }
 
+// Nested under TBDHomeSerialized: this suite does not *mutate* `TBD_HOME`, it
+// depends on the value staying put. `ModelProfileKeychain` is a file store
+// under `$TBD_HOME/claude-tokens` and resolves that directory from the
+// process-global environment on every call, so a test that seeds a token and
+// then drives a handler which reads it back straddles two independent
+// resolutions. Run concurrently with a suite that points `TBD_HOME` at its own
+// temp directory, the seed and the read land in different homes and the
+// handler answers "Secret missing from keychain" — the observed failure. The
+// gap is seconds wide in the fast parallel pass, where a test spends most of
+// its wall time suspended between awaits.
+//
+// See `TBDHomeSerializedSuites.swift`: the serialized domain is the only
+// mutual exclusion available here, because the handlers reach
+// `ModelProfileKeychain` through static members with no injection seam.
+extension TBDHomeSerialized {
+
 @Suite("ModelProfile RPC Handlers")
 struct ModelProfileRPCTests {
 
@@ -1045,4 +1061,6 @@ struct ModelProfileRPCTests {
         #expect(!resp.success)
         #expect(resp.error == "Profile not found")
     }
+}
+
 }
