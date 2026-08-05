@@ -40,9 +40,11 @@ import sys
 #
 # DO NOT RENAME IT. The literal still reads "v2" from when this pipeline ran
 # alongside the single-session reviewer it has since replaced, and that is now
-# purely a name: it is live state, matched verbatim by prepare.py's marker
-# parser and by the workflow's jq selectors, and stamped into every review
-# comment already on every open PR. Changing it orphans those comments — priors
+# purely a name: it is live state, matched verbatim by the workflow's jq
+# selectors — when it fetches the prior comment and when it minimizes priors —
+# and stamped into every review comment already on every open PR. (prepare.py
+# never sees the sentinel; it parses the marker lines below out of the comment
+# those selectors already picked.) Changing it orphans those comments — priors
 # stop being found and collapsed, and skip decisions read no prior state and
 # silently re-review.
 COMMENT_SENTINEL = "<!-- claude-review-v2 -->"

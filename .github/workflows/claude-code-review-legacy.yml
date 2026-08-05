@@ -1,25 +1,34 @@
-# ⚠️  RETAINED AS A MANUALLY-TRIGGERABLE FALLBACK — this workflow does not run on its
-# own. The merge gate is claude-code-review.yml, whose `claude-review` job produces the
-# required check; this is the single-session reviewer it replaced, kept so a human can
-# fall back to it by hand (Actions → Run workflow) if the fan-out pipeline is broken or
-# unavailable. Its job is named `claude-review-legacy`, NOT `claude-review`: branch
-# protection matches a required check by job name, so two jobs sharing that name would
-# both report into the gate.
+# ⚠️  RETAINED AS A RESTORATION SOURCE, NOT A WORKING FALLBACK. This workflow does not
+# run on its own, and DISPATCHING IT DOES NOT REVIEW ANYTHING — every step below that
+# reads `github.event.pull_request.*` is empty under workflow_dispatch, so the trust
+# step sees no author, its permission probe fails, and the run exits at the fork gate
+# with a misleading "this PR is from a fork" error before any review logic executes.
+# That is a dead end by construction, not a bug to work around at dispatch time.
+#
+# What it IS for: the merge gate is claude-code-review.yml, whose `claude-review` job
+# produces the required check. This is the single-session reviewer it replaced, kept in
+# the tree so that reviving it is re-adding a `pull_request_target:` trigger (and
+# renaming the job) rather than reconstructing 300 lines from git history. Reviving it
+# is a deliberate edit-and-merge, not a button.
+#
+# Its job is named `claude-review-legacy`, NOT `claude-review`: branch protection
+# matches a required check by job name, so two jobs sharing that name would both report
+# into the gate. Rename it back only as part of retiring the fan-out pipeline.
 #
 # Delete this file once the fan-out gate has held across enough real PRs that nobody
-# would reach for the fallback — or as soon as it stops working, since a fallback that
-# has quietly rotted is worse than none.
+# would reach back for it — or as soon as it stops working, since a restoration source
+# that has quietly rotted is worse than none.
 #
 # Background on the merge-gate design (trust model, verdict token + Stop hook,
 # exact-match enforce): docs/pr-review-gate.md.
 name: Claude Code Review (legacy)
 
 on:
-  # workflow_dispatch ONLY — a workflow with no trigger at all is invalid, and this one
-  # must never fire automatically (running two full reviews per PR is what retiring it
-  # saved). Dispatch runs against a BRANCH, not a PR, so the steps below that read
-  # github.event.pull_request.* have no values on a manual run; treat a hand-triggered
-  # run as a diagnostic of the workflow itself, not as a review of a PR.
+  # workflow_dispatch ONLY, and only because a workflow with no trigger at all is
+  # invalid — this one must never fire automatically, since running two full reviews per
+  # PR is exactly what retiring it saved. The dispatch entry is a placeholder to keep the
+  # file valid, NOT an invocation path: see the banner above for why a hand-triggered run
+  # exits at the trust gate without reviewing anything.
   workflow_dispatch:
 
 concurrency:

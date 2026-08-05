@@ -323,6 +323,37 @@ This pipeline **is** the merge gate. Its job is named `claude-review` in
 `.github/workflows/claude-code-review.yml`, which is what satisfies the required
 `claude-review` check on `main`.
 
+### Why it was promoted when it was
+
+The design originally set a specific bar for promotion: run as a non-required shadow
+check, then review the commits where the two pipelines disagreed, and promote on the
+strength of that review. **That review was not performed.** The pipeline was promoted
+because running both reviewers on every PR cost two full model reviews per push, and
+the second one was not worth its price — a cost argument, not a quality one. Recording
+that plainly matters more than the tidier story, because it names what is owed: the
+divergence review is unpaid, and deficiencies are expected to be found in flight and
+fixed as they surface rather than caught beforehand.
+
+The soak measured this much. Over roughly a day, both pipelines ran on 21 commits
+across 7 branches; on the 17 where both produced a conclusion, 8 disagreed — and every
+disagreement ran the same direction, this pipeline failing where the single-session
+reviewer passed. That one-directional split is *not* evidence of a stricter reviewer,
+because at least two of the eight were traced to a schema bug that failed the gate
+closed with no verdict at all (nullable finding anchors, since fixed). A contaminated
+signal is why the divergence review would have had to triage each case individually,
+and why the count alone could not stand in for it.
+
+The countervailing evidence is qualitative and comes from the same window: on its own
+promotion PR this pipeline returned two accurate findings — a retained workflow that
+could not do the job its comments claimed, and this section dropping the graduation
+criterion instead of answering it — while the single-session reviewer approved the same
+diff. Both are recorded here because they are the argument.
+
+The residual risk is concentrated and worth stating: with one reviewer there is no
+second opinion, and a bug that fails this gate closed blocks merges outright rather
+than producing a red advisory check beside a working gate. That is the cost accepted in
+exchange for halving review spend.
+
 The naming follows from how GitHub matches a required check: **by job name, not by
 workflow file**. That makes the job key the load-bearing identifier and gives the
 arrangement two properties worth stating outright.
@@ -335,20 +366,27 @@ arrangement two properties worth stating outright.
   report into the same required context, and which one the gate reads becomes a
   race. The single-session predecessor is therefore retained as
   `claude-code-review-legacy.yml` with its job renamed `claude-review-legacy`, and
-  with `workflow_dispatch` as its only trigger so no PR event starts it. It exists as
-  a fallback a human can start by hand if this pipeline breaks; keeping it inert is
-  what avoids spending two full model reviews on every PR for one verdict. It should
-  be deleted once nobody would reach for it, or as soon as it stops working — a
-  rotted fallback is worse than none.
+  with `workflow_dispatch` as its only trigger so no PR event starts it — keeping it
+  inert is what avoids spending two full model reviews on every PR for one verdict.
+
+  It is a **restoration source, not a live fallback**: dispatching it reviews nothing,
+  because every step that reads `github.event.pull_request.*` is empty outside a PR
+  event, so the trust step finds no author and the run exits at the fork gate. Reviving
+  it means re-adding a `pull_request_target:` trigger and renaming the job — a
+  deliberate edit, not a button. What retaining the file buys is that the edit is small
+  and reviewable rather than a reconstruction from git history. It should be deleted
+  once nobody would reach back for it, or as soon as it stops working.
 
 The pipeline selects its comments by its own `<!-- claude-review-v2 -->` sentinel
 rather than by the action's sticky-comment mode (§3.5), so it never contends with the
 legacy workflow over a comment identity even when that fallback is run by hand.
 
-That sentinel keeps the `v2` spelling because it is live state: `prepare.py` and the
-workflow's `jq` selectors match the literal verbatim, and it is already stamped into
-the review comments on every open PR. Renaming it orphans
-those comments — priors stop being collapsed, and skip decisions read no prior state.
+That sentinel keeps the `v2` spelling because it is live state: the workflow's `jq`
+selectors match the literal verbatim when fetching and when minimizing priors, and it
+is already stamped into the review comments on every open PR. (`prepare.py` never sees
+the sentinel — it parses the `last-reviewed-patch-id` and `last-verdict` markers out of
+the comment those selectors already picked.) Renaming it orphans those comments —
+priors stop being collapsed, and skip decisions read no prior state.
 The pipeline's script directory, `.github/workflows/claude-review-v2/`, keeps its name
 for the same reason at lower stakes: it is path-pinned by the workflow's restore steps
 and the whole test suite.

@@ -197,9 +197,17 @@ The gate's comment behavior is worth knowing before you read a reviewed PR:
 holds the single-session reviewer the fan-out pipeline replaced: one session that
 covered every concern in one pass and typed its own `APPROVE`/`REJECT` into
 `claude-verdict.txt`, gated by the Stop hook in
-[`claude-review-hooks/`](../.github/workflows/claude-review-hooks/). It is kept only
-as a fallback a human can start by hand (Actions → Run workflow) if the fan-out
-pipeline is broken; two things keep it inert until then:
+[`claude-review-hooks/`](../.github/workflows/claude-review-hooks/).
+
+**It is a restoration source, not a fallback you can run.** Dispatching it reviews
+nothing: outside a PR event every `github.event.pull_request.*` expression is empty, so
+the author-trust step probes permissions for an empty login, fails, and the run exits at
+the fork gate with a misleading "this PR is from a fork" error before any review logic
+runs. Reviving it means re-adding a `pull_request_target:` trigger and renaming the job
+back — a deliberate edit and merge. Keeping the file means that edit is small and
+reviewable instead of a reconstruction from git history.
+
+Two things keep it inert until then:
 
 - Its only trigger is `workflow_dispatch`, so no PR event starts it. Running two
   full model reviews per PR is exactly the cost retiring it removed.
