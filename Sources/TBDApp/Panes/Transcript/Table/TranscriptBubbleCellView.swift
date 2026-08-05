@@ -202,7 +202,20 @@ final class MessageBlockMeasurer {
             return proseMeasurer.textHeight(of: string, width: bodyWidth)
         case .table(let data):
             return Self.tableHeight(data, bodyWidth: bodyWidth)
+        case .image(let attachment):
+            return Self.imageSize(attachment, bodyWidth: bodyWidth).height
         }
+    }
+
+    /// Laid-out size of an attached image. The aspect ratio comes from a
+    /// SYNCHRONOUS header-only probe (`CGImageSourceCopyPropertiesAtIndex` reads
+    /// the header, it does not decode), so the height is exact from the first
+    /// measurement and does not move when the downsampled thumbnail arrives on
+    /// the main thread later. A missing or undecodable file falls back to the
+    /// chip's fixed size — also deterministic.
+    static func imageSize(_ attachment: TranscriptImageAttachment, bodyWidth: CGFloat) -> CGSize {
+        let metadata = TranscriptImageService.shared.metadata(forPath: attachment.path)
+        return TranscriptImageGeometry.displaySize(metadata: metadata, bodyWidth: bodyWidth)
     }
 
     /// Per-block measured heights at `bodyWidth`, in block order. The summed-plus-
@@ -480,6 +493,8 @@ final class TranscriptBubbleCellView: NSTableCellView {
                 view = makeProseView(string, bodyWidth: width)
             case .table(let data):
                 view = makeTableView(data, bodyWidth: width)
+            case .image(let attachment):
+                view = makeImageView(attachment, bodyWidth: width)
             }
             view.translatesAutoresizingMaskIntoConstraints = false
             blockStack.addArrangedSubview(view)
@@ -550,6 +565,18 @@ final class TranscriptBubbleCellView: NSTableCellView {
         }
     }
 
+    /// An attached-image block: a leading-aligned thumbnail at exactly the size
+    /// the measurer reserved, decoded off-main and revealed in Finder on click.
+    private func makeImageView(_ attachment: TranscriptImageAttachment, bodyWidth: CGFloat) -> NSView {
+        let metadata = TranscriptImageService.shared.metadata(forPath: attachment.path)
+        let view = TranscriptImageBlockView()
+        view.configure(
+            attachment: attachment,
+            metadata: metadata,
+            displaySize: TranscriptImageGeometry.displaySize(metadata: metadata, bodyWidth: bodyWidth))
+        return view
+    }
+
     /// A table block hosted in an `NSHostingView` over the native grid.
     private func makeTableView(_ data: TranscriptTableData, bodyWidth: CGFloat) -> NSView {
         let view = TranscriptTableView(
@@ -570,6 +597,10 @@ final class TranscriptBubbleCellView: NSTableCellView {
             case .table:
                 // A table always wants the full body width.
                 widest = bodyWidth
+            case .image(let attachment):
+                // A thumbnail wants exactly its laid-out width, so a bubble that
+                // is just an image hugs the picture instead of spanning the column.
+                widest = max(widest, MessageBlockMeasurer.imageSize(attachment, bodyWidth: bodyWidth).width)
             }
         }
         return widest

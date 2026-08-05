@@ -24,6 +24,31 @@ struct UserMessageClassifierTests {
         #expect(UserMessageClassifier.extractText(l) == "Now add unit tests.")
     }
 
+    /// A multi-image paste records one text block PER image, so extraction must
+    /// keep them all. Taking only the first silently dropped every attachment
+    /// after the first, and the transcript could then never show them.
+    @Test("joins every text block, not just the first")
+    func joinsAllTextBlocks() {
+        let l = line("user", role: "user", content: [
+            ["type": "text", "text": "[Image: source: /tmp/cache/2.png]"],
+            ["type": "text", "text": "[Image: source: /tmp/cache/3.png]"]
+        ])
+        #expect(UserMessageClassifier.isRealUserMessage(l) == true)
+        #expect(UserMessageClassifier.extractText(l)
+            == "[Image: source: /tmp/cache/2.png]\n[Image: source: /tmp/cache/3.png]")
+    }
+
+    /// A typed prompt with a pasted image is `[text, image]` — the base64 block
+    /// carries no path, so only the text block contributes.
+    @Test("ignores non-text blocks when joining")
+    func ignoresNonTextBlocks() {
+        let l = line("user", role: "user", content: [
+            ["type": "text", "text": "looks good [Image #1]"],
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "iVBOR"]]
+        ])
+        #expect(UserMessageClassifier.extractText(l) == "looks good [Image #1]")
+    }
+
     @Test("filters system-reminder string")
     func filtersSystemReminder() {
         let l = line("user", role: "user", content: "<system-reminder>You are Claude.</system-reminder>")

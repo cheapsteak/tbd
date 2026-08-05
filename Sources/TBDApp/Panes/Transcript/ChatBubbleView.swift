@@ -83,6 +83,8 @@ struct ChatBubbleView: View {
                         .transcriptSelectableText()
                 case .code(let lang, let body):
                     codeBlock(language: lang, content: body)
+                case .image(let attachment):
+                    TranscriptImageAttachmentView(attachment: attachment)
                 }
             }
         }
