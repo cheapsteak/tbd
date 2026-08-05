@@ -104,7 +104,7 @@ struct StatusBarView: View {
                         // The branch glyph doubles as the separator from the
                         // path, so no interpunct is needed between them.
                         CopyableStatusText(
-                            icon: "arrow.triangle.branch",
+                            icon: GitBranchIcon(),
                             text: branch,
                             copyValue: branch,
                             truncation: .tail,
@@ -145,9 +145,9 @@ struct StatusBarView: View {
 private struct CopyableStatusText: View {
     @EnvironmentObject var appState: AppState
 
-    /// Optional leading SF Symbol naming what the value is. Part of the same
-    /// click target and hover affordance as the text.
-    var icon: String?
+    /// Optional leading glyph naming what the value is. Part of the same click
+    /// target and hover affordance as the text.
+    var icon: GitBranchIcon?
     let text: String
     let copyValue: String
     let truncation: Text.TruncationMode
@@ -159,8 +159,9 @@ private struct CopyableStatusText: View {
     var body: some View {
         HStack(spacing: 3) {
             if let icon {
-                Image(systemName: icon)
-                    .imageScale(.small)
+                // Sized to the caption text this bar is set in; the glyph's
+                // own grid has generous padding, so it optically matches.
+                icon.frame(width: 11, height: 11)
             }
             Text(text)
                 .lineLimit(1)
