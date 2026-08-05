@@ -574,6 +574,17 @@ struct TableTranscriptHarness {
         tableView.delegate = coordinator
 
         let scrollView = NSScrollView()
+        // PIN THE SCROLLER GEOMETRY. `NSScroller.preferredScrollerStyle` follows the
+        // host's "Show scroll bars" setting and whether a scroll-capable pointing
+        // device is attached, so an unpinned scroll view is 680pt wide on a developer
+        // box with overlay scrollers and 663pt on a runner with legacy ones — and
+        // every measured row height is keyed by that width. Pin the LEGACY,
+        // autohiding shape (the moving one: the scroller claims its 17pt only once
+        // the document outgrows the viewport, i.e. after the first `reloadData`) so
+        // every environment exercises the same geometry AND the same mid-setup width
+        // change. `primeScene` is what absorbs that change.
+        scrollView.scrollerStyle = .legacy
+        scrollView.autohidesScrollers = true
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
@@ -1056,6 +1067,44 @@ struct TableTranscriptHarness {
         for _ in 0..<4 { await Task.yield() }
     }
 
+    /// Primes `scene` on `nodes` exactly as production's first `updateNSView` does,
+    /// then keeps updating until the table's COLUMN WIDTH stops moving.
+    ///
+    /// The first `update` after `makeNSView` always takes the width-change branch
+    /// (`cachedColumnWidth` starts at 0): it measures the bottom window and reloads.
+    /// That reload is also what first makes the document taller than the viewport,
+    /// so an autohiding legacy scroller claims its 17pt on the NEXT layout pass —
+    /// AFTER those heights were cached. Every cache here is keyed by `(id,
+    /// contentVersion, width)`, so the whole cache is then unreachable, and the next
+    /// `update` legitimately takes the width-change branch again (wipe + re-measure)
+    /// instead of the `.rebuild` branch a disclosure test means to exercise. Rows
+    /// above the click fall back to the arithmetic estimate — which is ~30-45pt off
+    /// a measured bubble by design — and the anchor jumps by hundreds of points.
+    ///
+    /// So: settle the width FIRST, and only then take a "before" snapshot. Returns
+    /// the settled column width; fails the test if it never settles.
+    @discardableResult
+    private func primeScene(_ scene: Scene, nodes: [TranscriptRenderNode]) -> CGFloat {
+        for _ in 0..<4 {
+            let widthAtUpdate = scene.tableView.bounds.width
+            scene.coordinator.update(nodes: nodes, atBottom: .constant(true), activityToggleToken: 0)
+            settle(scene.tableView)
+            if scene.tableView.bounds.width == widthAtUpdate { return widthAtUpdate }
+        }
+        Issue.record("the table's column width never settled: \(scene.tableView.bounds.width)")
+        return scene.tableView.bounds.width
+    }
+
+    /// Realizes every row once — as a user who scrolled the whole transcript would —
+    /// so each carries an EXACT measured height rather than the cheap arithmetic
+    /// estimate `heightOfRow` serves for unrealized rows.
+    private func realizeAllRows(_ scene: Scene, count: Int) {
+        for row in 0..<count {
+            _ = scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
+        }
+        settle(scene.tableView)
+    }
+
     /// Vertical gap between the viewport's bottom edge and the document bottom.
     private func gapToBottom(_ scene: Scene) -> CGFloat {
         let clip = scene.scrollView.contentView
@@ -1084,11 +1133,11 @@ struct TableTranscriptHarness {
         let appState = AppState(userDefaults: defaults)
 
         // Shape of the fixture, both arms: more leading rows than the bottom-window
-        // precompute measures, so the rows ABOVE the anchor are ones only the cache
-        // can keep exact (a wipe sends them back to the arithmetic estimate and the
-        // anchor moves with them). The tail is short when the viewport must sit AT
-        // the bottom with the summary still on screen, and deep when the viewport
-        // must be clear of the tail-follow threshold.
+        // precompute measures, so the rows ABOVE the anchor are ones only the CACHE
+        // can keep exact across the rebuild (a wipe sends them back to the arithmetic
+        // estimate and the anchor moves with them). The tail is short when the
+        // viewport must sit AT the bottom with the summary still on screen, and deep
+        // when the viewport must be clear of the tail-follow threshold.
         let items = Self.activityGroupFixture(
             leadingBubbles: 25, groupSize: 5, trailingBubbles: atBottom ? 1 : 8)
         let collapsed = Self.groupNodes(items, expanded: false)
@@ -1098,14 +1147,29 @@ struct TableTranscriptHarness {
         let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
 
-        // Prime exactly as production does: the first `updateNSView` after
-        // `makeNSView` always takes the width-change branch (cachedColumnWidth
-        // starts at 0), which reloads and measures the bottom window.
-        scene.coordinator.update(nodes: collapsed, atBottom: .constant(true), activityToggleToken: 0)
-        settle(scene.tableView)
+        // Prime exactly as production does, then let the column width settle (see
+        // `primeScene`) — a width that moves mid-test sends the toggle down the
+        // width-change branch, which wipes the caches for a reason that has nothing
+        // to do with what this test guards.
+        let primedWidth = primeScene(scene, nodes: collapsed)
 
         let summaryRow = try #require(collapsed.firstIndex { $0.id == Self.fixtureGroupID })
         let clip = scene.scrollView.contentView
+
+        // Realize every row, so the "before" snapshot is entirely EXACT measurements.
+        // Without this the rows above the anchor carry the arithmetic estimate, which
+        // is deliberately cheap and can sit tens of points off the measurement — so a
+        // later estimate→exact transition (from anything at all: a re-measure, a
+        // width change, a different host font) would masquerade as anchor drift. The
+        // guard below then reads exactly as written: heights that were exact before
+        // the click must still be exact, and identical, after it.
+        realizeAllRows(scene, count: collapsed.count)
+        let unmeasuredAbove = (0..<summaryRow)
+            .filter { scene.coordinator.cachedExactHeight(for: collapsed[$0]) == nil }
+        #expect(unmeasuredAbove.isEmpty,
+                Comment(rawValue: "every row above the anchor must be exactly measured before the "
+                    + "click, else an estimate→exact transition can masquerade as drift; "
+                    + "unmeasured rows: \(unmeasuredAbove.prefix(5))"))
 
         if atBottom {
             scene.coordinator.scrollToEnd(animated: false)
@@ -1135,6 +1199,14 @@ struct TableTranscriptHarness {
         // token bumped exactly as `setActivityGroup` does.
         scene.coordinator.update(nodes: expanded, atBottom: .constant(true), activityToggleToken: 1)
         scene.tableView.layoutSubtreeIfNeeded()
+        // The toggle must have gone through the `.rebuild` branch. If the column
+        // width moved, `update` took the width-change branch instead — a legitimate
+        // cache wipe for an unrelated reason — and everything below would be
+        // measuring that, not the anchor.
+        #expect(scene.tableView.bounds.width == primedWidth,
+                Comment(rawValue: "the column width moved across the click "
+                    + "(\(primedWidth) → \(scene.tableView.bounds.width)), so the toggle took the "
+                    + "width-change branch rather than `.rebuild`"))
         // The FIRST frame after the click is what the user sees. Rows above the
         // anchor must already be laid out at their unchanged heights here — if the
         // rebuild dropped their cached exact heights they come back estimated, and
@@ -1187,13 +1259,11 @@ struct TableTranscriptHarness {
 
         let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        scene.coordinator.update(nodes: collapsed, atBottom: .constant(true), activityToggleToken: 0)
+        primeScene(scene, nodes: collapsed)
 
         // Realize every row once — as a user scrolling the whole transcript would —
         // which measures each exactly and caches it.
-        for row in 0..<collapsed.count {
-            _ = scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
-        }
+        realizeAllRows(scene, count: collapsed.count)
         let uncachedBefore = collapsed
             .filter { scene.coordinator.cachedExactHeight(for: $0) == nil }
             .map(\.id)
@@ -1236,7 +1306,7 @@ struct TableTranscriptHarness {
 
         let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        scene.coordinator.update(nodes: collapsed, atBottom: .constant(true), activityToggleToken: 0)
+        primeScene(scene, nodes: collapsed)
 
         // Four caches, at most one entry per live row each.
         let ceiling = 4 * expanded.count
@@ -1271,8 +1341,7 @@ struct TableTranscriptHarness {
 
         let scene = makeScene(items: items, appState: appState, fixedSize: true, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        scene.coordinator.update(nodes: collapsed, atBottom: .constant(true), activityToggleToken: 0)
-        settle(scene.tableView)
+        primeScene(scene, nodes: collapsed)
         scene.coordinator.scrollToEnd(animated: false)
         settle(scene.tableView)
         #expect(gapToBottom(scene) <= 120, "precondition: the viewport starts at the bottom")
