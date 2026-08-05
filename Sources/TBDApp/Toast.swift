@@ -9,6 +9,8 @@ struct Toast: Equatable, Identifiable {
         case progress
         /// Informational notice (archivebox icon); auto-dismisses.
         case notice
+        /// A completed action the user just triggered (checkmark); auto-dismisses.
+        case success
         /// Failure notice; auto-dismisses.
         case error
     }

@@ -48,6 +48,9 @@ private struct ToastCard: View {
         case .notice:
             Image(systemName: "archivebox")
                 .foregroundStyle(.secondary)
+        case .success:
+            Image(systemName: "checkmark.circle")
+                .foregroundStyle(.secondary)
         case .error:
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(.yellow)
