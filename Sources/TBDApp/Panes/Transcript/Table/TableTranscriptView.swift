@@ -938,10 +938,19 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   prose the visitor's trailing newline survives as one empty line
         ///   fragment, which is charged here in place of paragraph spacing.
         ///
-        /// Two shapes are deliberately NOT modelled, both because they need real
-        /// layout to see: a GFM cell whose text wraps (that grid row is 48 pt, not
-        /// 24), and a list item whose continuation lines wrap inside the 24 pt list
-        /// indent. Both make this estimate small, which is the safe direction.
+        /// Three shapes are deliberately NOT modelled, all because they need real
+        /// layout to see, and all three make this estimate SMALL — the safe
+        /// direction, since an under-reservation grows on realize:
+        ///
+        /// * a GFM cell whose text wraps (that grid row is 48 pt, not 24) —
+        ///   measured -48 pt on a four-times-wrapping cell;
+        /// * a list item whose continuation lines wrap inside the 24 pt list
+        ///   indent — measured exact out to 20 wrapped lines, so the indent has
+        ///   yet to cost a whole line in practice;
+        /// * a blockquote, whose `headIndent`/`firstLineHeadIndent` are also the
+        ///   24 pt list indent, so it wraps narrower than the body width used here
+        ///   while its `> ` markers are still counted as drawn characters —
+        ///   measured exact to 12 wrapped lines and -16 pt (one line) at 20.
         ///
         /// The image term is not an approximation at all: an attached image is laid
         /// out at `TranscriptImageGeometry.displaySize`, which derives from a
@@ -1097,8 +1106,9 @@ struct TableTranscriptView: NSViewRepresentable {
                     pendingTableRows = 0
                 }
 
-                for rawLine in run.split(separator: "\n", omittingEmptySubsequences: false) {
-                    let line = rawLine.trimmingCharacters(in: .whitespaces)
+                for rawLine in run.split(omittingEmptySubsequences: false,
+                                        whereSeparator: Self.isLineTerminator) {
+                    let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
 
                     if line.hasPrefix("```") || line.hasPrefix("~~~") {
                         if inFence {
@@ -1175,6 +1185,21 @@ struct TableTranscriptView: NSViewRepresentable {
                 } else {
                     appendBlock(badgeLineHeight)
                 }
+            }
+
+            /// The three line endings CommonMark recognises — and NOT the other
+            /// things `Character.isNewline` reports, which cmark draws as ordinary
+            /// characters.
+            ///
+            /// Splitting on the single `Character` `"\n"` is not enough, because
+            /// `"\r\n"` is ONE extended grapheme cluster in Swift and therefore not
+            /// equal to `"\n"`. A CRLF message contains no `"\n"` Character at all,
+            /// so the old split handed back the entire message as a single line:
+            /// no paragraphs, no list items, no fences, no table rows, one estimated
+            /// line for the lot. Measured on a six-line CRLF message, that reserved
+            /// 48 pt against a rendered 128.
+            private static func isLineTerminator(_ character: Character) -> Bool {
+                character == "\n" || character == "\r" || character == "\r\n"
             }
 
             /// ATX heading level (1…6) of `line`, or nil. `#hashtag` is not a

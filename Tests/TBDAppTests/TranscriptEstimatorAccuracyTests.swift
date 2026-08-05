@@ -95,6 +95,8 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "assistant/bullet-list", points: 2, percent: 1.3, achieved: "0.0"),
         Budget(id: "assistant/gfm-table", points: 2, percent: 1.2, achieved: "0.0"),
         Budget(id: "assistant/image", points: 2, percent: 1.0, achieved: "0.0"),
+        Budget(id: "assistant/soft-breaks", points: 2, percent: 0.9, achieved: "0.0"),
+        Budget(id: "assistant/crlf", points: 2, percent: 0.8, achieved: "0.0"),
         Budget(id: "assistant/badge-control", points: 2, percent: 3.1, achieved: "0.0"),
         Budget(id: "assistant/badge", points: 2, percent: 2.2, achieved: "0.0"),
         Budget(id: "user/short", points: 2, percent: 4.2, achieved: "0.0"),
@@ -485,6 +487,37 @@ struct TranscriptEstimatorAccuracyTests {
     private static let badgeText = "This assistant message carries a token-usage badge that must "
         + "render fully inside the bubble, beneath the body text."
 
+    /// Single newlines with NO blank line between them — typed notes, an
+    /// address-style block, a short list someone did not mark up. `visitSoftBreak`
+    /// emits the break INSIDE the paragraph, but TextKit still treats it as a
+    /// paragraph terminator and stamps the paragraph style's 16 pt
+    /// `paragraphSpacing` after every one, so a three-line note is 3 lines PLUS
+    /// two full breaks — not the tight 3 lines it looks like. Every other prose
+    /// fixture here separates paragraphs with a blank line, so without this one
+    /// the soft-break shape is unpinned.
+    ///
+    /// Line lengths are kept clear of a wrap boundary on purpose: three lines that
+    /// draw as one each and one that draws as two, at BOTH body widths. Probing the
+    /// boundary is `user/wrap-boundary`'s job — this fixture's job is the spacing,
+    /// and a fixture that does two things at once tells you neither when it reds.
+    private static let softBreakText = """
+        Notes from the call, one per line:
+        the estimator reserves space for rows nobody has looked at yet, and a biased guess is \
+        therefore something the reader perceives as motion rather than as a wrong number
+        the correction lands when the row realizes
+        direction matters less than magnitude here
+        """
+
+    /// The same structure as the LF fixtures, written with Windows line endings.
+    /// `"\r\n"` is ONE Swift `Character`, so `split(separator: "\n")` finds no
+    /// separator in it at all and the whole message collapses to a single
+    /// estimated line — 48 pt against a rendered 128. Pinned at both widths
+    /// because the collapse is width-independent and silent.
+    private static let crlfText = "Windows-pasted notes:\r\n\r\n- first item, long enough that it "
+        + "does not sit on a wrap boundary\r\n- second item, also comfortably clear of one\r\n\r\n"
+        + "```swift\r\nlet a = 1\r\nlet b = 2\r\n```\r\n\r\n| Field | Value |\r\n| --- | --- |\r\n"
+        + "| one | two |\r\n\r\nThat is the whole paste."
+
     /// Every row kind the guard covers, as render nodes. Kept under
     /// `bottomEagerWindow` so the precompute measures all of them exactly.
     private static func characterizationNodes(imagePath: String) -> [TranscriptRenderNode] {
@@ -507,6 +540,10 @@ struct TranscriptEstimatorAccuracyTests {
             text: "Here is the screenshot.\n\n[Image: source: \(imagePath)]",
             timestamp: nil,
             usage: nil))
+        items.append(.assistantText(id: "assistant/soft-breaks", text: softBreakText,
+                                    timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/crlf", text: crlfText,
+                                    timestamp: nil, usage: nil))
         items.append(.userPrompt(id: "user/short", text: shortUserText, timestamp: nil))
         items.append(.userPrompt(id: "user/long", text: longUserText, timestamp: nil))
         items.append(.userPrompt(id: "user/wrap-boundary", text: wrapBoundaryUserText, timestamp: nil))
