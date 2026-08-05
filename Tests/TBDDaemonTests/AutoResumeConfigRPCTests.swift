@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 @Suite struct AutoResumeConfigRPCTests {
     let db: TBDDatabase
@@ -16,7 +17,7 @@ import Testing
                 db: db, git: GitManager(),
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date())
+            startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     @Test func enablePersistsFlag() async throws {

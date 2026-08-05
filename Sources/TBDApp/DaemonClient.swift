@@ -246,7 +246,11 @@ actor DaemonClient {
     /// FileManager, etc.) are freed immediately — prevents accumulation across
     /// the 2-second polling cycle.
     private nonisolated func sendRaw(_ request: RPCRequest) throws -> RPCResponse {
-        try autoreleasepool {
+        // The app is the operator's hand: every request it makes is declared
+        // `{"kind":"app"}` at this one encode chokepoint rather than at each
+        // of the ~200 call sites.
+        let request = request.stamping(actor: .app)
+        return try autoreleasepool {
             let fd = try makeConnectedSocket()
             defer { close(fd) }
 

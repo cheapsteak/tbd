@@ -42,7 +42,7 @@ struct RPCRouterNightwatchLeaseTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let desk = try await db.worktrees.createScratch(
             name: "watch-desk", displayName: "Watch Desk",
             path: "/tmp/watch-desk-\(UUID())", tmuxServer: "test")

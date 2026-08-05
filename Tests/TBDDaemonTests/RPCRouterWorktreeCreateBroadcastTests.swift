@@ -49,7 +49,8 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             db: db,
             lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
-            subscriptions: subs
+            subscriptions: subs,
+            actuationLog: makeTestActuationLog()
         )
         return (router, deltas)
     }

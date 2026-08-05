@@ -185,7 +185,8 @@ public final class Daemon: Sendable {
     /// the socket/HTTP servers or background tasks. In mock mode this is a
     /// no-op so hand-seeded fixtures render exactly as authored.
     func performStartupReconciliation(
-        mockMode: MockMode?, database: TBDDatabase, git: GitManager, lifecycle: WorktreeLifecycle
+        mockMode: MockMode?, database: TBDDatabase, git: GitManager,
+        lifecycle: WorktreeLifecycle, actuationLog: ActuationLog
     ) async {
         guard mockMode == nil else {
             daemonLogger.info("Mock mode: skipping startup reconciliation")
@@ -210,7 +211,7 @@ public final class Daemon: Sendable {
             let repos = try await database.repos.list()
             for repo in repos {
                 do {
-                    try await lifecycle.reconcile(repoID: repo.id)
+                    try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
                 } catch {
                     reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
@@ -434,7 +435,13 @@ public final class Daemon: Sendable {
             try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
         }
 
-        // 8. Initialize RPC router
+        // 8. Initialize RPC router.
+        //
+        // One `ActuationLog` for the whole daemon: the router hands it to the
+        // hibernation coordinator, and it is passed to every daemon-internal
+        // rail below, so all of them append to the same file through the same
+        // actor (which is what serializes the appends).
+        let actuationLog = ActuationLog(path: TBDConstants.actuationLogPath)
         let rpcRouter = RPCRouter(
             db: database,
             lifecycle: lifecycle,
@@ -445,7 +452,8 @@ public final class Daemon: Sendable {
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions,
-            remoteManager: remoteManager
+            remoteManager: remoteManager,
+            actuationLog: actuationLog
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
@@ -472,7 +480,7 @@ public final class Daemon: Sendable {
         // handlers — and the socket server that serves those doesn't start until
         // step 9 below. So no merge can be observed between construction and here.
         let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
-            db: database, lifecycle: lifecycle, subscriptions: subs)
+            db: database, lifecycle: lifecycle, subscriptions: subs, actuationLog: actuationLog)
         let autoHibernateCoordinator = AutoHibernateOnMergeCoordinator(
             db: database, hibernation: rpcRouter.hibernationCoordinator, subscriptions: subs)
         let mergedTransitionDispatcher = MergedTransitionDispatcher(
@@ -555,7 +563,9 @@ public final class Daemon: Sendable {
         }
 
         // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
-        await performStartupReconciliation(mockMode: mockMode, database: database, git: git, lifecycle: lifecycle)
+        await performStartupReconciliation(
+            mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
+            actuationLog: actuationLog)
 
         if mockMode == nil {
             // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
@@ -701,7 +711,8 @@ public final class Daemon: Sendable {
                     (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
                 },
                 // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the production value of `LimitResumeActuator`'s non-defaulted `waiter:` parameter (the seam itself), exercised by Tests/TBDDaemonTests/LimitResumeActuatorTests.swift which injects `waiter: { _ in }` at 5 construction sites; see docs/specs/2026-07-24-test-hardening-design.md
-                waiter: { duration in _ = try? await Task.sleep(for: duration) }
+                waiter: { duration in _ = try? await Task.sleep(for: duration) },
+                actuationLog: actuationLog
             )
             let resumeScheduler = LimitResumeScheduler(
                 store: database.scheduledResumes,
@@ -750,7 +761,8 @@ public final class Daemon: Sendable {
                 lifecycle: lifecycle,
                 tmux: tmux,
                 skillDir: skillDir,
-                subscriptions: subs
+                subscriptions: subs,
+                actuationLog: actuationLog
             )
 
             let runner = DaywatchRunner(

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Task 11: `panel.importLegacy` handler tests. Router-level — exercises the
 /// full gating → convert → commitImport → broadcast pipeline. The pure
@@ -35,7 +36,8 @@ struct PanelImportHandlerTests {
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
-            subscriptions: subs
+            subscriptions: subs,
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, deltas)
     }

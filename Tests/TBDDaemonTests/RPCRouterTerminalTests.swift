@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 // Terminal-scoped RPC methods: terminal.create (shell + claude), terminal.list,
 // terminal.send, terminal.output.
@@ -77,7 +78,8 @@ extension RPCRouterTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)",

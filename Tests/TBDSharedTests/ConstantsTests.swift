@@ -53,6 +53,13 @@ import Foundation
         #expect(TBDConstants.portFilePath(environment: env) == "/tmp/tbd-derived/port")
         #expect(TBDConstants.reposDir(environment: env).path == "/tmp/tbd-derived/repos")
         #expect(TBDConstants.socketPath(environment: env) == "/tmp/tbd-derived/sock")
+        #expect(TBDConstants.actuationLogPath(environment: env) == "/tmp/tbd-derived/actuations.jsonl")
+    }
+
+    @Test func actuationLogPathFallsBackToHomeTbdWhenKeyAbsent() {
+        let path = TBDConstants.actuationLogPath(environment: [:])
+        #expect(path.hasSuffix("/tbd/actuations.jsonl"))
+        #expect(path.hasPrefix(FileManager.default.homeDirectoryForCurrentUser.path))
     }
 
     @Test func socketPathOverrideWinsOverTBDHome() {

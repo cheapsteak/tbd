@@ -80,7 +80,8 @@ import TestSupport
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(
@@ -120,7 +121,8 @@ import TestSupport
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
 
         let repo = try await db.repos.create(

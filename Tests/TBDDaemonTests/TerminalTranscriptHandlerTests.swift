@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 @Suite("terminal.transcript handler")
 struct TerminalTranscriptHandlerTests {
@@ -20,7 +21,8 @@ struct TerminalTranscriptHandlerTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 

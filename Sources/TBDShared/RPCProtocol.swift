@@ -8,17 +8,33 @@ import Foundation
 public struct RPCRequest: Codable, Sendable {
     public let method: String
     public let params: String
+    /// Optional caller identity declaration, deliberately a TOP-LEVEL field
+    /// beside `method`/`params` rather than a member of any per-method params
+    /// struct — so no verb's parameter shape changes. An absent field means
+    /// the caller declared nothing and the daemon records `anonymous`; old
+    /// clients simply omit it, and daemons that predate it ignore the key.
+    public let actor: ActuationActor?
 
-    public init(method: String, params: String = "{}") {
+    public init(method: String, params: String = "{}", actor: ActuationActor? = nil) {
         self.method = method
         self.params = params
+        self.actor = actor
     }
 
     /// Convenience: encode a Codable param struct into an RPCRequest.
-    public init<P: Encodable>(method: String, params: P) throws {
+    public init<P: Encodable>(method: String, params: P, actor: ActuationActor? = nil) throws {
         self.method = method
         let data = try JSONEncoder().encode(params)
         self.params = String(data: data, encoding: .utf8) ?? "{}"
+        self.actor = actor
+    }
+
+    /// Returns a copy carrying `actor`, leaving an already-declared identity
+    /// alone. Clients stamp their own identity at their single encode
+    /// chokepoint rather than at every call site.
+    public func stamping(actor: ActuationActor?) -> RPCRequest {
+        guard self.actor == nil, let actor else { return self }
+        return RPCRequest(method: method, params: params, actor: actor)
     }
 
     /// Decode the params JSON string into Data for JSONDecoder consumption.

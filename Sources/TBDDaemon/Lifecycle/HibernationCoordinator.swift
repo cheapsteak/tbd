@@ -143,6 +143,13 @@ public actor HibernationCoordinator {
     /// "escalate after exactly N attempts" boundary is exact.
     private let clock: any Clock<Duration>
 
+    /// The daemon's actuation record. The idle sweep and the merge-park rail
+    /// are daemon-internal actuation sites — they bypass the router, so each
+    /// logs its own row. Deliberately NOT logged inside `performHibernate`: the
+    /// RPC handlers call that same method after writing their own row, and a
+    /// row there would double-count every manual park.
+    private let actuationLog: ActuationLog
+
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
@@ -156,7 +163,8 @@ public actor HibernationCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         exitPollAttempts: Int = 15,
         exitPollInterval: Duration = .milliseconds(200),
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        actuationLog: ActuationLog
     ) {
         self.db = db
         self.tmux = tmux
@@ -169,6 +177,7 @@ public actor HibernationCoordinator {
         self.exitPollAttempts = exitPollAttempts
         self.exitPollInterval = exitPollInterval
         self.clock = clock
+        self.actuationLog = actuationLog
     }
 
     /// Projects root for a wake spawn's resolved profile config dir path,
@@ -246,6 +255,12 @@ public actor HibernationCoordinator {
     /// Park a session because its worktree's PR merged. Honors every safety rail
     /// (including keep-warm, unlike `manualHibernate`) but NOT the idle window or
     /// the idle-sweep master switch — see `HibernationGate.decideForMerge`.
+    ///
+    /// A daemon-internal rail: no RPC carried this, so it writes its own row
+    /// with no `method` and the rail-named actor. `AutoHibernateOnMergeCoordinator`
+    /// fans out over every terminal in the worktree and most are refused by the
+    /// rails above, so — like the idle sweep — the row goes after the gate, at
+    /// the moment this rail is actually about to act on a session.
     public func hibernateForMerge(terminalID: UUID) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -254,7 +269,27 @@ public actor HibernationCoordinator {
         if let blocked = HibernationGate.blockingRail(terminal: terminal) {
             return .notEligible(reason: Self.mergeBlockReason(blocked))
         }
-        return await performHibernate(terminal: terminal, reason: .merged)
+
+        // Fail-closed, as everywhere else: an unrecordable park does not
+        // happen. The writer already logged the failure at `.fault`; carrying
+        // its self-explaining text out as the refusal reason puts it in the
+        // caller's log too.
+        var row = ActuationRow(
+            actor: .daemon(rail: ActuationRail.autoHibernateOnMerge), kind: .hibernate)
+        row.target = .local(worktree: terminal.worktreeID, terminal: terminal.id)
+        let actuationID: String
+        do {
+            actuationID = try await actuationLog.appendRequest(row)
+        } catch {
+            return .notEligible(reason: "\(error)")
+        }
+
+        let result = await performHibernate(terminal: terminal, reason: .merged)
+        await actuationLog.appendOutcome(
+            confirms: actuationID,
+            result: ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
+        return result
     }
 
     /// The reason a merge-park was refused, for logging/telemetry. Mirrors
@@ -830,7 +865,21 @@ public actor HibernationCoordinator {
                 }
                 if let pending = pendingKillSince[terminal.id] {
                     if reference.timeIntervalSince(pending) >= Self.killDebounce {
-                        _ = await performHibernate(terminal: terminal, reason: .auto)
+                        // The rail's own row, written at its act moment. A
+                        // request row that cannot be persisted refuses the act
+                        // (fail-closed) — an unrecorded auto-park is exactly the
+                        // silent gap the record exists to forbid.
+                        var row = ActuationRow(
+                            actor: .daemon(rail: ActuationRail.autoHibernate), kind: .hibernate)
+                        row.target = .local(worktree: terminal.worktreeID, terminal: terminal.id)
+                        guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                            continue
+                        }
+                        let result = await performHibernate(terminal: terminal, reason: .auto)
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID,
+                            result: ActuationOutcome.classify(result),
+                            error: ActuationOutcome.detail(result))
                     }
                 } else {
                     pendingKillSince[terminal.id] = reference

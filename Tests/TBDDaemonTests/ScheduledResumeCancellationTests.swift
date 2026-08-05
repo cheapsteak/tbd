@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 @Suite struct ScheduledResumeCancellationTests {
     let db: TBDDatabase
@@ -18,7 +19,7 @@ import Testing
                 db: db, git: GitManager(),
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date())
+            startTime: Date(), actuationLog: makeTestActuationLog())
         try await db.config.setAutoResumeOnLimitReset(true)
         let repo = try await db.repos.create(
             path: "/tmp/can-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -45,7 +46,9 @@ actor FiredBox {
             hooks: HookResolver(),
             subscriptions: subs
         )
-        let coord = AutoArchiveOnMergeCoordinator(db: db, lifecycle: lifecycle, subscriptions: subs)
+        let coord = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subs,
+            actuationLog: makeTestActuationLog())
         return (coord, db)
     }
 

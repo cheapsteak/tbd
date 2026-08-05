@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 @Suite("terminal.activityEvent handler")
 struct TerminalActivityEventHandlerTests {
@@ -20,7 +21,8 @@ struct TerminalActivityEventHandlerTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 

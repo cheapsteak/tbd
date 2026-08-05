@@ -17,7 +17,7 @@ struct ScratchPromoteRPCTests {
     private func makeRouter(_ db: TBDDatabase) -> RPCRouter {
         RPCRouter(db: db,
                   lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-                  tmux: TmuxManager(dryRun: true), startTime: Date())
+                  tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     private func gitInitCommit(at path: String) throws {

@@ -49,7 +49,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
 
     // The directory is still on disk AND still registered with git — exactly
     // the situation that used to make reconcile resurrect the row.
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
     #expect(!active.contains { $0.path == wt.path },
@@ -77,7 +77,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     let wtPath = (base as NSString).appendingPathComponent("stray")
     try await shell("git worktree add -b stray-branch '\(wtPath)'", at: repoDir)
 
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
     #expect(active.contains { $0.path == wtPath },
@@ -108,7 +108,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     // after its row disappears (proves the skip was tombstone-driven, not
     // some other latent state).
     try await db.worktrees.delete(id: outcome.worktree.id)
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
     #expect(active.contains { $0.path == wt.path },
             "after the tombstone is cleared, reconcile behavior is back to normal")
