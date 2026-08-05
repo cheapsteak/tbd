@@ -1818,6 +1818,17 @@ extension RPCRouter {
     /// then C-c C-c, another settle, then a SIGTERM to the pane pid as a
     /// backstop. Every step is best-effort — failures are logged and ignored,
     /// since the subsequent `respawn-window -k` guarantees termination.
+    ///
+    /// **Acts on an unverified coordinate (issue #384).** `paneID` comes from
+    /// the terminal row, and tmux reuses pane ids, so a stale row aims this at
+    /// a live stranger — and unlike `terminal.send`, which now consults
+    /// `paneSendTarget` before typing and refuses on disagreement, what lands
+    /// here is a SIGTERM and then a forced respawn of that window. The
+    /// consultation is not the missing piece: what a *refusal* should do to a
+    /// user's account switch or hibernate is a product decision (fail it, mark
+    /// the row, or fall back to a coordinate-free path), and belongs in a spec
+    /// rather than being bolted on here. Same note on
+    /// `HibernationCoordinator`'s copy of this helper.
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
