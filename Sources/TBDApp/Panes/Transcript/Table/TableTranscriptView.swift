@@ -977,6 +977,8 @@ struct TableTranscriptView: NSViewRepresentable {
         ///
         /// * a GFM cell whose text wraps (that grid row is 48 pt, not 24) —
         ///   measured -48 pt on a four-times-wrapping cell;
+        /// * a `- - -` thematic break, which the list-item test claims before the
+        ///   rule test can — measured -12 pt, and the `---` spelling is exact;
         /// * a list item whose continuation lines wrap inside the 24 pt list
         ///   indent — measured exact out to 20 wrapped lines, so the indent has
         ///   yet to cost a whole line in practice;
@@ -1157,11 +1159,29 @@ struct TableTranscriptView: NSViewRepresentable {
             }
 
             /// Appends the blocks a marker-free run of message text renders as.
+            ///
+            /// Walks the source lines once with a single line of LOOKAHEAD, which is
+            /// what setext headings and pipe-less GFM tables need to be recognised
+            /// at all — both are defined by the line that FOLLOWS them.
             mutating func appendTextRun(_ run: String) {
                 let theme = TranscriptTextTheme.chatBubble
-                var inFence = false
-                var fenceLines = 0
+                let lines = Array(run.split(omittingEmptySubsequences: false,
+                                            whereSeparator: Self.isLineTerminator))
                 var pendingTableRows = 0
+                /// Whether the unit most recently appended was a list item, so an
+                /// INDENTED line following it is that item's continuation rather
+                /// than a paragraph of its own.
+                var lastUnitWasListItem = false
+                /// Whether the next line starts a fresh block — the top of the run,
+                /// or the line after a blank. Only there can an indentation of four
+                /// or more spaces open a code block.
+                var atBlockStart = true
+                /// Whether a list is still open. Unlike `lastUnitWasListItem` this
+                /// SURVIVES a blank line, because an indented line under a list is
+                /// that list's continuation however loosely it is written — never
+                /// the indented code block the same indentation would open at the
+                /// top level.
+                var inListContext = false
 
                 func flushTable() {
                     guard pendingTableRows > 0 else { return }
@@ -1169,67 +1189,117 @@ struct TableTranscriptView: NSViewRepresentable {
                     pendingTableRows = 0
                 }
 
-                // Whether the unit most recently appended was a list item, so an
-                // INDENTED line following it can be recognised as that item's
-                // continuation rather than as a paragraph of its own.
-                var lastUnitWasListItem = false
-
-                for rawLine in run.split(omittingEmptySubsequences: false,
-                                        whereSeparator: Self.isLineTerminator) {
-                    let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let isIndented = rawLine.first == " " || rawLine.first == "\t"
-
-                    if line.hasPrefix("```") || line.hasPrefix("~~~") {
-                        if inFence {
-                            // Closing delimiter: the block draws its code lines, and
-                            // the visitor's surviving trailing newline shows up as
-                            // one empty line fragment when more content follows.
-                            inFence = false
-                            appendUnit(lines: fenceLines, lineHeight: codeLineHeight,
-                                       trailing: bubbleLineHeight, styleSpacing: 0)
-                            fenceLines = 0
-                        } else {
-                            flushTable()
-                            inFence = true
-                            fenceLines = 0
-                        }
-                        continue
-                    }
-                    if inFence {
-                        // Code never wraps into fewer lines than it has; long lines
-                        // do wrap, but the tail indent makes that rare enough that
-                        // one source line == one drawn line is the better model.
-                        fenceLines += 1
-                        continue
-                    }
+                var index = 0
+                while index < lines.count {
+                    let raw = lines[index]
+                    let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    index += 1
 
                     if line.isEmpty {
                         // A blank source line draws nothing — the separation it
                         // expresses is already paid by the previous unit's trailing
-                        // spacing. It does end a list, though: what follows is a
-                        // fresh block, not a continuation.
+                        // spacing. It does end a list and a table, though: what
+                        // follows is a fresh block, not a continuation.
                         flushTable()
                         lastUnitWasListItem = false
+                        atBlockStart = true
                         continue
                     }
 
-                    if line.hasPrefix("|") {
-                        // GFM grid row. The `|---|` separator draws as a border
-                        // rather than a row, so it is not counted.
+                    // Fenced code: the ``` delimiters and the language tag are not
+                    // drawn, only the lines between them.
+                    if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                        flushTable()
+                        var fenceLines = 0
+                        var closed = false
+                        while index < lines.count {
+                            let fenceLine = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+                            index += 1
+                            if fenceLine.hasPrefix("```") || fenceLine.hasPrefix("~~~") {
+                                closed = true
+                                break
+                            }
+                            // Code never wraps into fewer lines than it has; long
+                            // lines do wrap, but the tail indent makes that rare
+                            // enough that one source line == one drawn line is the
+                            // better model.
+                            fenceLines += 1
+                        }
+                        appendCodeUnit(lines: fenceLines, terminated: closed)
+                        lastUnitWasListItem = false
+                        inListContext = false
+                        atBlockStart = false
+                        continue
+                    }
+
+                    // Indented code block: four spaces (or a tab) at the top of a
+                    // block. It draws in the code face with NO paragraph spacing
+                    // between its lines, so charging each line as a paragraph cost
+                    // 32 pt on a three-line block and 304 on a twenty-line one.
+                    if atBlockStart, !inListContext, Self.indentWidth(of: raw) >= 4 {
+                        flushTable()
+                        var codeLines = 1
+                        var lookahead = index
+                        while lookahead < lines.count {
+                            let next = lines[lookahead]
+                            let trimmed = next.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if trimmed.isEmpty {
+                                // A blank line only ends the block if what follows
+                                // is not indented too.
+                                var probe = lookahead + 1
+                                while probe < lines.count,
+                                      lines[probe].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    probe += 1
+                                }
+                                guard probe < lines.count, Self.indentWidth(of: lines[probe]) >= 4 else { break }
+                                codeLines += probe - lookahead
+                                lookahead = probe
+                                continue
+                            }
+                            guard Self.indentWidth(of: next) >= 4 else { break }
+                            codeLines += 1
+                            lookahead += 1
+                        }
+                        index = lookahead
+                        appendCodeUnit(lines: codeLines, terminated: true)
+                        atBlockStart = false
+                        continue
+                    }
+
+                    // GFM grid row — with leading pipes, or, since cmark-gfm accepts
+                    // it, without them, in which case the row is only recognisable
+                    // by the delimiter line underneath it.
+                    if line.contains("|"),
+                       pendingTableRows > 0 || line.hasPrefix("|")
+                        || (index < lines.count && Self.isTableDelimiter(lines[index])) {
+                        // The `|---|` separator draws as a border rather than a row,
+                        // so it is not counted.
                         let cells = line.filter { $0 != "|" && $0 != "-" && $0 != ":" && $0 != " " }
                         if !cells.isEmpty { pendingTableRows += 1 }
+                        lastUnitWasListItem = false
+                        inListContext = false
+                        atBlockStart = false
                         continue
                     }
                     flushTable()
 
-                    if let level = Self.headingLevel(of: line) {
-                        // A heading's font is scaled, so it both draws taller and
-                        // wraps at proportionally fewer characters.
-                        let scale = theme.headingFont(level: level).pointSize / theme.bodyFont.pointSize
-                        appendUnit(lines: wrappedLines(line, widthScale: scale),
-                                   lineHeight: headingLineHeights[level - 1],
-                                   trailing: theme.paragraphSpacing)
+                    // Setext heading: the underline is not drawn, and the line above
+                    // it is set in the heading face rather than the body one.
+                    if index < lines.count, let level = Self.setextLevel(of: lines[index]),
+                       !Self.isListItem(line), Self.headingLevel(of: line) == nil {
+                        index += 1
+                        appendHeadingUnit(line: line, level: level)
                         lastUnitWasListItem = false
+                        inListContext = false
+                        atBlockStart = false
+                        continue
+                    }
+
+                    if let level = Self.headingLevel(of: line) {
+                        appendHeadingUnit(line: line, level: level)
+                        lastUnitWasListItem = false
+                        inListContext = false
+                        atBlockStart = false
                         continue
                     }
 
@@ -1238,23 +1308,47 @@ struct TableTranscriptView: NSViewRepresentable {
                     // `listItemSpacing`: `visitListItem` pulls the item's inline
                     // children out, so the soft break before a continuation sits
                     // inside the item's own paragraph style rather than starting a
-                    // fresh 16 pt paragraph.
-                    let isListItem = Self.isListItem(line) || (isIndented && lastUnitWasListItem)
+                    // fresh 16 pt paragraph. `lastUnitWasListItem` covers the tight
+                    // form and `inListContext` the loose one, where a blank line
+                    // sits between the item and its continuation.
+                    let indented = raw.first == " " || raw.first == "\t"
+                    let isListItem = Self.isListItem(line) || (indented && (lastUnitWasListItem || inListContext))
                     appendUnit(
                         lines: wrappedLines(line),
                         lineHeight: bubbleLineHeight,
                         trailing: isListItem ? theme.listItemSpacing : theme.paragraphSpacing)
                     lastUnitWasListItem = isListItem
-                }
-
-                if inFence {
-                    // Unterminated fence (a code block still streaming in): the
-                    // renderer runs it to the end of the message, and being last it
-                    // has no trailing spacing.
-                    appendUnit(lines: fenceLines, lineHeight: codeLineHeight,
-                               trailing: 0, styleSpacing: 0)
+                    // An ordinary, unindented paragraph is what closes a list.
+                    if isListItem {
+                        inListContext = true
+                    } else if !indented {
+                        inListContext = false
+                    }
+                    atBlockStart = false
                 }
                 flushTable()
+            }
+
+            /// A code block of `lines` drawn lines. When more content follows a
+            /// TERMINATED block, the visitor's surviving trailing newline shows up
+            /// as one empty line fragment, which is charged in place of paragraph
+            /// spacing; the block's own style carries none, which is what a trailing
+            /// usage badge would pay.
+            private mutating func appendCodeUnit(lines: Int, terminated: Bool) {
+                appendUnit(lines: lines,
+                           lineHeight: codeLineHeight,
+                           trailing: terminated ? bubbleLineHeight : 0,
+                           styleSpacing: 0)
+            }
+
+            /// A heading, whose scaled font both draws taller than body prose and
+            /// wraps at proportionally fewer characters.
+            private mutating func appendHeadingUnit(line: String, level: Int) {
+                let theme = TranscriptTextTheme.chatBubble
+                let scale = theme.headingFont(level: level).pointSize / theme.bodyFont.pointSize
+                appendUnit(lines: wrappedLines(line, widthScale: scale),
+                           lineHeight: headingLineHeights[level - 1],
+                           trailing: theme.paragraphSpacing)
             }
 
             /// Charges the trailing token-usage badge.
@@ -1293,6 +1387,44 @@ struct TableTranscriptView: NSViewRepresentable {
             /// 48 pt against a rendered 128.
             private static func isLineTerminator(_ character: Character) -> Bool {
                 character == "\n" || character == "\r" || character == "\r\n"
+            }
+
+            /// Leading indentation of `line` in columns, counting a tab as four.
+            /// Four or more at the top of a block opens an indented code block.
+            private static func indentWidth(of line: Substring) -> Int {
+                var width = 0
+                for character in line {
+                    if character == " " {
+                        width += 1
+                    } else if character == "\t" {
+                        width += 4
+                    } else {
+                        break
+                    }
+                    if width >= 4 { return width }
+                }
+                return width
+            }
+
+            /// Whether `line` is a GFM table delimiter row — `| --- | --- |` or the
+            /// leading-pipe-free `--- | ---`. It is what identifies the row ABOVE it
+            /// as a table header, which is the only way a pipe-less table can be
+            /// recognised at all. Requires a pipe, so a setext `-----` underline and
+            /// a `---` thematic break are not mistaken for one.
+            private static func isTableDelimiter(_ line: Substring) -> Bool {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.contains("|"), trimmed.contains("-") else { return false }
+                return trimmed.allSatisfy { $0 == "-" || $0 == ":" || $0 == "|" || $0 == " " }
+            }
+
+            /// Setext underline level: 1 for a run of `=`, 2 for a run of `-`, nil
+            /// otherwise. The underline is not drawn; it re-faces the line above it.
+            private static func setextLevel(of line: Substring) -> Int? {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, indentWidth(of: line) < 4 else { return nil }
+                if trimmed.allSatisfy({ $0 == "=" }) { return 1 }
+                if trimmed.allSatisfy({ $0 == "-" }) { return 2 }
+                return nil
             }
 
             /// ATX heading level (1…6) of `line`, or nil. `#hashtag` is not a

@@ -92,6 +92,9 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "assistant/two-para", points: 2, percent: 1.6, achieved: "0.0"),
         Budget(id: "assistant/long", points: 2, percent: 0.4, achieved: "0.0"),
         Budget(id: "assistant/code-block", points: 2, percent: 1.1, achieved: "0.0"),
+        Budget(id: "assistant/indented-code", points: 2, percent: 0.6, achieved: "0.0"),
+        Budget(id: "assistant/setext-headings", points: 2, percent: 1.5, achieved: "0.0"),
+        Budget(id: "assistant/pipeless-table", points: 2, percent: 1.4, achieved: "0.0"),
         Budget(id: "assistant/bullet-list", points: 2, percent: 1.3, achieved: "0.0"),
         Budget(id: "assistant/list-continuation", points: 2, percent: 1.1, achieved: "0.0"),
         Budget(id: "assistant/gfm-table", points: 2, percent: 1.2, achieved: "0.0"),
@@ -498,6 +501,54 @@ struct TranscriptEstimatorAccuracyTests {
         Each contributes independently to the total error.
         """
 
+    /// A four-space INDENTED code block — the other way markdown spells a code
+    /// block, and the one that looks like ordinary prose to a line scan. It draws
+    /// in the code face with no paragraph spacing between its lines, so charging
+    /// each line as a paragraph cost 32 pt on three lines and 304 on twenty.
+    private static let indentedCodeText = """
+        The delegate callback reads:
+
+            let width = max(tableView.bounds.width, 1)
+            if let exact = cachedExactHeight(forRow: row) { return exact }
+            return Self.estimate(for: nodes[row], width: width)
+
+        Indented four spaces, with no fence in sight.
+        """
+
+    /// SETEXT headings, whose underline is not drawn and whose text is set in the
+    /// scaled heading face. Both levels, plus a thematic break in the same message
+    /// so the `---` disambiguation is pinned too: after a paragraph line it
+    /// underlines that line, after a blank it is a rule of its own.
+    private static let setextHeadingText = """
+        A first-level heading
+        =====================
+
+        Some body text under it.
+
+        A second-level heading
+        ----------------------
+
+        More body text.
+
+        ---
+
+        And a closing paragraph after a thematic break.
+        """
+
+    /// A GFM table written WITHOUT leading pipes, which cmark-gfm accepts. Only
+    /// the delimiter row underneath identifies the header, so this shape is
+    /// invisible to a scan that keys on a leading `|` and was charged as prose.
+    private static let pipelessTableText = """
+        Comparison, written without leading pipes:
+
+        Path | Up-front cost | Clip risk
+        --- | --- | ---
+        Authoritative | measure visible rows | none
+        Estimate+correct | cheap | high
+
+        The renderer draws it as a grid all the same.
+        """
+
     /// A list whose items carry INDENTED continuation lines, with one in the
     /// middle of the list rather than trailing it. `visitListItem` flattens an
     /// item's inline children, so the soft break before a continuation sits inside
@@ -633,6 +684,12 @@ struct TranscriptEstimatorAccuracyTests {
             text: "Here is the screenshot.\n\n[Image: source: \(imagePath)]",
             timestamp: nil,
             usage: nil))
+        items.append(.assistantText(id: "assistant/indented-code", text: indentedCodeText,
+                                    timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/setext-headings", text: setextHeadingText,
+                                    timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/pipeless-table", text: pipelessTableText,
+                                    timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/list-continuation", text: listContinuationText,
                                     timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/soft-breaks", text: softBreakText,
