@@ -1053,6 +1053,12 @@ struct TableTranscriptView: NSViewRepresentable {
             private var proseHeight: CGFloat = 0
             private var proseUnits = 0
             private var pendingTrailing: CGFloat = 0
+            /// Paragraph spacing carried by the STYLE of the last prose block's
+            /// final unit — what a paragraph appended after it would pay. Not the
+            /// same as `pendingTrailing`, which for a code block is the phantom
+            /// empty line rather than a paragraph spacing.
+            private var lastProseUnitStyleSpacing: CGFloat = 0
+            private var pendingUnitStyleSpacing: CGFloat = 0
 
             init(charsPerLine: Int) {
                 self.charsPerLine = charsPerLine
@@ -1078,18 +1084,30 @@ struct TableTranscriptView: NSViewRepresentable {
                 closedBlocksHeight += proseHeight
                 closedBlockCount += 1
                 hasProseBlock = true
+                lastProseUnitStyleSpacing = pendingUnitStyleSpacing
                 proseHeight = 0
                 proseUnits = 0
                 pendingTrailing = 0
+                pendingUnitStyleSpacing = 0
             }
 
             /// One rendered paragraph: `lines` fragments of `lineHeight`, followed
             /// by `trailing` points of spacing IF another unit follows it in the
             /// same block.
-            private mutating func appendUnit(lines: Int, lineHeight: CGFloat, trailing: CGFloat) {
+            /// `styleSpacing` defaults to `trailing` because for every unit but a
+            /// fenced code block the two ARE the same number; the fence is the one
+            /// place where what follows pays 0 while the unit itself is followed by
+            /// a phantom empty line.
+            private mutating func appendUnit(
+                lines: Int,
+                lineHeight: CGFloat,
+                trailing: CGFloat,
+                styleSpacing: CGFloat? = nil
+            ) {
                 if proseUnits > 0 { proseHeight += pendingTrailing }
                 proseHeight += CGFloat(max(lines, 1)) * lineHeight
                 pendingTrailing = trailing
+                pendingUnitStyleSpacing = styleSpacing ?? trailing
                 proseUnits += 1
             }
 
@@ -1150,7 +1168,7 @@ struct TableTranscriptView: NSViewRepresentable {
                             // one empty line fragment when more content follows.
                             inFence = false
                             appendUnit(lines: fenceLines, lineHeight: codeLineHeight,
-                                       trailing: bubbleLineHeight)
+                                       trailing: bubbleLineHeight, styleSpacing: 0)
                             fenceLines = 0
                         } else {
                             flushTable()
@@ -1204,17 +1222,30 @@ struct TableTranscriptView: NSViewRepresentable {
                     // Unterminated fence (a code block still streaming in): the
                     // renderer runs it to the end of the message, and being last it
                     // has no trailing spacing.
-                    appendUnit(lines: fenceLines, lineHeight: codeLineHeight, trailing: 0)
+                    appendUnit(lines: fenceLines, lineHeight: codeLineHeight,
+                               trailing: 0, styleSpacing: 0)
                 }
                 flushTable()
             }
 
-            /// Charges the trailing token-usage badge. It joins the last prose block
-            /// as a new paragraph — so the paragraph before it starts paying its
-            /// `paragraphSpacing` — or, with no prose to join, becomes its own block.
+            /// Charges the trailing token-usage badge.
+            ///
+            /// `composedBlocks` merges it into the last PROSE block as
+            /// `existing + "\n" + badge`, which turns the block's final paragraph
+            /// into a non-final one — so the spacing that appears is whatever THAT
+            /// paragraph's own style carries, not a fixed `paragraphSpacing`.
+            /// Measured: 27 pt after ordinary prose (16 + the badge's 11 pt line),
+            /// 15 pt after a bullet or ordered list (`listItemSpacing` is 4), and
+            /// 11 pt after a fenced code block, whose style sets no paragraph
+            /// spacing at all. Charging 16 unconditionally over-reserved 12 pt on
+            /// the list shape and 16 on the fence — the shrink direction, on the
+            /// very common "assistant summarises in bullets" message.
+            ///
+            /// With no prose to join, the badge becomes its own trailing block and
+            /// pays `interBlockSpacing` instead (17 pt measured after a table).
             mutating func appendBadge() {
                 if hasProseBlock {
-                    closedBlocksHeight += TranscriptTextTheme.chatBubble.paragraphSpacing + badgeLineHeight
+                    closedBlocksHeight += lastProseUnitStyleSpacing + badgeLineHeight
                 } else {
                     appendBlock(badgeLineHeight)
                 }

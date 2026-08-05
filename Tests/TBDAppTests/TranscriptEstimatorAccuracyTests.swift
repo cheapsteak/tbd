@@ -99,6 +99,8 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "assistant/crlf", points: 2, percent: 0.8, achieved: "0.0"),
         Budget(id: "assistant/badge-control", points: 2, percent: 3.1, achieved: "0.0"),
         Budget(id: "assistant/badge", points: 2, percent: 2.2, achieved: "0.0"),
+        Budget(id: "assistant/badge-after-bullets", points: 2, percent: 1.7, achieved: "0.0"),
+        Budget(id: "assistant/badge-after-fence", points: 2, percent: 1.9, achieved: "0.0"),
         Budget(id: "user/short", points: 2, percent: 4.2, achieved: "0.0"),
         Budget(id: "user/long", points: 2, percent: 2.1, achieved: "0.0"),
         Budget(id: "user/wrap-boundary", points: 2, percent: 1.4, achieved: "0.0"),
@@ -513,6 +515,28 @@ struct TranscriptEstimatorAccuracyTests {
     private static let badgeText = "This assistant message carries a token-usage badge that must "
         + "render fully inside the bubble, beneath the body text."
 
+    /// A badged message whose last paragraph is a LIST ITEM. The badge then pays
+    /// the tight `listItemSpacing` (4) rather than a full paragraph break, so the
+    /// whole badge costs 15 pt and not 27 — the shape an unconditional
+    /// `paragraphSpacing` over-reserved by 12.
+    private static let badgeAfterBulletsText = """
+        Summary of what changed:
+
+        - the line height now comes from the font
+        - the table rows are counted exactly once
+        """
+
+    /// A badged message whose last paragraph is a fenced CODE BLOCK, whose style
+    /// sets no paragraph spacing at all: the badge costs just its own 11 pt line.
+    private static let badgeAfterFenceText = """
+        The sizing hook now reads:
+
+        ```swift
+        let width = max(tableView.bounds.width, 1)
+        return Self.estimate(for: nodes[row], width: width)
+        ```
+        """
+
     /// Single newlines with NO blank line between them — typed notes, an
     /// address-style block, a short list someone did not mark up. `visitSoftBreak`
     /// emits the break INSIDE the paragraph, but TextKit still treats it as a
@@ -650,6 +674,18 @@ struct TranscriptEstimatorAccuracyTests {
         nodes.append(TranscriptRenderNode(id: "assistant/badge",
                                           kind: .chatBubble(badgeItem),
                                           badgeUsage: badgeUsage))
+
+        // The badge's leading spacing is whatever the paragraph it is appended to
+        // carries, not a fixed `paragraphSpacing`: 4 pt after a list item, 0 after
+        // a fenced code block whose style sets none. `assistant/badge` above is
+        // plain prose and cannot see either.
+        for (id, text) in [("assistant/badge-after-bullets", badgeAfterBulletsText),
+                           ("assistant/badge-after-fence", badgeAfterFenceText)] {
+            nodes.append(TranscriptRenderNode(
+                id: id,
+                kind: .chatBubble(.assistantText(id: id, text: text, timestamp: nil, usage: badgeUsage)),
+                badgeUsage: badgeUsage))
+        }
 
         // Activity-group summary: only `TranscriptPresentation.build` mints one.
         let groupItems: [TranscriptItem] = (0..<3).map { index in
