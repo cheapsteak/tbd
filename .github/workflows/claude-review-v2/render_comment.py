@@ -89,7 +89,15 @@ def attribution_line(repo: str, base_ref: str, patch_id: str = "") -> str:
 
 
 def _finding_bullet(finding: dict) -> str:
-    """One markdown bullet for a finding: severity, location, title, body."""
+    """One markdown bullet for a finding: severity, location, title, body.
+
+    `file`, `line`, and `body` are each nullable in the schema — a repo-wide or
+    architectural finding anchors to neither a file nor a line. The location is
+    therefore assembled from whichever anchors exist and omitted entirely when
+    none do: a bullet with no `file` renders as severity and title alone, never
+    as a `None:42` or `file:None` placeholder. The finding still appears — the
+    ones with no anchor are the ones that most need a human to read them.
+    """
     severity = str(finding.get("severity") or "").strip() or "UNKNOWN"
     path = str(finding.get("file") or "").strip()
     line = finding.get("line")

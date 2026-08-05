@@ -82,13 +82,28 @@ scale, so the posted format doesn't change for readers). A JSON-schema file in t
 workflow directory is the single source of truth; validation failures list the offending
 file and field.
 
-`line` is both optional and nullable. Repo-wide, convention, and architectural findings
-have no single line anchor, and a model writing one emits `"line": null` — the natural
-JSON. A schema that accepted omission but rejected null would fail the whole gate closed
-on precisely the category of finding least amenable to mechanical judgment, which is a
-systematic blind spot rather than a random one. Tolerating what the model naturally
-produces is more robust than a prompt instruction nothing can enforce. Renderers treat a
-null line as "file only" and never emit a `file:null` placeholder.
+Both anchors are nullable, and the optional fields are too. Repo-wide, convention, and
+architectural findings have no single line — and often no single file either, being
+properties of the tree rather than of one path. A model writing one emits `"line": null`
+and `"file": null`, the natural JSON. A schema that accepted omission but rejected null
+would fail the whole gate closed on precisely the category of finding least amenable to
+mechanical judgment, which is a systematic blind spot rather than a random one.
+Tolerating what the model naturally produces is more robust than a prompt instruction
+nothing can enforce. Renderers assemble the location from whichever anchors exist and
+omit it entirely when neither does — never a `file:null` or `None:42` placeholder — so an
+unanchored finding still reaches the reader. The same reasoning covers `body`,
+`confidence`, `note`, and `comment_body`: each may already be omitted, so a null is that
+same absence spelled differently, and none has a consumer that reads it as more than
+text-or-nothing. `line` may be omitted as well as nulled; `file` stays required, so a
+model must state the anchor even when the answer is "there isn't one".
+
+The nullable set stops there, and the line is where a null stops meaning "absent" and
+starts meaning "broken". `id` keys the disposition-coverage check, `severity` computes
+the verdict, `title` is the finding's content, `specialist` is the lens's identity, and
+`findings`/`disposition` are iterated by the validator: a null in any of them is a
+malformed run with no safe reading, and the gate keeps failing closed on it. A `note` is
+nullable on a `kept` or `merged` disposition entry and not on a `downgraded` or `dropped`
+one, where a stated reason is the whole point.
 
 Initial specialist set (2, deliberately small):
 
