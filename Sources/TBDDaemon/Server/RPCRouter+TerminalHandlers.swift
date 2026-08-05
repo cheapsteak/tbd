@@ -1842,7 +1842,18 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
+        // Queue behind any send already mid-flight to this same terminal; sends
+        // to other terminals are unaffected. The whole handler runs inside the
+        // lane so the target check and the typing it authorizes cannot be
+        // separated by another caller's paste.
+        return try await terminalSendSerializer.run(terminalID: params.terminalID) {
+            try await self.performTerminalSend(params, actor: actor)
+        }
+    }
 
+    private func performTerminalSend(
+        _ params: TerminalSendParams, actor: ActuationActor?
+    ) async throws -> RPCResponse {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
@@ -1859,6 +1870,65 @@ extension RPCRouter {
             .terminalSend, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
             message: params.text, submit: params.submit == true)
+
+        // Ask the pane about itself before typing into it. tmux's own exit
+        // status cannot carry this: `send-keys` into a `remain-on-exit` dead
+        // pane exits 0, and keys sent to a reused pane id land in a live
+        // stranger's composer with no error anywhere (issue #384). Both answers
+        // arrive from ONE read-only `list-panes`, and both are read BEFORE any
+        // byte is written — so a decline here is a refusal, never a transport
+        // failure: the daemon declined without touching the transport.
+        let target: PaneSendTarget
+        do {
+            target = try await tmux.paneSendTarget(
+                server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+        } catch {
+            // The consultation itself could not be run (a wedged tmux tripping
+            // the subprocess timeout). That is a tmux command failing, not an
+            // answer about the pane, and it is classified as such.
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+
+        switch target {
+        case .missing:
+            let message = """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
+                no longer exists on server \(worktree.tmuxServer) — nothing was sent
+                """
+            await finishActuation(actuationID, .refused(.notFound), error: message)
+            return RPCResponse(error: message)
+        case .dead:
+            let message = """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
+                dead (its process has exited) — nothing was sent; recreate the terminal's \
+                window first
+                """
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(error: message)
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else {
+                // Absence is not disagreement. A pane spawned before TBD stamped
+                // identities, or by something outside TBD, answers with nothing —
+                // and refusing on nothing would turn this fix into a regression
+                // for every such pane. Only a POSITIVE disagreement refuses.
+                logger.debug("""
+                    terminal.send: pane \(terminal.tmuxPaneID, privacy: .public) claims no \
+                    terminal identity; proceeding without verifying it is terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+                break
+            }
+            if paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                let message = """
+                    tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
+                    \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
+                    — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
+                    """
+                await finishActuation(actuationID, .refused(.targetMismatch), error: message)
+                return RPCResponse(error: message)
+            }
+        }
 
         // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
         // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
