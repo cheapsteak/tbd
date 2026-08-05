@@ -599,19 +599,60 @@ struct PRStatusManagerTests {
 
     @Test("branchCandidates keeps only the local branch when no upstream is configured")
     func branchCandidatesWithoutUpstream() {
-        let candidates = PRStatusManager.branchCandidates(localBranch: "feature/local", upstreamBranch: nil)
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "feature/local", upstreamBranch: nil, defaultBranch: "main")
 
         #expect(candidates == ["feature/local"])
     }
 
-    @Test("branchCandidates includes a distinct upstream branch for PR matching")
+    @Test("branchCandidates includes a distinct upstream branch for PR matching (rename-push)")
     func branchCandidatesWithDistinctUpstream() {
+        // The case the upstream candidate exists for: a local branch pushed to a
+        // remote branch under a different name, whose PR is only findable there.
         let candidates = PRStatusManager.branchCandidates(
             localBranch: "feature/local",
-            upstreamBranch: "tbd/upstream-feature"
+            upstreamBranch: "tbd/upstream-feature",
+            defaultBranch: "main"
         )
 
         #expect(candidates == ["feature/local", "tbd/upstream-feature"])
+    }
+
+    @Test("branchCandidates keeps only the local branch when the upstream equals it")
+    func branchCandidatesUpstreamEqualsLocal() {
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "feature/local", upstreamBranch: "feature/local", defaultBranch: "main")
+
+        #expect(candidates == ["feature/local"])
+    }
+
+    @Test("branchCandidates drops an upstream that names the repo's default branch")
+    func branchCandidatesDropsDefaultBranchUpstream() {
+        // A worktree branch cut from the base branch records
+        // `branch.<name>.merge = refs/heads/<default>` — a base pointer, not a
+        // head ref. Offering it would attach a PR whose head is the base branch.
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main")
+
+        #expect(candidates == ["tbd/my-branch"])
+    }
+
+    @Test("branchCandidates drops a non-default upstream too when the default branch is unknown")
+    func branchCandidatesDropsUpstreamWhenDefaultUnknown() {
+        // Safe direction: losing a rare rename-push match costs far less than
+        // mis-attaching a base branch's PR across a fleet of worktrees.
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "tbd/my-branch", upstreamBranch: "renamed-on-remote", defaultBranch: nil)
+
+        #expect(candidates == ["tbd/my-branch"])
+    }
+
+    @Test("branchCandidates keeps an upstream that differs from both the local and the default branch")
+    func branchCandidatesKeepsNonDefaultUpstream() {
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "tbd/my-branch", upstreamBranch: "renamed-on-remote", defaultBranch: "trunk")
+
+        #expect(candidates == ["tbd/my-branch", "renamed-on-remote"])
     }
 
     // MARK: - parsePRCheckDetail
@@ -1359,7 +1400,7 @@ struct PRStatusManagerTests {
         let nodes = try PRStatusManager.parsePRNodes(from: json)
         let wt = UUID()
         let matches = PRStatusManager.matchUnnumbered(
-            [(wt, "feature-x", nil, "/wt/acme", nil)],
+            [(wt, "feature-x", nil, nil, "/wt/acme", nil)],
             nodes: nodes,
             resolveRepo: { _ in ("acme", "acme") })
         #expect(matches.count == 1)
@@ -1392,8 +1433,8 @@ struct PRStatusManagerTests {
             "/wt/studio-ui": ("mdg-private", "studio-ui")
         ]
         let matches = PRStatusManager.matchUnnumbered(
-            [(monorepoWT, branch, nil, "/wt/monorepo", nil),
-             (studioWT, branch, nil, "/wt/studio-ui", nil)],
+            [(monorepoWT, branch, nil, nil, "/wt/monorepo", nil),
+             (studioWT, branch, nil, nil, "/wt/studio-ui", nil)],
             nodes: nodes,
             resolveRepo: { repos[$0] })
         #expect(matches.count == 2)
@@ -1409,7 +1450,7 @@ struct PRStatusManagerTests {
                    branch: "shared-branch")
         ]
         let matches = PRStatusManager.matchUnnumbered(
-            [(UUID(), "shared-branch", nil, "/wt/monorepo", nil)],
+            [(UUID(), "shared-branch", nil, nil, "/wt/monorepo", nil)],
             nodes: nodes,
             resolveRepo: { _ in ("mdg-private", "monorepo") })
         #expect(matches.isEmpty)
@@ -1423,7 +1464,7 @@ struct PRStatusManagerTests {
             prNode(number: 7, url: "https://github.com/acme/acme/pull/7", branch: "feature-x")
         ]
         let matches = PRStatusManager.matchUnnumbered(
-            [(UUID(), "feature-x", nil, "/wt/acme", nil)],
+            [(UUID(), "feature-x", nil, nil, "/wt/acme", nil)],
             nodes: nodes,
             resolveRepo: { _ in nil })
         #expect(matches.isEmpty)
@@ -1435,7 +1476,7 @@ struct PRStatusManagerTests {
             prNode(number: 8, url: "https://github.com/Acme/Widgets/pull/8", branch: "feature-y")
         ]
         let matches = PRStatusManager.matchUnnumbered(
-            [(UUID(), "feature-y", nil, "/wt/widgets", nil)],
+            [(UUID(), "feature-y", nil, nil, "/wt/widgets", nil)],
             nodes: nodes,
             resolveRepo: { _ in ("acme", "widgets") })
         #expect(matches.first?.node.number == 8)
@@ -1448,10 +1489,204 @@ struct PRStatusManagerTests {
             prNode(number: 9, url: "https://github.com/acme/acme/pull/9", branch: "upstream-x")
         ]
         let matches = PRStatusManager.matchUnnumbered(
-            [(UUID(), "local-x", "upstream-x", "/wt/acme", nil)],
+            [(UUID(), "local-x", "upstream-x", "main", "/wt/acme", nil)],
             nodes: nodes,
             resolveRepo: { _ in ("acme", "acme") })
         #expect(matches.first?.node.number == 9)
+    }
+
+    @Test("matchUnnumbered does not attach a PR whose head is the repo's base branch")
+    func matchUnnumberedIgnoresBaseBranchPR() {
+        // A worktree branch cut from the base branch tracks `refs/heads/main`, so
+        // the base branch used to be offered as a head candidate — handing every
+        // worktree without its own PR yet the PR someone once opened FROM main.
+        let nodes = [
+            prNode(number: 88, url: "https://github.com/acme/acme-prod/pull/88", branch: "main",
+                   state: "CLOSED")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(UUID(), "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in ("acme", "acme-prod") })
+        #expect(matches.isEmpty)
+    }
+
+    @Test("matchUnnumbered still attaches the worktree's own PR when a base-branch PR also exists")
+    func matchUnnumberedPrefersOwnBranchOverBaseBranchPR() {
+        let nodes = [
+            prNode(number: 88, url: "https://github.com/acme/acme-prod/pull/88", branch: "main",
+                   state: "CLOSED"),
+            prNode(number: 89, url: "https://github.com/acme/acme-prod/pull/89", branch: "tbd/my-branch")
+        ]
+        let matches = PRStatusManager.matchUnnumbered(
+            [(UUID(), "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)],
+            nodes: nodes,
+            resolveRepo: { _ in ("acme", "acme-prod") })
+        #expect(matches.first?.node.number == 89)
+    }
+
+    // MARK: - Head-ref heal (base-branch mis-attachment)
+
+    @Test("headRefMismatchedMatches flags an unnumbered worktree whose PR head is the base branch")
+    func headRefHealFlagsBaseBranchHead() {
+        let wt = UUID()
+        let node = prNode(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                          branch: "main", state: "CLOSED")
+        let out = PRStatusManager.headRefMismatchedMatches(
+            [(wt, node)],
+            unnumbered: [(wt, "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)])
+        #expect(out.count == 1)
+        #expect(out.first?.worktreeID == wt)
+        #expect(out.first?.headRefName == "main")
+        #expect(out.first?.candidates == ["tbd/my-branch"])
+    }
+
+    @Test("headRefMismatchedMatches keeps a match on the worktree's own branch")
+    func headRefHealKeepsOwnBranchMatch() {
+        let wt = UUID()
+        let node = prNode(number: 89, url: "https://github.com/acme/acme-prod/pull/89",
+                          branch: "tbd/my-branch")
+        let out = PRStatusManager.headRefMismatchedMatches(
+            [(wt, node)],
+            unnumbered: [(wt, "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)])
+        #expect(out.isEmpty)
+    }
+
+    @Test("headRefMismatchedMatches keeps a legitimate rename-push match (upstream candidate)")
+    func headRefHealKeepsRenamePushMatch() {
+        // The heal is keyed on the same branchCandidates the matcher uses, so
+        // anything the matcher may attach it must accept — otherwise a cleared
+        // entry would be re-matched and cleared again on every poll.
+        let wt = UUID()
+        let node = prNode(number: 9, url: "https://github.com/acme/acme-prod/pull/9",
+                          branch: "renamed-on-remote")
+        let out = PRStatusManager.headRefMismatchedMatches(
+            [(wt, node)],
+            unnumbered: [(wt, "local-x", "renamed-on-remote", "main", "/wt/acme-prod", nil)])
+        #expect(out.isEmpty)
+    }
+
+    @Test("headRefMismatchedMatches never flags a numbered worktree (fork PR heads legitimately differ)")
+    func headRefHealSkipsNumberedWorktree() {
+        // A worktree created from a PR row carries that PR's number; a fork PR's
+        // head ref lives in another repo's namespace and rarely equals the local
+        // branch. Only IDs present in `unnumbered` are judged.
+        let numberedWT = UUID()
+        let node = prNode(number: 77, url: "https://github.com/acme/acme-prod/pull/77",
+                          branch: "contributor-fork-branch")
+        let out = PRStatusManager.headRefMismatchedMatches(
+            [(numberedWT, node)],
+            unnumbered: [(UUID(), "tbd/other", nil, "main", "/wt/acme-prod", nil)])
+        #expect(out.isEmpty)
+    }
+
+    @Test("headRefMismatchedMatches flags a MERGED mis-attached node, so it is dropped before any merged transition")
+    func headRefHealFlagsMergedMisattachedNode() {
+        // fetchAll removes flagged matches from the apply loop, which is what
+        // keeps a mis-attached MERGED PR from firing auto-archive on a worktree
+        // that has nothing to do with it.
+        let wt = UUID()
+        let node = prNode(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                          branch: "main", state: "MERGED")
+        let out = PRStatusManager.headRefMismatchedMatches(
+            [(wt, node)],
+            unnumbered: [(wt, "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)])
+        #expect(out.count == 1)
+    }
+
+    @Test("headRefVerificationTargets picks up an unmatched cached entry, carrying its PR number")
+    func headRefVerificationTargetsIncludesUnmatchedCached() {
+        // The stuck case: a mis-attached CLOSED PR is terminal, so
+        // cachedNumberFallback never re-queries it and no fresh node ever exists
+        // to judge. One by-number resolution per daemon run supplies the head ref.
+        let wt = UUID()
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(wt, "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)]
+        let out = PRStatusManager.headRefVerificationTargets(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                                          state: .closed) })
+        #expect(out.count == 1)
+        #expect(out.first?.id == wt)
+        #expect(out.first?.prNumber == 88)
+    }
+
+    @Test("headRefVerificationTargets skips a worktree this pass already matched")
+    func headRefVerificationTargetsSkipsMatched() {
+        let wt = UUID()
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(wt, "tbd/my-branch", nil, "main", "/wt/acme-prod", nil)]
+        let out = PRStatusManager.headRefVerificationTargets(
+            unnumbered: unnumbered, matchedIDs: [wt], batchSucceeded: true, verifiedIDs: [],
+            cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                                          state: .closed) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("headRefVerificationTargets skips a worktree already verified in this daemon run")
+    func headRefVerificationTargetsSkipsVerified() {
+        // Bounds the extra round trip: without it every terminal cached entry
+        // would be re-queried on every poll forever.
+        let wt = UUID()
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(wt, "tbd/my-branch", nil, "main", "/wt/acme-prod", nil)]
+        let out = PRStatusManager.headRefVerificationTargets(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [wt],
+            cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                                          state: .closed) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("headRefVerificationTargets skips a worktree with no cached status")
+    func headRefVerificationTargetsSkipsUncached() {
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(UUID(), "tbd/my-branch", nil, "main", "/wt/acme-prod", nil)]
+        let out = PRStatusManager.headRefVerificationTargets(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            cachedStatus: { _ in nil })
+        #expect(out.isEmpty)
+    }
+
+    @Test("headRefVerificationTargets yields nothing when the viewer batch failed")
+    func headRefVerificationTargetsSkippedOnBatchFailure() {
+        // Absence of evidence is not proof of mis-attachment: on a fetch/parse
+        // failure every worktree is "unmatched" and the word means nothing.
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(UUID(), "tbd/my-branch", nil, "main", "/wt/acme-prod", nil)]
+        let out = PRStatusManager.headRefVerificationTargets(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: false, verifiedIDs: [],
+            cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                                          state: .closed) })
+        #expect(out.isEmpty)
+    }
+
+    @Test("a cleared head-ref mismatch is not re-attached on the next pass (no oscillation)")
+    func headRefHealDoesNotOscillate() {
+        // Pass 1: the poisoned entry resolves to the base-branch PR and is healed.
+        let wt = UUID()
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(wt, "tbd/my-branch", "main", "main", "/wt/acme-prod", nil)]
+        let baseBranchPR = prNode(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
+                                  branch: "main", state: "CLOSED")
+        var cache: [UUID: PRStatus] = [
+            wt: PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88", state: .closed)
+        ]
+        let healed = PRStatusManager.headRefMismatchedMatches([(wt, baseBranchPR)], unnumbered: unnumbered)
+        #expect(healed.count == 1)
+        for entry in healed { cache.removeValue(forKey: entry.worktreeID) }
+
+        // Pass 2, same inputs: the matcher no longer offers the base branch, and
+        // with the cache cleared there is nothing left to verify or fall back to.
+        let rematch = PRStatusManager.matchUnnumbered(
+            unnumbered, nodes: [baseBranchPR], resolveRepo: { _ in ("acme", "acme-prod") })
+        #expect(rematch.isEmpty)
+        let targets = PRStatusManager.headRefVerificationTargets(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            cachedStatus: { cache[$0] })
+        #expect(targets.isEmpty)
+        let fallback = PRStatusManager.cachedNumberFallback(
+            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, cachedStatus: { cache[$0] })
+        #expect(fallback.isEmpty)
     }
 
     @Test("bestNodeByRepoBranch keeps the tie-break within one repo: OPEN beats MERGED, newest wins within a state")
@@ -1491,7 +1726,7 @@ struct PRStatusManagerTests {
         let cached = PRStatus(number: 13113, url: "https://github.com/mdg-private/studio-ui/pull/13113",
                               state: .mergeable)
         let out = PRStatusManager.poisonedCacheEntries(
-            unnumbered: [(wt, "shared-branch", nil, "/wt/monorepo", nil)],
+            unnumbered: [(wt, "shared-branch", nil, nil, "/wt/monorepo", nil)],
             resolveRepo: { _ in ("mdg-private", "monorepo") },
             cachedStatus: { _ in cached })
         #expect(out.count == 1)
@@ -1505,7 +1740,7 @@ struct PRStatusManagerTests {
         let cached = PRStatus(number: 555, url: "https://github.com/mdg-private/monorepo/pull/555",
                               state: .mergeable)
         let out = PRStatusManager.poisonedCacheEntries(
-            unnumbered: [(UUID(), "shared-branch", nil, "/wt/monorepo", nil)],
+            unnumbered: [(UUID(), "shared-branch", nil, nil, "/wt/monorepo", nil)],
             resolveRepo: { _ in ("mdg-private", "monorepo") },
             cachedStatus: { _ in cached })
         #expect(out.isEmpty)
@@ -1516,7 +1751,7 @@ struct PRStatusManagerTests {
         let cached = PRStatus(number: 1, url: "https://github.com/MDG-Private/Monorepo/pull/1",
                               state: .pending)
         let out = PRStatusManager.poisonedCacheEntries(
-            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            unnumbered: [(UUID(), "b", nil, nil, "/wt/monorepo", nil)],
             resolveRepo: { _ in ("mdg-private", "monorepo") },
             cachedStatus: { _ in cached })
         #expect(out.isEmpty)
@@ -1526,7 +1761,7 @@ struct PRStatusManagerTests {
     func poisonedCacheEntriesKeepsUnparseableURL() {
         let cached = PRStatus(number: 1, url: "not a pr url", state: .pending)
         let out = PRStatusManager.poisonedCacheEntries(
-            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            unnumbered: [(UUID(), "b", nil, nil, "/wt/monorepo", nil)],
             resolveRepo: { _ in ("mdg-private", "monorepo") },
             cachedStatus: { _ in cached })
         #expect(out.isEmpty)
@@ -1539,7 +1774,7 @@ struct PRStatusManagerTests {
         let cached = PRStatus(number: 13113, url: "https://github.com/mdg-private/studio-ui/pull/13113",
                               state: .mergeable)
         let out = PRStatusManager.poisonedCacheEntries(
-            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            unnumbered: [(UUID(), "b", nil, nil, "/wt/monorepo", nil)],
             resolveRepo: { _ in nil },
             cachedStatus: { _ in cached })
         #expect(out.isEmpty)
@@ -1548,7 +1783,7 @@ struct PRStatusManagerTests {
     @Test("poisonedCacheEntries skips a worktree with no cached status")
     func poisonedCacheEntriesSkipsNoCache() {
         let out = PRStatusManager.poisonedCacheEntries(
-            unnumbered: [(UUID(), "b", nil, "/wt/monorepo", nil)],
+            unnumbered: [(UUID(), "b", nil, nil, "/wt/monorepo", nil)],
             resolveRepo: { _ in ("mdg-private", "monorepo") },
             cachedStatus: { _ in nil })
         #expect(out.isEmpty)
@@ -1558,8 +1793,8 @@ struct PRStatusManagerTests {
     func cachedNumberFallbackExcludesBatchMatched() {
         // A branch re-pointed to a NEW PR must not get pinned to the stale cached number.
         let wt = UUID()
-        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
-            [(wt, "feature-x", nil, "/tmp/repo", nil)]
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(wt, "feature-x", nil, nil, "/tmp/repo", nil)]
         let out = PRStatusManager.cachedNumberFallback(
             unnumbered: unnumbered, matchedIDs: [wt], batchSucceeded: true,
             cachedStatus: { _ in PRStatus(number: 42, url: "https://example.com/pr/42", state: .pending) })
@@ -1571,8 +1806,8 @@ struct PRStatusManagerTests {
         // The stale PR fell out of the 100-PR viewer batch; the cached number is
         // the only remaining handle to observe the merged transition.
         let wt = UUID()
-        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
-            [(wt, "old-branch", "origin/old-branch", "/tmp/repo", nil)]
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(wt, "old-branch", "origin/old-branch", "main", "/tmp/repo", nil)]
         let out = PRStatusManager.cachedNumberFallback(
             unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
             cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
@@ -1584,8 +1819,8 @@ struct PRStatusManagerTests {
 
     @Test("cachedNumberFallback excludes an unmatched worktree with no cached entry")
     func cachedNumberFallbackExcludesNoCachedEntry() {
-        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
-            [(UUID(), "feature-y", nil, "/tmp/repo", nil)]
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(UUID(), "feature-y", nil, nil, "/tmp/repo", nil)]
         let out = PRStatusManager.cachedNumberFallback(
             unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, cachedStatus: { _ in nil })
         #expect(out.isEmpty)
@@ -1595,8 +1830,8 @@ struct PRStatusManagerTests {
     func cachedNumberFallbackSkippedOnBatchFailure() {
         // On a fetch/parse failure "unmatched" means nothing — falling back could
         // resolve a stale MERGED number and auto-archive off an unrelated PR.
-        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
-            [(UUID(), "old-branch", nil, "/tmp/repo", nil)]
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(UUID(), "old-branch", nil, nil, "/tmp/repo", nil)]
         let out = PRStatusManager.cachedNumberFallback(
             unnumbered: unnumbered, matchedIDs: [], batchSucceeded: false,
             cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
@@ -1609,9 +1844,9 @@ struct PRStatusManagerTests {
         // avoid a permanent per-poll re-query — a reopened PR is recovered by
         // the on-select refresh() path (or a restored batch match), not the fallback.
         let mergedWT = UUID(); let closedWT = UUID()
-        let unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] =
-            [(mergedWT, "merged-branch", nil, "/tmp/repo", nil),
-             (closedWT, "closed-branch", nil, "/tmp/repo", nil)]
+        let unnumbered: [PRStatusManager.PollWorktree] =
+            [(mergedWT, "merged-branch", nil, nil, "/tmp/repo", nil),
+             (closedWT, "closed-branch", nil, nil, "/tmp/repo", nil)]
         let statuses: [UUID: PRStatus] = [
             mergedWT: PRStatus(number: 11, url: "https://example.com/pr/11", state: .merged),
             closedWT: PRStatus(number: 12, url: "https://example.com/pr/12", state: .closed)
@@ -1627,10 +1862,10 @@ struct PRStatusManagerTests {
         // One repo's owner/name must never be applied to another worktree's PR
         // number — the wrong repo could hold an unrelated (even MERGED) PR.
         let a = UUID(); let b = UUID(); let c = UUID()
-        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
-            (a, "b1", nil, "/wt/tbd-1", 457),
-            (b, "b2", nil, "/wt/acme-prod-1", 9),
-            (c, "b3", nil, "/wt/tbd-2", 460)
+        let numbered: [PRStatusManager.PollWorktree] = [
+            (a, "b1", nil, nil, "/wt/tbd-1", 457),
+            (b, "b2", nil, nil, "/wt/acme-prod-1", 9),
+            (c, "b3", nil, nil, "/wt/tbd-2", 460)
         ]
         let repos = ["/wt/tbd-1": ("acme", "tbd"), "/wt/tbd-2": ("acme", "tbd"),
                      "/wt/acme-prod-1": ("acme", "acme-prod")]
@@ -1648,9 +1883,9 @@ struct PRStatusManagerTests {
     @Test("groupNumberedByRepo drops entries whose repo can't be resolved")
     func groupNumberedByRepoDropsUnresolved() {
         let a = UUID()
-        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
-            (a, "b1", nil, "/wt/known", 1),
-            (UUID(), "b2", nil, "/wt/unknown", 2)
+        let numbered: [PRStatusManager.PollWorktree] = [
+            (a, "b1", nil, nil, "/wt/known", 1),
+            (UUID(), "b2", nil, nil, "/wt/unknown", 2)
         ]
         let groups = PRStatusManager.groupNumberedByRepo(numbered) {
             $0 == "/wt/known" ? ("acme", "tbd") : nil
@@ -1662,9 +1897,9 @@ struct PRStatusManagerTests {
     @Test("groupNumberedByRepo passes a single-repo set through as one group")
     func groupNumberedByRepoSingleRepoPassthrough() {
         let a = UUID(); let b = UUID()
-        let numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = [
-            (a, "b1", nil, "/wt/one", 10),
-            (b, "b2", nil, "/wt/two", 11)
+        let numbered: [PRStatusManager.PollWorktree] = [
+            (a, "b1", nil, nil, "/wt/one", 10),
+            (b, "b2", nil, nil, "/wt/two", 11)
         ]
         let groups = PRStatusManager.groupNumberedByRepo(numbered) { _ in ("acme", "tbd") }
         #expect(groups.count == 1)

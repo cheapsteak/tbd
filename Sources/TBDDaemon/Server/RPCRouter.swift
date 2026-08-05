@@ -547,7 +547,13 @@ public final class RPCRouter: Sendable {
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = []
+        // Each repo's default branch: a worktree branch cut from it records
+        // `branch.<name>.merge = refs/heads/<default>`, which is a base pointer,
+        // not a head ref — see `PRStatusManager.branchCandidates`. Fetched once
+        // per pass, not per worktree.
+        let defaultBranchByRepo = Dictionary(
+            uniqueKeysWithValues: (try await db.repos.list()).map { ($0.id, $0.defaultBranch) })
+        var infos: [PRStatusManager.PollWorktree] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
             // Route the per-worktree `git config` lookup through the TTL cache
@@ -562,6 +568,7 @@ public final class RPCRouter: Sendable {
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
+                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
                 worktreePath: wt.path,
                 prNumber: wt.prNumber
             ))
@@ -592,11 +599,18 @@ public final class RPCRouter: Sendable {
             worktreePath: wt.path,
             branch: wt.branch
         )
+        // Same base-vs-head distinction as the poll path: an upstream that names
+        // the repo's default branch is a base pointer, not a head ref.
+        var defaultBranch: String?
+        if let repoID = wt.repoID {
+            defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
+        }
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
             upstreamBranch: upstreamBranch,
+            defaultBranch: defaultBranch,
             repoPath: wt.path,
             prNumber: wt.prNumber
         )

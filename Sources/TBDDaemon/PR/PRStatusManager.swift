@@ -14,6 +14,18 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRStatusMana
 /// callers keep the previous cached status instead of guessing.
 public actor PRStatusManager {
 
+    /// One worktree's poll inputs: its identity, the branch names it may be
+    /// matched under, its checkout path (which repo it belongs to), and the PR
+    /// number it was created from, if any.
+    public typealias PollWorktree = (
+        id: UUID,
+        branch: String,
+        upstreamBranch: String?,
+        defaultBranch: String?,
+        worktreePath: String,
+        prNumber: Int?
+    )
+
     private var cache: [UUID: PRStatus] = [:]
 
     /// TTL cache for `resolveNameWithOwner` so the periodic poll's by-number and
@@ -32,6 +44,13 @@ public actor PRStatusManager {
     private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
 
     private var onStatusPersist: (@Sendable (UUID, PRStatus?) async -> Void)?
+
+    /// Worktrees whose cached PR has had its head ref checked against the
+    /// worktree's own branch candidates in this daemon run (see the head-ref
+    /// heal in `fetchAll`). Verifying once per run bounds the extra by-number
+    /// round trip: without it, every terminal-state cached entry would be
+    /// re-queried on every poll forever.
+    private var headRefVerifiedIDs: Set<UUID> = []
 
     public init() {}
 
@@ -104,9 +123,26 @@ public actor PRStatusManager {
         }
     }
 
+    /// Clear the cached status of every head-ref-mismatched worktree and persist
+    /// the clear (nil), so `hydrate` can't resurrect it after a daemon restart.
+    /// No `lastDirectUpdate` write: this runs inside `fetchAll`, and a cleared
+    /// worktree is dropped from `matches` in the same pass, so no later `apply`
+    /// can touch it.
+    private func clearHeadRefMismatches(
+        _ entries: [(worktreeID: UUID, headRefName: String, candidates: [String])],
+        source: String
+    ) async {
+        for entry in entries {
+            let candidates = entry.candidates.joined(separator: ", ")
+            logger.debug("fetchAll: clearing head-ref-mismatched PR status for worktree \(entry.worktreeID, privacy: .public) (\(source, privacy: .public)): PR head is \(entry.headRefName, privacy: .public) but the worktree matches only [\(candidates, privacy: .public)]")
+            cache.removeValue(forKey: entry.worktreeID)
+            await onStatusPersist?(entry.worktreeID, nil)
+        }
+    }
+
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
-    /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
-    public func fetchAll(worktrees: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)]) async {
+    /// worktrees: one `PollWorktree` per active non-main worktree.
+    public func fetchAll(worktrees: [PollWorktree]) async {
         guard !worktrees.isEmpty else { return }
         guard !fetchAllInProgress else { return }   // a previous poll is still running; skip to avoid interleaved generations
         fetchAllInProgress = true
@@ -197,6 +233,48 @@ public actor PRStatusManager {
             matches += await fetchNumberedMatches(fallback)
         }
 
+        // Head-ref heal, pass 1: drop (and clear) any unnumbered match whose
+        // resolved PR head branch is not one of that worktree's own branch
+        // candidates. Before the base-branch candidate was removed, a worktree
+        // whose branch had no PR yet could match a PR opened FROM the base
+        // branch and stay pinned to it; the same shape reaches a stacked
+        // branch's base PR. Dropping the match here — before the apply loop —
+        // is what keeps a mis-attached MERGED PR from firing
+        // `onMergedTransition` (auto-archive/auto-hibernate) on the wrong
+        // worktree. The clear is persisted (nil) so `hydrate` can't resurrect
+        // it after a restart.
+        let mismatched = Self.headRefMismatchedMatches(matches, unnumbered: unnumbered)
+        if !mismatched.isEmpty {
+            await clearHeadRefMismatches(mismatched, source: "resolved match")
+            let healedIDs = Set(mismatched.map(\.worktreeID))
+            matches.removeAll { healedIDs.contains($0.worktreeID) }
+        }
+
+        // Head-ref heal, pass 2: the entries pass 1 can never see. A cached
+        // status in a terminal state (`.closed`) is deliberately never
+        // re-queried by `cachedNumberFallback`, so a worktree mis-attached to a
+        // closed PR has no freshly-resolved node to judge and would display it
+        // forever. Resolve those cached numbers once per daemon run purely to
+        // read `headRefName`; the resolved nodes are never applied, so a
+        // terminal cached status still isn't refreshed by the poll (and no
+        // merged transition can fire from this path).
+        // Worktrees the fallback already tried to resolve by number this pass
+        // count as covered even if that resolution failed — re-querying the same
+        // numbers a second time in the same tick would buy nothing. They are
+        // retried on the next poll like any other unresolved entry.
+        let verificationTargets = Self.headRefVerificationTargets(
+            unnumbered: unnumbered,
+            matchedIDs: Set(matches.map(\.worktreeID)).union(fallback.map(\.id)),
+            batchSucceeded: batchSucceeded,
+            verifiedIDs: headRefVerifiedIDs,
+            cachedStatus: { cache[$0] })
+        if !verificationTargets.isEmpty {
+            let resolved = await fetchNumberedMatches(verificationTargets)
+            headRefVerifiedIDs.formUnion(resolved.map(\.worktreeID))
+            await clearHeadRefMismatches(
+                Self.headRefMismatchedMatches(resolved, unnumbered: unnumbered), source: "cached PR verification")
+        }
+
         // Fetch per-PR signals concurrently; only non-green OPEN PRs need the query.
         let signalsByID = await withTaskGroup(of: (UUID, (failing: Bool, pending: Bool)?).self,
                                               returning: [UUID: (failing: Bool, pending: Bool)?].self) { group in
@@ -259,7 +337,8 @@ public actor PRStatusManager {
     /// merge-queue field set the batch query does. `gh repo view` resolves the
     /// checkout's `owner/name` so the query can scope to this repo+branch —
     /// which, unlike the 100-PR viewer batch, always finds an old PR.
-    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
+    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, defaultBranch: String?,
+                        repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
         // A stored PR number (fork PRs, or a PR whose head we renamed locally)
         // can't be found by head branch — resolve it directly, mirroring
         // fetchAll's number-first path. Only fall back to the branch path when no
@@ -270,7 +349,8 @@ public actor PRStatusManager {
         guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
             return cache[worktreeID]   // can't resolve owner/name → leave cache unchanged
         }
-        let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch)
+        let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch,
+                                               defaultBranch: defaultBranch)
         for candidate in candidates {
             let args = Self.prByBranchArgs(owner: ownerRepo.owner, name: ownerRepo.name, branch: candidate)
             let result = await runGHResult(args: args, repoPath: repoPath)
@@ -677,8 +757,26 @@ public actor PRStatusManager {
         }
     }
 
-    static func branchCandidates(localBranch: String, upstreamBranch: String?) -> [String] {
-        guard let upstreamBranch, upstreamBranch != localBranch else {
+    /// Head-branch names to try when matching a worktree to a PR, in priority
+    /// order (the worktree's own branch first).
+    ///
+    /// The upstream candidate serves exactly one case: a local branch pushed to
+    /// a remote branch under a DIFFERENT name, whose PR can only be found under
+    /// the remote name. It is dropped when it names the repo's default branch,
+    /// because `branch.<name>.merge` records the *base* a branch was created
+    /// from — `refs/heads/<default>` for every branch cut from the default
+    /// branch — not a head ref. Offering a base branch as a head candidate
+    /// attaches whatever PR someone once opened FROM that base branch to every
+    /// worktree whose own branch has no PR yet, and pins it there.
+    ///
+    /// A nil `defaultBranch` (the repo fact could not be resolved) drops the
+    /// upstream candidate too: losing a rare rename-push match is far cheaper
+    /// than mis-attaching a base branch's PR across a whole fleet.
+    static func branchCandidates(localBranch: String, upstreamBranch: String?, defaultBranch: String?) -> [String] {
+        guard let upstreamBranch,
+              upstreamBranch != localBranch,
+              let defaultBranch,
+              upstreamBranch != defaultBranch else {
             return [localBranch]
         }
         return [localBranch, upstreamBranch]
@@ -739,17 +837,17 @@ public actor PRStatusManager {
     /// merged-transition case is unaffected: the pre-transition cached state is
     /// non-terminal by definition.
     static func cachedNumberFallback(
-        unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        unnumbered: [PollWorktree],
         matchedIDs: Set<UUID>,
         batchSucceeded: Bool,
         cachedStatus: (UUID) -> PRStatus?
-    ) -> [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] {
+    ) -> [PollWorktree] {
         guard batchSucceeded else { return [] }
         return unnumbered.compactMap { wt in
             guard !matchedIDs.contains(wt.id),
                   let cached = cachedStatus(wt.id),
                   cached.state != .merged, cached.state != .closed else { return nil }
-            return (wt.id, wt.branch, wt.upstreamBranch, wt.worktreePath, cached.number)
+            return (wt.id, wt.branch, wt.upstreamBranch, wt.defaultBranch, wt.worktreePath, cached.number)
         }
     }
 
@@ -800,14 +898,15 @@ public actor PRStatusManager {
     /// (`groupNumberedByRepo`); matching it unscoped could apply another
     /// repo's PR.
     static func matchUnnumbered(
-        _ unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        _ unnumbered: [PollWorktree],
         nodes: [PRNode],
         resolveRepo: (String) -> (owner: String, name: String)?
     ) -> [(worktreeID: UUID, node: PRNode)] {
         let byRepoBranch = bestNodeByRepoBranch(nodes)
         return unnumbered.compactMap { wt in
             guard let repo = resolveRepo(wt.worktreePath) else { return nil }
-            let candidates = branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
+            let candidates = branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch,
+                                              defaultBranch: wt.defaultBranch)
             for candidate in candidates {
                 if let node = byRepoBranch[repoBranchKey(owner: repo.owner, name: repo.name, branch: candidate)] {
                     return (wt.id, node)
@@ -830,7 +929,7 @@ public actor PRStatusManager {
     /// Returns the poisoned entries with both repos rendered as
     /// "owner/name" for the caller's log line.
     static func poisonedCacheEntries(
-        unnumbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        unnumbered: [PollWorktree],
         resolveRepo: (String) -> (owner: String, name: String)?,
         cachedStatus: (UUID) -> PRStatus?
     ) -> [(worktreeID: UUID, cachedRepo: String, worktreeRepo: String)] {
@@ -842,6 +941,64 @@ public actor PRStatusManager {
                 && cachedRepo.name.lowercased() == repo.name.lowercased()
             guard !sameRepo else { return nil }
             return (wt.id, "\(cachedRepo.owner)/\(cachedRepo.name)", "\(repo.owner)/\(repo.name)")
+        }
+    }
+
+    /// Matches whose resolved PR head branch is not one of the worktree's own
+    /// branch candidates — a mis-attachment, whatever produced it.
+    ///
+    /// Keyed on the SAME `branchCandidates` the matcher uses, so everything the
+    /// matcher is allowed to attach the heal accepts. That is what keeps a
+    /// clear from oscillating with an immediate re-match on the next pass.
+    ///
+    /// Scoped to unnumbered worktrees by construction: only IDs present in
+    /// `unnumbered` are judged, so a worktree created from a PR row (which
+    /// carries that PR's number and legitimately points at a head ref its local
+    /// branch does not equal — every fork PR) is never touched.
+    static func headRefMismatchedMatches(
+        _ matches: [(worktreeID: UUID, node: PRNode)],
+        unnumbered: [PollWorktree]
+    ) -> [(worktreeID: UUID, headRefName: String, candidates: [String])] {
+        var candidatesByID: [UUID: [String]] = [:]
+        for wt in unnumbered {
+            candidatesByID[wt.id] = branchCandidates(
+                localBranch: wt.branch,
+                upstreamBranch: wt.upstreamBranch,
+                defaultBranch: wt.defaultBranch)
+        }
+        return matches.compactMap { match in
+            guard let candidates = candidatesByID[match.worktreeID],
+                  !candidates.contains(match.node.headRefName) else { return nil }
+            return (match.worktreeID, match.node.headRefName, candidates)
+        }
+    }
+
+    /// Unnumbered worktrees whose cached PR still needs its head ref checked:
+    /// this pass produced no match for them (so no fresh node exists to judge),
+    /// they carry a cached status, and this daemon run hasn't verified them yet.
+    /// Each is rewritten with the cached PR number so `fetchNumberedMatches` can
+    /// resolve it.
+    ///
+    /// In practice these are the terminal-state entries `cachedNumberFallback`
+    /// deliberately never re-queries — precisely the ones that would otherwise
+    /// display a mis-attached PR forever.
+    ///
+    /// `batchSucceeded` gates it for the same reason the fallback is gated: on a
+    /// fetch/parse failure every worktree is "unmatched" and the word means
+    /// nothing. Absence of evidence is not proof of mis-attachment.
+    static func headRefVerificationTargets(
+        unnumbered: [PollWorktree],
+        matchedIDs: Set<UUID>,
+        batchSucceeded: Bool,
+        verifiedIDs: Set<UUID>,
+        cachedStatus: (UUID) -> PRStatus?
+    ) -> [PollWorktree] {
+        guard batchSucceeded else { return [] }
+        return unnumbered.compactMap { wt in
+            guard !matchedIDs.contains(wt.id),
+                  !verifiedIDs.contains(wt.id),
+                  let cached = cachedStatus(wt.id) else { return nil }
+            return (wt.id, wt.branch, wt.upstreamBranch, wt.defaultBranch, wt.worktreePath, cached.number)
         }
     }
 
@@ -1083,7 +1240,7 @@ public actor PRStatusManager {
     /// behavior. Group order follows first appearance; `cwd` is the first
     /// grouped worktree's path, used as gh's working directory.
     static func groupNumberedByRepo(
-        _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)],
+        _ numbered: [PollWorktree],
         resolve: (String) -> (owner: String, name: String)?
     ) -> [(owner: String, name: String, cwd: String, entries: [(worktreeID: UUID, number: Int)])] {
         var order: [String] = []
@@ -1109,7 +1266,7 @@ public actor PRStatusManager {
     /// (owner/name unresolved, gh missing, non-zero exit, unparseable); the
     /// caller keeps prior cached status for those worktrees.
     private nonisolated func fetchNumberedMatches(
-        _ numbered: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)]
+        _ numbered: [PollWorktree]
     ) async -> [(worktreeID: UUID, node: PRNode)] {
         var resolved: [String: (owner: String, name: String)] = [:]
         for path in Set(numbered.map(\.worktreePath)) {
