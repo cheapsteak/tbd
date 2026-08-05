@@ -133,10 +133,44 @@ A second review pipeline, `claude-review-v2`, runs alongside this gate as a
 **non-required** check, produced by
 [`.github/workflows/claude-code-review-v2.yml`](../.github/workflows/claude-code-review-v2.yml).
 It reviews with two specialist subagents and deterministic script bookends —
-schema-validated findings, a script-computed verdict, and a patch-id skip for
-unchanged diffs — and is designed to eventually replace this gate once its
-verdicts prove out against v1's on real PRs. Design and rollout plan:
+`prepare.py` (skip decision + PR discussion context), `validate.py`
+(schema-validated findings, disposition coverage, the computed verdict), and
+`render_comment.py` (the posted comment's body) — and is designed to eventually
+replace this gate once its verdicts prove out against v1's on real PRs. Design
+and rollout plan:
 [`docs/specs/2026-08-03-pr-review-fanout-design.md`](specs/2026-08-03-pr-review-fanout-design.md).
+
+Its comment behavior differs from v1's sticky comment in ways worth knowing
+before reading a v2-reviewed PR:
+
+- **One comment per review, posted by the workflow.** The review session holds
+  no GitHub write tool at all. It writes `review-result.json`; the workflow
+  renders that file's `comment_body` into a comment body and posts it. Nothing
+  is edited in place, so each review of each diff stays on the record as its own
+  comment.
+- **Each comment carries its own machine-read state.** Three leading HTML
+  comments — a `<!-- claude-review-v2 -->` sentinel plus the reviewed patch-id
+  and the computed verdict — sit above the prose. The next run reads its skip
+  decision off the newest such comment, so there is no separate state comment to
+  keep in sync.
+- **Earlier v2 reviews are collapsed as outdated.** Before posting, the run
+  minimizes every earlier sentinel-led comment of its own (GitHub's
+  `minimizeComment`, classifier `OUTDATED`). History collapses instead of piling
+  up. Minimizing happens before the post, which is what makes it impossible for
+  a run to collapse the review it is about to publish.
+- **The pipeline scripts are the base branch's, never the PR's.** The workflow
+  restores `.github/workflows/claude-review-v2/` from the base branch before the
+  review session and again after it, from the same recorded base SHA, so the
+  scripts that compute the verdict and render the posted comment are base
+  content no matter what the PR committed or the session wrote. Two consequences
+  when you review a PR that changes that directory: the check exercises the
+  *base* scripts, so a fix to them proves itself only after merge, and the
+  session sees base content on disk (its prompt says so, and points it at
+  `git show HEAD:<path>` for the PR's version).
+- **A skipped review writes nothing.** When the diff's patch-id matches the last
+  reviewed one, the run posts no comment and minimizes none — the prior review
+  is still the current review of an unchanged diff — and re-asserts the recorded
+  verdict as its own check result.
 
 Both traps documented in this file apply to the v2 workflow identically: it runs
 on `pull_request_target` and must pass `github_token` explicitly, and changing

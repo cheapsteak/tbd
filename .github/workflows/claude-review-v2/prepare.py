@@ -4,7 +4,7 @@
 Deterministic bookend that runs BEFORE the model review session
 (docs/specs/2026-08-03-pr-review-fanout-design.md §3.5, §3.6). It:
 
-- parses the prior sticky comment's markers (last-reviewed-patch-id, last-verdict),
+- parses the prior review comment's markers (last-reviewed-patch-id, last-verdict),
 - computes the head patch-id and decides skip-vs-review (fail toward reviewing),
 - fetches PR discussion once through the single `gh` boundary (_gh.run_gh) and
   renders it into a sanitized, fenced, untrusted-data block.
@@ -35,15 +35,17 @@ _PATCH_ID_MARKER_RE = re.compile(
 _VERDICT_MARKER_RE = re.compile(r"<!--\s*last-verdict:\s*(\w+)\s*-->")
 
 
-def parse_markers(sticky_body: str) -> dict:
-    """Extract the patch-id and verdict markers from a sticky comment body.
+def parse_markers(prior_body: str) -> dict:
+    """Extract the patch-id and verdict markers from a prior review comment body.
 
     Returns {"patch_id": str|None, "verdict": str|None} — None for a marker that
     is absent or malformed (non-hex patch id, non-word verdict). Tolerant of
-    whitespace inside the comment.
+    whitespace inside the comment. Both markers are taken from the FIRST match,
+    which render_comment.py writes above the review prose — so marker-shaped
+    text further down a model-authored body cannot displace the real state.
     """
-    patch_match = _PATCH_ID_MARKER_RE.search(sticky_body)
-    verdict_match = _VERDICT_MARKER_RE.search(sticky_body)
+    patch_match = _PATCH_ID_MARKER_RE.search(prior_body)
+    verdict_match = _VERDICT_MARKER_RE.search(prior_body)
     return {
         "patch_id": patch_match.group(1) if patch_match else None,
         "verdict": verdict_match.group(1) if verdict_match else None,
@@ -67,7 +69,7 @@ def decide_skip(
 ) -> dict:
     """Decide whether to skip the review and re-assert the recorded verdict.
 
-    Skip fires ONLY when the sticky fetch succeeded, both patch ids are
+    Skip fires ONLY when the prior-comment fetch succeeded, both patch ids are
     non-empty strings and equal, and the prior verdict is exactly APPROVE or
     REJECT. Every other state falls through to a full review with a distinct
     reason — the cheap direction to fail is toward spending a review, never
@@ -79,8 +81,8 @@ def decide_skip(
         return {
             "skip": False,
             "verdict": None,
-            "reason": "sticky comment fetch failed — cannot trust any prior "
-            "marker, running a full review",
+            "reason": "prior review comment fetch failed — cannot trust any "
+            "prior marker, running a full review",
         }
     if not _is_nonempty_str(head_patch_id):
         return {
@@ -93,7 +95,7 @@ def decide_skip(
         return {
             "skip": False,
             "verdict": None,
-            "reason": "no prior patch-id marker in the sticky comment — "
+            "reason": "no prior patch-id marker in the prior review comment — "
             "running a full review",
         }
     if prior_verdict not in _KNOWN_VERDICTS:
@@ -126,7 +128,7 @@ WHOLE_BLOCK_CAP = 30000
 
 
 def _sanitize(text: str) -> str:
-    """Strip whole HTML comments FIRST (so a quoted sticky marker can't
+    """Strip whole HTML comments FIRST (so a quoted state marker can't
     masquerade as ours), then escape angle brackets."""
     text = _HTML_COMMENT_RE.sub("", text)
     return text.replace("<", "&lt;").replace(">", "&gt;")
@@ -322,28 +324,30 @@ def main() -> int:
     parser.add_argument("--pr", type=int, required=True, help="PR number")
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument(
-        "--sticky-body-file",
+        "--prior-review-body-file",
         required=True,
-        help="file holding the prior sticky comment body; a MISSING file means "
-        "the sticky fetch failed (fail toward reviewing), an empty file means "
-        "no prior comment",
+        help="file holding the newest prior v2 review comment's body; a MISSING "
+        "file means the fetch failed (fail toward reviewing), an empty file "
+        "means no prior review comment",
     )
     parser.add_argument("--base-ref", required=True, help="PR base branch name")
     args = parser.parse_args()
 
     try:
-        with open(args.sticky_body_file, encoding="utf-8") as handle:
-            sticky_body = handle.read()
-        sticky_fetch_ok = True
+        with open(args.prior_review_body_file, encoding="utf-8") as handle:
+            prior_body = handle.read()
+        prior_fetch_ok = True
     except OSError as exc:
-        print(f"warning: could not read sticky body file: {exc}", file=sys.stderr)
-        sticky_body = ""
-        sticky_fetch_ok = False
+        print(
+            f"warning: could not read prior review body file: {exc}", file=sys.stderr
+        )
+        prior_body = ""
+        prior_fetch_ok = False
 
-    markers = parse_markers(sticky_body)
+    markers = parse_markers(prior_body)
     head_patch_id = _compute_head_patch_id(args.base_ref)
     decision = decide_skip(
-        fetch_ok=sticky_fetch_ok,
+        fetch_ok=prior_fetch_ok,
         prior_patch_id=markers["patch_id"],
         head_patch_id=head_patch_id,
         prior_verdict=markers["verdict"],

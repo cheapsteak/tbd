@@ -131,7 +131,7 @@ def check_disposition(
 
     Coverage check only (spec §3.4): the disposition's CONTENT — whether a drop
     or downgrade was justified — is a judgment left visible to humans in the
-    sticky comment, never judged here.
+    review comment, never judged here.
     """
     covered = {entry.get("id") for entry in disposition}
     return [finding_id for finding_id in specialist_ids if finding_id not in covered]
