@@ -20,6 +20,22 @@ import TBDShared
 //    the typing is how the spawn finishes, not a second intent. When the
 //    observed rung lands it will confirm that spawn's row, not open a new one.
 //
+// Two layers write, and only two: the **RPC handler** for anything a caller
+// asked for, and a **rail's own entry point** for anything the daemon started
+// by itself. The shared lifecycle internals in between — `captureThenKillWindow`,
+// `killWindowAndReap`, `performHibernate`, `closeScratchTerminals` — stay
+// silent, because both `worktree.archive` and the boot-time reconcile sweep
+// reach them and a row down there would double-count every archive. Reconcile
+// is an entry point in its own right (boot is what invoked it), so its rows are
+// rail-level logging rather than shared-path logging.
+//
+// The two layers name different things, deliberately. A worktree-level RPC
+// (`worktree.archive`, `worktree.forget`, `scratch.delete`) writes ONE row
+// naming the worktree, with no terminal: the caller asked for one thing and the
+// per-terminal kills are how the lifecycle carries it out. Reconcile writes one
+// row PER act, because each kill or park it performs is an independent decision
+// it made about a terminal it has already resolved.
+//
 // The wired set lives here, in one file next to the writer, so a reviewer can
 // see it at a glance: `method` names the door a request came through and
 // `kind` names the act, and both are spelled once, per surface.
@@ -33,6 +49,19 @@ enum ActuationSurface: CaseIterable, Sendable {
     case terminalSend
     case terminalCreate
     case terminalDelete
+    /// Tears down the worktree's sessions (capture, kill, reap) before the
+    /// checkout goes away. One row per call naming the worktree — the
+    /// per-terminal kills happen inside `WorktreeLifecycle`'s phase.
+    case worktreeArchive
+    /// Same teardown as archive, minus the disk removal: one row, worktree-named.
+    case worktreeForget
+    /// Spawns a fresh hook terminal. The terminal is minted inside the
+    /// lifecycle, so the row names the worktree — as `worktree.revive` does.
+    case worktreeRerunPreSession
+    /// Kills the scratch space's windows, then trashes its folder.
+    case scratchDelete
+    /// The same teardown as `scratch.delete`, keeping the folder on disk.
+    case scratchArchive
     case terminalHibernate
     case terminalWake
     /// Legacy shim, retained for old CLI/app builds; parks like `terminal.hibernate`.
@@ -65,6 +94,11 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalSend: return RPCMethod.terminalSend
         case .terminalCreate: return RPCMethod.terminalCreate
         case .terminalDelete: return RPCMethod.terminalDelete
+        case .worktreeArchive: return RPCMethod.worktreeArchive
+        case .worktreeForget: return RPCMethod.worktreeForget
+        case .worktreeRerunPreSession: return RPCMethod.worktreeRerunPreSession
+        case .scratchDelete: return RPCMethod.scratchDelete
+        case .scratchArchive: return RPCMethod.scratchArchive
         case .terminalHibernate: return RPCMethod.terminalHibernate
         case .terminalWake: return RPCMethod.terminalWake
         case .terminalSuspend: return RPCMethod.terminalSuspend
@@ -94,8 +128,9 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
-             .remoteCreate: return .spawn
-        case .terminalDelete, .remoteStop: return .dispose
+             .worktreeRerunPreSession, .remoteCreate: return .spawn
+        case .terminalDelete, .worktreeArchive, .worktreeForget, .scratchDelete,
+             .scratchArchive, .remoteStop: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
         }
@@ -112,6 +147,14 @@ enum ActuationRail {
     /// `AutoHibernateOnMergeCoordinator` parking a worktree's sessions once its
     /// PR merged — a separate rail from the idle sweep, with its own switch.
     static let autoHibernateOnMerge = "auto-hibernate-on-merge"
+    /// `AutoArchiveOnMergeCoordinator` archiving a whole worktree once its PR
+    /// merged, tearing down its sessions with it.
+    static let autoArchiveOnMerge = "auto-archive-on-merge"
     /// The Watch Desk's wrap-up and nudge pastes.
     static let nightwatchDesk = "nightwatch-desk"
+    /// The boot-time (and post-`cleanup`) reconcile sweep: it kills the windows
+    /// of worktrees that left disk, parks sessions whose window is gone, and
+    /// reaps orphaned windows and dead servers. One row per act — each is an
+    /// independent decision about a target the sweep has already resolved.
+    static let reconcile = "reconcile"
 }

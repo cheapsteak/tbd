@@ -170,6 +170,26 @@ struct ActuationLogSpawnWiringTests {
         }
     }
 
+    /// The repo lookup is a plain DB read, not an act — so it happens ahead of
+    /// the row, and a missing repo is declined before anything claims a spawn
+    /// was about to be dispatched. Same shape as every other handler's
+    /// pre-row validation.
+    @Test("a create naming a repo that does not exist writes no row at all")
+    func worktreeCreateWithUnknownRepoWritesNoRow() async throws {
+        let iso = isolateTBDHome(); defer { iso.cleanup() }
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeCreate,
+            params: WorktreeCreateParams(repoID: UUID()),
+            actor: .app))
+
+        #expect(!response.success)
+        #expect(try rows(at: logPath).isEmpty)
+    }
+
     @Test("an unwritable record refuses the create and leaves no half-created row")
     func unwritableRecordRefusesWorktreeCreate() async throws {
         let iso = isolateTBDHome(); defer { iso.cleanup() }

@@ -94,6 +94,10 @@ extension RPCRouter {
     /// forgetWorktree). Shared by `scratch.delete` and `scratch.archive` — both
     /// tear down the terminal/tab state identically before mutating the row
     /// itself (delete removes it, archive flips its status).
+    ///
+    /// Deliberately writes no row: both callers record one worktree-named row of
+    /// their own before calling this, and a row here would double-count every
+    /// teardown (the same reason `captureThenKillWindow` stays silent).
     private func closeScratchTerminals(_ wt: Worktree) async throws {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         for t in terminals {
@@ -107,7 +111,9 @@ extension RPCRouter {
         }
     }
 
-    func handleScratchDelete(_ paramsData: Data) async throws -> RPCResponse {
+    func handleScratchDelete(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchDeleteParams.self, from: paramsData)
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
@@ -116,7 +122,16 @@ extension RPCRouter {
             return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
         }
 
-        try await closeScratchTerminals(wt)
+        // One row per call naming the scratch space, ahead of the first kill —
+        // the same shape `worktree.archive` uses, and for the same reason: the
+        // per-terminal kills inside the teardown are sub-steps of one intent.
+        // The trashing and the row deletion below touch no process and confirm
+        // nothing, so the outcome lands as soon as the teardown returns.
+        let actuationID = try await beginActuation(
+            .scratchDelete, actor: actor,
+            target: ActuationTarget(worktree: wt.id.uuidString))
+        try await actuating(actuationID) { try await closeScratchTerminals(wt) }
+        await finishActuation(actuationID, .dispatched)
 
         // Move the folder to Trash — never rm -rf. Promoted rows already had
         // their folder moved by promotion (handleScratchPromote sets
@@ -158,7 +173,9 @@ extension RPCRouter {
     /// Archive a scratch space: close its terminals (same teardown as delete)
     /// and flip its status to `.archived`, but leave the folder on disk —
     /// unlike delete, nothing is moved to Trash.
-    func handleScratchArchive(_ paramsData: Data) async throws -> RPCResponse {
+    func handleScratchArchive(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchArchiveParams.self, from: paramsData)
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
@@ -167,7 +184,13 @@ extension RPCRouter {
             return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
         }
 
-        try await closeScratchTerminals(wt)
+        // Same teardown as `scratch.delete`, so the same row: one per call,
+        // worktree-named, written before the first kill.
+        let actuationID = try await beginActuation(
+            .scratchArchive, actor: actor,
+            target: ActuationTarget(worktree: wt.id.uuidString))
+        try await actuating(actuationID) { try await closeScratchTerminals(wt) }
+        await finishActuation(actuationID, .dispatched)
         try await db.worktrees.archive(id: wt.id)
 
         // Same delta `scratch.delete` broadcasts — deliberate: from the

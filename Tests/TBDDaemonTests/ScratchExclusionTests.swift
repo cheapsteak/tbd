@@ -57,7 +57,7 @@ struct ScratchExclusionTests {
         // Reconcile is entered per repo and scopes its worktree lookups to
         // that repoID — a scratch row (repoID == nil) can never be in scope,
         // even when the repo itself is real and reconcile runs to completion.
-        try await lifecycle.reconcile(repoID: repo.id)
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
         let after = try await db.worktrees.get(id: scratch.id)
         #expect(after != nil)               // untouched
         #expect(after?.status == .active)   // not archived

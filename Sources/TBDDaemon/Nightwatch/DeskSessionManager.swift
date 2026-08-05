@@ -454,12 +454,18 @@ public actor DeskSessionManager: DeskSessionManaging {
             }
 
             // Request row before the paste; the paste and the Enter are one
-            // send. Fail-closed: an unrecordable wrap-up is not posted.
-            guard let actuationID = try? await recordDeskSend(
-                worktreeID: worktreeID,
-                terminalID: agentTerminal.id,
-                message: NightwatchDeskPrompts.wrapUpPrompt)
-            else { return }
+            // send. Fail-closed: an unrecordable wrap-up is not posted — and
+            // says so, like every other refusal on this path.
+            let actuationID: String
+            do {
+                actuationID = try await recordDeskSend(
+                    worktreeID: worktreeID,
+                    terminalID: agentTerminal.id,
+                    message: NightwatchDeskPrompts.wrapUpPrompt)
+            } catch {
+                logger.warning("Skipping Watch Desk wrap-up prompt: \(error, privacy: .public)")
+                return
+            }
 
             do {
                 // Paste the wrap-up prompt text
@@ -587,11 +593,16 @@ public actor DeskSessionManager: DeskSessionManaging {
             // Request row before the paste; the paste and the Enter are one
             // send. Fail-closed: an unrecordable nudge is not sent, and
             // `lastNudgeTime` below is left alone so the next tick retries.
-            guard let actuationID = try? await recordDeskSend(
-                worktreeID: worktreeID,
-                terminalID: agentTerminal.id,
-                message: prompt)
-            else { return }
+            let actuationID: String
+            do {
+                actuationID = try await recordDeskSend(
+                    worktreeID: worktreeID,
+                    terminalID: agentTerminal.id,
+                    message: prompt)
+            } catch {
+                logger.warning("Skipping Watch Desk nudge: \(error, privacy: .public)")
+                return
+            }
 
             do {
                 // Paste the prompt text (matches handleTerminalSend pattern for reliability)

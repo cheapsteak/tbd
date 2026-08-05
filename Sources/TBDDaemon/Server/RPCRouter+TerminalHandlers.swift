@@ -567,13 +567,23 @@ extension RPCRouter {
         let worktree = try await actuating(actuationID) {
             try await db.worktrees.get(id: terminal.worktreeID)
         }
+        // Set when the kill itself failed. The deletion proceeds regardless
+        // (pre-existing contract — the row goes and the response is the same),
+        // so the failure is invisible in the response and has to be carried out
+        // separately, or the record would call a failed kill `dispatched`.
+        var killWindowFailure: String?
         if let worktree {
             await db.terminalHistory.captureOnClose(terminal: terminal) {
                 try await tmux.capturePaneScrollback(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
             }
             // Kill the tmux window
-            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            do {
+                try await tmux.killWindow(
+                    server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            } catch {
+                killWindowFailure = "\(error)"
+            }
         }
 
         // Delete from DB
@@ -592,7 +602,11 @@ extension RPCRouter {
             terminalID: terminal.id
         )))
 
-        await finishActuation(actuationID, .dispatched)
+        if let killWindowFailure {
+            await finishActuation(actuationID, .transportFailed, error: killWindowFailure)
+        } else {
+            await finishActuation(actuationID, .dispatched)
+        }
         return try RPCResponse(result: TerminalDeleteResult(
             closed: true,
             alreadyGone: false,
@@ -1421,6 +1435,23 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
+        // One row for the whole swap, on the two branches that actually reshape
+        // a live session. It sits here, as soon as the plan names what will be
+        // acted on, because the very next step already mutates state outside the
+        // daemon: the resume path copies the session transcript into the
+        // destination profile's config dir. The interrupt the in-place branch
+        // sends later is a sub-step of this one actuation, not a send of its
+        // own — and the cold (parked) swap returned above without a row, because
+        // re-homing a parked row touches no process. `.fork` names the new
+        // terminal it is about to spawn; `.inPlace` names the one it respawns.
+        let actuationID = try await beginActuation(
+            .terminalSwapProfile, actor: actor,
+            target: .local(
+                worktree: worktree.id,
+                terminal: mode == .fork ? plannedTerminalID : oldTerminal.id),
+            agent: TerminalKind.claude.rawValue,
+            profile: resolved?.profileID.uuidString)
+
         // Carry the session transcript into the DESTINATION config dir so the
         // forked `claude --resume <id>` finds the conversation. Only matters on
         // the resume path — a fresh spawn has no prior transcript to carry.
@@ -1556,20 +1587,6 @@ extension RPCRouter {
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
         let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
-
-        // One row for the whole swap, on the two branches that actually
-        // reshape a live session. The interrupt the in-place branch sends
-        // first is a sub-step of this one actuation, not a send of its own —
-        // and the cold (parked) swap returned above without a row, because
-        // re-homing a parked row touches no process. `.fork` names the new
-        // terminal it is about to spawn; `.inPlace` names the one it respawns.
-        let actuationID = try await beginActuation(
-            .terminalSwapProfile, actor: actor,
-            target: .local(
-                worktree: worktree.id,
-                terminal: mode == .fork ? plannedTerminalID : oldTerminal.id),
-            agent: TerminalKind.claude.rawValue,
-            profile: resolved?.profileID.uuidString)
 
         let response: RPCResponse
         // Set when the in-place respawn's tmux call failed. That failure is
@@ -1984,7 +2001,7 @@ extension RPCRouter {
             // Reconcile DB against actual git worktree list
             do {
                 let beforeCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
-                try await lifecycle.reconcile(repoID: repo.id)
+                try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
                 let afterCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
                 let delta = abs(beforeCount - afterCount)
                 worktreesReconciled += delta

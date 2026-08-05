@@ -26,7 +26,9 @@ struct MergedTransitionPrecedenceTests {
             hooks: HookResolver(),
             subscriptions: subs
         )
-        let archive = AutoArchiveOnMergeCoordinator(db: db, lifecycle: lifecycle, subscriptions: subs)
+        let archive = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subs,
+            actuationLog: makeTestActuationLog())
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(), actuationLog: makeTestActuationLog())

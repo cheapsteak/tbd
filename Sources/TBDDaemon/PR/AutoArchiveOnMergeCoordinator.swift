@@ -10,11 +10,23 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     let db: TBDDatabase
     let lifecycle: WorktreeLifecycle
     let subscriptions: StateSubscriptionManager
+    /// The daemon's actuation record. This is a daemon-internal rail — no RPC
+    /// carried it — so it writes its own row, with no `method` and the
+    /// rail-named actor. Deliberately NOT logged inside `beginArchiveWorktree`:
+    /// the `worktree.archive` handler calls that same method after writing its
+    /// own row, and a row there would double-count every manual archive.
+    let actuationLog: ActuationLog
 
-    public init(db: TBDDatabase, lifecycle: WorktreeLifecycle, subscriptions: StateSubscriptionManager) {
+    public init(
+        db: TBDDatabase,
+        lifecycle: WorktreeLifecycle,
+        subscriptions: StateSubscriptionManager,
+        actuationLog: ActuationLog
+    ) {
         self.db = db
         self.lifecycle = lifecycle
         self.subscriptions = subscriptions
+        self.actuationLog = actuationLog
     }
 
     /// Returns `true` ONLY when it actually began archiving the worktree (i.e.
@@ -41,7 +53,33 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
                 return false
             }
 
-            let (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: worktreeID)
+            // The rail's own row, written at its act moment — after the gates
+            // above, at the point this rail is actually about to tear a
+            // worktree's sessions down. Fail-closed, as everywhere else: an
+            // unrecordable archive does not happen, and the worktree survives
+            // for the next merged-transition to retry. The writer already
+            // logged the failure at `.fault`.
+            var row = ActuationRow(
+                actor: .daemon(rail: ActuationRail.autoArchiveOnMerge), kind: .dispose)
+            row.target = ActuationTarget(worktree: worktreeID.uuidString)
+            let actuationID: String
+            do {
+                actuationID = try await actuationLog.appendRequest(row)
+            } catch {
+                logger.warning("auto-archive skipped (record unwritable): \(worktreeID, privacy: .public): \(error, privacy: .public)")
+                return false
+            }
+
+            let worktree: Worktree
+            let repo: Repo
+            do {
+                (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: worktreeID)
+            } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
+                throw error
+            }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
             subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktreeID)))
 
             // Surface it: persist + broadcast a notification (non-activating).

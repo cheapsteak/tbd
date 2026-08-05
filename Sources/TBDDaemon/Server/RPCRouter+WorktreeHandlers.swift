@@ -28,6 +28,17 @@ extension RPCRouter {
             prNumber: params.prNumber
         )
 
+        // Reads precede the row; the row precedes the acts. This lookup is a
+        // plain DB read, so a missing repo is pre-row validation — the create is
+        // refused before anything claims it was about to be dispatched, exactly
+        // as the worktree-not-found guards on the sibling handlers do.
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            // Mirror completeCreateWorktree's guard: clean up the .creating row
+            // inserted by beginCreateWorktree so it can't be orphaned forever.
+            try? await db.worktrees.delete(id: pending.id)
+            throw WorktreeLifecycleError.repoNotFound(params.repoID)
+        }
+
         // Creation ends in a spawn — the lifecycle's phase 2/3 opens this
         // worktree's primary terminals, the same call `worktree.revive` reaches
         // — so it gets the same shape of row: one per call, naming the worktree,
@@ -40,24 +51,10 @@ extension RPCRouter {
                 .worktreeCreate, actor: actor,
                 target: ActuationTarget(worktree: pending.id.uuidString))
         } catch {
-            // Same cleanup the repo guard below does: an unrecordable spawn is
+            // Same cleanup the repo guard above does: an unrecordable spawn is
             // refused, so don't leave the `.creating` row orphaned forever.
             try? await db.worktrees.delete(id: pending.id)
             throw error
-        }
-
-        // Phase 1.5: Fetch from origin (coalesced, with tight timeout)
-        // Fire off as a background task so it doesn't block the RPC response.
-        // Phase 2 will re-await before git worktree add; FetchCache's singleflight
-        // means the second await joins the in-flight fetch or is a no-op if cached.
-        let repoRow = try await actuating(actuationID) { try await db.repos.get(id: params.repoID) }
-        guard let repo = repoRow else {
-            // Mirror completeCreateWorktree's guard: clean up the .creating row
-            // inserted by beginCreateWorktree so it can't be orphaned forever.
-            try? await db.worktrees.delete(id: pending.id)
-            await finishActuation(
-                actuationID, .refused(.notFound), error: "Repo not found: \(params.repoID)")
-            throw WorktreeLifecycleError.repoNotFound(params.repoID)
         }
 
         // Arm the per-worktree auto-archive-on-merge override when the spawn
@@ -70,6 +67,10 @@ extension RPCRouter {
             }
         }
 
+        // Phase 1.5: Fetch from origin (coalesced, with tight timeout)
+        // Fire off as a background task so it doesn't block the RPC response.
+        // Phase 2 will re-await before git worktree add; FetchCache's singleflight
+        // means the second await joins the in-flight fetch or is a no-op if cached.
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
         let fetchCache = self.fetchCache
@@ -192,11 +193,31 @@ extension RPCRouter {
         return try RPCResponse(result: worktrees)
     }
 
-    func handleWorktreeArchive(_ paramsData: Data) async throws -> RPCResponse {
+    func handleWorktreeArchive(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeArchiveParams.self, from: paramsData)
 
+        // One row per call, naming the worktree and no terminal: the caller
+        // asked to archive a worktree, and the per-terminal captures and kills
+        // are how `WorktreeLifecycle`'s phase 1 carries that out — sub-steps of
+        // one intent, not separate actuations. Same shape as `worktree.create`,
+        // for the same reason.
+        let actuationID = try await beginActuation(
+            .worktreeArchive, actor: actor,
+            target: ActuationTarget(worktree: params.worktreeID.uuidString))
+
         // Phase 1: Fast — update DB, kill tmux, return immediately
-        let (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: params.worktreeID)
+        let worktree: Worktree
+        let repo: Repo
+        do {
+            (worktree, repo) = try await lifecycle.beginArchiveWorktree(
+                worktreeID: params.worktreeID)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        await finishActuation(actuationID, .dispatched)
 
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
             worktreeID: params.worktreeID
@@ -218,24 +239,66 @@ extension RPCRouter {
     /// Rejections (`no hook`, `already running`, `still creating`) come back as
     /// RPC errors and surface as an app alert — the menu hides the item when no
     /// hook resolves, but the app's view can be a keystroke stale.
-    func handleWorktreeRerunPreSession(_ paramsData: Data) async throws -> RPCResponse {
+    func handleWorktreeRerunPreSession(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeRerunPreSessionParams.self, from: paramsData)
+        // The hook's terminal is minted inside the lifecycle, so — as with
+        // `worktree.revive` — the row names the worktree and no terminal. Every
+        // rejection below happens after the row and confirms it as refused: the
+        // lifecycle owns those checks, and duplicating them here to get ahead of
+        // the row would be two implementations of one rule.
+        let actuationID = try await beginActuation(
+            .worktreeRerunPreSession, actor: actor,
+            target: ActuationTarget(worktree: params.worktreeID.uuidString))
         do {
             try await lifecycle.rerunPreSessionHook(worktreeID: params.worktreeID, cols: params.cols, rows: params.rows)
+            await finishActuation(actuationID, .dispatched)
             return .ok()
         } catch let error as RerunPreSessionError {
+            await finishActuation(
+                actuationID, .refused(Self.refusedReason(error)), error: error.description)
             return RPCResponse(error: error.description)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
         }
     }
 
-    func handleWorktreeForget(_ paramsData: Data) async throws -> RPCResponse {
+    /// Why a pre-session re-run was declined, in the record's closed vocabulary
+    /// — so "which acts did my controls stop?" is a query over the envelope
+    /// rather than a match on a message that may be reworded.
+    private static func refusedReason(_ error: RerunPreSessionError) -> RefusedReason {
+        switch error {
+        case .worktreeNotFound: return .notFound
+        case .noHookConfigured: return .notEligible
+        // Both mean the same thing to a reader: this worktree's hook is already
+        // running, under a manual re-run or under the create/revive phase 3.
+        case .alreadyRunning, .worktreeBusy: return .inFlight
+        }
+    }
+
+    func handleWorktreeForget(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeForgetParams.self, from: paramsData)
 
         // Capture the path before the row is deleted so the result can report
         // the directory we deliberately left on disk.
         let path = try await db.worktrees.get(id: params.worktreeID)?.path
 
-        try await lifecycle.forgetWorktree(worktreeID: params.worktreeID)
+        // Forget kills the same windows archive does, so it records the same
+        // shape: one worktree-named row per call, ahead of the first kill.
+        let actuationID = try await beginActuation(
+            .worktreeForget, actor: actor,
+            target: ActuationTarget(worktree: params.worktreeID.uuidString))
+        do {
+            try await lifecycle.forgetWorktree(worktreeID: params.worktreeID)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        await finishActuation(actuationID, .dispatched)
 
         // Reuse the archive delta — from the client's perspective the row has
         // left the active list, which is exactly what `.worktreeArchived`

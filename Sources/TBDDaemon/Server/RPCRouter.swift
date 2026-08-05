@@ -205,11 +205,11 @@ public final class RPCRouter: Sendable {
             case RPCMethod.scratchCreate:
                 return try await handleScratchCreate(request.paramsData, actor: request.actor)
             case RPCMethod.scratchDelete:
-                return try await handleScratchDelete(request.paramsData)
+                return try await handleScratchDelete(request.paramsData, actor: request.actor)
             case RPCMethod.scratchPromote:
                 return try await handleScratchPromote(request.paramsData)
             case RPCMethod.scratchArchive:
-                return try await handleScratchArchive(request.paramsData)
+                return try await handleScratchArchive(request.paramsData, actor: request.actor)
             case RPCMethod.scratchRevive:
                 return try await handleScratchRevive(request.paramsData)
             case RPCMethod.repoUpdateInstructions:
@@ -231,9 +231,9 @@ public final class RPCRouter: Sendable {
             case RPCMethod.worktreeList:
                 return try await handleWorktreeList(request.paramsData)
             case RPCMethod.worktreeArchive:
-                return try await handleWorktreeArchive(request.paramsData)
+                return try await handleWorktreeArchive(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeRerunPreSession:
-                return try await handleWorktreeRerunPreSession(request.paramsData)
+                return try await handleWorktreeRerunPreSession(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeRevive:
                 return try await handleWorktreeRevive(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeReviveConversationFresh:
@@ -247,7 +247,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.worktreeMove:
                 return try await handleWorktreeMove(request.paramsData)
             case RPCMethod.worktreeForget:
-                return try await handleWorktreeForget(request.paramsData)
+                return try await handleWorktreeForget(request.paramsData, actor: request.actor)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalContinueInCodex:

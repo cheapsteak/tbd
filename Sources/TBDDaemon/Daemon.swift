@@ -185,7 +185,8 @@ public final class Daemon: Sendable {
     /// the socket/HTTP servers or background tasks. In mock mode this is a
     /// no-op so hand-seeded fixtures render exactly as authored.
     func performStartupReconciliation(
-        mockMode: MockMode?, database: TBDDatabase, git: GitManager, lifecycle: WorktreeLifecycle
+        mockMode: MockMode?, database: TBDDatabase, git: GitManager,
+        lifecycle: WorktreeLifecycle, actuationLog: ActuationLog
     ) async {
         guard mockMode == nil else {
             daemonLogger.info("Mock mode: skipping startup reconciliation")
@@ -210,7 +211,7 @@ public final class Daemon: Sendable {
             let repos = try await database.repos.list()
             for repo in repos {
                 do {
-                    try await lifecycle.reconcile(repoID: repo.id)
+                    try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
                 } catch {
                     reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
@@ -479,7 +480,7 @@ public final class Daemon: Sendable {
         // handlers — and the socket server that serves those doesn't start until
         // step 9 below. So no merge can be observed between construction and here.
         let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
-            db: database, lifecycle: lifecycle, subscriptions: subs)
+            db: database, lifecycle: lifecycle, subscriptions: subs, actuationLog: actuationLog)
         let autoHibernateCoordinator = AutoHibernateOnMergeCoordinator(
             db: database, hibernation: rpcRouter.hibernationCoordinator, subscriptions: subs)
         let mergedTransitionDispatcher = MergedTransitionDispatcher(
@@ -562,7 +563,9 @@ public final class Daemon: Sendable {
         }
 
         // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
-        await performStartupReconciliation(mockMode: mockMode, database: database, git: git, lifecycle: lifecycle)
+        await performStartupReconciliation(
+            mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
+            actuationLog: actuationLog)
 
         if mockMode == nil {
             // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.

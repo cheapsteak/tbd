@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -36,7 +37,8 @@ struct DaemonMockGateTests {
 
         // Run with mockMode == nil (live mode) — RepoHealthValidator should flip it
         await Daemon().performStartupReconciliation(
-            mockMode: nil, database: db, git: git, lifecycle: lifecycle)
+            mockMode: nil, database: db, git: git, lifecycle: lifecycle,
+            actuationLog: makeTestActuationLog())
 
         let after = try await db.repos.list()
         #expect(after.first?.status == .missing)
@@ -74,7 +76,8 @@ struct DaemonMockGateTests {
         // Run with mockMode == .enabled — reconciliation should be skipped
         await Daemon().performStartupReconciliation(
             mockMode: .enabled(fixturePath: "/tmp/x.json"),
-            database: db, git: git, lifecycle: lifecycle)
+            database: db, git: git, lifecycle: lifecycle,
+            actuationLog: makeTestActuationLog())
 
         // Repo should still be .ok (RepoHealthValidator never ran)
         let repos = try await db.repos.list()
