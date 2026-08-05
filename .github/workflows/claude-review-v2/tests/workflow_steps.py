@@ -1,4 +1,4 @@
-"""Pull one step's shell body out of the v2 review workflow, BY STEP NAME.
+"""Pull one step's shell body out of the PR-review workflow, BY STEP NAME.
 
 The workflow's "Post review comment and enforce verdict" step implements
 safety-shaped ordering in shell — the verdict gate before anything is posted,
@@ -26,7 +26,7 @@ from pathlib import Path
 
 # .../.github/workflows/claude-review-v2/tests/ -> .../.github/workflows/
 _WORKFLOWS_DIR = Path(__file__).resolve().parents[2]
-WORKFLOW_PATH = _WORKFLOWS_DIR / "claude-code-review-v2.yml"
+WORKFLOW_PATH = _WORKFLOWS_DIR / "claude-code-review.yml"
 
 _STEP_RE = re.compile(r"^(?P<indent> *)- name: (?P<name>.+?) *$")
 _RUN_RE = re.compile(r"^(?P<indent> *)run: \| *$")

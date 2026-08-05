@@ -1,8 +1,19 @@
 # Claude PR review merge gate
 
 `main` requires the `claude-review` status check to pass before a PR can merge
-(alongside `test` and `Lint`). The check is produced by
-[`.github/workflows/claude-code-review.yml`](../.github/workflows/claude-code-review.yml).
+(alongside `test` and `Lint`). The check is produced by the `claude-review` job in
+[`.github/workflows/claude-code-review.yml`](../.github/workflows/claude-code-review.yml),
+which runs the specialist fan-out pipeline described in
+[`docs/specs/2026-08-03-pr-review-fanout-design.md`](specs/2026-08-03-pr-review-fanout-design.md):
+deterministic script bookends around one model session that fans out to two
+specialist subagents.
+
+**Branch protection matches a required check by job NAME, not by workflow file.**
+Exactly one job across `.github/workflows/` may therefore be named `claude-review`;
+a second one would report into the same required context. That is why the retired
+single-session reviewer, kept as a manually-triggerable fallback in
+[`claude-code-review-legacy.yml`](../.github/workflows/claude-code-review-legacy.yml),
+names its job `claude-review-legacy` and triggers only on `workflow_dispatch`.
 
 ## How a PR is gated
 
@@ -30,16 +41,31 @@
    forks and harmless for same-repo branches. The default `GITHUB_TOKEN` reads this
    endpoint with only `contents: read` — verified in Actions — so the reviewer App
    token is still minted after the gate rather than before it.
-3. **Verdict.** The reviewer writes a single token — exactly `APPROVE` or `REJECT`
-   — to `claude-verdict.txt`. A `Stop` hook
-   ([`claude-review-hooks/verdict-gate.sh`](../.github/workflows/claude-review-hooks/verdict-gate.sh))
-   refuses to end the review session until that file holds a clean token, so
-   free-form review prose can never be misread as a verdict. The job then enforces
-   it with an exact string match: `APPROVE` passes, `REJECT` blocks the merge, and
-   anything else (missing / malformed / killed session) fails closed.
+3. **Skip decision.** `prepare.py` computes the head diff's patch-id and reads the
+   markers off the newest prior review comment. When they match, the run re-asserts
+   the recorded verdict as its own check result and spends no review; otherwise it
+   runs the full pipeline. A missing or unreadable prior comment fails toward a full
+   review, never toward a skip.
+4. **Review.** One model session orchestrates two specialist subagents
+   (`correctness`, `conventions`). Each specialist writes a schema-validated
+   `findings-<name>.json`; the orchestrator merges them into `review-result.json`
+   with a per-finding disposition list and the review comment's prose. The session
+   holds **no GitHub write tool** — it posts nothing.
+5. **Verdict.** `validate.py`, not the model, computes the verdict: it
+   schema-validates the findings and the merged result, checks the disposition list
+   accounts for every specialist finding id, and writes `REJECT` to `verdict.txt`
+   iff any HIGH or MEDIUM finding survives the merge, otherwise `APPROVE`. A `Stop`
+   hook
+   ([`claude-review-v2/hooks/stop-hook.sh`](../.github/workflows/claude-review-v2/hooks/stop-hook.sh))
+   refuses to end the session until `review-result.json` exists and parses. The job
+   then enforces the verdict with an exact string match: `APPROVE` passes, `REJECT`
+   blocks the merge, and anything else (missing / malformed / killed session) fails
+   closed.
 
-The verdict file is deleted after checkout, before the review runs, so a PR cannot
-pre-commit `claude-verdict.txt=APPROVE` to approve itself.
+Every file the pipeline reads back out of the workspace — `review-result.json`,
+`verdict.txt`, `skip-decision.json`, `discussion-context.txt`, `findings-*.json` —
+is deleted after checkout, before anything runs, so a PR cannot pre-commit a forged
+`verdict.txt=APPROVE` or a skip decision and approve itself.
 
 ## Trusted fork PRs need `allow-unsafe-pr-checkout`
 
@@ -97,13 +123,14 @@ the checked-out tree still reaches three execution paths:
 - **Project hooks.** `.claude/settings.json` is tracked here and registers a
   `PreToolUse` hook running `.claude/hooks/guardrails/dispatch.py` on every `Bash`
   and `Skill` call. Both files come from the checked-out branch, and the reviewer
-  always runs `Bash`. Restoring `claude-review-hooks/` from base does not prevent
+  always runs `Bash`. Restoring the pipeline directory from base does not prevent
   this: the action merges the `settings:` input into `~/.claude/settings.json` (the
   *user* layer, lowest priority) rather than passing `--settings`, and hooks merge
   additively across layers — so the base-branch Stop hook cannot displace or
   suppress a project-layer hook the branch adds.
 - **`CLAUDE.md`.** Every tracked `CLAUDE.md` is auto-loaded as instructions and is
-  branch-controlled, against an allowlist that includes `Bash(gh api:*)`.
+  branch-controlled, against an allowlist that carries read-only `gh` and `git`
+  subcommands plus `Read`/`Write`/`Glob`/`Grep`/`Task`.
 
 The job holds `CLAUDE_CODE_OAUTH_TOKEN`, the minted reviewer App token, and
 default-branch cache scope. The accepted residual risk is therefore precisely: an
@@ -127,21 +154,9 @@ and gets no `claude-review` run — which leaves the required check unreported a
 the PR blocked. That is a one-time bootstrap gap: land such a PR with an admin
 merge, after which every subsequent PR is gated normally.
 
-## The v2 shadow pipeline
+## Reading a review comment
 
-A second review pipeline, `claude-review-v2`, runs alongside this gate as a
-**non-required** check, produced by
-[`.github/workflows/claude-code-review-v2.yml`](../.github/workflows/claude-code-review-v2.yml).
-It reviews with two specialist subagents and deterministic script bookends —
-`prepare.py` (skip decision + PR discussion context), `validate.py`
-(schema-validated findings, disposition coverage, the computed verdict), and
-`render_comment.py` (the posted comment's body) — and is designed to eventually
-replace this gate once its verdicts prove out against v1's on real PRs. Design
-and rollout plan:
-[`docs/specs/2026-08-03-pr-review-fanout-design.md`](specs/2026-08-03-pr-review-fanout-design.md).
-
-Its comment behavior differs from v1's sticky comment in ways worth knowing
-before reading a v2-reviewed PR:
+The gate's comment behavior is worth knowing before you read a reviewed PR:
 
 - **One comment per review, posted by the workflow.** The review session holds
   no GitHub write tool at all. It writes `review-result.json`; the workflow
@@ -152,8 +167,12 @@ before reading a v2-reviewed PR:
   comments — a `<!-- claude-review-v2 -->` sentinel plus the reviewed patch-id
   and the computed verdict — sit above the prose. The next run reads its skip
   decision off the newest such comment, so there is no separate state comment to
-  keep in sync.
-- **Earlier v2 reviews are collapsed as outdated.** Before posting, the run
+  keep in sync. **The sentinel's literal text is live state and must not be
+  renamed**: it is matched verbatim by `prepare.py` and by the workflow's `jq`
+  selectors, and it is already stamped into the review comments on every open PR,
+  so changing it orphans them — priors stop being collapsed and skip decisions
+  read no prior state.
+- **Earlier reviews are collapsed as outdated.** Before posting, the run
   minimizes every earlier sentinel-led comment of its own (GitHub's
   `minimizeComment`, classifier `OUTDATED`). History collapses instead of piling
   up. Minimizing happens before the post, which is what makes it impossible for
@@ -172,11 +191,26 @@ before reading a v2-reviewed PR:
   is still the current review of an unchanged diff — and re-asserts the recorded
   verdict as its own check result.
 
-Both traps documented in this file apply to the v2 workflow identically: it runs
-on `pull_request_target` and must pass `github_token` explicitly, and changing
-its trigger event needs an admin merge. Graduation — swapping the required check
-from `claude-review` to `claude-review-v2` — is a branch-protection settings
-change, not a workflow change, so it springs neither trap.
+## The legacy single-session workflow
+
+[`claude-code-review-legacy.yml`](../.github/workflows/claude-code-review-legacy.yml)
+holds the single-session reviewer the fan-out pipeline replaced: one session that
+covered every concern in one pass and typed its own `APPROVE`/`REJECT` into
+`claude-verdict.txt`, gated by the Stop hook in
+[`claude-review-hooks/`](../.github/workflows/claude-review-hooks/). It is kept only
+as a fallback a human can start by hand (Actions → Run workflow) if the fan-out
+pipeline is broken; two things keep it inert until then:
+
+- Its only trigger is `workflow_dispatch`, so no PR event starts it. Running two
+  full model reviews per PR is exactly the cost retiring it removed.
+- Its job is named `claude-review-legacy`, so it cannot report into the required
+  `claude-review` context.
+
+Because dispatch runs against a branch rather than a PR, a hand-triggered run has no
+`github.event.pull_request` and reviews nothing — treat it as a diagnostic of the
+workflow itself. Delete the file once the fan-out gate has held across enough real
+PRs that nobody would reach for the fallback, or as soon as it stops working: a
+fallback that has quietly rotted is worse than none.
 
 ## Operational notes
 
@@ -185,14 +219,17 @@ change, not a workflow change, so it springs neither trap.
   can temporarily drop `claude-review` from the required contexts to override.
 - Reviews post as a **dedicated GitHub App whose slug contains "claude"** (e.g.
   `tbd-claude-reviewer[bot]`), minted per run via `actions/create-github-app-token`
-  from the `CLAUDE_REVIEWER_APP_ID` / `CLAUDE_REVIEWER_APP_PRIVATE_KEY` secrets. This
-  is required for **sticky comments** to work: the action's sticky-comment matcher
-  (`create-initial.ts`) only recognizes its own prior comment when the author id is
-  the Claude App *or* the author is a `Bot` whose login contains `claude` — and has
-  no config input to change that. A plain `GITHUB_TOKEN` (`github-actions[bot]`)
-  matches neither, so it posts a new comment every run. We can't use the OIDC→Claude
-  App token because that exchange 401s under `pull_request_target`
-  (anthropics/claude-code-action#1017), hence the dedicated App.
+  from the `CLAUDE_REVIEWER_APP_ID` / `CLAUDE_REVIEWER_APP_PRIVATE_KEY` secrets. The
+  App is the gate's **stable comment-author identity**: the fetch, minimize, and post
+  steps all select prior reviews by *this login plus the sentinel*, so a comment
+  posted under any other identity is invisible to the next run's skip decision. We
+  can't use the OIDC→Claude App token because that exchange 401s under
+  `pull_request_target` (anthropics/claude-code-action#1017), and a plain
+  `GITHUB_TOKEN` posts as `github-actions[bot]`, which collides with every other
+  workflow's comments. (The legacy workflow needs the same App for a different
+  reason: the action's sticky-comment matcher in `create-initial.ts` recognizes its
+  own prior comment only when the author is the Claude App or a `Bot` whose login
+  contains `claude`, and has no config input to change that.)
 - The gate is a **status check**, not a required-approval count. (The App's approval
-  *could* count toward required reviews if we ever want that, but the verdict-file
-  status check is what enforces High/Medium blocking today.)
+  *could* count toward required reviews if we ever want that, but the computed
+  verdict is what enforces High/Medium blocking today.)

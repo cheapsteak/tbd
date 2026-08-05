@@ -33,10 +33,18 @@ import sys
 
 # --- sentinel ---------------------------------------------------------------
 
-# Opens every v2 review comment body. The workflow selects prior v2 reviews —
-# to read state off the newest and to minimize them all as outdated — by
-# matching the App's comments whose body STARTS WITH this line, so it must
-# stay line 1.
+# Opens every review comment body this pipeline posts. The workflow selects its
+# prior reviews — to read state off the newest and to minimize them all as
+# outdated — by matching the App's comments whose body STARTS WITH this line, so
+# it must stay line 1.
+#
+# DO NOT RENAME IT. The literal still reads "v2" from when this pipeline ran
+# alongside the single-session reviewer it has since replaced, and that is now
+# purely a name: it is live state, matched verbatim by prepare.py's marker
+# parser and by the workflow's jq selectors, and stamped into every review
+# comment already on every open PR. Changing it orphans those comments — priors
+# stop being found and collapsed, and skip decisions read no prior state and
+# silently re-review.
 COMMENT_SENTINEL = "<!-- claude-review-v2 -->"
 
 
@@ -79,9 +87,9 @@ def attribution_line(repo: str, base_ref: str, patch_id: str = "") -> str:
         else "the review of this PR's diff as of the time it was posted"
     )
     return (
-        f"_Posted by the [claude-review-v2 shadow check](https://github.com/"
-        f"{repo}/blob/{base_ref}/.github/workflows/claude-code-review-v2.yml) — "
-        f"{scope}. A newer v2 review comment supersedes this one._"
+        f"_Posted by the [claude-review check](https://github.com/"
+        f"{repo}/blob/{base_ref}/.github/workflows/claude-code-review.yml) — "
+        f"{scope}. A newer review comment supersedes this one._"
     )
 
 
