@@ -12,7 +12,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/dispositionEntry" }
     },
-    "comment_body": { "type": "string" }
+    "comment_body": {
+      "type": ["string", "null"],
+      "description": "The review comment's markdown, or null when the run produced no prose. render_comment.py already treats a non-string body as blank and falls back to a machine-rendered body plus a `::warning::` — a designed degradation. Failing the gate closed on the null instead would block the PR outright and post nothing, which is strictly worse than the fallback the renderer was built for. `findings` and `disposition` are NOT nullable by contrast: the validator iterates both, and a null there is a broken run with no safe reading."
+    }
   },
   "required": ["findings", "disposition", "comment_body"],
   "additionalProperties": false,
@@ -21,15 +24,26 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "file": { "type": "string" },
+        "file": {
+          "type": ["string", "null"],
+          "description": "File anchor, or null when the finding has none. The key stays required — the model must state the anchor — but its value may be null, for the same reason `line` may: repo-wide, convention, and architectural findings are properties of the tree rather than of one file, and a schema that rejects the null a model naturally writes would fail the gate closed on exactly the findings that most need a human."
+        },
         "line": {
           "type": ["integer", "null"],
           "description": "Line anchor, or null when the finding has none. Null is accepted as well as omission: repo-wide, convention, and architectural findings have no single line, and a schema that rejects the null a model naturally writes would fail the gate closed on exactly the findings that most need a human."
         },
         "severity": { "enum": ["HIGH", "MEDIUM", "MINOR"] },
         "title": { "type": "string" },
-        "body": { "type": "string" },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "body": {
+          "type": ["string", "null"],
+          "description": "Elaboration, or null when the finding needs none. The field is optional, so absence is already legal; null is that same absence spelled the way a model writes it, and no consumer reads it as anything but text-or-nothing."
+        },
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Self-reported confidence in 0..1, or null when the specialist has none to offer. Optional like `body`, nullable for the same reason; no script reads it, so a null costs nothing and a rejected null costs the whole run. The bounds still apply to any number given."
+        }
       },
       "required": ["id", "file", "severity", "title"],
       "additionalProperties": false
@@ -39,7 +53,10 @@
       "properties": {
         "id": { "type": "string" },
         "action": { "enum": ["kept", "merged", "downgraded", "dropped"] },
-        "note": { "type": "string" }
+        "note": {
+          "type": ["string", "null"],
+          "description": "Why the finding was handled this way. Optional for `kept`/`merged`, where null is just the model's spelling of the absence the schema already allows. A `downgraded` or `dropped` entry still needs a real reason: the conditional below demands a string there, so widening this type does not let a null satisfy the one place a note is load-bearing."
+        }
       },
       "required": ["id", "action"],
       "additionalProperties": false,
@@ -49,7 +66,10 @@
             "properties": { "action": { "enum": ["downgraded", "dropped"] } },
             "required": ["action"]
           },
-          "then": { "required": ["note"] }
+          "then": {
+            "required": ["note"],
+            "properties": { "note": { "type": "string" } }
+          }
         }
       ]
     }
