@@ -58,7 +58,7 @@ def test_parse_markers_malformed() -> None:
 
 
 def test_parse_markers_ignores_quoted_marker_in_rendered_discussion() -> None:
-    # A comment body QUOTING a sticky marker, once run through the discussion
+    # A comment body QUOTING a state marker, once run through the discussion
     # renderer (HTML comments stripped, angle brackets escaped), must not
     # false-match as a real marker.
     items = [
