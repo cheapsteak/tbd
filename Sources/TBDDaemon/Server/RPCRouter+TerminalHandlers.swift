@@ -904,16 +904,33 @@ extension RPCRouter {
                 logger.info("recreateWindow: window \(terminal.tmuxWindowID, privacy: .public) for claude terminal \(terminal.id, privacy: .public) is alive — ignoring stale recreate request")
                 return try RPCResponse(result: terminal)
             }
+            // This branch actuates too, and differently: it kills a window the
+            // check above read as gone — a read that can be stale — and parks
+            // the session. That is the same act reconcile's recovery park
+            // performs, so it carries kind `hibernate` through this surface's
+            // own door (`ActuationBranch.recreateWindowRepark`). The row goes in
+            // ahead of the kill, fail-closed: an unrecordable park refuses the
+            // RPC with the window and the row untouched.
+            let reparkID = try await beginActuation(
+                .recreateWindowRepark, actor: actor,
+                target: .local(worktree: worktree.id, terminal: terminal.id))
+
             // Clean up any lingering (almost always already-dead) window to avoid orphans.
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
-            try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
-            // Drop any stale pending-question entry — the window the question
-            // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
-            await pendingQuestions.clear(terminalID: terminal.id)
-            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+            let parked = try await actuating(reparkID) { () -> Terminal? in
+                // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
+                try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+                // Drop any stale pending-question entry — the window the question
+                // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
+                await pendingQuestions.clear(terminalID: terminal.id)
+                return try await db.terminals.get(id: params.terminalID)
+            }
+            guard let updated = parked else {
+                await finishActuation(
+                    reparkID, .refused(.notFound), error: "Terminal not found after suspend")
                 return RPCResponse(error: "Terminal not found after suspend")
             }
+            await finishActuation(reparkID, .dispatched)
             logger.info("recreateWindow: parked claude terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
             return try RPCResponse(result: updated)
         }
@@ -936,9 +953,9 @@ extension RPCRouter {
             codexPreparation = nil
         }
 
-        // Only the respawning branch is an actuation: the re-park branch above
-        // returned already, and it touches nothing but the DB and a window that
-        // was already dead. The row goes here, ahead of the first kill.
+        // The respawning branch's own row, ahead of its first kill. The re-park
+        // branch above wrote its own before returning — it is an actuation in
+        // its own right, not a DB-only edit.
         let actuationID = try await beginActuation(
             .terminalRecreateWindow, actor: actor,
             target: .local(worktree: worktree.id, terminal: terminal.id),

@@ -87,6 +87,8 @@ enum ActuationSurface: CaseIterable, Sendable {
     case worktreeSuspend
     /// Fan-out shim: one row per terminal it wakes, at that terminal's own act moment.
     case worktreeResume
+    /// Respawns a terminal's window and process. Its dead-window re-park branch
+    /// acts too, and acts differently — see `ActuationBranch`.
     case terminalRecreateWindow
     case terminalSwapProfile
     case terminalContinueInCodex
@@ -149,6 +151,42 @@ enum ActuationSurface: CaseIterable, Sendable {
              .scratchDelete, .scratchArchive, .remoteStop: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
+        }
+    }
+}
+
+/// A branch of a wired surface whose act is not the one its surface names.
+///
+/// `terminal.recreateWindow` is the only such door today. It normally respawns
+/// a window and its process — a `spawn` — but when the terminal is a resumable
+/// Claude whose window is gone it kills that window and parks the session
+/// instead, which is the recovery park `reconcile` performs and therefore a
+/// `hibernate`. One surface still names one door, so the second act is spelled
+/// here rather than as a second `ActuationSurface` case claiming the same
+/// method.
+///
+/// A closed enum rather than a `kind:` argument at the call site, for the
+/// reason the two switches above exist: a handler may select a sanctioned
+/// branch but cannot invent a kind, the compiler still proves each branch has
+/// both a door and an act, and the whole wired set — surfaces and their
+/// alternate acts — stays readable in this one file.
+enum ActuationBranch: CaseIterable, Sendable {
+    /// The dead-window re-park: `terminal.recreateWindow` kills the window it
+    /// read as already gone — a read that can be stale — and parks the session,
+    /// preserving the identity `wake()` resumes from.
+    case recreateWindowRepark
+
+    /// The door this branch still came through.
+    var surface: ActuationSurface {
+        switch self {
+        case .recreateWindowRepark: return .terminalRecreateWindow
+        }
+    }
+
+    /// The act this branch performs, in place of its surface's.
+    var kind: ActuationKind {
+        switch self {
+        case .recreateWindowRepark: return .hibernate
         }
     }
 }

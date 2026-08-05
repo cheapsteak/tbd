@@ -37,6 +37,20 @@ extension RPCRouter {
         return try await actuationLog.appendRequest(row)
     }
 
+    /// Append the request row for a surface's alternate branch — the same door,
+    /// a different act (see `ActuationBranch`). Same placement and the same
+    /// fail-closed contract as the surface overload above.
+    func beginActuation(
+        _ branch: ActuationBranch,
+        actor: ActuationActor?,
+        target: ActuationTarget
+    ) async throws -> String {
+        var row = ActuationRow(actor: actor ?? .anonymous, kind: branch.kind)
+        row.method = branch.surface.method
+        row.target = target
+        return try await actuationLog.appendRequest(row)
+    }
+
     /// Target for a surface whose params name only the terminal. Resolves the
     /// owning worktree so the row carries full coordinates; a terminal whose
     /// row has already vanished still gets a row naming what was asked for,

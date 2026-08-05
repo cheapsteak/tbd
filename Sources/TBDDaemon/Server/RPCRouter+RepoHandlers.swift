@@ -91,6 +91,14 @@ extension RPCRouter {
                 // repo half-dismantled; rowing the whole set first makes the
                 // refusal all-or-nothing, with the repo and every session it
                 // owns still standing.
+                // The edge that leaves: if an append throws partway through
+                // this loop, the rows already written stay unconfirmed and
+                // render that way — while nothing at all was torn down. That is
+                // the honest shape rather than a gap to repair. No refusal
+                // reason means "the record itself failed", and minting one here
+                // would grow the outcome contract for a case where the appends
+                // that carried it would very likely fail too — the log was
+                // unwritable one row ago.
                 var actuationIDs: [String] = []
                 for wt in activeWorktrees {
                     actuationIDs.append(try await beginActuation(
