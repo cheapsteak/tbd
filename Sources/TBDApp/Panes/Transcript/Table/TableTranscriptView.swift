@@ -924,45 +924,53 @@ struct TableTranscriptView: NSViewRepresentable {
         /// with 1/2/4/6 options is 171/213/297/381 pt (42 pt per option, dead
         /// straight), and 1/2/3 questions with two options each is 213/378/543
         /// (165 pt per question, likewise). A question whose text is four times
-        /// longer moves the card not at all. So counting is the right model here,
-        /// and `40 + 81·questions + 42·options` reproduces every one of those to
-        /// the point.
+        /// longer moves the card not at all.
         ///
-        /// The counts come from a substring scan, not a JSON parse — the estimate
-        /// runs from `heightOfRow`. `"question":` and `"label":` are matched WITH
-        /// their colon and without tolerating whitespace on purpose: a payload
-        /// pretty-printed as `"question" :` would then be under-counted rather than
-        /// over-counted, and under-counting is the safe direction. An input that
-        /// does not decode at all renders a fallback block (53 pt measured) and
-        /// scans as zero of each, which lands at the 40 pt base — also under.
+        /// The counts come from DECODING the payload with the same shape the card
+        /// itself decodes, not from scanning it for `"question":` and `"label":`.
+        /// A scan cannot tell a sound payload from a malformed one, and the two
+        /// render as completely different things: a payload the card cannot decode
+        /// falls back to a small raw-JSON block, so a renamed key or an option
+        /// whose `label` is a number — exactly what the fallback exists for —
+        /// counted as a full card and over-reserved by up to 210 pt. Decoding is
+        /// affordable here precisely because this kind is rare and the result is
+        /// memoized in `estimateCache`; the scan bought nothing for the risk.
         ///
         /// The base is 40 rather than the 48 the fit gives, which buys a uniform
         /// 8 pt under-reservation on every answered card and lands exactly on a
         /// PENDING one (measured 163 for 1×1 with no result yet, against 171
-        /// answered). Where the card does grow past the counts — a question or
-        /// description or free-form answer long enough to wrap — it grows, so the
-        /// estimate only ever falls further under: measured -50 pt at worst across
-        /// thirteen card shapes, against the -59 to -439 pt of the flat constant
-        /// this replaces.
+        /// answered). Where the card does grow past its counts — a question,
+        /// description or free-form answer long enough to wrap — it only grows, so
+        /// the estimate falls further under: -50 pt at worst across thirteen card
+        /// shapes, against the -59 to -439 pt of the flat constant it replaced.
         static let askCardBase: CGFloat = 40
         static let askCardPerQuestion: CGFloat = 81
         static let askCardPerOption: CGFloat = 42
+        /// An input the card cannot decode renders a compact raw-JSON block —
+        /// measured 53 to 79 pt across malformed payloads. Sized under all of them.
+        static let askCardFallbackHeight: CGFloat = 50
 
-        static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {
-            askCardBase
-                + askCardPerQuestion * CGFloat(occurrences(of: "\"question\":", in: inputJSON))
-                + askCardPerOption * CGFloat(occurrences(of: "\"label\":", in: inputJSON))
+        /// The subset of the card's input shape the height depends on. Mirrors
+        /// `AskUserQuestionCard.Input`; a payload that fails to decode against THIS
+        /// fails against the card's decoder too, which is the property that matters.
+        private struct AskCardShape: Decodable {
+            struct Question: Decodable {
+                struct Option: Decodable { let label: String }
+                let question: String
+                let options: [Option]
+            }
+            let questions: [Question]
         }
 
-        /// Non-overlapping occurrences of `needle` in `haystack`.
-        private static func occurrences(of needle: String, in haystack: String) -> Int {
-            var count = 0
-            var searchStart = haystack.startIndex
-            while let found = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
-                count += 1
-                searchStart = found.upperBound
+        static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {
+            guard let decoded = try? JSONDecoder().decode(
+                AskCardShape.self, from: Data(inputJSON.utf8)), !decoded.questions.isEmpty else {
+                return askCardFallbackHeight
             }
-            return count
+            let options = decoded.questions.reduce(0) { $0 + $1.options.count }
+            return askCardBase
+                + askCardPerQuestion * CGFloat(decoded.questions.count)
+                + askCardPerOption * CGFloat(options)
         }
 
         /// Arithmetic height estimate for a chat bubble. ONE pass over the message's
@@ -1055,8 +1063,10 @@ struct TableTranscriptView: NSViewRepresentable {
             // of its own.
             if badgeUsage != nil { blocks.appendBadge() }
 
-            return TranscriptBubbleGeometry.rowHeight(
-                blocksHeight: max(blocks.totalHeight, bubbleLineHeight))
+            // No floor: a message that renders to NO blocks — one that is only raw
+            // HTML, or only a reference-link definition — measures at bare chrome,
+            // and flooring it to one line put it 16 pt over.
+            return TranscriptBubbleGeometry.rowHeight(blocksHeight: blocks.totalHeight)
         }
 
         /// Accumulates the estimated block structure of one chat message: a
@@ -1153,27 +1163,97 @@ struct TableTranscriptView: NSViewRepresentable {
 
             /// Length of `line` measured in BODY characters — what it will cost on
             /// a wrapped line, rather than how many characters the markdown source
-            /// spends saying it. Backticks are markup and are not drawn, and the
-            /// characters between them are set in the wider monospaced inline-code
-            /// face, so a code span costs more than its character count.
+            /// spends saying it.
             ///
-            /// Deliberately does NOT try to undo emphasis or link syntax: `**` and
-            /// `*` are two-to-four characters against a whole line, and a link's
-            /// hidden URL makes the line estimate LONG — which reserves more space,
-            /// the safe direction. Code spans are singled out because they are both
-            /// pervasive here and biased the UNSAFE way.
+            /// Three kinds of markup are not drawn and so are not charged:
+            ///
+            /// * backticks, whose CONTENTS are drawn in the wider monospaced
+            ///   inline-code face and are charged at `inlineCodeCharWeight`;
+            /// * a link's destination — `[text](https://…)` draws `text` and
+            ///   nothing else, and this transcript's prose is full of doc, PR and
+            ///   file links. A 100-character URL was 100 characters of reservation
+            ///   that never appeared, measured at +16 pt per link;
+            /// * a reference link's `[ref]` suffix, and its `[ref]: url` definition
+            ///   line, which draws nothing at all.
+            ///
+            /// A run of inline spaces is charged once, because cmark collapses one
+            /// to a single space before anything is drawn.
+            ///
+            /// Emphasis markers are still counted: `**` and `*` are two to four
+            /// characters against a whole line, and they make the line estimate
+            /// LONGER, which is the direction that under-reserves once the ceiling
+            /// rounds — the safe one.
             private static func drawnLength(of line: String) -> Int {
-                guard line.contains("`") else { return line.count }
+                guard line.contains("`") || line.contains("[") else { return line.count }
                 var total: CGFloat = 0
                 var inCode = false
-                for character in line {
+                var characters = Array(line)
+                var index = 0
+                while index < characters.count {
+                    let character = characters[index]
                     if character == "`" {
                         inCode.toggle()
+                        index += 1
+                        continue
+                    }
+                    if !inCode, character == "[",
+                       let close = Self.matchingBracket(in: characters, from: index) {
+                        // `[text](dest)` or `[text][ref]`: the text is drawn, the
+                        // destination is not.
+                        let after = close + 1
+                        if after < characters.count, characters[after] == "(" || characters[after] == "[" {
+                            let terminator: Character = characters[after] == "(" ? ")" : "]"
+                            if let end = characters[after...].firstIndex(of: terminator) {
+                                total += CGFloat(close - index - 1)
+                                index = end + 1
+                                continue
+                            }
+                        }
+                    }
+                    if character == " ", !inCode, index > 0, characters[index - 1] == " " {
+                        // cmark collapses a run of inline whitespace to one space,
+                        // so the extra characters are never drawn.
+                        index += 1
                         continue
                     }
                     total += inCode ? inlineCodeCharWeight : 1
+                    index += 1
                 }
                 return Int(total.rounded())
+            }
+
+            /// Index of the `]` closing the `[` at `open`, or nil if it is unclosed.
+            private static func matchingBracket(in characters: [Character], from open: Int) -> Int? {
+                var depth = 0
+                var index = open
+                while index < characters.count {
+                    if characters[index] == "[" { depth += 1 }
+                    if characters[index] == "]" {
+                        depth -= 1
+                        if depth == 0 { return index }
+                    }
+                    index += 1
+                }
+                return nil
+            }
+
+            /// Whether `line` opens a raw-HTML block: a `<` followed by a tag
+            /// name, a closing slash, or a `!`/`?` declaration. Deliberately not a
+            /// bare `<`, so prose that starts with an arrow or a comparison is
+            /// still prose.
+            private static func opensHTMLBlock(_ line: String) -> Bool {
+                guard line.hasPrefix("<"), line.count > 1 else { return false }
+                let second = line[line.index(line.startIndex, offsetBy: 1)]
+                return second.isLetter || second == "/" || second == "!" || second == "?"
+            }
+
+            /// Whether `line` is a reference-link DEFINITION — `[ref]: url` — which
+            /// the renderer consumes and draws nothing for.
+            private static func isLinkDefinition(_ line: String) -> Bool {
+                guard line.hasPrefix("[") else { return false }
+                guard let close = line.firstIndex(of: "]") else { return false }
+                let rest = line[line.index(after: close)...]
+                return rest.hasPrefix(":")
             }
 
             /// Appends the blocks a marker-free run of message text renders as.
@@ -1280,6 +1360,30 @@ struct TableTranscriptView: NSViewRepresentable {
                         }
                         index = lookahead
                         appendCodeUnit(lines: codeLines, terminated: true)
+                        atBlockStart = false
+                        continue
+                    }
+
+                    // Raw HTML draws NOTHING: the renderer implements no
+                    // `visitHTMLBlock`, so `defaultVisit` walks zero children and
+                    // emits an empty string. A `<details>` block was 96 pt of
+                    // reservation for blank space.
+                    if atBlockStart, Self.opensHTMLBlock(line) {
+                        flushTable()
+                        while index < lines.count,
+                              !lines[index].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            index += 1
+                        }
+                        lastUnitWasListItem = false
+                        inListContext = false
+                        atBlockStart = false
+                        continue
+                    }
+
+                    // A reference-link definition is consumed by the parser and
+                    // drawn as nothing.
+                    if Self.isLinkDefinition(line) {
+                        flushTable()
                         atBlockStart = false
                         continue
                     }

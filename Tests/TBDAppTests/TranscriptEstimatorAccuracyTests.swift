@@ -127,7 +127,10 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "card/askUserQuestion", points: 10, percent: 4.7, achieved: "-8.0"),
         Budget(id: "card/askUserQuestion-min", points: 10, percent: 5.8, achieved: "-8.0"),
         Budget(id: "card/askUserQuestion-max", points: 10, percent: 1.8, achieved: "-8.0"),
-        Budget(id: "card/askUserQuestion-wrapping", points: 40, percent: 16.6, achieved: "-36.0")
+        Budget(id: "card/askUserQuestion-wrapping", points: 40, percent: 16.6, achieved: "-36.0"),
+        Budget(id: "card/askUserQuestion-malformed", points: 20, percent: 30.3, achieved: "-16.0"),
+        Budget(id: "assistant/links", points: 2, percent: 1.6, achieved: "0.0"),
+        Budget(id: "assistant/raw-html", points: 2, percent: 1.8, achieved: "0.0")
     ]
 
     /// The AskUserQuestion fixtures are only worth anything if the card can
@@ -147,9 +150,14 @@ struct TranscriptEstimatorAccuracyTests {
                         + "backslash — a `#\"\"\"` raw string does not honour a trailing `\\` as a "
                         + "line continuation, and the embedded characters make it undecodable"))
             let decoded = try? JSONDecoder().decode(Input.self, from: Data(fixture.json.utf8))
-            #expect(decoded != nil,
-                    Comment(rawValue: "\(fixture.id): does not decode, so the fixture measures the "
-                        + "card's raw-JSON fallback block rather than a card"))
+            // `decodes: false` is ONE fixture and it is named: the malformed
+            // payload deliberately pins the fallback path. Every other fixture
+            // must decode, or it silently measures that fallback instead of a card.
+            #expect((decoded != nil) == fixture.decodes,
+                    Comment(rawValue: "\(fixture.id): expected decodes == \(fixture.decodes) but "
+                        + "the payload \(decoded == nil ? "did not decode" : "decoded"). A fixture "
+                        + "that stops decoding measures the card's raw-JSON fallback block rather "
+                        + "than a card."))
         }
     }
 
@@ -543,6 +551,45 @@ struct TranscriptEstimatorAccuracyTests {
         Each contributes independently to the total error.
         """
 
+    /// Markdown LINKS, whose destinations are not drawn. Assistant prose is full
+    /// of doc, PR and file links, and charging a 100-character URL as 100
+    /// characters of prose reserved space that never appeared — measured +16 pt per
+    /// link. Covers an inline link, two in one paragraph, a link inside a list
+    /// item, and a reference link whose `[1]: url` definition line draws nothing at
+    /// all.
+    private static let linksText = "See [the design note]"
+        + "(https://example.com/acme/docs/specs/2026-07-26-fleet-supervision-design.md) for the "
+        + "rationale, and [the requirements]"
+        + "(https://example.com/acme/docs/specs/2026-07-26-fleet-supervision-requirements.md) for "
+        + "the constraints it had to satisfy."
+        + "\n\n- the estimate is corrected on realize, see [the callback]"
+        + "(https://example.com/acme/blob/main/Sources/Table/TableTranscriptView.swift)"
+        + "\n- the measurement path is unchanged"
+        + "\n\nBackground is in [the original issue][1]."
+        + "\n\n[1]: https://example.com/acme/issues/129"
+
+    /// RAW HTML, which the renderer draws as NOTHING: it implements no
+    /// `visitHTMLBlock`, so `defaultVisit` walks zero children and emits an empty
+    /// string. Charging each source line as a paragraph reserved 96 pt of blank
+    /// space for a `<details>` block. Covers a multi-line block, a self-closing
+    /// tag, and a comment.
+    private static let rawHTMLText = """
+        Here is the evidence:
+
+        <details>
+        <summary>Full measurement table</summary>
+
+        The rows that used to over-reserve are listed here.
+
+        </details>
+
+        <img src="https://example.com/shot.png" width="600">
+
+        <!-- the note below is what actually renders -->
+
+        Everything above this line draws nothing at all.
+        """
+
     /// A four-space INDENTED code block — the other way markdown spells a code
     /// block, and the one that looks like ordinary prose to a line scan. It draws
     /// in the code face with no paragraph spacing between its lines, so charging
@@ -689,19 +736,26 @@ struct TranscriptEstimatorAccuracyTests {
     /// newlines, did not decode, and silently measured the card's raw-JSON
     /// FALLBACK block instead of a card. `askCardFixturesAreValidJSON` holds that
     /// shut.
-    private static let askCardFixtures: [(id: String, json: String, answer: String)] = [
+    private static let askCardFixtures: [(id: String, json: String, answer: String, decodes: Bool)] = [
         (id: "card/askUserQuestion",
          json: #"{"questions":[{"question":"Which sizing path should drive row height?","header":"Sizing","multiSelect":false,"options":[{"label":"Authoritative heightOfRow","description":"Measure the real height up front, cached."},{"label":"Estimate then correct","description":"Cheap estimate, patch via noteHeightOfRows."}]}]}"#,
-         answer: "Authoritative heightOfRow"),
+         answer: "Authoritative heightOfRow", decodes: true),
         (id: "card/askUserQuestion-min",
          json: #"{"questions":[{"question":"Proceed?","header":"Go","multiSelect":false,"options":[{"label":"Yes","description":"Do it."}]}]}"#,
-         answer: "Yes"),
+         answer: "Yes", decodes: true),
         (id: "card/askUserQuestion-max",
          json: #"{"questions":[{"question":"Path?","header":"A","multiSelect":false,"options":[{"label":"One","description":"x"},{"label":"Two","description":"y"}]},{"question":"Bias?","header":"B","multiSelect":false,"options":[{"label":"Low","description":"x"},{"label":"High","description":"y"}]},{"question":"Ship?","header":"C","multiSelect":false,"options":[{"label":"Now","description":"x"},{"label":"Later","description":"y"}]}]}"#,
-         answer: "One"),
+         answer: "One", decodes: true),
+        // Malformed but KEY-BEARING: a renamed top-level key, which is exactly what
+        // the card's fallback block exists for. Counting `"question":` /
+        // `"label":` out of a payload like this reported a full card and
+        // over-reserved 139 pt against the 66 pt block that actually renders.
+        (id: "card/askUserQuestion-malformed",
+         json: #"{"quesions":[{"question":"Proceed?","header":"Go","multiSelect":false,"options":[{"label":"Yes","description":"a"},{"label":"No","description":"b"}]}]}"#,
+         answer: "Yes", decodes: false),
         (id: "card/askUserQuestion-wrapping",
          json: #"{"questions":[{"question":"This question is deliberately very long indeed, so long that it must wrap across at least three separate lines inside the card at either of the column widths the transcript pane is ever laid out at, which is the shape a count-based model cannot see.","header":"Sizing","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}"#,
-         answer: "A")
+         answer: "A", decodes: true)
     ]
 
     /// Every row kind the guard covers, as render nodes. Kept under
@@ -726,6 +780,10 @@ struct TranscriptEstimatorAccuracyTests {
             text: "Here is the screenshot.\n\n[Image: source: \(imagePath)]",
             timestamp: nil,
             usage: nil))
+        items.append(.assistantText(id: "assistant/links", text: linksText,
+                                    timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/raw-html", text: rawHTMLText,
+                                    timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/indented-code", text: indentedCodeText,
                                     timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/setext-headings", text: setextHeadingText,
@@ -970,7 +1028,7 @@ struct TranscriptEstimatorAccuracyTests {
         try png.write(to: URL(fileURLWithPath: path))
     }
 
-    private static func f(_ value: CGFloat) -> String { String(format: "%.1f", value) }
+    nonisolated private static func f(_ value: CGFloat) -> String { String(format: "%.1f", value) }
     private static func sf(_ value: CGFloat) -> String { String(format: "%+.1f", value) }
 
     /// Left-aligned fixed-width cell (Swift's `String(format: "%-20@")` does not
