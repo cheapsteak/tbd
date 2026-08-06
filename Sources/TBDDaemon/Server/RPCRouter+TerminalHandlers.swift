@@ -60,6 +60,19 @@ actor TranscriptParseCache {
     }
 }
 
+// MARK: - The pane consultation's verdict
+
+/// A pane consultation that came back "do not type here", with the outcome the
+/// record gets and the message the caller sees.
+///
+/// One type for both typing paths — the send handler and the verifier's
+/// retry — so a refusal cannot be classified two ways depending on which one
+/// asked.
+struct PaneSendRefusal: Sendable {
+    let outcome: ActuationOutcome
+    let message: String
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -1932,78 +1945,56 @@ extension RPCRouter {
         // shows the near-miss so the morning can see what the flag stopped.
         //
         // Read per call and only when `--verify` was armed, so an ordinary send
-        // pays no config read — and flipping the flag needs no daemon restart.
+        // pays no config read.
+        //
+        // Two conditions, because the flag and the machinery it enables are
+        // read at different times: the column per call, the verifier once at
+        // daemon start. Between flipping the flag on and restarting, the column
+        // says yes and there is still nothing to arm — and a send that
+        // dispatched with nothing armed would render `unconfirmed` forever,
+        // handing the caller a silence that reads like a delivery failure when
+        // nothing ever looked. Both conditions therefore refuse, and neither
+        // types anything.
         if payload.isVerifyArmed {
             let enabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
             if !enabled {
                 let message = """
                     terminal.send --verify was refused: delivery verification is disabled \
                     (config.delivery_verification_enabled is off) — nothing was sent. Enable \
-                    it with the config.setDeliveryVerification RPC, or resend without --verify \
-                    to accept an unverified send.
+                    it with the config.setDeliveryVerification RPC and restart the daemon, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            if deliveryVerifier == nil {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is enabled but \
+                    this daemon has no verifier wired, so the flag was turned on after it \
+                    started — nothing was sent. Restart the daemon to arm the observation, or \
+                    resend without --verify to accept an unverified send.
                     """
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
         }
 
-        // Ask the pane about itself before typing into it. tmux's own exit
-        // status cannot carry this: `send-keys` into a `remain-on-exit` dead
-        // pane exits 0, and keys sent to a reused pane id land in a live
-        // stranger's composer with no error anywhere (issue #384). Both answers
-        // arrive from ONE read-only `list-panes`, and both are read BEFORE any
-        // byte is written — so a decline here is a refusal, never a transport
-        // failure: the daemon declined without touching the transport.
-        let target: PaneSendTarget
+        // Ask the pane about itself before typing into it — the honest-transport
+        // check of issue #384 and the dead-pane class beside it. A decline here
+        // is a refusal, never a transport failure: the daemon declined without
+        // touching the transport. The consultation itself failing is the
+        // opposite, and is classified as such.
+        let refusal: PaneSendRefusal?
         do {
-            target = try await tmux.paneSendTarget(
-                server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            refusal = try await consultPaneBeforeTyping(
+                terminal: terminal, server: worktree.tmuxServer)
         } catch {
-            // The consultation itself could not be run (a wedged tmux tripping
-            // the subprocess timeout). That is a tmux command failing, not an
-            // answer about the pane, and it is classified as such.
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
         }
-
-        switch target {
-        case .missing:
-            let message = """
-                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
-                no longer exists on server \(worktree.tmuxServer) — nothing was sent
-                """
-            await finishActuation(actuationID, .refused(.notFound), error: message)
-            return RPCResponse(error: message)
-        case .dead:
-            let message = """
-                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
-                dead (its process has exited) — nothing was sent; recreate the terminal's \
-                window first
-                """
-            await finishActuation(actuationID, .refused(.notEligible), error: message)
-            return RPCResponse(error: message)
-        case .live(let paneTerminalID):
-            guard let paneTerminalID else {
-                // Absence is not disagreement. A pane spawned before TBD stamped
-                // identities, or by something outside TBD, answers with nothing —
-                // and refusing on nothing would turn this fix into a regression
-                // for every such pane. Only a POSITIVE disagreement refuses.
-                logger.debug("""
-                    terminal.send: pane \(terminal.tmuxPaneID, privacy: .public) claims no \
-                    terminal identity; proceeding without verifying it is terminal \
-                    \(terminal.id.uuidString, privacy: .public)
-                    """)
-                break
-            }
-            if paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
-                let message = """
-                    tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
-                    \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
-                    — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
-                    """
-                await finishActuation(actuationID, .refused(.targetMismatch), error: message)
-                return RPCResponse(error: message)
-            }
+        if let refusal {
+            await finishActuation(actuationID, refusal.outcome, error: refusal.message)
+            return RPCResponse(error: refusal.message)
         }
 
         // What actually reached the pane, envelope included — nil for a payload
@@ -2093,6 +2084,116 @@ extension RPCRouter {
                 submit: payload.recordedSubmit ?? false)
         }
         return .ok()
+    }
+
+    // MARK: - The pane consultation, and the verifier's re-delivery
+
+    /// Consult the pane the send names, and classify the answer.
+    ///
+    /// `nil` means "proceed" — the pane is alive and either agrees it is this
+    /// terminal or claims no identity at all. Anything else is a refusal the
+    /// caller records and returns, with the message a human reads.
+    ///
+    /// tmux's own exit status cannot carry this: `send-keys` into a
+    /// `remain-on-exit` dead pane exits 0, and keys sent to a reused pane id
+    /// land in a live stranger's composer with no error anywhere (issue #384).
+    /// Both answers arrive from ONE read-only `list-panes`, read BEFORE any
+    /// byte is written. Throws only when the consultation could not be RUN — a
+    /// wedged tmux tripping the subprocess timeout — which is a tmux command
+    /// failing, not an answer about the pane.
+    ///
+    /// Shared by the send path and by `redeliverVerifiedPayload`, so the retry
+    /// cannot re-type into a pane the first send would have refused.
+    private func consultPaneBeforeTyping(
+        terminal: Terminal, server: String
+    ) async throws -> PaneSendRefusal? {
+        switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
+        case .missing:
+            return PaneSendRefusal(outcome: .refused(.notFound), message: """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
+                no longer exists on server \(server) — nothing was sent
+                """)
+        case .dead:
+            return PaneSendRefusal(outcome: .refused(.notEligible), message: """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
+                dead (its process has exited) — nothing was sent; recreate the terminal's \
+                window first
+                """)
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else {
+                // Absence is not disagreement. A pane spawned before TBD stamped
+                // identities, or by something outside TBD, answers with nothing —
+                // and refusing on nothing would turn this fix into a regression
+                // for every such pane. Only a POSITIVE disagreement refuses.
+                logger.debug("""
+                    terminal.send: pane \(terminal.tmuxPaneID, privacy: .public) claims no \
+                    terminal identity; proceeding without verifying it is terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+                return nil
+            }
+            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString)
+                != .orderedSame else { return nil }
+            return PaneSendRefusal(outcome: .refused(.targetMismatch), message: """
+                tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
+                \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
+                — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
+                """)
+        }
+    }
+
+    /// Re-deliver an already-recorded payload, byte-identically, for the
+    /// delivery verifier's single evidence-bounded retry (§12).
+    ///
+    /// **Writes no row of its own, and mints no id.** The retry re-delivers the
+    /// identical payload under the identical envelope id, so it is the same
+    /// actuation-level intent as the original send — a second request row would
+    /// split one intent in two and break the join that makes the ladder
+    /// readable. The verifier records this call's *outcome* against the
+    /// original request id, which is why the outcome is returned rather than
+    /// thrown: a refused or transport-failed retry must be classified as what
+    /// it was, not collapsed into "the payload failed".
+    ///
+    /// It runs the same pane consultation the first send ran, through the same
+    /// helper: a minute has passed, and the pane may have died or been reused
+    /// since. And it queues in the same per-terminal lane, so a retry can never
+    /// splice itself into a concurrent send's paste.
+    func redeliverVerifiedPayload(
+        terminalID: UUID, payload: String, submit: Bool
+    ) async -> ActuationOutcome {
+        guard let terminal = try? await db.terminals.get(id: terminalID),
+              let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+            return .refused(.notFound)
+        }
+        let outcome: ActuationOutcome
+        do {
+            outcome = try await terminalSendSerializer.run(terminalID: terminalID) {
+                if let refusal = try await self.consultPaneBeforeTyping(
+                    terminal: terminal, server: worktree.tmuxServer) {
+                    return refusal.outcome
+                }
+                try await self.tmux.pasteText(
+                    server: worktree.tmuxServer,
+                    paneID: terminal.tmuxPaneID,
+                    bytes: Data(payload.utf8))
+                if submit {
+                    try await self.tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter")
+                }
+                return .dispatched
+            }
+        } catch {
+            // Either the consultation could not be run or the paste itself
+            // failed. Both are the transport, not a decision.
+            logger.warning("""
+                delivery retry: re-delivery to terminal \(terminalID.uuidString, privacy: .public) \
+                failed: \(error, privacy: .public)
+                """)
+            return .transportFailed
+        }
+        return outcome
     }
 
     // MARK: - terminal.send payload shape
