@@ -243,3 +243,11 @@ restoration source that has quietly rotted is worse than none.
 - The gate is a **status check**, not a required-approval count. (The App's approval
   *could* count toward required reviews if we ever want that, but the computed
   verdict is what enforces High/Medium blocking today.)
+- **A green `claude-review` can predate the workflow that would produce it now.**
+  Branch protection has `strict: false` — PRs need not be up to date with `main` — and
+  a `pull_request_target` check does not re-run because the base branch's workflow
+  changed. So a PR already open when this file changes keeps whatever verdict it
+  already has, from whatever the workflow was then. The check name is the same and the
+  green tick looks identical, which is the whole problem. After any change to what the
+  gate *does*, push to (or re-run the check on) an open PR before merging it if you
+  want the current pipeline's opinion rather than the one it happened to get.
