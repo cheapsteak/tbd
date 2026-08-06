@@ -266,6 +266,14 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// unrelated session*, which would then receive a pasted judge prompt plus Enter. That
     /// is issue #384, and picking the newest row alone would not prevent it.
     ///
+    /// Neither guard is sufficient on its own, and neither proves *ownership*.
+    /// `windowExists` proves a window id resolves to SOME window;
+    /// `paneCurrentCommand` proves an agent of the right kind is in the
+    /// foreground of SOME pane. A recycled pane id running a stranger's Claude
+    /// satisfies both. So each surviving candidate is asked who it is
+    /// (`paneSendTarget`) and dropped when it answers with a different terminal
+    /// — see `paneIdentityPermitsSend`.
+    ///
     /// Hibernated/suspended rows are excluded even if their tmux window still
     /// exists: their pane contains a shell, not an agent, and pasting a judge
     /// prompt there would execute it as shell input.
@@ -295,6 +303,7 @@ public actor DeskSessionManager: DeskSessionManaging {
                     """)
                 continue
             }
+            guard await paneIdentityPermitsSend(server: server, terminal: terminal) else { continue }
             if tmux.verifiesPaneCurrentCommand {
                 guard let command = try? await tmux.paneCurrentCommand(
                     server: server,
@@ -310,6 +319,83 @@ public actor DeskSessionManager: DeskSessionManaging {
             live.append(terminal)
         }
         return live
+    }
+
+    /// Ask a candidate's pane who it belongs to, before it can become the target
+    /// of a paste nobody asked for.
+    ///
+    /// The same read-only consultation `handleTerminalSend` and
+    /// `LimitResumeActuator` run, on the same rule, and the rule is the whole
+    /// point: **refusal requires POSITIVE disagreement, never absence.** A pane
+    /// that answers with no identity — spawned before TBD stamped one, or by
+    /// something outside TBD — is treated exactly as it was before this check
+    /// existed, so no pre-stamp desk regresses into a silent night. Only a pane
+    /// that names a *different* terminal is dropped.
+    ///
+    /// This rail needs it more than the send path does. Both consumers of the
+    /// candidate list paste on a timer with no user gesture behind them, and
+    /// what they paste is a judge prompt: a stranger agent on a recycled pane id
+    /// would not merely receive a stray keystroke, it would read and act on
+    /// instructions addressed to another session, with permissions bypassed.
+    ///
+    /// Excluding rather than throwing is what makes the outcome safe by
+    /// default. A dropped candidate is simply not live, so the callers'
+    /// existing "no uniquely owned live terminal … skipping" path handles it,
+    /// and `leasedJudgeTerminal` gets *more* correct: a stranger can no longer
+    /// masquerade as the lease owner, nor pad the candidate count into a
+    /// spurious fail-closed contention report.
+    ///
+    /// - Returns: `true` when this pane may be sent to.
+    private func paneIdentityPermitsSend(server: String, terminal: Terminal) async -> Bool {
+        let target: PaneSendTarget
+        do {
+            target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
+        } catch {
+            // The consultation could not be RUN at all (a wedged tmux tripping
+            // the subprocess timeout) — no answer about the pane either way.
+            // Dropped, matching how the `paneCurrentCommand` check below already
+            // treats the same wedged server: `try?` there turns a failed query
+            // into a skipped candidate. Pasting a judge prompt into a pane we
+            // could not look at is exactly what this check exists to stop, and
+            // the cost of being wrong is only a skipped tick.
+            logger.notice("""
+                Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not verify \
+                pane \(terminal.tmuxPaneID, privacy: .public) belongs to it: \
+                \(String(describing: error), privacy: .public)
+                """)
+            return false
+        }
+
+        switch target {
+        case .missing:
+            logger.notice("""
+                Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
+                pane \(terminal.tmuxPaneID, privacy: .public) no longer exists
+                """)
+            return false
+        case .dead:
+            logger.notice("""
+                Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
+                pane \(terminal.tmuxPaneID, privacy: .public) is dead
+                """)
+            return false
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else { return true }
+            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
+            else { return true }
+            // Logged distinctly and loudly: to every caller this looks like an
+            // ordinary absence, and "no live terminal" is a sentence this rail
+            // prints for half a dozen benign reasons. A pane that has changed
+            // hands is not benign — it is the row's coordinate gone stale, and
+            // it stays stale until something respawns the window.
+            logger.warning("""
+                Skipping Watch Desk terminal \(terminal.id, privacy: .public): pane \
+                \(terminal.tmuxPaneID, privacy: .public) now belongs to terminal \
+                \(paneTerminalID, privacy: .public) — nothing will be pasted into it \
+                (tmux reuses pane ids, so this coordinate is stale)
+                """)
+            return false
+        }
     }
 
     private func liveAgentTerminal(
