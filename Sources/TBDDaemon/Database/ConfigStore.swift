@@ -41,6 +41,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var daemon_panel_surface_enabled: Bool?
     var agent_panel_control_enabled: Bool?
     var remote_backends_enabled: Bool?
+    /// Delivery acknowledgement (design §12). Nil/absent means OFF — the
+    /// `v69_config_delivery_verification` column default.
+    var delivery_verification_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -79,7 +82,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
             panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
             agentPanelControlEnabled: agent_panel_control_enabled ?? false,
-            remoteBackendsEnabled: remote_backends_enabled ?? false
+            remoteBackendsEnabled: remote_backends_enabled ?? false,
+            deliveryVerificationEnabled: delivery_verification_enabled ?? false
         )
     }
 }
@@ -286,6 +290,21 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET hibernate_input_veto_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the delivery-acknowledgement opt-in (default OFF, soaking).
+    /// `terminal.send` re-reads it per call — but only when the caller armed
+    /// `--verify`, so an ordinary send pays nothing — and it therefore applies
+    /// to the next send with no daemon restart. Turning it off does not cancel
+    /// observations already armed; it stops new ones from being armed and makes
+    /// `--verify` a refusal again.
+    public func setDeliveryVerification(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET delivery_verification_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

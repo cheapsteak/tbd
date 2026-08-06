@@ -1876,6 +1876,28 @@ extension RPCRouter {
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?
     ) async throws -> RPCResponse {
+        // ─── The first of two refusal lines, and the reason they differ ───
+        //
+        // A malformed payload SHAPE is rejected here, before any row exists, as
+        // an ordinary RPC error. `RPCRouter+Actuation.swift` draws this line
+        // already: a row must not be written for a request that was never about
+        // to be dispatched. None of these combinations names a coherent act —
+        // there is no send to record, only a caller that asked for nothing, or
+        // for two contradictory things at once.
+        //
+        // The second line is below, at the flag: `--verify` while delivery
+        // verification is off IS a coherent act, one the daemon declined, so it
+        // gets a row and a refusal outcome. See there.
+        //
+        // The CLI validates these same shapes so a human gets a clean message
+        // before a socket is opened; the daemon enforces them independently
+        // because the CLI is not the only caller.
+        let payload: TerminalSendPayload
+        switch Self.validateSendShape(params) {
+        case .valid(let validated): payload = validated
+        case .malformed(let message): return RPCResponse(error: message)
+        }
+
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
@@ -1888,10 +1910,42 @@ extension RPCRouter {
         // Request row first: the target is resolved and the payload is known,
         // and nothing has touched the pane yet. The paste and the Enter are
         // sub-steps of one send, so they share this one row.
+        //
+        // The row records the caller's payload VERBATIM and without the
+        // envelope (§3, "the log records the message verbatim"). The envelope is
+        // transport framing built at delivery, and its id is this row's own id,
+        // so storing it would duplicate the row's identifier into its own body.
         let actuationID = try await beginActuation(
             .terminalSend, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
-            message: params.text, submit: params.submit == true)
+            message: payload.recordedMessage,
+            submit: payload.recordedSubmit,
+            verify: payload.recordedVerify)
+
+        // ─── The second refusal line: a well-formed act the daemon declines ───
+        //
+        // `--verify` while `delivery_verification_enabled` is off is a refusal,
+        // not a silent downgrade to an unverified send. A caller that asked for
+        // evidence must never be answered with a silence that reads like
+        // confirmation — that would rebuild, one layer up, the exact
+        // silent-failure class §12 exists to end. Nothing is typed, and the row
+        // shows the near-miss so the morning can see what the flag stopped.
+        //
+        // Read per call and only when `--verify` was armed, so an ordinary send
+        // pays no config read — and flipping the flag needs no daemon restart.
+        if payload.isVerifyArmed {
+            let enabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
+            if !enabled {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is disabled \
+                    (config.delivery_verification_enabled is off) — nothing was sent. Enable \
+                    it with the config.setDeliveryVerification RPC, or resend without --verify \
+                    to accept an unverified send.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+        }
 
         // Ask the pane about itself before typing into it. tmux's own exit
         // status cannot carry this: `send-keys` into a `remain-on-exit` dead
@@ -1952,32 +2006,72 @@ extension RPCRouter {
             }
         }
 
-        // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
-        // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
-        // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
-        // multiple rapid reads, which a TUI's non-bracketed paste-burst
-        // detection mistakes for a paste and coalesces — absorbing the trailing
-        // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
-        // Enter provably outside the paste. tmux emits the wrappers iff the pane
-        // has bracketed-paste mode on — agent TUIs and modern interactive shells
-        // both enable it at the prompt; cooked-mode consumers get bare bytes and
-        // behave as before. Skip an empty body entirely (don't paste an empty
-        // buffer) but still press Enter below if requested.
-        do {
-            if !params.text.isEmpty {
-                try await tmux.pasteText(
-                    server: worktree.tmuxServer,
-                    paneID: terminal.tmuxPaneID,
-                    bytes: Data(params.text.utf8)
-                )
-            }
+        // What actually reached the pane, envelope included — nil for a payload
+        // that pasted nothing (empty text, or keys). Handed to the arming seam
+        // below so a retry can re-deliver byte-identically.
+        var deliveredPayload: String?
 
-            if params.submit == true {
-                try await tmux.sendKey(
-                    server: worktree.tmuxServer,
-                    paneID: terminal.tmuxPaneID,
-                    key: "Enter"
-                )
+        do {
+            switch payload {
+            case .text(let text, let submit, _):
+                // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
+                // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
+                // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
+                // multiple rapid reads, which a TUI's non-bracketed paste-burst
+                // detection mistakes for a paste and coalesces — absorbing the trailing
+                // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
+                // Enter provably outside the paste. tmux emits the wrappers iff the pane
+                // has bracketed-paste mode on — agent TUIs and modern interactive shells
+                // both enable it at the prompt; cooked-mode consumers get bare bytes and
+                // behave as before. Skip an empty body entirely (don't paste an empty
+                // buffer) but still press Enter below if requested.
+                //
+                // Every NON-EMPTY text payload rides behind the dispatch
+                // envelope (§12): a one-line tag carrying this row's id and the
+                // identity the row was attributed to, then the caller's message
+                // verbatim. It is attribution the receiving agent can read, and
+                // — because a submitted message's verbatim content lands in the
+                // transcript JSONL — it is the machine fact a later observation
+                // looks for, requiring nothing of the agent. It rides every text
+                // send, verified or not: a prefix that appears only sometimes is
+                // one no reader can rely on.
+                //
+                // An EMPTY payload keeps today's behaviour exactly: nothing is
+                // pasted, and a bare `--submit` still presses Enter. `tbd
+                // terminal send --text "" --submit` is a real way to press Enter
+                // and must not start pasting a tag.
+                if !text.isEmpty {
+                    let composed = Self.dispatchEnvelope(
+                        id: actuationID, from: (actor ?? .anonymous).dispatchLabel
+                    ) + "\n" + text
+                    try await tmux.pasteText(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        bytes: Data(composed.utf8)
+                    )
+                    deliveredPayload = composed
+                }
+
+                if submit {
+                    try await tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter"
+                    )
+                }
+
+            case .keys(let names, _):
+                // Named keys, one at a time, paced — see `PacedKeySender` for
+                // why back-to-back keys get dropped by a redrawing TUI. The
+                // `sendKey` call stays here, inside the file the actuation audit
+                // covers, and the pacing lives behind the closure.
+                try await pacedKeySender.send(names) { key in
+                    try await self.tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: key
+                    )
+                }
             }
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -1985,7 +2079,103 @@ extension RPCRouter {
         }
 
         await finishActuation(actuationID, .dispatched)
+
+        // Hand off to the observation — the record's third rung. Reached only
+        // from here, only after `.dispatched`, and only for a verify-armed text
+        // payload that actually pasted something, so a verify-less send, a
+        // refusal and a transport failure all arm nothing. See
+        // `DeliveryVerificationArming` for the full contract.
+        if payload.isVerifyArmed, let deliveredPayload {
+            await deliveryVerifier?.armVerification(
+                actuationID: actuationID,
+                terminalID: terminal.id,
+                deliveredPayload: deliveredPayload,
+                submit: payload.recordedSubmit ?? false)
+        }
         return .ok()
+    }
+
+    // MARK: - terminal.send payload shape
+
+    /// The dispatch envelope §12 puts ahead of every non-empty text payload.
+    ///
+    /// `id` is the actuation row's own id — there is no second identifier
+    /// namespace, so dispatch, transcript receipt and outcome all join on one
+    /// string. `from` comes from `ActuationActor.dispatchLabel`, which is
+    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or project name
+    /// can close the tag or open a second attribute.
+    static func dispatchEnvelope(id: String, from label: String) -> String {
+        "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
+    }
+
+    /// Reject the payload shapes that name no coherent act, before a row exists.
+    ///
+    /// Returns the validated payload, or the error text the caller sees. Pure
+    /// and static so both the daemon path and its tests can reach it without a
+    /// database.
+    static func validateSendShape(
+        _ params: TerminalSendParams
+    ) -> TerminalSendShape {
+        let submit = params.submit == true
+        let verify = params.verify == true
+
+        switch (params.text, params.keys) {
+        case (.some, .some):
+            // Two payloads in one call. Which one was meant is unknowable, and
+            // guessing would type something nobody asked for.
+            return .malformed(
+                "terminal.send takes exactly one payload: --text or --keys, not both")
+
+        case (.none, .none):
+            return .malformed(
+                "terminal.send needs a payload: pass --text or --keys")
+
+        case (.none, .some(let keys)):
+            // Enter is itself a key. `--submit --keys` asks the daemon to append
+            // a keystroke to a key sequence the caller already wrote out in
+            // full, which cannot be what was meant — spell it "… Enter".
+            if submit {
+                return .malformed(
+                    "terminal.send --submit is incoherent with --keys (Enter is itself a "
+                    + "key — put it in the sequence: --keys \"Escape Enter\")")
+            }
+            // Keys never reach a transcript, so there is no observation to make
+            // and nothing an envelope could be found in (§12).
+            if verify {
+                return .malformed(
+                    "terminal.send --verify cannot be used with --keys: keys reach no "
+                    + "transcript, so delivery cannot be observed")
+            }
+            guard let names = PacedKeySender.tokenize(keys) else {
+                return .malformed(
+                    "terminal.send --keys must name between 1 and \(PacedKeySender.maxKeys) "
+                    + "whitespace-separated tmux keys (for example: --keys \"Escape Enter\")")
+            }
+            return .valid(.keys(names: names, verbatim: keys))
+
+        case (.some(let text), .none):
+            if verify {
+                // Text that is never submitted never enters the conversation and
+                // so can never appear in a transcript; verifying it would build
+                // a machine that reports not-landed every time and then retries.
+                // An EMPTY payload fails for the same reason one step earlier —
+                // nothing is pasted, so no envelope is ever written to be found.
+                // Both are refused rather than downgraded, per the never-answer-
+                // a-request-for-evidence-with-silence rule (§12).
+                if !submit {
+                    return .malformed(
+                        "terminal.send --verify requires --submit: text left standing in a "
+                        + "composer never enters the conversation, so delivery cannot be "
+                        + "observed")
+                }
+                if text.isEmpty {
+                    return .malformed(
+                        "terminal.send --verify requires a non-empty --text: an empty payload "
+                        + "pastes nothing, so there is no dispatch envelope to observe")
+                }
+            }
+            return .valid(.text(text, submit: submit, verify: verify))
+        }
     }
 
     // MARK: - Main Area Size Broadcast

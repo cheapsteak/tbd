@@ -109,6 +109,18 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the delivery-acknowledgement soak flag (design §12). This is
+    /// how an operator enables the flag for its soak. `terminal.send` reads it
+    /// per `--verify` call, so it applies to the next send immediately — no
+    /// daemon restart. Turning it off makes `--verify` a refusal again.
+    func handleConfigSetDeliveryVerification(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetDeliveryVerificationParams.self, from: paramsData)
+        try await db.config.setDeliveryVerification(enabled: params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
     /// so it applies to the next worktree creation immediately — already-open
     /// setup tabs are unaffected.

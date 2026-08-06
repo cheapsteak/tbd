@@ -239,6 +239,7 @@ public enum RPCMethod {
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
+    public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
     public static let gcList = "gc.list"
@@ -1499,13 +1500,43 @@ public struct TerminalListParams: Codable, Sendable {
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
 }
 
+/// One `terminal.send` request. Exactly one payload kind per call — `text` or
+/// `keys`, never both and never neither (design §3, "Payloads, not verbs").
+///
+/// **`text` is optional only to admit `keys`.** An older CLI sending
+/// `{terminalID, text, submit}` decodes and behaves byte-identically: `keys`
+/// and `verify` are absent, which is exactly a text send. `--text` and
+/// `--submit` keep their exact current semantics — bare `--text` types without
+/// submitting, and `--submit` is not deprecated.
 public struct TerminalSendParams: Codable, Sendable {
     public let terminalID: UUID
-    public let text: String
+    /// The message, verbatim. Delivered behind a `<tbd-dispatch …/>` envelope
+    /// line (§12); the record stores what the caller wrote, not the envelope.
+    /// An empty string keeps its existing meaning: nothing is pasted, and a
+    /// bare `--submit` still presses Enter.
+    public let text: String?
+    /// Whitespace-separated tmux key names — `"Escape"`, `"C-c"`,
+    /// `"Escape Enter"` — sent one at a time, paced. Mutually exclusive with
+    /// `text`. Carries no envelope (a key sequence has nowhere to put a line of
+    /// text) and cannot be verified (keys reach no transcript).
+    public let keys: String?
     /// When true, sends an Enter keypress after the text to submit it.
+    /// Incoherent with `keys`, where Enter is itself a key.
     public let submit: Bool?
-    public init(terminalID: UUID, text: String, submit: Bool? = nil) {
-        self.terminalID = terminalID; self.text = text; self.submit = submit
+    /// Arms delivery acknowledgement for this send (§12). Requires `submit`
+    /// (unsubmitted text never enters the conversation, so it can never reach a
+    /// transcript) and is incompatible with `keys`. Refused, never silently
+    /// downgraded, while `delivery_verification_enabled` is off.
+    public let verify: Bool?
+    public init(
+        terminalID: UUID, text: String? = nil, keys: String? = nil,
+        submit: Bool? = nil, verify: Bool? = nil
+    ) {
+        self.terminalID = terminalID
+        self.text = text
+        self.keys = keys
+        self.submit = submit
+        self.verify = verify
     }
 }
 
@@ -1796,6 +1827,15 @@ public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setDeliveryVerification` — the delivery-acknowledgement
+/// soak flag (default OFF, fleet-supervision design §12). Read per `--verify`
+/// send, so the change applies to the next one; no daemon restart required.
+/// This is the operator's enable path for the soak.
+public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setAutoCloseSetup` — the auto-close-setup-tab soak
 /// flag (default OFF). Read fresh at spawn time; applies to the next
 /// worktree creation, no daemon restart required.
@@ -1957,6 +1997,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
+    /// Whether delivery acknowledgement is armed (`delivery_verification_enabled`,
+    /// design §12). Default OFF while it soaks. This is the read-back for the
+    /// soak's enable path: while it is false, `terminal.send --verify` is
+    /// refused rather than quietly downgraded. Re-evaluated on every call.
+    public let deliveryVerificationEnabled: Bool
     /// Whether TBD pre-accepts Claude's folder-trust dialog for the worktrees of
     /// registered repos — the ones TBD created plus the repo's own checkout, but
     /// never a fork-PR-head checkout (default ON). Re-evaluated by the daemon on
@@ -1992,6 +2037,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 controlModeSupported: Bool = false,
                 hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
+                deliveryVerificationEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
                 panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
@@ -2001,6 +2047,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.controlModeSupported = controlModeSupported
         self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
+        self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
         self.panelSurfaceEnabled = panelSurfaceEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
@@ -2018,6 +2065,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // New field for delivery acknowledgement; absent from older daemons defaults to false (soaking).
+        deliveryVerificationEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .deliveryVerificationEnabled) ?? false
         // New field for worktree auto-trust; absent from older daemons defaults
         // to true, matching the column default (it is not a soak flag).
         autoTrustWorktrees = try c.decodeIfPresent(Bool.self, forKey: .autoTrustWorktrees) ?? true
