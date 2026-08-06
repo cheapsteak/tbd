@@ -657,8 +657,10 @@ carried for a hypothetical.
 One configuration column in the daemon, on or off — added by migration and
 **shipped off**, which is the house default-off-flag rule satisfied by the
 switch itself: no second flag hides behind it, and the soak is opt-in
-coverage. (The Channels delivery adapter additionally ships behind its own
-default-off flag, §12.) Settable from the app and the
+coverage. (Two §12 mechanisms carry default-off flags of their own beside
+it: the delivery-verification re-check, which the public send offers every
+caller and supervision only shares, and the Channels delivery adapter.)
+Settable from the app and the
 CLI, broadcast when it changes, surviving restart like every other daemon
 toggle. That is P0-2's one-gesture handover for the whole fleet, unchanged in
 substance: one gesture, one ledger, one account. The switch is
@@ -759,7 +761,9 @@ rather than a capability wall, and the requirements doc records that descope
 There are no desk verbs. Acting on a session is **`tbd terminal send`** —
 the public actuation, one verb for every caller: a human's script, the wake
 program, a sweep program's continuation policy, the supervisor itself.
-Payloads, not verbs: `--text` delivers a message and submits it (also how
+Payloads, not verbs: `--text` carries the message and `--submit` sends
+it — text without `--submit` is typed and left standing in the composer,
+so every delivery this design describes passes both (that pair is also how
 an agent's `AskUserQuestion` is answered, the adapter clearing a
 machine-known dialog first, §2); `--keys` sends named keys chosen after
 reading the screen; interrupt is a keys payload. Splitting text from keys
@@ -773,8 +777,12 @@ message verbatim, so a stale premise is *visible* the moment it ships
 rather than prevented at the door (P0-8). `--verify` opts into the §12
 acknowledgment machinery — confirm the payload landed, within the re-check
 deadline (§13) — implemented as a tail read of the target transcript's
-JSONL, never a full parse. Verification is opt-in because it costs a
-transcript read; supervision's conduct says to use it.
+JSONL, never a full parse. It presupposes the pair above: verification is
+refused without `--submit`, because text left standing in a composer never
+enters the conversation and so can never reach a transcript, and refused
+with `--keys`, which reaches no transcript at all (§12). Verification is
+opt-in because it costs a transcript read; supervision's conduct says to
+use it.
 
 **Every send is logged; nobody is the reporter of their own acts.** The
 daemon executes every actuation on its own surfaces, so it records each in
@@ -2503,9 +2511,17 @@ race itself biting; if one does, the fix joins this family (the send path
 refusing when the composer is unreachable) and stays content-blind.
 
 **Receipt is a passive machine observation; the agent cooperates in nothing.**
-Every dispatched payload opens with a one-line envelope carrying the
-actuation row's ID — `<tbd-dispatch id="a3f1" from="supervision-desk"/>` — which
-doubles as honest attribution: the receiving agent sees who is addressing it.
+Every dispatched text payload opens with a one-line envelope carrying the
+actuation row's ID and the identity the row was attributed to —
+`<tbd-dispatch id="a3f1" from="supervisor:acme-web"/>`, then the message
+verbatim — which doubles as honest attribution: the receiving agent sees who
+is addressing it, down to `from="anonymous"` when the caller declared no
+identity. The envelope rides every text send, `--verify` or not, because a
+prefix that appears only sometimes is one no reader can rely on. A keys
+payload carries none: a key sequence has nowhere to put a line of text, and
+typing one ahead of an interrupt would itself be an intervention. That is
+why `--verify` and `--keys` are refused together (§3) — keys reach no
+transcript, so there is no observation to be made.
 No second ID namespace exists; the row ID is the identifier, so dispatch,
 transcript receipt, and outcome join on one string. When a submitted message
 enters the conversation, the agent's own harness writes its verbatim content
@@ -2543,6 +2559,18 @@ records one of four results as an outcome row referencing the act:
   with permissions bypassed is arbitrary instruction injection (§3), so
   delivering it twice is not a neutral event.
 
+**The machinery carries its own flag, and refuses rather than pretends.**
+The re-check acts on no user gesture and its retry types into a live
+session, so the whole path — arming the timer, the retry, and the startup
+replay below — stands behind a daemon config column,
+`delivery_verification_enabled`, shipped off. While it is off, `--verify` is
+*refused*, with the flag named: nothing is typed, and the caller learns its
+request went unhonored rather than receiving a quiet unverified send. A
+caller that asked for confirmation must never be answered with a silence
+that reads like one. The envelope is deliberately outside the flag —
+attribution belongs on every dispatch, and a prefix that comes and goes with
+a config column is worse than one that is always there.
+
 That one full attempt — adapter fallback and the evidence-bounded single
 retry included — is the whole of TBD-side persistence for any send. Beyond
 it the outcome stands as recorded, and whether to try again belongs to the
@@ -2565,9 +2593,13 @@ act whose observation never ran renders as unconfirmed by construction
 actuation row's timestamp fixes the deadline, and the envelope is durable in
 the transcript — so at startup the daemon replays the record, finds acts
 past their deadline with no outcome, and performs the same observation late,
-writing the outcome the timer would have written (§7). What a restart costs
-is cadence, stated plainly: P1-6's sixty-second window degrades to the
-startup scan or the next evaluation. What to *do* about a late-confirmed or
+writing the outcome the timer would have written (§7). The observation only:
+the replay never re-delivers, because the retry exists to close a
+sixty-second gap, and a payload whose premise is an unbounded interval old
+is exactly the stale-premise send this design refuses to issue (§3). A
+replayed *not landed* records the outcome and the anomaly, and stops. What a
+restart costs is cadence, stated plainly: P1-6's sixty-second window degrades
+to the startup scan or the next evaluation. What to *do* about a late-confirmed or
 unconfirmed act — re-send, journal, shrug — stays playbook judgment, never
 compiled repair.
 
