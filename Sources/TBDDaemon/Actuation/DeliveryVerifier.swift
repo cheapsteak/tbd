@@ -62,14 +62,29 @@ struct DatabaseDeliveryObservationSource: DeliveryObservationSource {
             sessionID: terminal.claudeSessionID)
     }
 
+    /// Every failure here answers `nil`, and none of them may answer empty.
+    ///
+    /// The two values mean opposite things to the caller: empty is
+    /// *readable-and-the-envelope-is-not-there*, which is the positive evidence
+    /// that licenses a re-paste, while `nil` is "no observation could be made".
+    /// A swallowed `seek` or `read` error collapsing into `Data()` would turn a
+    /// disk hiccup into a claim about an agent's conversation — a silent failure
+    /// re-entering the one system built to end them.
     func transcriptTail(atPath path: String, maxBytes: Int) async -> Data? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
         guard let size = try? handle.seekToEnd() else { return nil }
         guard size > 0 else { return Data() }
         let window = UInt64(max(maxBytes, 0))
-        try? handle.seek(toOffset: size > window ? size - window : 0)
-        return (try? handle.readToEnd()) ?? Data()
+        do {
+            try handle.seek(toOffset: size > window ? size - window : 0)
+            // `readToEnd` answers nil only at EOF, which the size guard above
+            // has already excluded — so this coalesce is for the type, not for
+            // a failure.
+            return try handle.readToEnd() ?? Data()
+        } catch {
+            return nil
+        }
     }
 }
 

@@ -2548,8 +2548,13 @@ result vocabulary below, never the tag.
 
 **The one-minute re-check performs the observation.** The timer already exists
 for P1-6 and the transcript path is recorded for each terminal, so this adds
-no machinery. During the re-check the daemon reads two machine facts: whether
-the transcript contains the envelope, and the session's current state. It
+no machinery. During the re-check the daemon reads two machine facts — whether
+the transcript contains the envelope, and the session's current state — plus
+one identity check: that the terminal still holds the conversation the
+payload was addressed to. `/clear`, `/compact` and an account swap all
+rebind a session while leaving its pane untouched, so the transport's
+identity check cannot see them, and reading on would mean judging one
+conversation by another's transcript. It
 records one of four results as an outcome row referencing the act:
 
 - *Landed and acting* — delivery confirmed, session working. Done.
@@ -2562,7 +2567,13 @@ records one of four results as an outcome row referencing the act:
   indicate a structural problem with the session, and a third send without
   evidence would risk duplicate-message bugs.
 - *Undetermined* — the observation could not be made: transcript unreadable,
-  session state unknown, adapter result ambiguous. **Never retried.** Written
+  session state unknown, adapter result ambiguous, the terminal rebound to a
+  different conversation since dispatch, or the envelope simply absent from a
+  bounded read that cannot prove it covered everything written since. That
+  last case is why absence escalates before it accuses: a session can act on a
+  payload, write past the cheap window, and be idle again inside the deadline,
+  which is indistinguishable from non-delivery until a wider read settles it.
+  **Never retried.** Written
   as an outcome and an anomaly, loud in the account. Retry proceeds only from
   *not landed*, because retrying into uncertainty risks double-instructing an
   agent that did receive the first copy — and a message to an agent running
