@@ -1206,7 +1206,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 }
                 var total: CGFloat = 0
                 var inCode = false
-                var characters = Array(line)
+                let characters = Array(line)
                 var index = 0
                 while index < characters.count {
                     let character = characters[index]
