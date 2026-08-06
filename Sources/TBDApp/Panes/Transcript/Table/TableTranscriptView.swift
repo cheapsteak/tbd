@@ -525,7 +525,11 @@ struct TableTranscriptView: NSViewRepresentable {
             // AppKit used and, if they differ, ask AppKit to re-lay just this row.
             let width = columnWidth
             let wasExact = isExactHeightCached(node, width: width)
-            let estimateUsed = wasExact ? 0 : Self.estimate(for: node, width: width)
+            // Read the estimate AppKit actually used out of the cache rather than
+            // recomputing it: `heightOfRow` has already computed and stored it for
+            // this exact key, and recomputing paid the whole per-line scan a second
+            // time on every realize (measured 33 ms on a 250 KB message).
+            let estimateUsed = wasExact ? 0 : cachedEstimate(node, width: width)
             let cell = makeCell(tableView, node: node, row: row, width: width)
             if !wasExact {
                 correctRowHeightIfNeeded(
@@ -538,6 +542,19 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `heightOfRow` returned an exact value (not the estimate) for this row.
         private func isExactHeightCached(_ node: TranscriptRenderNode, width: CGFloat) -> Bool {
             heightCache[HeightKey(id: node.id, version: node.contentVersion, width: width)] != nil
+        }
+
+        /// The estimate `heightOfRow` served for this row, from the cache it stored
+        /// it in. Falls back to computing one only if the row is being realized
+        /// without ever having been sized — which `heightOfRow` makes impossible in
+        /// practice, but a miss must not silently report a zero-height estimate and
+        /// suppress the correction.
+        private func cachedEstimate(_ node: TranscriptRenderNode, width: CGFloat) -> CGFloat {
+            let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
+            if let cached = estimateCache[key] { return cached }
+            let estimate = Self.estimate(for: node, width: width)
+            estimateCache[key] = estimate
+            return estimate
         }
 
         /// If the now-cached EXACT height differs from the `estimate` AppKit used
@@ -971,14 +988,15 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   prose the visitor's trailing newline survives as one empty line
         ///   fragment, which is charged here in place of paragraph spacing.
         ///
-        /// Three shapes are deliberately NOT modelled, all because they need real
-        /// layout to see, and all three make this estimate SMALL — the safe
+        /// Four shapes are deliberately NOT modelled, all because they need real
+        /// layout to see, and all four make this estimate SMALL — the safe
         /// direction, since an under-reservation grows on realize:
         ///
         /// * a GFM cell whose text wraps (that grid row is 48 pt, not 24) —
         ///   measured -48 pt on a four-times-wrapping cell;
-        /// * a `- - -` thematic break, which the list-item test claims before the
-        ///   rule test can — measured -12 pt, and the `---` spelling is exact;
+        /// * a `- - -` or `* * *` thematic break, which the list-item test claims
+        ///   before the rule test can — measured -12 pt for both, while the `---`
+        ///   spelling is exact;
         /// * a list item whose continuation lines wrap inside the 24 pt list
         ///   indent — measured exact out to 20 wrapped lines, so the indent has
         ///   yet to cost a whole line in practice;
