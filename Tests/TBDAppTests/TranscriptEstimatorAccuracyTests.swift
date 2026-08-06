@@ -360,13 +360,14 @@ struct TranscriptEstimatorAccuracyTests {
     /// - no single message over-reserves by more than three rendered lines. A new
     ///   unmodelled block kind shows up here first and loudly: disabling the
     ///   raw-HTML branch takes the worst case to +288 pt;
-    /// - fewer than 9% of messages over-reserve at all (6.3% today). Disabling the
-    ///   link handling alone takes it to 17.6%, because that shape recurs;
-    /// - the mean signed error stays under +2 pt per message (+0.7 today).
+    /// - fewer than 9.5% of messages over-reserve at all (8.2% today). Disabling
+    ///   the link handling alone takes it to 17.6%, because that shape recurs;
+    /// - the mean signed error stays at or under +0.5 pt per message (-0.4 today,
+    ///   i.e. the estimator under-reserves on average across structured text).
     ///
-    /// The residual is not noise and is worth knowing before re-tuning: 178 of the
-    /// 202 over-reservations are exactly one rendered line (+16) or one line plus a
-    /// list gap (+20), and the +20 family is the nested-list / loose-continuation
+    /// The residual is not noise and is worth knowing before re-tuning: 150 of the
+    /// 262 over-reservations are exactly one rendered line (+16) or one line plus a
+    /// list gap (+20), and the larger ones are the nested-list / loose-continuation
     /// shape `chatBubbleEstimate` documents as deliberately unmodelled, where the
     /// RENDERER collapses content this estimate correctly predicts.
     ///
@@ -414,6 +415,16 @@ struct TranscriptEstimatorAccuracyTests {
             }
         }
 
+        // Two of the three thresholds below are absolute point counts swept at
+        // 13 pt (only `worst` scales with the font), so say so when the host
+        // differs rather than let a re-calibration read as a regression.
+        let sizeCaveat = NSFont.preferredFont(forTextStyle: .body).pointSize
+            == Self.calibratedBodyPointSize
+            ? ""
+            : " NOTE: the rate and mean thresholds are absolute and were swept at "
+                + "\(Self.f(Self.calibratedBodyPointSize)) pt; this host renders at "
+                + "\(Self.f(NSFont.preferredFont(forTextStyle: .body).pointSize)) pt, so re-derive "
+                + "them before treating this as a regression."
         let worst = overReserving.map(\.delta).max() ?? 0
         let rate = Double(overReserving.count) / Double(total)
         let mean = signedTotal / CGFloat(total)
@@ -431,14 +442,14 @@ struct TranscriptEstimatorAccuracyTests {
             + "\(Self.sf(mean)) pt. Over-reservations by size: \(bySize).\nWorst offenders:\n"
             + offenders
 
-        // Achieved: worst +40 pt, rate 6.3% (202 of 3200), mean +0.7 pt.
+        // Achieved: worst +40 pt, rate 8.2% (262 of 3200), mean -0.4 pt.
         #expect(worst <= 3 * Self.renderedLineHeight, Comment(rawValue: "a generated message "
             + "over-reserved by more than three rendered lines, which is what a whole unmodelled "
-            + "block kind looks like. \(summary)"))
-        #expect(rate < 0.09, Comment(rawValue: "too many generated messages over-reserve — a "
-            + "structural shape has stopped being modelled. \(summary)"))
-        #expect(mean <= 2, Comment(rawValue: "the estimator now over-reserves on average across "
-            + "structured messages. \(summary)"))
+            + "block kind looks like. \(summary)\(sizeCaveat)"))
+        #expect(rate < 0.095, Comment(rawValue: "too many generated messages over-reserve — a "
+            + "structural shape has stopped being modelled. \(summary)\(sizeCaveat)"))
+        #expect(mean <= 0.5, Comment(rawValue: "the estimator now over-reserves on average across "
+            + "structured messages. \(summary)\(sizeCaveat)"))
     }
 
     private static let corpusMessageCount = 400
@@ -472,17 +483,32 @@ struct TranscriptEstimatorAccuracyTests {
         (0..<count).map { _ in rng.pick(corpusWords) }.joined(separator: " ")
     }
 
-    /// One to five randomly chosen blocks, separated by blank lines. The label
-    /// names the blocks in order so a failure says which combination broke.
+    /// One to five randomly chosen blocks. The label names the blocks in order,
+    /// and the separator between each pair, so a failure says which combination
+    /// broke and whether a blank line was involved.
+    ///
+    /// A third of the joins are a SINGLE newline. That is not variety for its own
+    /// sake: several branches in `chatBubbleEstimate` only fire at the start of a
+    /// block, and joining every pair with a blank line meant no seed could ever
+    /// produce a block that INTERRUPTS a paragraph. Raw HTML interrupting a
+    /// paragraph was a +96 pt over-reservation — twice this test's own ceiling —
+    /// and it sat inside the corpus's blind spot rather than outside its sample.
     private static func randomMessage(_ rng: inout SplitMix64) -> (String, String) {
-        var names: [String] = []
-        var parts: [String] = []
-        for _ in 0...rng.int(0...4) {
-            let (name, text) = randomBlock(&rng)
-            names.append(name)
-            parts.append(text)
+        var label = ""
+        var text = ""
+        for index in 0...rng.int(0...4) {
+            let (name, block) = randomBlock(&rng)
+            if index > 0 {
+                // A single newline one time in three, so block-start-gated
+                // branches are exercised in their interrupting position too.
+                let tight = rng.int(0...2) == 0
+                text += tight ? "\n" : "\n\n"
+                label += tight ? ">" : "+"
+            }
+            label += name
+            text += block
         }
-        return (names.joined(separator: "+"), parts.joined(separator: "\n\n"))
+        return (label, text)
     }
 
     private static func randomBlock(_ rng: inout SplitMix64) -> (String, String) {
