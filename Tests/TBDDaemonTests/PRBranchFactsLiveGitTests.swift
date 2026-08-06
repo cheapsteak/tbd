@@ -25,12 +25,15 @@ struct PRBranchFactsLiveGitTests {
     /// matter: one tracking its base, one pushed under a different name, and one
     /// pushed under its own name.
     ///
-    /// Every command runs through `TestSupport.shell`, which THROWS on a
-    /// non-zero exit and fences out the developer's global git config. Both
-    /// matter more than usual here: a silently-failing fixture leaves a repo
-    /// with no commits and no remote-tracking refs, where every `@{push}`
-    /// degrades to "no destination" and both arms of this test pass while
-    /// proving nothing — precisely the failure mode the suite exists to catch.
+    /// Every command that MUTATES the repo runs through `TestSupport.shell`,
+    /// which THROWS on a non-zero exit and fences out the developer's global git
+    /// config. Both matter more than usual here: a silently-failing fixture
+    /// leaves a repo with no commits and no remote-tracking refs, where every
+    /// `@{push}` degrades to "no destination" and both arms of this test pass
+    /// while proving nothing — precisely the failure mode the suite exists to
+    /// catch. The one exception is `detectDefaultBranch`, called in-process on
+    /// the same `GitManager` the production code uses: it only reads, and the
+    /// repo-local config the fixture just wrote wins over anything ambient.
     private static func makeFixture(in tempDir: URL) async throws -> Fixture {
         let repoDir = tempDir.appendingPathComponent("repo")
         try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
@@ -89,6 +92,20 @@ struct PRBranchFactsLiveGitTests {
             statusCheckRollupState: nil, mergeQueuePosition: nil)
     }
 
+    /// The explicit time limit — unusual in the fast parallel pass, where suites
+    /// normally take `.clockDriven`'s budget or none — is here for two reasons:
+    ///
+    /// 1. **There is a real hang to bound.** This suite arms no `TestClock`, so
+    ///    `.clockDriven` would be the wrong trait; the hazard is a wedged git
+    ///    subprocess, and `TestSupport.shell` waits on its child without a
+    ///    deadline. Without a limit that wedge is an indefinite stall with no
+    ///    failing test to name it.
+    /// 2. **A minute is not tight here.** The parallel pass's guards are sized
+    ///    at 90 s / 240 s to absorb `TestClock` arming latency across a ~5000-
+    ///    test population; this suite never arms one and so never pays that
+    ///    cost. Measured runtime is ~0.4 s for both arms — roughly 130x of
+    ///    headroom, wider in proportion than `.clockDriven` leaves the suites it
+    ///    covers.
     @Test("candidates and heal behave identically under both push.default values",
           .timeLimit(.minutes(1)),
           arguments: ["simple", "upstream"])

@@ -840,16 +840,21 @@ public actor PRStatusManager {
     ///   fixes, narrower, unobserved in the field.
     /// - A **stale or wrong `repo.defaultBranch`** makes the exclusion miss, so
     ///   the fix silently does not apply on that repo. The stored value is
-    ///   written once at repo registration and never refreshed: `repo.add`
-    ///   detection is best-effort, and TBD registers pre-existing checkouts
-    ///   rather than cloning them, so `refs/remotes/origin/HEAD` — the only
-    ///   authoritative source `git` offers locally — is usually absent and
-    ///   detection falls back to whatever branch is checked out. Re-probing it
-    ///   periodically was tried and reverted: the fallback makes it a
-    ///   current-branch reader, so a main checkout parked on a feature branch
-    ///   would rewrite the stored value on every daemon start and thrash a fact
-    ///   that also picks the base for every new worktree, the fresh-revive base,
-    ///   and the ahead/behind sweep.
+    ///   written once at repo registration and never refreshed. It is usually
+    ///   right: `GitManager.detectDefaultBranch` reads
+    ///   `refs/remotes/origin/HEAD`, which `git clone` writes and most checkouts
+    ///   therefore carry (36 of 44 local repos, measured). The gap is its
+    ///   fallback — with no `origin/HEAD` it reports whichever branch is checked
+    ///   out, which is a different fact wearing the same name.
+    ///
+    ///   Re-probing periodically does not fix that, it spreads it: on exactly
+    ///   the repos whose stored value can be wrong, the probe is a current-
+    ///   branch reader, so a main checkout parked on a feature branch would
+    ///   rewrite the stored value on every daemon start and flip it back on the
+    ///   next. The fact is not local to PR matching — it also picks the base for
+    ///   every new worktree, the fresh-revive base, the periodic fetch, and the
+    ///   conflict sweep (`WorktreeLifecycle+Reconcile`) — so a value that
+    ///   thrashes is worse than one that is occasionally stale.
     /// - A **rename-push whose target is named like the default branch** (e.g. a
     ///   fork PR pushed as `fix-thing:main`) is indistinguishable from a base
     ///   attachment: the tracked branch is `main`, the repo default is
@@ -1072,12 +1077,16 @@ public actor PRStatusManager {
     ///   how candidates happen to be built today.
     ///
     /// Note the asymmetry with `branchCandidates`, which is what makes leaning
-    /// on a stored `repo.defaultBranch` safe here even though it can be stale
-    /// (see the residuals listed there): a wrong value costs a MISSED heal —
-    /// nothing is destroyed, and no attachment becomes wrong that was not
-    /// already wrong. What it does cost is silence: on a repo whose stored
-    /// default branch is wrong, this fix simply does not apply. Do not
-    /// "simplify" the two uses into one shared gate.
+    /// on a stored `repo.defaultBranch` tolerable here even though it can be
+    /// stale (see the residuals listed there): a wrong value almost always costs
+    /// a MISSED heal, and what it buys is silence — on such a repo this fix
+    /// simply does not apply. One case escapes that: the clear fires on
+    /// `tracked == head == defaultBranch`, so a wrong stored default that
+    /// happens to name some branch's rename-push target produces the same
+    /// durable clear as the third residual at `branchCandidates`, which reaches
+    /// it with a *correct* default. Contrived — but it is why "a wrong default
+    /// can only cost a missed heal" is not stated flatly. Do not "simplify" the
+    /// two uses into one shared gate.
     ///
     /// A head ref that is neither a candidate nor the tracked default branch is
     /// left alone: unexplained, but not demonstrably wrong.
