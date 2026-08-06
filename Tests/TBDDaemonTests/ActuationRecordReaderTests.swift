@@ -214,14 +214,45 @@ struct DeliveryRecordTests {
         let now = try date("2026-08-05T14:10:00Z")
         let nonAnswers: [RecordedResult] = [
             .synchronous(.dispatched),
-            .synchronous(.refused),
-            .synchronous(.transportFailed),
             .unrecognized("landed-and-hibernating"),
         ]
         for result in nonAnswers {
             let rows = [request(id: "a1"), outcome(id: "a2", confirms: "a1", result: result)]
             #expect(DeliveryRecord.statuses(in: rows, now: now).map { $0.status } == [.unconfirmed])
         }
+    }
+
+    /// An act the transport never accepted is settled by that answer alone.
+    ///
+    /// `verify == true` on the request row says the caller *asked* for an
+    /// observation — the row is written before the flag check and before the
+    /// pane consultation, so a refused send carries the flag too. Nothing was
+    /// typed, so nothing can have landed and no observation is owed. Rendering
+    /// it `unconfirmed` would put it on the startup replay's work list, and the
+    /// replay would write a landing verdict about a payload that never reached
+    /// a pane.
+    @Test("a send the transport never accepted is owed no observation")
+    func refusedSendsAreSettledNotUnconfirmed() throws {
+        let now = try date("2026-08-05T14:10:00Z")
+        for result in [RecordedResult.synchronous(.refused), .synchronous(.transportFailed)] {
+            let rows = [request(id: "a1"), outcome(id: "a2", confirms: "a1", result: result)]
+            #expect(DeliveryRecord.statuses(in: rows, now: now).isEmpty)
+        }
+    }
+
+    /// A dispatch anywhere in an act's outcomes outranks a later refusal — that
+    /// can only be the single retry failing after a real first delivery, and
+    /// the act genuinely did reach a pane once.
+    @Test("a failed retry after a real dispatch leaves the act still owed an observation")
+    func dispatchOutranksALaterRefusal() throws {
+        let rows = [
+            request(id: "a1"),
+            outcome(id: "a2", confirms: "a1", result: .synchronous(.dispatched)),
+            outcome(id: "a3", confirms: "a1", result: .synchronous(.refused)),
+        ]
+        let statuses = DeliveryRecord.statuses(
+            in: rows, now: try date("2026-08-05T14:10:00Z"))
+        #expect(statuses.map { $0.status } == [.unconfirmed])
     }
 
     @Test("an act that never armed verification is owed no observation at all")

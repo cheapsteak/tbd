@@ -16,9 +16,11 @@ enum TerminalSendShape: Sendable, Equatable {
 }
 
 enum TerminalSendPayload: Sendable, Equatable {
-    /// The caller's message verbatim, without the dispatch envelope: the
-    /// envelope is transport framing built at delivery time (§12, and D16's
-    /// reading of §3's "the log records the message verbatim").
+    /// The caller's message verbatim, without the dispatch envelope. §3's "the
+    /// log records the message verbatim" means the message as the caller wrote
+    /// it; the envelope is transport framing built at delivery time, and its id
+    /// is the row's own — so recording it would copy the row's identifier into
+    /// its own body (§12).
     case text(String, submit: Bool, verify: Bool)
     /// Named tmux keys, already tokenized and bounded by `PacedKeySender`.
     /// `verbatim` is the caller's string as written, which is what the record

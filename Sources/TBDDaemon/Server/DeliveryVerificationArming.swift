@@ -20,21 +20,25 @@ import Foundation
 ///   **envelope line included** — so a retry re-delivers byte-identically and
 ///   still joins on the original row. The envelope's id *is* `actuationID`;
 ///   there is no second identifier namespace.
+/// - `sessionID` is the conversation those bytes went into. The observation
+///   compares it before reasoning about a transcript, because `/clear` and an
+///   account swap rebind a terminal to a new session without disturbing its
+///   pane — so the pane consultation, which compares pane ids, cannot see it.
+///   `nil` when the terminal had reported no session yet.
 /// - Implementations must not block the send: the RPC response is the caller's
 ///   synchronous result, and the observation happens a minute later.
 ///
-/// **Unimplemented on purpose.** Nothing conforms to this yet. The conforming
-/// type is `DeliveryVerifier` — the re-check actor, the retry, the anomaly, and
-/// the startup replay — which lands beside this and is wired onto
-/// `RPCRouter.deliveryVerifier` in `Daemon.swift` next to
-/// `performStartupReconciliation`. Until then `deliveryVerifier` is nil, an
-/// armed send is simply never observed, and `DeliveryRecord.statuses` renders
-/// it `unconfirmed` — the fail-closed answer, and the reason no repair row is
-/// ever written to say so.
+/// The conforming type is `DeliveryVerifier`, wired onto
+/// `RPCRouter.deliveryVerifier` in `Daemon.swift` beside
+/// `performStartupReconciliation` and only when
+/// `delivery_verification_enabled` is on. While it is nil an armed send is
+/// refused outright rather than dispatched unobserved: a caller that asked for
+/// evidence must never be answered with a silence that reads like confirmation.
 protocol DeliveryVerificationArming: Sendable {
     func armVerification(
         actuationID: String,
         terminalID: UUID,
+        sessionID: String?,
         deliveredPayload: String,
         submit: Bool
     ) async

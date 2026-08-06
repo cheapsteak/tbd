@@ -296,11 +296,17 @@ public struct ConfigStore: Sendable {
     }
 
     /// Persist the delivery-acknowledgement opt-in (default OFF, soaking).
-    /// `terminal.send` re-reads it per call — but only when the caller armed
-    /// `--verify`, so an ordinary send pays nothing — and it therefore applies
-    /// to the next send with no daemon restart. Turning it off does not cancel
-    /// observations already armed; it stops new ones from being armed and makes
-    /// `--verify` a refusal again.
+    ///
+    /// **Enabling it takes effect at the next daemon start.** `terminal.send`
+    /// re-reads this column per call — but only when the caller armed
+    /// `--verify`, so an ordinary send pays nothing — while the observation
+    /// machinery it gates is wired once, at startup. In between, `--verify` is
+    /// refused with a message naming the restart, rather than dispatched with
+    /// nothing armed.
+    ///
+    /// Turning it off does not cancel observations already armed; it stops new
+    /// ones from being armed and makes `--verify` a refusal again — and that
+    /// half does apply to the next send.
     public func setDeliveryVerification(enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(

@@ -161,11 +161,18 @@ struct TerminalSend: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    /// The same four shape rules the daemon enforces, checked here so a human
-    /// gets a clean message before a socket is opened. Deliberately duplicated
-    /// rather than delegated: the CLI is not the only caller, so the daemon
-    /// cannot rely on this — and a human should not have to read an RPC error
-    /// to learn they passed two payloads.
+    /// The payload-shape rules, checked here so a human gets a clean message
+    /// before a socket is opened. Deliberately duplicated rather than
+    /// delegated: the CLI is not the only caller, so the daemon cannot rely on
+    /// this — and a human should not have to read an RPC error to learn they
+    /// passed two payloads.
+    ///
+    /// Not a complete mirror of the daemon's `validateSendShape`, and not meant
+    /// to be: the daemon additionally refuses a `--keys` value that tokenizes
+    /// to nothing or to more than `PacedKeySender.maxKeys` keys. Duplicating
+    /// the tokenizer here would mean two copies of a bound that must agree,
+    /// which is a worse failure than one extra round trip — the daemon's
+    /// refusal is specific and reaches the user as an ordinary error.
     func validate() throws {
         if text != nil && keys != nil {
             throw ValidationError("Pass exactly one payload: --text or --keys, not both.")

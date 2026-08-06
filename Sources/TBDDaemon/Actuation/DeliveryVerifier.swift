@@ -17,6 +17,15 @@ struct TerminalDeliveryFacts: Sendable, Equatable {
     /// which is an *undetermined* observation, never a non-delivery.
     let transcriptPath: String?
     let activityState: TerminalActivityState
+    /// `terminals.claudeSessionID` — which *conversation* currently occupies
+    /// this terminal, as distinct from which pane occupies its coordinate.
+    ///
+    /// A third fact, and it earns its place: `/clear` and the account swap both
+    /// rebind a live terminal to a new session and a new, empty transcript
+    /// without disturbing the pane. The pane consultation cannot see that — it
+    /// compares pane ids — so without this the observation would read a
+    /// stranger's transcript, find no envelope, and call it non-delivery.
+    var sessionID: String?
 }
 
 /// Everything the observation reads from outside itself.
@@ -49,7 +58,8 @@ struct DatabaseDeliveryObservationSource: DeliveryObservationSource {
         guard let terminal = try? await db.terminals.get(id: terminalID) else { return nil }
         return TerminalDeliveryFacts(
             transcriptPath: terminal.transcriptPath,
-            activityState: terminal.activityState)
+            activityState: terminal.activityState,
+            sessionID: terminal.claudeSessionID)
     }
 
     func transcriptTail(atPath path: String, maxBytes: Int) async -> Data? {
@@ -151,11 +161,12 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     func armVerification(
         actuationID: String,
         terminalID: UUID,
+        sessionID: String?,
         deliveredPayload: String,
         submit: Bool
     ) async {
         let armed = ArmedDelivery(
-            actuationID: actuationID, terminalID: terminalID,
+            actuationID: actuationID, terminalID: terminalID, sessionID: sessionID,
             payload: deliveredPayload, submit: submit)
         // Detached from the caller's send: the RPC response is the caller's
         // synchronous result and must not wait a minute for an observation.
@@ -171,6 +182,10 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     private struct ArmedDelivery: Sendable {
         let actuationID: String
         let terminalID: UUID
+        /// The conversation this payload was delivered into. Compared at every
+        /// observation, so a session rebound between dispatch and re-check is
+        /// caught before the retry can type into a stranger.
+        let sessionID: String?
         let payload: String
         let submit: Bool
     }
@@ -192,7 +207,9 @@ actor DeliveryVerifier: DeliveryVerificationArming {
 
     private func runReCheckCycle(_ armed: ArmedDelivery) async {
         try? await clock.sleep(for: deadline)
-        let first = await observe(actuationID: armed.actuationID, terminalID: armed.terminalID)
+        let first = await observe(
+            actuationID: armed.actuationID, terminalID: armed.terminalID,
+            expectedSessionID: armed.sessionID)
         await record(first, confirming: armed.actuationID)
 
         // `undetermined` is NEVER retried, and the reason is not caution about
@@ -239,7 +256,9 @@ actor DeliveryVerifier: DeliveryVerificationArming {
         }
 
         try? await clock.sleep(for: deadline)
-        let second = await observe(actuationID: armed.actuationID, terminalID: armed.terminalID)
+        let second = await observe(
+            actuationID: armed.actuationID, terminalID: armed.terminalID,
+            expectedSessionID: armed.sessionID)
         await record(second, confirming: armed.actuationID)
         // Two silent failures indicate a structural problem with the session,
         // and a third send without evidence would risk duplicate-message bugs.
@@ -257,11 +276,35 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     /// `CLAUDE.md`, "No TUI screen-scraping"). The transcript is the machine
     /// interface, and the envelope reaches it without the agent cooperating in
     /// anything.
-    func observe(actuationID: String, terminalID: UUID) async -> DeliveryObservation {
+    /// `expectedSessionID` is the conversation the payload was delivered into,
+    /// when the caller knows it. The startup replay does not — the record keeps
+    /// no session id — and passes `nil`, which skips the comparison; that is
+    /// safe there precisely because the replay never re-delivers.
+    func observe(
+        actuationID: String, terminalID: UUID, expectedSessionID: String? = nil
+    ) async -> DeliveryObservation {
         guard let facts = await source.facts(forTerminal: terminalID) else {
             return DeliveryObservation(
                 .undetermined,
                 detail: "terminal \(terminalID.uuidString) is gone — no session left to observe")
+        }
+        // The terminal is alive but a DIFFERENT conversation now occupies it:
+        // `/clear`, `/compact`, or an account swap rebinds the session and
+        // starts an empty transcript, leaving the pane untouched — so the pane
+        // consultation, which compares pane ids, cannot see it. Reading on would
+        // find no envelope in a transcript that never had one and call that
+        // non-delivery, and the retry would then paste the payload into an
+        // unrelated conversation. That is the instruction-injection hazard §3
+        // names, arriving through the one door the pane check does not cover.
+        // The observation simply could not be made about the session that was
+        // addressed, which is what `undetermined` means — and undetermined is
+        // never retried.
+        if let expectedSessionID, facts.sessionID != expectedSessionID {
+            return DeliveryObservation(
+                .undetermined,
+                detail: "terminal \(terminalID.uuidString) has been rebound to a different "
+                    + "session since dispatch — the conversation that was addressed is no "
+                    + "longer there to observe")
         }
         guard let path = facts.transcriptPath, !path.isEmpty else {
             return DeliveryObservation(

@@ -159,15 +159,41 @@ enum DeliveryRecord {
         // dispatched → landed-and-acting), and the last observation is the one
         // that still stands.
         var observations: [String: ObservedResult] = [:]
+        // Which acts the transport ever accepted, and which it answered with a
+        // terminal refusal. `verify == true` says the caller *asked* for an
+        // observation, not that one is owed: the request row is written before
+        // the flag check and before the pane consultation, so a refused send
+        // carries the flag too. An act that never dispatched can have landed
+        // nothing, so it owes no observation — and without this it would render
+        // unconfirmed forever and be "observed" by the startup replay, writing a
+        // landing verdict about a payload that never reached a pane.
+        var everDispatched: Set<String> = []
+        var refusedOrFailed: Set<String> = []
         for row in rows where row.kind == .outcome {
-            guard let confirms = row.confirms, let observed = row.result?.observed else { continue }
-            observations[confirms] = observed
+            guard let confirms = row.confirms else { continue }
+            if let observed = row.result?.observed {
+                observations[confirms] = observed
+                continue
+            }
+            switch row.result {
+            case .synchronous(.dispatched): everDispatched.insert(confirms)
+            case .synchronous(.refused), .synchronous(.transportFailed):
+                refusedOrFailed.insert(confirms)
+            default: break
+            }
         }
 
         return rows.compactMap { row in
             guard row.kind != .outcome, row.verify == true, !row.id.isEmpty else { return nil }
             if let observed = observations[row.id] {
                 return DeliveryAssessment(request: row, status: .observed(observed))
+            }
+            // Settled synchronously and never dispatched: the refusal or the
+            // transport failure IS the whole answer. A dispatch anywhere in the
+            // act's outcomes outranks a later refusal, which can only be the
+            // single retry failing after a real first delivery.
+            if refusedOrFailed.contains(row.id) && !everDispatched.contains(row.id) {
+                return nil
             }
             // Fail-closed on an unreadable timestamp: a deadline that cannot be
             // computed is not a deadline that has not passed. §12's rule is

@@ -2080,6 +2080,7 @@ extension RPCRouter {
             await deliveryVerifier?.armVerification(
                 actuationID: actuationID,
                 terminalID: terminal.id,
+                sessionID: terminal.claudeSessionID,
                 deliveredPayload: deliveredPayload,
                 submit: payload.recordedSubmit ?? false)
         }

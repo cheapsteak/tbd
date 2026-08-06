@@ -393,9 +393,11 @@ and it is refused with `--keys`, which leaves no transcript trace to read,
 and with an empty `--text`, which pastes nothing and so writes no envelope
 to look for. It is also gated on the daemon's `delivery_verification_enabled`
 config, shipped off and flipped with the `config.setDeliveryVerification`
-RPC (`daemon.capabilities` reads it back): while that is off a `--verify`
-send is refused outright with the flag named, rather than quietly delivered
-as an unverified one — a
+RPC (`daemon.capabilities` reads it back). **Enabling it means enabling it
+and then restarting the daemon**, which wires the observation machinery at
+startup; until that restart `--verify` is refused with a message saying so.
+While the flag is off a `--verify` send is likewise refused outright, with
+the flag named, rather than quietly delivered as an unverified one — a
 caller that asked for confirmation is never answered with silence. TBD makes
 one full attempt — including the single re-delivery it will make on positive
 evidence that the first never landed — and nothing beyond it; the

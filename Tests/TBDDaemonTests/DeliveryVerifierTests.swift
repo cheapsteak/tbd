@@ -20,6 +20,10 @@ private final class ScriptedObservationSource: DeliveryObservationSource, @unche
         var activityState: TerminalActivityState = .idle
         /// `nil` stands for an unreadable transcript.
         var tail: Data? = Data()
+        /// Which conversation currently occupies the terminal. A round whose
+        /// value differs from the armed one stands for a `/clear` or an account
+        /// swap between dispatch and re-check.
+        var sessionID: String?
 
         static func envelope(
             for id: String, state: TerminalActivityState, escaped: Bool = false
@@ -61,7 +65,8 @@ private final class ScriptedObservationSource: DeliveryObservationSource, @unche
             round += 1
             return answer.map {
                 TerminalDeliveryFacts(
-                    transcriptPath: $0.transcriptPath, activityState: $0.activityState)
+                    transcriptPath: $0.transcriptPath, activityState: $0.activityState,
+                    sessionID: $0.sessionID)
             }
         }
     }
@@ -361,7 +366,7 @@ struct DeliveryVerifierTests {
             .silence(state: .idle),
         ])
         await harness.verifier.armVerification(
-            actuationID: id, terminalID: Self.terminal,
+            actuationID: id, terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "<tbd-dispatch id=\"\(id)\" from=\"anonymous\"/>\nstatus?",
             submit: true)
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
@@ -397,7 +402,7 @@ struct DeliveryVerifierTests {
             .envelope(for: id, state: .working),
         ])
         await harness.verifier.armVerification(
-            actuationID: id, terminalID: Self.terminal, deliveredPayload: "x", submit: true)
+            actuationID: id, terminalID: Self.terminal, sessionID: nil, deliveredPayload: "x", submit: true)
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
@@ -418,7 +423,7 @@ struct DeliveryVerifierTests {
     func undeterminedNeverRetried() async throws {
         let harness = try makeHarness(answers: [.silence(state: .unknown)])
         await harness.verifier.armVerification(
-            actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal,
+            actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
@@ -432,6 +437,59 @@ struct DeliveryVerifierTests {
         #expect(harness.source.tailReads == 1)
     }
 
+    /// `/clear` between dispatch and re-check rebinds the terminal to a new,
+    /// empty conversation without disturbing its pane — so the pane
+    /// consultation, which compares pane ids, sees nothing wrong. Reading on
+    /// would find no envelope in a transcript that never had one, call that
+    /// `not-landed`, and retry the payload into an unrelated conversation:
+    /// arbitrary instruction injection through the one door the pane check does
+    /// not cover. The observation could not be made about the session that was
+    /// addressed, which is exactly what `undetermined` means — and undetermined
+    /// is never retried.
+    @Test("a session rebound between dispatch and re-check is undetermined, and never retried")
+    func rebindingTheSessionBlocksTheRetry() async throws {
+        let id = "a3f1b2c3d4e5"
+        // The transcript even *contains* a plausible absence — the point is that
+        // the daemon refuses to reason from it at all.
+        var rebound = ScriptedObservationSource.Answer.silence(state: .idle)
+        rebound.sessionID = "session-after-clear"
+        let harness = try makeHarness(answers: [rebound])
+        await harness.verifier.armVerification(
+            actuationID: id, terminalID: Self.terminal, sessionID: "session-at-dispatch",
+            deliveredPayload: "<tbd-dispatch id=\"\(id)\" from=\"anonymous\"/>\nstatus?",
+            submit: true)
+        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await awaitDeliveryCycle(harness.verifier, observed: {
+            "\((try? results(at: harness.logPath)) ?? []) rows, "
+                + "\(harness.redeliveries.calls.count) re-deliveries"
+        })
+
+        #expect(try results(at: harness.logPath) == ["undetermined"])
+        #expect(harness.redeliveries.calls.isEmpty)
+        let row = try #require(try rows(at: harness.logPath).last)
+        #expect((row["error"] as? String)?.contains("rebound") == true)
+    }
+
+    /// The same terminal, the same session: the guard must not fire on the
+    /// ordinary case, or every verified send would degrade to undetermined.
+    @Test("an unchanged session observes normally")
+    func matchingSessionObservesNormally() async throws {
+        let id = "a3f1b2c3d4e5"
+        var answer = ScriptedObservationSource.Answer.envelope(for: id, state: .working)
+        answer.sessionID = "session-at-dispatch"
+        let harness = try makeHarness(answers: [answer])
+        await harness.verifier.armVerification(
+            actuationID: id, terminalID: Self.terminal, sessionID: "session-at-dispatch",
+            deliveredPayload: "x", submit: true)
+        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await awaitDeliveryCycle(harness.verifier, observed: {
+            "\((try? results(at: harness.logPath)) ?? []) rows"
+        })
+
+        #expect(try results(at: harness.logPath) == ["landed-and-acting"])
+        #expect(harness.redeliveries.calls.isEmpty)
+    }
+
     /// A retry the daemon declined is not "the payload failed" — the record has
     /// to be able to say a stale coordinate was refused, and it confirms the
     /// ORIGINAL request id rather than opening a second one.
@@ -441,7 +499,7 @@ struct DeliveryVerifierTests {
         let harness = try makeHarness(
             answers: [.silence(state: .idle)], retryOutcome: .refused(.targetMismatch))
         await harness.verifier.armVerification(
-            actuationID: id, terminalID: Self.terminal, deliveredPayload: "x", submit: true)
+            actuationID: id, terminalID: Self.terminal, sessionID: nil, deliveredPayload: "x", submit: true)
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
@@ -467,7 +525,7 @@ struct DeliveryVerifierTests {
         let harness = try makeHarness(
             answers: [.silence(state: .idle)], retryOutcome: .transportFailed)
         await harness.verifier.armVerification(
-            actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal,
+            actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
@@ -495,7 +553,7 @@ struct DeliveryVerifierTests {
             .envelope(for: id, state: .working),
         ])
         await harness.verifier.armVerification(
-            actuationID: id, terminalID: Self.terminal, deliveredPayload: "x", submit: true)
+            actuationID: id, terminalID: Self.terminal, sessionID: nil, deliveredPayload: "x", submit: true)
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await harness.clock.advanceWhenSuspended(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
@@ -587,10 +645,11 @@ struct DeliveryVerifierTests {
         #expect(harness.source.factsCalls == 0)
     }
 
-    /// D19: the replay's window is the active segment. An act from a rotated
-    /// day is one whose transcript may have rolled over, and a late read buys
-    /// only a more precise word for something the query-time rule already
-    /// renders honestly.
+    /// The replay's window is the active segment. An act from a rotated day is
+    /// one whose transcript may have rolled over, and a late read buys only a
+    /// more precise word for something the query-time rule already renders
+    /// honestly — so the writer's own daily rotation bounds both the read and
+    /// the work, with no new threshold to pick.
     @Test("the replay reads only the active segment, never rotated ones")
     func startupReplayReadsOnlyTheActiveSegment() async throws {
         let dispatchedAt = Self.fixedNow

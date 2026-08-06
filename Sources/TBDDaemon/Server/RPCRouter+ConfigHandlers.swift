@@ -109,10 +109,12 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the delivery-acknowledgement soak flag (design §12). This is
-    /// how an operator enables the flag for its soak. `terminal.send` reads it
-    /// per `--verify` call, so it applies to the next send immediately — no
-    /// daemon restart. Turning it off makes `--verify` a refusal again.
+    /// Persist the delivery-acknowledgement soak flag (design §12). This is how
+    /// an operator enables the flag for its soak — **and enabling it means
+    /// restarting the daemon afterwards**, because the observation machinery is
+    /// wired once at startup while this column is read per `--verify` call.
+    /// Until the restart, `--verify` is refused with a message saying so.
+    /// Turning it off makes `--verify` a refusal again on the next send.
     func handleConfigSetDeliveryVerification(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetDeliveryVerificationParams.self, from: paramsData)
         try await db.config.setDeliveryVerification(enabled: params.enabled)

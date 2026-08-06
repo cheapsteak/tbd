@@ -64,7 +64,8 @@ struct TerminalSendDispatchTests {
             return _armings
         }
         func armVerification(
-            actuationID: String, terminalID: UUID, deliveredPayload: String, submit: Bool
+            actuationID: String, terminalID: UUID, sessionID: String?,
+            deliveredPayload: String, submit: Bool
         ) async {
             lock.withLock {
                 _armings.append(Arming(
