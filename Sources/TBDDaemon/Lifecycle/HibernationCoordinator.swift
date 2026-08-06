@@ -988,6 +988,12 @@ public actor HibernationCoordinator {
     /// Escape → settle → C-c C-c → settle → SIGTERM. Best-effort; the
     /// subsequent `respawn-window -k` guarantees termination. Copied from the
     /// swap path so hibernate and account-switch interrupt identically.
+    ///
+    /// **Acts on an unverified coordinate (issue #384)** — `paneID` comes from
+    /// the terminal row and tmux reuses pane ids, so a stale row points this
+    /// SIGTERM and the respawn that follows at a live stranger. See the swap
+    /// path's copy in `RPCRouter+TerminalHandlers` for why the fix is a spec
+    /// about refusal semantics rather than a consultation added here.
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md

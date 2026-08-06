@@ -171,6 +171,19 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
     let expected = "export TBD_WORKTREE_ID='\(wt.id.uuidString)';"
     #expect(bodies.contains { $0.contains(expected) },
             "handleTerminalRecreateWindow must export TBD_WORKTREE_ID; got bodies: \(bodies)")
+
+    // TBD_TERMINAL_ID too, and for a second reason: it is what `createWindow`
+    // stamps onto the new pane as `@tbd_terminal_id`. Without it this branch
+    // mints panes that `terminal.send` can never verify, because a pane with no
+    // identity is sent to unchecked — a permanent hole in the stale-coordinate
+    // refusal for every terminal recreated this way.
+    let expectedTerminal = "export TBD_TERMINAL_ID='\(terminal.id.uuidString)';"
+    #expect(bodies.contains { $0.contains(expectedTerminal) },
+            "handleTerminalRecreateWindow must export TBD_TERMINAL_ID; got bodies: \(bodies)")
+    #expect(recorded.snapshot().contains { call in
+        call.contains("set-option") && call.contains(TmuxManager.terminalIDPaneOption)
+            && call.contains(terminal.id.uuidString)
+    }, "the recreated pane must be stamped with its terminal id")
 }
 
 
