@@ -1054,8 +1054,19 @@ extension RPCRouter {
             // the env. Without this set, the pane would inherit whatever TBD_WORKTREE_ID
             // got baked into the tmux server's global env, leaking another worktree's
             // identity into this one.
+            //
+            // TBD_TERMINAL_ID is set for the same reason, plus one more: it is
+            // what `createWindow` stamps onto the new pane as
+            // `@tbd_terminal_id`, and an unstamped pane is one `terminal.send`
+            // can never verify (absence is not disagreement, so it proceeds
+            // unchecked). Omitting it here would leave this branch — the only
+            // spawn path that ever did — minting fresh panes that opt out of
+            // the stale-coordinate check for the rest of their life.
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-            let env: [String: String] = ["TBD_WORKTREE_ID": worktree.id.uuidString]
+            let env: [String: String] = [
+                "TBD_WORKTREE_ID": worktree.id.uuidString,
+                "TBD_TERMINAL_ID": terminal.id.uuidString,
+            ]
             let updatedTerminal = try await actuating(actuationID) {
                 let window = try await tmux.createWindow(
                     server: worktree.tmuxServer,
@@ -1807,6 +1818,17 @@ extension RPCRouter {
     /// then C-c C-c, another settle, then a SIGTERM to the pane pid as a
     /// backstop. Every step is best-effort — failures are logged and ignored,
     /// since the subsequent `respawn-window -k` guarantees termination.
+    ///
+    /// **Acts on an unverified coordinate (issue #384).** `paneID` comes from
+    /// the terminal row, and tmux reuses pane ids, so a stale row aims this at
+    /// a live stranger — and unlike `terminal.send`, which now consults
+    /// `paneSendTarget` before typing and refuses on disagreement, what lands
+    /// here is a SIGTERM and then a forced respawn of that window. The
+    /// consultation is not the missing piece: what a *refusal* should do to a
+    /// user's account switch or hibernate is a product decision (fail it, mark
+    /// the row, or fall back to a coordinate-free path), and belongs in a spec
+    /// rather than being bolted on here. Same note on
+    /// `HibernationCoordinator`'s copy of this helper.
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
@@ -1842,7 +1864,18 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
+        // Queue behind any send already mid-flight to this same terminal; sends
+        // to other terminals are unaffected. The whole handler runs inside the
+        // lane so the target check and the typing it authorizes cannot be
+        // separated by another caller's paste.
+        return try await terminalSendSerializer.run(terminalID: params.terminalID) {
+            try await self.performTerminalSend(params, actor: actor)
+        }
+    }
 
+    private func performTerminalSend(
+        _ params: TerminalSendParams, actor: ActuationActor?
+    ) async throws -> RPCResponse {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
@@ -1859,6 +1892,65 @@ extension RPCRouter {
             .terminalSend, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
             message: params.text, submit: params.submit == true)
+
+        // Ask the pane about itself before typing into it. tmux's own exit
+        // status cannot carry this: `send-keys` into a `remain-on-exit` dead
+        // pane exits 0, and keys sent to a reused pane id land in a live
+        // stranger's composer with no error anywhere (issue #384). Both answers
+        // arrive from ONE read-only `list-panes`, and both are read BEFORE any
+        // byte is written — so a decline here is a refusal, never a transport
+        // failure: the daemon declined without touching the transport.
+        let target: PaneSendTarget
+        do {
+            target = try await tmux.paneSendTarget(
+                server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+        } catch {
+            // The consultation itself could not be run (a wedged tmux tripping
+            // the subprocess timeout). That is a tmux command failing, not an
+            // answer about the pane, and it is classified as such.
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+
+        switch target {
+        case .missing:
+            let message = """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
+                no longer exists on server \(worktree.tmuxServer) — nothing was sent
+                """
+            await finishActuation(actuationID, .refused(.notFound), error: message)
+            return RPCResponse(error: message)
+        case .dead:
+            let message = """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
+                dead (its process has exited) — nothing was sent; recreate the terminal's \
+                window first
+                """
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(error: message)
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else {
+                // Absence is not disagreement. A pane spawned before TBD stamped
+                // identities, or by something outside TBD, answers with nothing —
+                // and refusing on nothing would turn this fix into a regression
+                // for every such pane. Only a POSITIVE disagreement refuses.
+                logger.debug("""
+                    terminal.send: pane \(terminal.tmuxPaneID, privacy: .public) claims no \
+                    terminal identity; proceeding without verifying it is terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+                break
+            }
+            if paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                let message = """
+                    tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
+                    \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
+                    — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
+                    """
+                await finishActuation(actuationID, .refused(.targetMismatch), error: message)
+                return RPCResponse(error: message)
+            }
+        }
 
         // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
         // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads

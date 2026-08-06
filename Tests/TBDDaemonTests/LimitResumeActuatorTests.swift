@@ -33,6 +33,17 @@ final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
         }
     }
     func panePID(server: String, paneID: String) async throws -> String { panePIDValue }
+    /// What the pane answers when the actuator asks who it is. Defaults to
+    /// "alive, carrying no identity" — the branch that proceeds — so every
+    /// pre-existing test behaves exactly as it did before the actuator started
+    /// consulting its target.
+    var paneTarget: PaneSendTarget = .live(terminalID: nil)
+    /// When set, the consultation itself fails to run (wedged tmux).
+    var paneTargetError: Error?
+    func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
+        if let paneTargetError { throw paneTargetError }
+        return paneTarget
+    }
     func sendKeys(server: String, paneID: String, text: String) async throws {
         queue.sync { _sends.append("text:\(text)") }
     }
@@ -134,6 +145,69 @@ struct FakeInspector: PaneProcessInspecting {
         tmux.windowAlive = false
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
+    }
+
+    // MARK: - Pane target consultation (eligibility step 1a)
+    //
+    // The auto-resume actuator is the component issue #384 caught typing into
+    // a stranger: `windowExists` proves a window id resolves, never that the
+    // pane still belongs to this terminal. Same rule as `terminal.send` —
+    // only a POSITIVE disagreement refuses.
+
+    @Test func paneOwnedByAnotherTerminalTypesNothing() async throws {
+        tmux.paneTarget = .live(terminalID: UUID().uuidString)
+        let outcome = await makeActuator().actuate(row)
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(message.contains(terminalID.uuidString))
+        #expect(message.contains("%1"))
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func paneWithNoIdentityStillGetsTheResume() async throws {
+        // The no-regression branch: absence is not disagreement.
+        tmux.paneTarget = .live(terminalID: nil)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .sent)
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func paneIdentityMatchIsCaseInsensitiveAndSends() async throws {
+        tmux.paneTarget = .live(terminalID: terminalID.uuidString.lowercased())
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .sent)
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func vanishedPaneIsTerminalGone() async throws {
+        tmux.paneTarget = .missing
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .terminalGone)
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func deadPaneIsTerminalGone() async throws {
+        // The case tmux reports as success: `send-keys` into a remain-on-exit
+        // pane exits 0, so only the consultation can catch it.
+        tmux.paneTarget = .dead
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .terminalGone)
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func unrunnableConsultationTypesNothing() async throws {
+        tmux.paneTargetError = FakeTmuxSendError()
+        let outcome = await makeActuator().actuate(row)
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(message.contains("could not verify the target pane"))
+        #expect(tmux.sends.isEmpty)
     }
 
     @Test func newerTranscriptRecordCancels() async throws {

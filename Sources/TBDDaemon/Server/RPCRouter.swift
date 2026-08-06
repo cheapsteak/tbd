@@ -109,6 +109,10 @@ public final class RPCRouter: Sendable {
     let upstreamBranchCache = UpstreamBranchCache()
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
+    /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
+    /// never interleave in one composer. Different terminals still send in
+    /// parallel — see `TerminalSendSerializer`.
+    let terminalSendSerializer = TerminalSendSerializer()
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, terminal handlers open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.

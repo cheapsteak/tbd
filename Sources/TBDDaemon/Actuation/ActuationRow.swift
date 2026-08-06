@@ -49,6 +49,16 @@ enum RefusedReason: String, Codable, Sendable, CaseIterable {
     case notEligible = "not-eligible"
     /// The same act is already running on this target.
     case inFlight = "in-flight"
+    /// The coordinate resolved to a *different* session than the one named:
+    /// the target answered with an identity that disagrees with the request's.
+    ///
+    /// Neither neighbour is honest about this. `notFound` would claim the named
+    /// target is gone, and it is not — its row is right there. `notEligible`
+    /// would claim the target is in the wrong state, and it is not — a
+    /// perfectly healthy *other* target answered. tmux reuses pane ids, so a
+    /// stale coordinate names a live stranger (issue #384); the record has to
+    /// be able to say that is what happened.
+    case targetMismatch = "target-mismatch"
 }
 
 /// The synchronous outcome of one act, as the daemon classifies it just before
