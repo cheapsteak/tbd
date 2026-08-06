@@ -140,9 +140,13 @@ struct TranscriptEstimatorAccuracyTests {
     /// calibrated against the wrong thing, by 439 pt at worst.
     @Test("the AskUserQuestion fixtures decode as cards, not as the fallback block")
     func askCardFixturesAreValidJSON() throws {
-        struct Option: Decodable { let label: String }
-        struct Question: Decodable { let question: String; let options: [Option] }
-        struct Input: Decodable { let questions: [Question] }
+        // The card's OWN question type, not a mirror of it. A mirror carrying only
+        // the required fields decodes payloads the card rejects — `decodeIfPresent`
+        // throws on a present-but-wrong-typed optional and returns nil only for an
+        // absent or null one — so a `decodes:` flag checked against a mirror cannot
+        // see that class of drift at all. `card/askUserQuestion-optional-typed` is
+        // exactly that payload, and it caught this copy when it was added.
+        struct Input: Decodable { let questions: [AskUserQuestionCard.Question] }
 
         for fixture in Self.askCardFixtures {
             #expect(!fixture.json.contains("\n") && !fixture.json.contains("\\"),
@@ -955,6 +959,17 @@ struct TranscriptEstimatorAccuracyTests {
         (id: "card/askUserQuestion-malformed",
          json: #"{"quesions":[{"question":"Proceed?","header":"Go","multiSelect":false,"options":[{"label":"Yes","description":"a"},{"label":"No","description":"b"}]}]}"#,
          answer: "Yes", decodes: false),
+        // Malformed in an OPTIONAL field. `decodeIfPresent` THROWS on a
+        // present-but-wrong-typed value, so this decodes against a mirror of the
+        // required fields and fails against the card — the drift that re-created
+        // the +139 pt over-reservation. Only sharing the card's own types closes it.
+        (id: "card/askUserQuestion-optional-typed",
+         json: #"{"questions":[{"question":"Proceed?","header":"Go","multiSelect":false,"options":[{"label":"Yes","description":5},{"label":"No","description":6}]}]}"#,
+         answer: "Yes", decodes: false),
+        // Options with no description draw one line less each.
+        (id: "card/askUserQuestion-bare-options",
+         json: #"{"questions":[{"question":"Proceed?","header":"Go","multiSelect":false,"options":[{"label":"Yes"},{"label":"No"}]}]}"#,
+         answer: "Yes", decodes: true),
         (id: "card/askUserQuestion-wrapping",
          json: #"{"questions":[{"question":"This question is deliberately very long indeed, so long that it must wrap across at least three separate lines inside the card at either of the column widths the transcript pane is ever laid out at, which is the shape a count-based model cannot see.","header":"Sizing","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}"#,
          answer: "A", decodes: true)
@@ -982,6 +997,12 @@ struct TranscriptEstimatorAccuracyTests {
             text: "Here is the screenshot.\n\n[Image: source: \(imagePath)]",
             timestamp: nil,
             usage: nil))
+        items.append(.assistantText(id: "assistant/html-interrupting", text: htmlInterruptingText,
+                                    timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/angle-bracket-prose", text: angleBracketProseText,
+                                    timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/indented-after-heading",
+                                    text: indentedAfterHeadingText, timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/links", text: linksText,
                                     timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/raw-html", text: rawHTMLText,

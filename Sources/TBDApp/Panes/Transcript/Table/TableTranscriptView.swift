@@ -946,31 +946,46 @@ struct TableTranscriptView: NSViewRepresentable {
         static let askCardBase: CGFloat = 40
         static let askCardPerQuestion: CGFloat = 81
         static let askCardPerOption: CGFloat = 42
+        /// An option whose description is absent, null or empty draws one line less.
+        static let askCardPerBareOption: CGFloat = 27
         /// An input the card cannot decode renders a compact raw-JSON block —
         /// measured 53 to 79 pt across malformed payloads. Sized under all of them.
         static let askCardFallbackHeight: CGFloat = 50
 
-        /// The subset of the card's input shape the height depends on. Mirrors
-        /// `AskUserQuestionCard.Input`; a payload that fails to decode against THIS
-        /// fails against the card's decoder too, which is the property that matters.
-        private struct AskCardShape: Decodable {
-            struct Question: Decodable {
-                struct Option: Decodable { let label: String }
-                let question: String
-                let options: [Option]
-            }
-            let questions: [Question]
+        /// Decoded with the card's OWN `Question` (and therefore its own `Option`),
+        /// not a local mirror of it.
+        ///
+        /// A mirror is unsound in the direction that matters. The safety property
+        /// is `decodes here ⇒ decodes there`, and a mirror carrying only the
+        /// required fields breaks it: Swift's synthesized `decodeIfPresent` THROWS
+        /// on a present-but-wrong-typed value and returns nil only for an absent or
+        /// null one, so a payload malformed in an OPTIONAL field — `"description":
+        /// 5`, `"multiSelect": "false"` — decoded against the mirror and failed
+        /// against the card, re-creating the +139 pt over-reservation the decode was
+        /// introduced to remove. Sharing the card's types makes the two agree by
+        /// construction rather than by review.
+        private struct AskCardInput: Decodable {
+            let questions: [AskUserQuestionCard.Question]
         }
 
         static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {
             guard let decoded = try? JSONDecoder().decode(
-                AskCardShape.self, from: Data(inputJSON.utf8)), !decoded.questions.isEmpty else {
+                AskCardInput.self, from: Data(inputJSON.utf8)), !decoded.questions.isEmpty else {
                 return askCardFallbackHeight
             }
-            let options = decoded.questions.reduce(0) { $0 + $1.options.count }
-            return askCardBase
-                + askCardPerQuestion * CGFloat(decoded.questions.count)
-                + askCardPerOption * CGFloat(options)
+            var height = askCardBase + askCardPerQuestion * CGFloat(decoded.questions.count)
+            for question in decoded.questions {
+                for option in question.options {
+                    // An option with no description draws one line less inside its
+                    // bubble. Measured -15 pt per option, dead straight across 1, 2
+                    // and 4 options and across two questions; an empty string
+                    // behaves exactly like an absent or null one.
+                    height += (option.description ?? "").isEmpty
+                        ? askCardPerBareOption
+                        : askCardPerOption
+                }
+            }
+            return height
         }
 
         /// Arithmetic height estimate for a chat bubble. ONE pass over the message's
