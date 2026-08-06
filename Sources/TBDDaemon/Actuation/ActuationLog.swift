@@ -169,13 +169,65 @@ public actor ActuationLog {
     /// `result` and `reason` both come off the one `ActuationOutcome`, so a row
     /// carries a reason exactly when it says `refused` — the caller cannot
     /// forget one or attach the other.
+    ///
+    /// This door can only produce `.synchronous`. Claiming a payload landed is
+    /// not merely forbidden here, it is unspellable: the observed vocabulary
+    /// lives in a type this signature does not accept (`ObservedResult`), and
+    /// reaches the file only through `appendObservation`.
     func appendOutcome(confirms: String, result: ActuationOutcome, error: String? = nil) {
         var row = ActuationRow(actor: .daemon(), kind: .outcome)
         row.id = Self.mintID()
         row.confirms = confirms
-        row.result = result.result
+        row.result = .synchronous(result.result)
         row.reason = result.reason
         row.error = error
+        try? appendWithOneRetry(row, failClosed: false)
+    }
+
+    /// Append what a later, independent observation established about a payload
+    /// this daemon already dispatched — the third rung of the claims ladder.
+    ///
+    /// The second door beside `appendOutcome`, and the only one that can write
+    /// an `ObservedResult`. That asymmetry is the point: a synchronous send
+    /// path holds no value it could pass here, so "only an observed outcome may
+    /// claim a payload landed" is a property of the two signatures rather than
+    /// a rule someone has to remember.
+    ///
+    /// `observedAt` is when the machine facts were *read*, which the row keeps
+    /// distinct from `ts`, when the row was *written*. It comes through the
+    /// caller's `Date` because it is persisted data, not behavior — the same
+    /// reason this actor stamps `ts` from a `now` seam and never from a `Clock`.
+    ///
+    /// `detail` names what the observation could not establish (or what it found
+    /// instead), and rides the row's `error` field: the shared free-text slot
+    /// for "why this outcome is not a clean success", already read by anything
+    /// that renders a row.
+    ///
+    /// **One request row may legitimately carry several outcome rows.** The
+    /// ladder for a verified send that needed its single retry reads
+    /// `dispatched` → `not-landed` → `dispatched` → `landed-and-acting`: the
+    /// retry re-delivers the identical payload under the identical envelope id,
+    /// so it is the same actuation-level intent and opens no second request row
+    /// (`ActuationSurface`'s boundary rule), while each of its own synchronous
+    /// and observed results is a separate fact about that one act. A reader
+    /// that assumes one outcome per request is wrong, not the record.
+    ///
+    /// Best-effort-loud, exactly like `appendOutcome`: a second failure is
+    /// `.fault`-logged and swallowed. A lost observation leaves the act
+    /// unconfirmed by the query-time rule, which is honest — silence never
+    /// reads as delivery.
+    func appendObservation(
+        confirms: String,
+        result: ObservedResult,
+        observedAt: Date,
+        detail: String? = nil
+    ) {
+        var row = ActuationRow(actor: .daemon(), kind: .outcome)
+        row.id = Self.mintID()
+        row.confirms = confirms
+        row.result = .observed(result)
+        row.observedAt = timestampFormatter.string(from: observedAt)
+        row.error = detail
         try? appendWithOneRetry(row, failClosed: false)
     }
 
