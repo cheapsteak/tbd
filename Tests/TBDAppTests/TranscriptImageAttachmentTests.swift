@@ -598,9 +598,9 @@ struct TranscriptImageAttachmentTests {
     ///
     /// It YIELDS rather than spinning a nested `RunLoop.run`: the decode's
     /// completion arrives via `DispatchQueue.main.async`, and suspending is what
-    /// lets the main queue deliver it. A nested run loop would deliver it too, but
-    /// it would also resume every other suspended `@MainActor` test in this
-    /// 200-suite process inside this test's body.
+    /// lets the main queue deliver it. A nested run loop could not — this body is
+    /// itself a block on that serial queue, so the completion would sit there
+    /// until the body ended and then land inside some other test.
     ///
     /// Bounded on purpose: a decode that never arrives must fail the assertion
     /// below rather than hang the suite.
