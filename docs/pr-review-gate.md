@@ -11,9 +11,11 @@ specialist subagents.
 **Branch protection matches a required check by job NAME, not by workflow file.**
 Exactly one job across `.github/workflows/` may therefore be named `claude-review`;
 a second one would report into the same required context. That is why the retired
-single-session reviewer, kept as a manually-triggerable fallback in
+single-session reviewer, kept as a restoration source in
 [`claude-code-review-legacy.yml`](../.github/workflows/claude-code-review-legacy.yml),
 names its job `claude-review-legacy` and triggers only on `workflow_dispatch`.
+Dispatching it reviews nothing — see [below](#the-legacy-single-session-workflow) for
+why, and for what reviving it actually takes.
 
 ## How a PR is gated
 
@@ -217,8 +219,8 @@ Two things keep it inert until then:
 Because dispatch runs against a branch rather than a PR, a hand-triggered run has no
 `github.event.pull_request` and reviews nothing — treat it as a diagnostic of the
 workflow itself. Delete the file once the fan-out gate has held across enough real
-PRs that nobody would reach for the fallback, or as soon as it stops working: a
-fallback that has quietly rotted is worse than none.
+PRs that nobody would reach back for it, or as soon as it stops working: a
+restoration source that has quietly rotted is worse than none.
 
 ## Operational notes
 

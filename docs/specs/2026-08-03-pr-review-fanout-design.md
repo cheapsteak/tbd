@@ -397,7 +397,7 @@ arrangement two properties worth stating outright.
 
 The pipeline selects its comments by its own `<!-- claude-review-v2 -->` sentinel
 rather than by the action's sticky-comment mode (§3.5), so it never contends with the
-legacy workflow over a comment identity even when that fallback is run by hand.
+legacy workflow over a comment identity, including if that workflow is ever revived.
 
 That sentinel keeps the `v2` spelling because it is live state: the workflow's `jq`
 selectors match the literal verbatim when fetching and when minimizing priors, and it
