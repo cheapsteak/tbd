@@ -17,8 +17,17 @@ Every lookup is by exact step NAME, so renaming a step fails loudly.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from workflow_steps import read_workflow, run_block, step_index, step_source
+import yaml
+
+from workflow_steps import (
+    _WORKFLOWS_DIR,
+    read_workflow,
+    run_block,
+    step_index,
+    step_source,
+)
 
 RESTORE_STEP = "Restore the review pipeline from the base branch"
 RE_RESTORE_STEP = "Re-restore the review pipeline from the base branch"
@@ -100,3 +109,104 @@ def test_the_session_prompt_explains_the_restored_directory() -> None:
     assert PIPELINE_DIR in prompt
     assert "restores `.github/workflows/claude-review-v2/` from the base branch" in prompt
     assert "git show HEAD:<path>" in prompt
+
+
+# --- exactly one job may be named `claude-review` ---------------------------
+
+# Branch protection matches a required check by JOB NAME, not by workflow file.
+# Two jobs sharing the name would both report into the required `claude-review`
+# context and which one the gate reads becomes a race. The whole promotion rests
+# on this, and it is asserted as load-bearing in four prose places (this
+# workflow's banner, CLAUDE.md, docs/pr-review-gate.md, design spec §5) — none of
+# which a future edit has to read. Splitting the reviewer into
+# claude-code-review.yml + claude-code-review-legacy.yml is what created the
+# collision risk, so it is checked here rather than left to review vigilance.
+#
+# DEFENSE IN DEPTH, NOT A GATE. The job that runs this suite ("Review scripts
+# tests") is not among main's required contexts — those are `test`, `Lint` and
+# `claude-review` — so a PR that reintroduces a colliding job goes red here and
+# stays mergeable. This test makes the breakage visible and named; it does not
+# stop it. Making it stop anything means adding this job to the required list.
+
+
+def _load(path: Path) -> dict:
+    """One workflow file, parsed by a real YAML loader.
+
+    The rest of this module reads the workflow as TEXT on purpose — it asserts
+    on step order and on verbatim shell, which a load discards. The two
+    properties below are the opposite case: they ask what GitHub itself would
+    see, and every way a hand-rolled pattern can be evaded (a job key indented
+    differently, a quoted key, a flow mapping) is a way a colliding job passes
+    the check while still registering as a second job. A parser is the only
+    thing that closes that gap, so this suite is the one place the pipeline's
+    test deps grow past the stdlib.
+    """
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _job_names(path: Path) -> list[str]:
+    """Every name a job in this workflow can report under.
+
+    Both the key and any job-level `name:` override matter: GitHub reports a
+    job under its `name:` when one is set, and under its key otherwise — so a
+    `name: claude-review` override on a differently-keyed job collides just as
+    hard.
+    """
+    jobs = _load(path).get("jobs") or {}
+    names: list[str] = []
+    for key, body in jobs.items():
+        names.append(str(key))
+        if isinstance(body, dict) and body.get("name") is not None:
+            names.append(str(body["name"]))
+    return names
+
+
+def _triggers(path: Path) -> list[str]:
+    """The workflow's `on:` events, however the key spells them.
+
+    YAML 1.1 reads a bare `on` as the boolean `True`, which is why the key is
+    looked up both ways; `on:` also accepts a bare string and a list, not only
+    the mapping this repo happens to write.
+    """
+    document = _load(path)
+    events = document["on"] if "on" in document else document.get(True)
+    if isinstance(events, str):
+        return [events]
+    if isinstance(events, list):
+        return [str(event) for event in events]
+    if isinstance(events, dict):
+        return [str(event) for event in events]
+    return []
+
+
+def test_exactly_one_job_across_all_workflows_is_named_claude_review() -> None:
+    # Both suffixes: GitHub runs `.yaml` workflows too, so globbing only `.yml`
+    # would leave the same blind spot the parser just closed.
+    workflows = sorted(
+        path
+        for suffix in ("*.yml", "*.yaml")
+        for path in _WORKFLOWS_DIR.glob(suffix)
+    )
+    owners = [path for path in workflows if "claude-review" in _job_names(path)]
+    assert owners == [_WORKFLOWS_DIR / "claude-code-review.yml"], (
+        "exactly one job named `claude-review` may exist across .github/workflows "
+        f"— the required check matches by job name; found: {[p.name for p in owners]}"
+    )
+    # The glob has to have looked at something: an empty or mis-rooted sweep
+    # would satisfy an `owners ==` assertion just as happily if the one expected
+    # file were the only thing it ever found.
+    assert len(workflows) > 1, f"workflow sweep found only {workflows}"
+
+
+def test_the_legacy_reviewer_keeps_a_distinct_job_name() -> None:
+    names = _job_names(_WORKFLOWS_DIR / "claude-code-review-legacy.yml")
+    assert "claude-review" not in names
+    assert "claude-review-legacy" in names
+
+
+def test_the_legacy_reviewer_stays_dispatch_only() -> None:
+    # A PR trigger here would run two full model reviews per push — the cost
+    # retiring it removed — and its job would report a second check besides.
+    assert _triggers(_WORKFLOWS_DIR / "claude-code-review-legacy.yml") == [
+        "workflow_dispatch"
+    ]

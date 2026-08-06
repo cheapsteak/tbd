@@ -1,4 +1,4 @@
-"""Pull one step's shell body out of the v2 review workflow, BY STEP NAME.
+"""Pull one step's shell body out of the PR-review workflow, BY STEP NAME.
 
 The workflow's "Post review comment and enforce verdict" step implements
 safety-shaped ordering in shell — the verdict gate before anything is posted,
@@ -10,10 +10,13 @@ Lookup is by EXACT step name and raises when the name is absent: renaming a
 step fails the tests loudly rather than silently leaving them asserting on
 nothing.
 
-Stdlib only, and the parse is deliberately literal rather than a YAML load —
-the CI job that runs this suite installs pytest and jsonschema, nothing else.
-Steps are the `- name:` entries at the shallowest such indentation in the file
-(this workflow has one job), and a run body is the block scalar under `run: |`.
+The parse is deliberately literal rather than a YAML load: these helpers hand a
+step's shell to bash and assert on its verbatim source, comments included, and a
+load discards exactly that. (Where a test needs to know what GitHub itself would
+see — which job names a workflow declares — `test_workflow_structure.py` uses a
+real parser instead, because there a pattern match can be evaded.) Steps are the
+`- name:` entries at the shallowest such indentation in the file (this workflow
+has one job), and a run body is the block scalar under `run: |`.
 
 Not a test module — pytest does not collect it.
 """
@@ -26,7 +29,7 @@ from pathlib import Path
 
 # .../.github/workflows/claude-review-v2/tests/ -> .../.github/workflows/
 _WORKFLOWS_DIR = Path(__file__).resolve().parents[2]
-WORKFLOW_PATH = _WORKFLOWS_DIR / "claude-code-review-v2.yml"
+WORKFLOW_PATH = _WORKFLOWS_DIR / "claude-code-review.yml"
 
 _STEP_RE = re.compile(r"^(?P<indent> *)- name: (?P<name>.+?) *$")
 _RUN_RE = re.compile(r"^(?P<indent> *)run: \| *$")
