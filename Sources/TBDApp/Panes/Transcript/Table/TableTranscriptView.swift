@@ -1011,9 +1011,10 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   prose the visitor's trailing newline survives as one empty line
         ///   fragment, which is charged here in place of paragraph spacing.
         ///
-        /// Four shapes are deliberately NOT modelled, all because they need real
-        /// layout to see, and all four make this estimate SMALL — the safe
-        /// direction, since an under-reservation grows on realize:
+        /// Five shapes are deliberately NOT modelled because they need real layout
+        /// to see. Four of them make this estimate SMALL, which is the safe
+        /// direction since an under-reservation grows on realize; the fifth is the
+        /// one residual that goes the other way, and it is called out as such:
         ///
         /// * a GFM cell whose text wraps (that grid row is 48 pt, not 24) —
         ///   measured -48 pt on a four-times-wrapping cell;
@@ -1028,17 +1029,18 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   while its `> ` markers are still counted as drawn characters —
         ///   measured exact to 12 wrapped lines and -16 pt (one line) at 20.
         ///
-        /// One family is unmodelled for a different reason, and deliberately so:
-        /// a NESTED list (`- outer` / `  - inner`) and a list-item continuation
-        /// that follows a BLANK line both collapse to a single rendered line today,
-        /// because `visitListItem` flattens an item's children inline and a nested
-        /// list or a second paragraph arrives with no break between them. The
-        /// arithmetic here predicts what those SHOULD draw — 2 lines at
-        /// `listItemSpacing` for the nested pair, which is exactly what it returns
-        /// — so it reads as a +20 to +40 pt over-reservation only for as long as
-        /// the renderer mangles them. Teaching the estimator to reproduce the
-        /// collapse would encode the defect in a second place and make fixing the
-        /// renderer a silent two-file trap.
+        /// * — the one on the UNSAFE side — a NESTED list (`- outer` /
+        ///   `  - inner`) or a list-item continuation that follows a BLANK line.
+        ///   Both collapse to a single rendered line today, because
+        ///   `visitListItem` flattens an item's children inline and a nested list
+        ///   or a second paragraph arrives with no break between them. The
+        ///   arithmetic here predicts what those SHOULD draw — 2 lines at
+        ///   `listItemSpacing` for the nested pair, which is exactly what it
+        ///   returns — so it reads as a +20 to +40 pt OVER-reservation only for as
+        ///   long as the renderer mangles them. Teaching the estimator to reproduce
+        ///   the collapse would encode the defect in a second place and make fixing
+        ///   the renderer a silent two-file trap. It is the largest single family
+        ///   in the generated corpus's residual.
         ///
         /// The image term is not an approximation at all: an attached image is laid
         /// out at `TranscriptImageGeometry.displaySize`, which derives from a
@@ -1199,7 +1201,9 @@ struct TableTranscriptView: NSViewRepresentable {
             /// LONGER, which is the direction that under-reserves once the ceiling
             /// rounds — the safe one.
             private static func drawnLength(of line: String) -> Int {
-                guard line.contains("`") || line.contains("[") else { return line.count }
+                guard line.contains("`") || line.contains("[") || line.contains("  ") else {
+                    return line.count
+                }
                 var total: CGFloat = 0
                 var inCode = false
                 var characters = Array(line)
@@ -1252,17 +1256,67 @@ struct TableTranscriptView: NSViewRepresentable {
                 return nil
             }
 
-            /// Whether `line` opens a raw-HTML block: a `<` followed by a tag
-            /// name, a closing slash, or a `!`/`?` declaration. Deliberately not a
-            /// bare `<`, so prose that starts with an arrow or a comparison is
-            /// still prose.
-            private static func opensHTMLBlock(_ line: String) -> Bool {
-                guard line.hasPrefix("<"), line.count > 1 else { return false }
-                let second = line[line.index(line.startIndex, offsetBy: 1)]
-                return second.isLetter || second == "/" || second == "!" || second == "?"
+            /// How an HTML block may begin, if `line` begins one.
+            enum HTMLBlockStart {
+                /// CommonMark types 1-6: may INTERRUPT a paragraph, no blank line
+                /// needed before it.
+                case interrupting
+                /// CommonMark type 7 — a complete tag alone on its line. May only
+                /// START a block, never interrupt a paragraph.
+                case blockStartOnly
             }
 
-            /// Whether `line` is a reference-link DEFINITION — `[ref]: url` — which
+            /// Classifies `line` as the opening of a raw-HTML block, or nil.
+            ///
+            /// Two failures made this worth doing properly rather than testing for
+            /// a leading `<`:
+            ///
+            /// * types 1-6 can interrupt a paragraph with NO blank line before
+            ///   them, and gating the whole branch on a block start charged an
+            ///   interrupting `<div>` as six lines of prose — +96 pt, twice the
+            ///   ceiling the generated corpus allows for a whole message;
+            /// * "`<` then a letter" is far wider than CommonMark, so a paragraph
+            ///   led by an autolink (`<https://…>`) or by inline HTML (`<span>`)
+            ///   was swallowed whole and charged nothing — measured -80 and -68 pt.
+            ///   Under-reserving is the safe direction, but a blank-line-free run
+            ///   charged 32 pt however long it is defeats the deep-scroll landing
+            ///   this estimate exists for.
+            private static func htmlBlockStart(_ line: String) -> HTMLBlockStart? {
+                guard line.hasPrefix("<"), line.count > 1 else { return nil }
+                // Types 2-5: comment, processing instruction, declaration, CDATA.
+                if line.hasPrefix("<!") || line.hasPrefix("<?") { return .interrupting }
+
+                var rest = line.dropFirst()
+                if rest.first == "/" { rest = rest.dropFirst() }
+                let name = rest.prefix { $0.isLetter || $0.isNumber }
+                guard !name.isEmpty else { return nil }
+                // The tag name has to actually END for this to be a tag at all —
+                // `<https://…>` fails here on the colon, which is what keeps an
+                // autolink out.
+                let after = rest.dropFirst(name.count).first
+                guard after == nil || after == " " || after == ">" || after == "/" else { return nil }
+
+                if htmlBlockTagNames.contains(name.lowercased()) { return .interrupting }
+                // Type 7: any other complete tag, alone on its line.
+                return line.hasSuffix(">") ? .blockStartOnly : nil
+            }
+
+            /// CommonMark's type-6 block tag names — the ones whose opening tag may
+            /// interrupt a paragraph. Inline tags (`span`, `em`, `code`, `a`, `img`)
+            /// are deliberately absent: those only ever open a block under type 7,
+            /// alone on their line.
+            private static let htmlBlockTagNames: Set<String> = [
+                "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
+                "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt",
+                "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset",
+                "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe",
+                "legend", "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol",
+                "optgroup", "option", "p", "param", "pre", "script", "search", "section", "style",
+                "summary", "table", "tbody", "td", "textarea", "tfoot", "th", "thead", "title",
+                "tr", "track", "ul"
+            ]
+
+            /// Whether `line` is a reference-link DEFINITION            /// Whether `line` is a reference-link DEFINITION — `[ref]: url` — which
             /// the renderer consumes and draws nothing for.
             private static func isLinkDefinition(_ line: String) -> Bool {
                 guard line.hasPrefix("[") else { return false }
@@ -1286,9 +1340,15 @@ struct TableTranscriptView: NSViewRepresentable {
                 /// than a paragraph of its own.
                 var lastUnitWasListItem = false
                 /// Whether the next line starts a fresh block — the top of the run,
-                /// or the line after a blank. Only there can an indentation of four
-                /// or more spaces open a code block.
+                /// or the line after a blank.
                 var atBlockStart = true
+                /// Whether the last unit appended was an ordinary PARAGRAPH. An
+                /// indented code block is the one construct that cannot interrupt
+                /// one (CommonMark reserves the indentation for lazy continuation),
+                /// but it opens perfectly well straight after a heading, a table or
+                /// a fence — gating it on `atBlockStart` charged those as prose and
+                /// cost up to 80 pt.
+                var lastUnitWasParagraph = false
                 /// Whether a list is still open. Unlike `lastUnitWasListItem` this
                 /// SURVIVES a blank line, because an indented line under a list is
                 /// that list's continuation however loosely it is written — never
@@ -1315,6 +1375,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         // follows is a fresh block, not a continuation.
                         flushTable()
                         lastUnitWasListItem = false
+                        lastUnitWasParagraph = false
                         atBlockStart = true
                         continue
                     }
@@ -1341,6 +1402,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         appendCodeUnit(lines: fenceLines, terminated: closed)
                         lastUnitWasListItem = false
                         inListContext = false
+                        lastUnitWasParagraph = false
                         atBlockStart = false
                         continue
                     }
@@ -1349,7 +1411,7 @@ struct TableTranscriptView: NSViewRepresentable {
                     // block. It draws in the code face with NO paragraph spacing
                     // between its lines, so charging each line as a paragraph cost
                     // 32 pt on a three-line block and 304 on a twenty-line one.
-                    if atBlockStart, !inListContext, Self.indentWidth(of: raw) >= 4 {
+                    if !inListContext, !lastUnitWasParagraph, Self.indentWidth(of: raw) >= 4 {
                         flushTable()
                         var codeLines = 1
                         var lookahead = index
@@ -1375,6 +1437,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         }
                         index = lookahead
                         appendCodeUnit(lines: codeLines, terminated: true)
+                        lastUnitWasParagraph = false
                         atBlockStart = false
                         continue
                     }
@@ -1383,7 +1446,8 @@ struct TableTranscriptView: NSViewRepresentable {
                     // `visitHTMLBlock`, so `defaultVisit` walks zero children and
                     // emits an empty string. A `<details>` block was 96 pt of
                     // reservation for blank space.
-                    if atBlockStart, Self.opensHTMLBlock(line) {
+                    if let htmlStart = Self.htmlBlockStart(line),
+                       atBlockStart || htmlStart == .interrupting {
                         flushTable()
                         while index < lines.count,
                               !lines[index].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1391,6 +1455,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         }
                         lastUnitWasListItem = false
                         inListContext = false
+                        lastUnitWasParagraph = false
                         atBlockStart = false
                         continue
                     }
@@ -1415,6 +1480,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         if !cells.isEmpty { pendingTableRows += 1 }
                         lastUnitWasListItem = false
                         inListContext = false
+                        lastUnitWasParagraph = false
                         atBlockStart = false
                         continue
                     }
@@ -1428,6 +1494,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         appendHeadingUnit(line: line, level: level)
                         lastUnitWasListItem = false
                         inListContext = false
+                        lastUnitWasParagraph = false
                         atBlockStart = false
                         continue
                     }
@@ -1436,6 +1503,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         appendHeadingUnit(line: line, level: level)
                         lastUnitWasListItem = false
                         inListContext = false
+                        lastUnitWasParagraph = false
                         atBlockStart = false
                         continue
                     }
@@ -1455,6 +1523,7 @@ struct TableTranscriptView: NSViewRepresentable {
                         lineHeight: bubbleLineHeight,
                         trailing: isListItem ? theme.listItemSpacing : theme.paragraphSpacing)
                     lastUnitWasListItem = isListItem
+                    lastUnitWasParagraph = !isListItem
                     // An ordinary, unindented paragraph is what closes a list.
                     if isListItem {
                         inListContext = true

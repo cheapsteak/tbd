@@ -130,7 +130,12 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "card/askUserQuestion-wrapping", points: 40, percent: 16.6, achieved: "-36.0"),
         Budget(id: "card/askUserQuestion-malformed", points: 20, percent: 30.3, achieved: "-16.0"),
         Budget(id: "assistant/links", points: 2, percent: 1.6, achieved: "0.0"),
-        Budget(id: "assistant/raw-html", points: 2, percent: 1.8, achieved: "0.0")
+        Budget(id: "assistant/raw-html", points: 2, percent: 1.8, achieved: "0.0"),
+        Budget(id: "assistant/html-interrupting", points: 2, percent: 1.5, achieved: "0.0"),
+        Budget(id: "assistant/angle-bracket-prose", points: 2, percent: 1.6, achieved: "0.0"),
+        Budget(id: "assistant/indented-after-heading", points: 2, percent: 1.4, achieved: "0.0"),
+        Budget(id: "card/askUserQuestion-bare-options", points: 10, percent: 5.5, achieved: "-8.0"),
+        Budget(id: "card/askUserQuestion-optional-typed", points: 20, percent: 24.2, achieved: "-16.0")
     ]
 
     /// The AskUserQuestion fixtures are only worth anything if the card can
@@ -794,6 +799,36 @@ struct TranscriptEstimatorAccuracyTests {
         <!-- the note below is what actually renders -->
 
         Everything above this line draws nothing at all.
+        """
+
+    /// Raw HTML with NO blank line before it. CommonMark block types 1-6 may
+    /// interrupt a paragraph, so gating the branch on a block start charged an
+    /// interrupting `<div>` as six lines of prose — +96 pt, twice the ceiling the
+    /// generated corpus allows for a whole message.
+    private static let htmlInterruptingText = """
+        Here is the evidence:
+        <div class="measurement">
+        <span>the renderer draws none of this</span>
+        </div>
+        """
+
+    /// Prose that merely BEGINS with an angle bracket — an autolink, then inline
+    /// HTML. Neither opens an HTML block, and treating them as one swallowed the
+    /// rest of the paragraph and charged it nothing: measured -80 and -68 pt.
+    private static let angleBracketProseText = """
+        <https://example.com/acme/a/long/reference/path> is the reference we used, and this line         is long enough that it has to wrap at least once in the column.
+        <span>note</span> that inline HTML does not open a block either, so this sentence is         prose and has to be charged as prose.
+        """
+
+    /// An indented code block immediately after a HEADING. An indented block is
+    /// the one construct that cannot interrupt a paragraph — CommonMark reserves
+    /// the indentation for lazy continuation — but it opens perfectly well after a
+    /// heading, a table or a fence, and gating it on a blank line cost 80 pt.
+    private static let indentedAfterHeadingText = """
+        ## The sizing hook
+            let width = max(tableView.bounds.width, 1)
+            if let exact = cachedExactHeight(forRow: row) { return exact }
+            return Self.estimate(for: nodes[row], width: width)
         """
 
     /// A four-space INDENTED code block — the other way markdown spells a code
