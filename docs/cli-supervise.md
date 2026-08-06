@@ -369,7 +369,9 @@ without `--submit` the text is typed into the composer and left there for a
 human to send, so a message meant to be acted on passes both (that pair is
 also how a pending question is answered — the adapter clears a machine-known
 dialog first); `--keys` sends named keys chosen after reading the screen; an
-interrupt is a keys payload. Exactly one payload flag per call. The daemon
+interrupt is a keys payload. Exactly one payload flag per call, and
+`--submit` belongs only to a text payload — Enter is itself a key, so a keys
+sequence that means to submit spells it out (`--keys "Escape Enter"`). The daemon
 does not read a text payload; it records it verbatim — every send lands in
 TBD's actuation log (`~/tbd/actuations.jsonl`) with the caller identity as
 declared, and a caller with no identity is logged as anonymous.
@@ -387,10 +389,13 @@ payload carries no envelope.
 transcript's JSONL for that envelope, with the re-check deadline as its
 default timeout. It requires `--submit`, since text left standing in a
 composer never enters the conversation and so can never reach a transcript,
-and it is refused with `--keys`, which leaves no transcript trace to read.
-It is also gated on the daemon's `delivery_verification_enabled` config,
-shipped off: while that is off a `--verify` send is refused outright with
-the flag named, rather than quietly delivered as an unverified one — a
+and it is refused with `--keys`, which leaves no transcript trace to read,
+and with an empty `--text`, which pastes nothing and so writes no envelope
+to look for. It is also gated on the daemon's `delivery_verification_enabled`
+config, shipped off and flipped with the `config.setDeliveryVerification`
+RPC (`daemon.capabilities` reads it back): while that is off a `--verify`
+send is refused outright with the flag named, rather than quietly delivered
+as an unverified one — a
 caller that asked for confirmation is never answered with silence. TBD makes
 one full attempt — including the single re-delivery it will make on positive
 evidence that the first never landed — and nothing beyond it; the
