@@ -82,12 +82,18 @@ struct DeliveryObservationSourceTests {
         #expect(tail == Data(repeating: 0x42, count: 1024))
     }
 
-    /// A directory opens as a file handle on darwin but cannot be read, which is
-    /// the closest reachable stand-in for the I/O failure the `do`/`catch`
-    /// exists for. It must answer `nil` — the branch that used to coalesce a
-    /// thrown read into empty data and hand the retry its licence.
-    @Test("a path that opens but cannot be read answers nil, not empty")
-    func unreadableHandleAnswersNil() async throws {
+    /// A directory is not a transcript, and must not read as an empty one.
+    ///
+    /// **This does not exercise the `do`/`catch` around `seek`/`read`** — it was
+    /// written believing it did, and a mutation check proved otherwise: reverting
+    /// that block to `try?`/`?? Data()` left this test green, because
+    /// `FileHandle(forReadingAtPath:)` refuses a directory outright and the
+    /// first guard answers `nil` without ever seeking. The catch branch is
+    /// correct by inspection and unproven by test; forcing a `seek` or `read` to
+    /// throw on a local regular file needs a seam this type does not have, and
+    /// inventing one to test a two-line guard is a worse trade than saying so.
+    @Test("a path that is not a readable file answers nil, not empty")
+    func nonFilePathAnswersNil() async throws {
         let directory = try makeDirectory()
 
         let reader = try source()
