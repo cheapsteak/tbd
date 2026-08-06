@@ -166,24 +166,54 @@ struct PaneSendTargetQueryTests {
 
     // MARK: - User-authored text in the start command cannot forge an identity
 
+    /// The two spawn paths that plant `TBD_TERMINAL_ID` into a pane's start
+    /// command. Every adversarial case below is driven through both.
+    ///
+    /// They share one env-prefix builder (`TmuxManager.envExportPrefixed`), so
+    /// today the two arms exercise the same code — but the resolver's anchor is
+    /// only safe while *every* spawn path emits the identical shape, and the
+    /// in-place profile swap that goes through `respawnWindowCommand` is the
+    /// path a reader is least likely to check. Parameterising rather than
+    /// copying the suite means the two can never drift apart in coverage.
+    enum SpawnBuilder: CaseIterable, Sendable, CustomStringConvertible {
+        case newWindow
+        case respawnWindow
+
+        var description: String {
+            switch self {
+            case .newWindow: "newWindowCommand"
+            case .respawnWindow: "respawnWindowCommand"
+            }
+        }
+
+        /// The shell command string the builder hands tmux — the same text tmux
+        /// reports back as `#{pane_start_command}`.
+        func startCommand(env: [String: String]) throws -> String {
+            let args: [String]
+            switch self {
+            case .newWindow:
+                args = TmuxManager.newWindowCommand(
+                    server: "tbd-acme", session: "main", cwd: "/tmp",
+                    shellCommand: "claude", env: env)
+            case .respawnWindow:
+                args = TmuxManager.respawnWindowCommand(
+                    server: "tbd-acme", windowID: "@3", cwd: "/tmp",
+                    shellCommand: "claude", env: env)
+            }
+            return try #require(args.last)
+        }
+    }
+
     /// Both spawn paths inline the env map the same way, so the anchor the
     /// resolver looks for holds for the in-place profile swap too. Asserted
     /// against the builders rather than a hand-written literal, because the
     /// resolver's narrowness is only safe while this stays true.
-    @Test("both spawn paths emit the assignment shape the resolver anchors on")
-    func bothSpawnPathsEmitTheAnchor() throws {
-        let env = ["TBD_TERMINAL_ID": Self.plantedID]
-        let spawned = try #require(TmuxManager.newWindowCommand(
-            server: "tbd-acme", session: "main", cwd: "/tmp", shellCommand: "claude",
-            env: env).last)
-        let respawned = try #require(TmuxManager.respawnWindowCommand(
-            server: "tbd-acme", windowID: "@3", cwd: "/tmp", shellCommand: "claude",
-            env: env).last)
-        #expect(spawned.contains(TmuxManager.terminalIDExportAnchor))
-        #expect(respawned.contains(TmuxManager.terminalIDExportAnchor))
-        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: spawned)
-            == Self.plantedID)
-        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: respawned)
+    @Test("a spawn path emits the assignment shape the resolver anchors on",
+          arguments: SpawnBuilder.allCases)
+    func spawnPathEmitsTheAnchor(builder: SpawnBuilder) throws {
+        let command = try builder.startCommand(env: ["TBD_TERMINAL_ID": Self.plantedID])
+        #expect(command.contains(TmuxManager.terminalIDExportAnchor))
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
             == Self.plantedID)
     }
 
@@ -192,19 +222,20 @@ struct PaneSendTargetQueryTests {
     /// inlined BEFORE `TBD_TERMINAL_ID` and any unanchored substring search
     /// reads the user's prose as the pane's identity. A pane that misreports
     /// its identity is refused as a stranger for the whole life of its window.
-    @Test("instructions containing the bare env-var name do not poison resolution")
-    func resolveIgnoresBareNameInInstructions() throws {
-        let command = try #require(TmuxManager.newWindowCommand(
-            server: "tbd-acme", session: "main", cwd: "/tmp", shellCommand: "claude",
-            env: [
-                "TBD_PROMPT_INSTRUCTIONS":
-                    "When paging a sibling, read TBD_TERMINAL_ID= from its pane env first.",
-                "TBD_TERMINAL_ID": Self.plantedID,
-            ]).last)
+    @Test("instructions containing the bare env-var name do not poison resolution",
+          arguments: SpawnBuilder.allCases)
+    func resolveIgnoresBareNameInInstructions(builder: SpawnBuilder) throws {
+        let command = try builder.startCommand(env: [
+            "TBD_PROMPT_INSTRUCTIONS":
+                "When paging a sibling, read TBD_TERMINAL_ID= from its pane env first.",
+            "TBD_TERMINAL_ID": Self.plantedID,
+        ])
         // The decoy really does precede the real assignment in the emitted string.
         let decoy = try #require(command.range(of: "TBD_TERMINAL_ID="))
         let real = try #require(command.range(of: TmuxManager.terminalIDExportAnchor))
         #expect(decoy.lowerBound < real.lowerBound)
+        // It is not an anchor at all: no `export ` and no opening quote.
+        #expect(command.ranges(of: TmuxManager.terminalIDExportAnchor).count == 1)
 
         #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
             == Self.plantedID)
@@ -212,26 +243,66 @@ struct PaneSendTargetQueryTests {
 
     /// The same hazard one step further: prose that spells the assignment out
     /// with a quoted value, so an anchored-but-first-match-only search would
-    /// hand back the quoted garbage. Scanning every occurrence steps over it.
-    @Test("instructions containing a quoted decoy value do not poison resolution")
-    func resolveStepsOverQuotedDecoy() throws {
-        let command = try #require(TmuxManager.newWindowCommand(
-            server: "tbd-acme", session: "main", cwd: "/tmp", shellCommand: "claude",
-            env: [
-                "TBD_PROMPT_INSTRUCTIONS":
-                    "Never run: export TBD_TERMINAL_ID='not-a-uuid' — it breaks routing.",
-                "TBD_TERMINAL_ID": Self.plantedID,
-            ]).last)
+    /// give up at the decoy and fail open. Scanning every occurrence steps over
+    /// it and still finds the real id.
+    ///
+    /// What the decoy occurrence yields is asserted rather than described,
+    /// because it is *not* the decoy's payload: `'` is escaped as `'\''`, the
+    /// anchor consumes the first of those quotes, and the value read runs to
+    /// the next quote — a lone backslash. `not-a-uuid` is never extracted.
+    @Test("instructions containing a quoted decoy value do not poison resolution",
+          arguments: SpawnBuilder.allCases)
+    func resolveStepsOverQuotedDecoy(builder: SpawnBuilder) throws {
+        let command = try builder.startCommand(env: [
+            "TBD_PROMPT_INSTRUCTIONS":
+                "Never run: export TBD_TERMINAL_ID='not-a-uuid' — it breaks routing.",
+            "TBD_TERMINAL_ID": Self.plantedID,
+        ])
         // The quote-escaping leaves a complete anchor inside the instructions.
         #expect(command.ranges(of: TmuxManager.terminalIDExportAnchor).count == 2)
+        #expect(Self.valueAtFirstAnchor(of: command) == "\\")
         #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
             == Self.plantedID)
+    }
 
-        // The same property stated directly, independent of the escaping rules.
-        let handWritten = "/bin/zsh -ic \"export TBD_TERMINAL_ID='decoy'; "
-            + "export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\""
-        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: handWritten)
+    /// The one decoy shape whose extracted value is neither a backslash nor the
+    /// payload: instructions ending exactly at the `=`, so the anchor closes on
+    /// the env entry's own closing quote and the value read is the `; export …=`
+    /// separator that always follows it. Also not a UUID.
+    @Test("instructions ending at the assignment read the separator, not an id",
+          arguments: SpawnBuilder.allCases)
+    func resolveStepsOverTruncatedDecoy(builder: SpawnBuilder) throws {
+        let command = try builder.startCommand(env: [
+            "TBD_PROMPT_INSTRUCTIONS": "Never write export TBD_TERMINAL_ID=",
+            "TBD_TERMINAL_ID": Self.plantedID,
+        ])
+        #expect(command.ranges(of: TmuxManager.terminalIDExportAnchor).count == 2)
+        #expect(Self.valueAtFirstAnchor(of: command) == "; export TBD_TERMINAL_ID=")
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
             == Self.plantedID)
+    }
+
+    /// Hand-written rather than built, so it holds the property independent of
+    /// the escaping rules: a raw adjacent decoy whose value really *is* read as
+    /// `decoy` still resolves to the real id, because `decoy` is not a UUID.
+    /// No `env` value can produce this shape — only unescaped command text can.
+    @Test("a raw adjacent decoy is stepped over on its UUID check")
+    func resolveStepsOverRawDecoy() {
+        let command = "/bin/zsh -ic \"export TBD_TERMINAL_ID='decoy'; "
+            + "export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\""
+        #expect(Self.valueAtFirstAnchor(of: command) == "decoy")
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
+            == Self.plantedID)
+    }
+
+    /// What `resolvePaneTerminalID` would return at the FIRST anchor if it did
+    /// not validate and keep scanning. Spelled out here so the tests above
+    /// assert the extracted text rather than asserting the doc comment.
+    static func valueAtFirstAnchor(of command: String) -> String? {
+        guard let anchor = command.range(of: TmuxManager.terminalIDExportAnchor) else { return nil }
+        let rest = command[anchor.upperBound...]
+        guard let close = rest.firstIndex(of: "'") else { return nil }
+        return String(rest[..<close])
     }
 
     /// Fail-open on a value that is not a terminal id at all: nil means "this

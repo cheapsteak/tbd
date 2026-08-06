@@ -216,17 +216,41 @@ public struct TmuxManager: Sendable {
         ["-L", server, "has-session", "-t", session]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
-        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
-        // -i keeps it interactive (loads .zshrc), -c runs the command
-        // After the command exits, the pane closes (tmux default behavior)
-        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    /// Prefix `shellCommand` with one `export KEY='value'; ` per `env` entry,
+    /// sorted by key, single-quoting each value with the standard `'\''`
+    /// escape for an embedded quote.
+    ///
+    /// Shared by `newWindowCommand` and `respawnWindowCommand` deliberately.
+    /// `resolvePaneTerminalID` reads a pane's identity back out of exactly this
+    /// text, anchored on `terminalIDExportAnchor`, and that anchor is only safe
+    /// while every spawn path emits the identical shape. Two independently
+    /// maintained copies could drift and reopen the forgery hole on one path.
+    static func envExportPrefixed(_ shellCommand: String, env: [String: String]) -> String {
         var envPrefix = ""
         for (key, value) in env.sorted(by: { $0.key < $1.key }) {
             let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
             envPrefix += "export \(key)='\(escaped)'; "
         }
-        let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
+        return envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
+    }
+
+    /// tmux `-e KEY=VALUE` flags, sorted by key. Shared by the two spawn
+    /// builders for the same reason as `envExportPrefixed`.
+    static func sensitiveEnvFlags(_ sensitiveEnv: [String: String]) -> [String] {
+        var eFlags: [String] = []
+        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
+            eFlags.append("-e")
+            eFlags.append("\(key)=\(value)")
+        }
+        return eFlags
+    }
+
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
+        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
+        // -i keeps it interactive (loads .zshrc), -c runs the command
+        // After the command exits, the pane closes (tmux default behavior)
+        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let fullCommand = envExportPrefixed(shellCommand, env: env)
         // `sensitiveEnv` carries values that must be in the spawned window's
         // PROCESS environment before the shell starts, via tmux's -e KEY=VALUE
         // flag — NOT inlined into the shell command argv like `env` above.
@@ -239,11 +263,7 @@ public struct TmuxManager: Sendable {
         //   - rc-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook panes):
         //     the `env` export-prefix runs after `.zshrc` completes, so only
         //     -e values are visible while rc files execute.
-        var eFlags: [String] = []
-        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
-            eFlags.append("-e")
-            eFlags.append("\(key)=\(value)")
-        }
+        let eFlags = sensitiveEnvFlags(sensitiveEnv)
         // Note: size flags (-x/-y) are intentionally NOT emitted here. tmux's
         // `new-window` does not support those flags (only `new-session`,
         // `split-window`, `resize-window`, and `resize-pane` do). The session's
@@ -259,8 +279,9 @@ public struct TmuxManager: Sendable {
     }
 
     /// Respawn (replace the running program of) an existing window's pane
-    /// IN PLACE, keeping the same window id and pane id. Mirrors
-    /// `newWindowCommand`'s env handling — the `env` map is inlined as an
+    /// IN PLACE, keeping the same window id and pane id. Shares
+    /// `newWindowCommand`'s env handling through `envExportPrefixed` and
+    /// `sensitiveEnvFlags` — the `env` map is inlined as an
     /// `export …; ` prefix on the shell command (runs AFTER rc files), while
     /// `sensitiveEnv` is passed via tmux `-e KEY=VALUE` so it's in the process
     /// environment before the shell starts (kept out of `ps aux`, and visible
@@ -279,17 +300,8 @@ public struct TmuxManager: Sendable {
         sensitiveEnv: [String: String] = [:]
     ) -> [String] {
         let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        var envPrefix = ""
-        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
-            envPrefix += "export \(key)='\(escaped)'; "
-        }
-        let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
-        var eFlags: [String] = []
-        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
-            eFlags.append("-e")
-            eFlags.append("\(key)=\(value)")
-        }
+        let fullCommand = envExportPrefixed(shellCommand, env: env)
+        let eFlags = sensitiveEnvFlags(sensitiveEnv)
         return ["-L", server, "respawn-window", "-k", "-t", windowID, "-c", cwd]
             + eFlags
             + [userShell, "-ic", fullCommand]
@@ -457,9 +469,9 @@ public struct TmuxManager: Sendable {
     }
 
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
-    /// emit for one entry of the `env` map. Both build the prefix identically,
-    /// so a pane spawned either way — including the in-place profile swap —
-    /// carries this literal.
+    /// emit for one entry of the `env` map. Both build the prefix from the one
+    /// shared `envExportPrefixed`, so a pane spawned either way — including the
+    /// in-place profile swap — carries this literal.
     static let terminalIDExportAnchor = "export TBD_TERMINAL_ID='"
 
     /// Which TBD terminal a pane says it is, or nil when the pane carries no
@@ -487,13 +499,29 @@ public struct TmuxManager: Sendable {
     /// the send proceed.
     ///
     /// Every occurrence of the anchor is scanned rather than just the first, so
-    /// instructions containing a quoted non-UUID decoy are stepped over and the
-    /// real id further along still resolves. Residual adversarial case:
-    /// instructions containing a complete `export TBD_TERMINAL_ID='<valid
-    /// uuid>'` would still be read first. That can only cause a false
-    /// *refusal* of a healthy pane, never a false *accept* — a stranger's pane
-    /// cannot be made to answer with this terminal's id, and the false accept
-    /// is the direction that would actually type into someone else's composer.
+    /// a decoy anchor earlier in the string is stepped over and the real id
+    /// further along still resolves.
+    ///
+    /// What a decoy anchor sitting inside an env *value* actually yields is
+    /// worth stating exactly, because it is never the decoy's own payload.
+    /// `envExportPrefixed` escapes an embedded `'` as `'\''`, so instructions
+    /// reading `export TBD_TERMINAL_ID='decoy'` are emitted as
+    /// `export TBD_TERMINAL_ID='\''decoy'\''`: the anchor consumes that first
+    /// quote and the value read is everything up to the next quote — a lone
+    /// backslash. A decoy that instead ends the env entry right at the `=`
+    /// reads as the `; export …=` text that always follows the entry's closing
+    /// quote. Neither parses as a `UUID`, so the scan steps past and finds the
+    /// real id. That guarantee comes from the escaping, not from the resolver,
+    /// which is why the two must stay coupled — see `envExportPrefixed`.
+    ///
+    /// Residual adversarial case: an *unescaped* complete
+    /// `export TBD_TERMINAL_ID='<valid uuid>'` earlier in the start command
+    /// would be read first. No `env` value can produce one, per the escaping
+    /// above, so it would have to arrive through `shellCommand` itself. And it
+    /// can only cause a false *refusal* of a healthy pane, never a false
+    /// *accept* — a stranger's pane cannot be made to answer with this
+    /// terminal's id, and the false accept is the direction that would actually
+    /// type into someone else's composer.
     static func resolvePaneTerminalID(paneOption: String, startCommand: String) -> String? {
         let stamped = paneOption.trimmingCharacters(in: .whitespaces)
         if !stamped.isEmpty { return stamped }
