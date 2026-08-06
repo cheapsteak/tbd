@@ -456,6 +456,12 @@ public struct TmuxManager: Sendable {
         return .missing
     }
 
+    /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
+    /// emit for one entry of the `env` map. Both build the prefix identically,
+    /// so a pane spawned either way — including the in-place profile swap —
+    /// carries this literal.
+    static let terminalIDExportAnchor = "export TBD_TERMINAL_ID='"
+
     /// Which TBD terminal a pane says it is, or nil when the pane carries no
     /// answer at all.
     ///
@@ -467,22 +473,43 @@ public struct TmuxManager: Sendable {
     /// spawned before the option existed still carries its own id. macOS forbids
     /// reading another process's environment (SIP), so the start command, not
     /// `ps eww`, is where the planted value remains legible.
+    ///
+    /// The fallback is deliberately narrow, because the start command also
+    /// carries *user-authored free text*: the env map is inlined sorted by key,
+    /// and `TBD_PROMPT_INSTRUCTIONS` — a repo's custom instructions — sorts
+    /// before `TBD_TERMINAL_ID` and so appears earlier in the same string. A
+    /// bare `TBD_TERMINAL_ID=` substring search would read whatever the user
+    /// happened to write as the pane's identity, and a pane that misreports its
+    /// identity is refused as a stranger for the whole life of its window. So
+    /// the search anchors on the full assignment TBD actually emits, and the
+    /// extracted value must parse as a `UUID` — the only thing TBD ever plants
+    /// there. Anything else resolves to nil, which means "no answer" and lets
+    /// the send proceed.
+    ///
+    /// Every occurrence of the anchor is scanned rather than just the first, so
+    /// instructions containing a quoted non-UUID decoy are stepped over and the
+    /// real id further along still resolves. Residual adversarial case:
+    /// instructions containing a complete `export TBD_TERMINAL_ID='<valid
+    /// uuid>'` would still be read first. That can only cause a false
+    /// *refusal* of a healthy pane, never a false *accept* — a stranger's pane
+    /// cannot be made to answer with this terminal's id, and the false accept
+    /// is the direction that would actually type into someone else's composer.
     static func resolvePaneTerminalID(paneOption: String, startCommand: String) -> String? {
         let stamped = paneOption.trimmingCharacters(in: .whitespaces)
         if !stamped.isEmpty { return stamped }
 
-        let marker = "TBD_TERMINAL_ID="
-        guard let markerRange = startCommand.range(of: marker) else { return nil }
-        let rest = startCommand[markerRange.upperBound...]
-        let value: Substring
-        if rest.first == "'" {
-            let afterQuote = rest.dropFirst()
-            guard let close = afterQuote.firstIndex(of: "'") else { return nil }
-            value = afterQuote[..<close]
-        } else {
-            value = rest.prefix { !$0.isWhitespace && $0 != ";" && $0 != "\"" }
+        var searchFrom = startCommand.startIndex
+        while let anchor = startCommand.range(
+            of: terminalIDExportAnchor, range: searchFrom..<startCommand.endIndex) {
+            searchFrom = anchor.upperBound
+            let rest = startCommand[anchor.upperBound...]
+            // No closing quote anywhere after this anchor means no later
+            // occurrence can be well-formed either.
+            guard let close = rest.firstIndex(of: "'") else { return nil }
+            let value = String(rest[..<close])
+            if UUID(uuidString: value) != nil { return value }
         }
-        return value.isEmpty ? nil : String(value)
+        return nil
     }
 
     public static func panePIDQuery(server: String, paneID: String) -> [String] {
