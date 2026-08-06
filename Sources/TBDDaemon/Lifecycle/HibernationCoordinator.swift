@@ -533,8 +533,19 @@ public actor HibernationCoordinator {
     /// decided here. Recovery today stays the parked-row path below and the
     /// explicit `terminal.recreateWindow` RPC.
     private func classifyUnparkedWake(_ terminal: Terminal) async -> WakeResult {
-        // No worktree row means no server name to probe with — nothing can be
-        // proven, so keep the benign historical answer.
+        // No worktree row means no server name to probe with, so nothing can be
+        // proven and the benign historical answer stands.
+        //
+        // The parked path returns `.notFound` for this same condition, and the
+        // asymmetry is deliberate rather than an oversight. There, the missing
+        // worktree blocks an action the caller asked for, so it has to be
+        // reported. Here it blocks only a *diagnosis*: the caller asked to wake
+        // something the row already calls awake, and failing to look it up is
+        // not evidence that the session is dead. Reporting `.notFound` would
+        // turn "I couldn't check" into "your terminal is gone" — the same
+        // conflation this whole change exists to remove. Practically
+        // unreachable either way: `terminal.worktreeID` is a cascading foreign
+        // key, so a terminal row outliving its worktree does not happen.
         guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
             return .notHibernated
         }

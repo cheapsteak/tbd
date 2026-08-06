@@ -150,6 +150,36 @@ import TestSupport
         #expect(decoded.woken == false)
     }
 
+    /// The legacy `terminal.resume` shim (still reachable from older CLI and
+    /// app builds) must give the same honest answer as `terminal.wake` — it
+    /// routes through the same coordinator, so a silent no-op here would be the
+    /// original bug surviving at the other entry point.
+    @Test func legacyResumeOnUnparkedRowWithNoPaneIsAnErrorNotASilentNoOp() async throws {
+        let (router, db) = try makeRouter(paneTarget: { _, _ in .missing })
+        let terminal = try await makeUnparkedTerminal(db, tag: "repoW5")
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalResume,
+            params: TerminalResumeParams(terminalID: terminal.id))
+        let resp = await router.handle(req)
+
+        #expect(!resp.success, "terminal.resume must not report success into a dead session")
+        #expect(resp.errorCode == RPCErrorCode.terminalSessionGone.rawValue)
+        #expect(resp.error?.contains("tbd terminal conversation") == true)
+    }
+
+    /// The benign arm of the same shim: a live pane keeps `terminal.resume`'s
+    /// historical success.
+    @Test func legacyResumeOnUnparkedRowWithLivePaneStaysSuccessful() async throws {
+        let (router, db) = try makeRouter(paneTarget: { _, _ in .live(terminalID: nil) })
+        let terminal = try await makeUnparkedTerminal(db, tag: "repoW6")
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalResume,
+            params: TerminalResumeParams(terminalID: terminal.id))
+        #expect(await router.handle(req).success)
+    }
+
     /// Fail-closed at the RPC level too: a probe that threw keeps the benign
     /// successful no-op rather than reporting a dead terminal.
     @Test func wakeOnUnparkedRowWithUnreadablePaneStaysASuccessfulNoOp() async throws {
