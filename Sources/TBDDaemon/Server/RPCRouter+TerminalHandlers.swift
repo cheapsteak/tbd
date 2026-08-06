@@ -1956,6 +1956,19 @@ extension RPCRouter {
         // nothing ever looked. Both conditions therefore refuse, and neither
         // types anything.
         if payload.isVerifyArmed {
+            // A shell has no transcript, so no observation can ever be made
+            // about it: verification would arm a re-check that must return
+            // `undetermined` every time. Refuse rather than promise evidence
+            // this target can never produce.
+            if !Self.carriesDispatchEnvelope(terminal) {
+                let message = """
+                    terminal.send --verify was refused: terminal \
+                    \(terminal.id.uuidString) is a shell, which keeps no transcript for a \
+                    delivery to be observed in — nothing was sent. Resend without --verify.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
             let enabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
             if !enabled {
                 let message = """
@@ -2032,9 +2045,19 @@ extension RPCRouter {
                 // terminal send --text "" --submit` is a real way to press Enter
                 // and must not start pasting a tag.
                 if !text.isEmpty {
-                    let composed = Self.dispatchEnvelope(
-                        id: actuationID, from: (actor ?? .anonymous).dispatchLabel
-                    ) + "\n" + text
+                    // ...and it rides every send to an AGENT. A shell is not a
+                    // reader of envelopes: it has no transcript to join back to,
+                    // and a `--submit` there would execute the tag as a command
+                    // line of its own before the caller's text ever ran. Every
+                    // sentence §12 uses to justify the envelope is about a
+                    // receiving agent and its transcript JSONL; a shell target
+                    // satisfies none of them, so prefixing one would be framing
+                    // nobody reads, delivered as a syntax error.
+                    let composed = Self.carriesDispatchEnvelope(terminal)
+                        ? Self.dispatchEnvelope(
+                            id: actuationID, from: (actor ?? .anonymous).dispatchLabel
+                        ) + "\n" + text
+                        : text
                     try await tmux.pasteText(
                         server: worktree.tmuxServer,
                         paneID: terminal.tmuxPaneID,
@@ -2208,6 +2231,27 @@ extension RPCRouter {
     /// can close the tag or open a second attribute.
     static func dispatchEnvelope(id: String, from label: String) -> String {
         "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
+    }
+
+    /// Whether this target is one the envelope means anything to.
+    ///
+    /// Agent sessions only. The envelope exists so a receiving agent can see who
+    /// is addressing it and so a later reader can join a transcript message back
+    /// to its actuation row — and a shell has neither property: nothing reads the
+    /// tag, no transcript records it, and `--submit` would run it as a command
+    /// line of its own. `tbd terminal send` into a plain shell pane is a
+    /// supported thing to do (`docs/tmux-integration.md`), so this is a real
+    /// target rather than a theoretical one.
+    ///
+    /// A terminal with no recorded kind is treated as a shell — the same
+    /// defaulting the rest of this file uses (`terminal.kind ?? .shell`), and the
+    /// conservative direction: it withholds framing rather than typing a tag into
+    /// something that may execute it.
+    static func carriesDispatchEnvelope(_ terminal: Terminal) -> Bool {
+        switch terminal.kind ?? .shell {
+        case .claude, .codex: return true
+        case .shell: return false
+        }
     }
 
     /// Reject the payload shapes that name no coherent act, before a row exists.

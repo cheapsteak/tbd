@@ -158,42 +158,60 @@ enum DeliveryRecord {
         // one request may carry several outcomes (dispatched → not-landed →
         // dispatched → landed-and-acting), and the last observation is the one
         // that still stands.
-        var observations: [String: ObservedResult] = [:]
-        // Which acts the transport ever accepted, and which it answered with a
-        // terminal refusal. `verify == true` says the caller *asked* for an
-        // observation, not that one is owed: the request row is written before
-        // the flag check and before the pane consultation, so a refused send
-        // carries the flag too. An act that never dispatched can have landed
-        // nothing, so it owes no observation — and without this it would render
-        // unconfirmed forever and be "observed" by the startup replay, writing a
-        // landing verdict about a payload that never reached a pane.
-        var everDispatched: Set<String> = []
-        var refusedOrFailed: Set<String> = []
+        // What each act's outcomes leave it standing at, walked in record order.
+        //
+        // Order matters, and the retry is why: it shares the original act's id
+        // by design, so a retried send's ladder is
+        // `dispatched → not-landed → dispatched → landed`, four rows on one id.
+        // Taking "the newest observed row" alone would let a restart between the
+        // retry's dispatch and its own re-check leave the stale `not-landed`
+        // standing as the act's final word — settled, so the startup replay
+        // skips it, and the retry is never observed at all. A delivery that
+        // happened after the last observation is a delivery still owed one.
+        enum Standing {
+            /// A payload reached the pane and nothing has observed it since.
+            case awaitingObservation
+            /// The newest observation, with no later delivery after it.
+            case observed(ObservedResult)
+            /// The transport never accepted this act at all.
+            case neverDispatched
+        }
+        var standing: [String: Standing] = [:]
         for row in rows where row.kind == .outcome {
             guard let confirms = row.confirms else { continue }
             if let observed = row.result?.observed {
-                observations[confirms] = observed
+                standing[confirms] = .observed(observed)
                 continue
             }
             switch row.result {
-            case .synchronous(.dispatched): everDispatched.insert(confirms)
+            case .synchronous(.dispatched):
+                standing[confirms] = .awaitingObservation
             case .synchronous(.refused), .synchronous(.transportFailed):
-                refusedOrFailed.insert(confirms)
+                // A refusal only settles an act that never got off the ground.
+                // The same result on an act that already dispatched is the
+                // single retry failing, which erases neither the delivery that
+                // did happen nor the observation of it.
+                if standing[confirms] == nil { standing[confirms] = .neverDispatched }
             default: break
             }
         }
 
         return rows.compactMap { row in
             guard row.kind != .outcome, row.verify == true, !row.id.isEmpty else { return nil }
-            if let observed = observations[row.id] {
+            switch standing[row.id] {
+            case .observed(let observed):
                 return DeliveryAssessment(request: row, status: .observed(observed))
-            }
-            // Settled synchronously and never dispatched: the refusal or the
-            // transport failure IS the whole answer. A dispatch anywhere in the
-            // act's outcomes outranks a later refusal, which can only be the
-            // single retry failing after a real first delivery.
-            if refusedOrFailed.contains(row.id) && !everDispatched.contains(row.id) {
+            case .neverDispatched:
+                // `verify == true` says the caller *asked* for an observation,
+                // not that one is owed: the request row is written before the
+                // flag check and before the pane consultation, so a refused send
+                // carries the flag too. Nothing was typed, so nothing can have
+                // landed — and without this the act would render unconfirmed
+                // forever and the startup replay would "observe" it, writing a
+                // landing verdict about a payload that never reached a pane.
                 return nil
+            case .awaitingObservation, nil:
+                break
             }
             // Fail-closed on an unreadable timestamp: a deadline that cannot be
             // computed is not a deadline that has not passed. §12's rule is

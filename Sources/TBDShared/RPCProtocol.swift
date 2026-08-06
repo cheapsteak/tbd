@@ -1828,9 +1828,12 @@ public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
 }
 
 /// Params for `config.setDeliveryVerification` — the delivery-acknowledgement
-/// soak flag (default OFF, fleet-supervision design §12). Read per `--verify`
-/// send, so the change applies to the next one; no daemon restart required.
-/// This is the operator's enable path for the soak.
+/// soak flag (default OFF, fleet-supervision design §12). This is the
+/// operator's enable path for the soak, and **enabling it means restarting the
+/// daemon afterwards**: the column is read per `--verify` send, but the
+/// observation machinery it gates is wired once at startup. Until that restart
+/// `--verify` is refused with a message saying so. Turning it off makes
+/// `--verify` a refusal again on the next send, with no restart.
 public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }

@@ -87,7 +87,14 @@ struct TerminalSendDispatchTests {
         let logPath: String
     }
 
-    private func makeFixture(clock: (any Clock<Duration>)? = nil) async throws -> Fixture {
+    /// A shell-kind target: the envelope and `--verify` both withhold there.
+    private func makeShellFixture() async throws -> Fixture {
+        try await makeFixture(kind: .shell)
+    }
+
+    private func makeFixture(
+        clock: (any Clock<Duration>)? = nil, kind: TerminalKind = .claude
+    ) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-send-dispatch-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -123,8 +130,9 @@ struct TerminalSendDispatchTests {
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "acme-wt", branch: "main",
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
+        // Agent by default: the envelope rides sends to agents, not to shells.
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7")
+            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: kind)
         return Fixture(
             router: router, terminal: terminal, recorder: recorder, pastes: pastes,
             verifier: verifier, logPath: logPath)
@@ -163,8 +171,9 @@ struct TerminalSendDispatchTests {
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "acme-wt", branch: "main",
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
+        // An agent terminal: the envelope rides sends to agents, not to shells.
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7")
+            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: .claude)
         return Fixture(
             router: router, terminal: terminal, recorder: recorder, pastes: pastes,
             verifier: verifier, logPath: logPath)
@@ -219,6 +228,37 @@ struct TerminalSendDispatchTests {
         #expect(fixture.pastes.pastes == [
             "<tbd-dispatch id=\"\(rowID)\" from=\"anonymous\"/>\nrebase onto main"
         ])
+    }
+
+    /// A shell is not a reader of envelopes. It has no transcript to join back
+    /// to, and `--submit` would run the tag as a command line of its own before
+    /// the caller's text ever ran — so a `tbd terminal send --text "ls"
+    /// --submit` into a shell pane would execute a syntax error first. Sending
+    /// into a plain shell is a supported thing to do, so this is a real target.
+    @Test("a shell target receives the caller's text with no envelope")
+    func shellTargetGetsNoEnvelope() async throws {
+        let fixture = try await makeShellFixture()
+        #expect(try await send(fixture, text: "ls -la", submit: true).success)
+
+        #expect(fixture.pastes.pastes == ["ls -la"])
+        #expect(fixture.pastes.pastes.allSatisfy { !$0.contains("tbd-dispatch") })
+    }
+
+    /// And a shell cannot be verified at all: with no transcript, the re-check
+    /// could only ever answer `undetermined`. Refuse rather than promise
+    /// evidence this target can never produce.
+    @Test("--verify against a shell target is refused, and nothing is typed")
+    func verifyAgainstShellRefused() async throws {
+        let fixture = try await makeShellFixture()
+        let response = try await send(fixture, text: "ls", submit: true, verify: true)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("keeps no transcript") == true)
+        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.verifier.armings.isEmpty)
+        let outcome = try lastOutcome(at: fixture.logPath)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
     }
 
     /// `from` is the row's own actor, not a constant: the receiving agent sees

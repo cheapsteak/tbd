@@ -83,8 +83,9 @@ struct DeliveryVerificationWiringTests {
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "acme-wt", branch: "main",
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
+        // An agent terminal: the envelope rides sends to agents, not to shells.
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7")
+            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: .claude)
         return Fixture(
             db: db, router: router, terminal: terminal, logPath: logPath, log: log,
             pastes: pastes)

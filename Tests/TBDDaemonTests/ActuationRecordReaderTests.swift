@@ -255,6 +255,43 @@ struct DeliveryRecordTests {
         #expect(statuses.map { $0.status } == [.unconfirmed])
     }
 
+    /// A restart between the retry's dispatch and its own re-check.
+    ///
+    /// The retry shares the original act's id, so the ladder is
+    /// `dispatched → not-landed → dispatched`, all on one id, with the second
+    /// observation never written. Reading "the newest observed row" alone would
+    /// leave the stale `not-landed` standing as the act's final word — settled,
+    /// so the startup replay skips it and the retry is never observed at all. A
+    /// delivery after the last observation is a delivery still owed one.
+    @Test("a retry dispatched after the last observation is still owed one")
+    func aDeliveryAfterTheLastObservationIsStillOwed() throws {
+        let rows = [
+            request(id: "a1"),
+            outcome(id: "a2", confirms: "a1", result: .synchronous(.dispatched)),
+            outcome(id: "a3", confirms: "a1", result: .observed(.notLanded)),
+            outcome(id: "a4", confirms: "a1", result: .synchronous(.dispatched)),
+        ]
+        let statuses = DeliveryRecord.statuses(
+            in: rows, now: try date("2026-08-05T14:10:00Z"))
+        #expect(statuses.map { $0.status } == [.unconfirmed])
+    }
+
+    /// The same ladder, completed: the retry's own observation lands, and the
+    /// act is settled by it rather than by the stale first one.
+    @Test("a completed retry ladder settles on the final observation")
+    func aCompletedRetryLadderSettlesOnTheFinalObservation() throws {
+        let rows = [
+            request(id: "a1"),
+            outcome(id: "a2", confirms: "a1", result: .synchronous(.dispatched)),
+            outcome(id: "a3", confirms: "a1", result: .observed(.notLanded)),
+            outcome(id: "a4", confirms: "a1", result: .synchronous(.dispatched)),
+            outcome(id: "a5", confirms: "a1", result: .observed(.landedAndActing)),
+        ]
+        let statuses = DeliveryRecord.statuses(
+            in: rows, now: try date("2026-08-05T14:10:00Z"))
+        #expect(statuses.map { $0.status } == [.observed(.landedAndActing)])
+    }
+
     @Test("an act that never armed verification is owed no observation at all")
     func unverifiedActsAreNotAssessed() throws {
         let now = try date("2026-08-06T00:00:00Z")
