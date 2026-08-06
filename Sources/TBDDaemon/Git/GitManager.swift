@@ -170,9 +170,10 @@ public struct GitManager: Sendable {
         /// `@{push}` resolved to this bare branch name (remote prefix stripped).
         case resolved(String)
         /// git ran and answered that the branch has no single push destination.
-        /// Under the default `push.default = simple`, this is exactly what a
-        /// branch whose upstream is its *base* (e.g. `refs/heads/main`) reports:
-        /// "cannot resolve 'simple' push to a single destination".
+        /// Carries no information about WHY: under `push.default = simple` a
+        /// branch tracking its base and a branch pushed under a different name
+        /// both land here ("cannot resolve 'simple' push to a single
+        /// destination").
         case noPushDestination
         /// The lookup itself failed (subprocess error, timeout, unparseable
         /// ref). Says nothing about the branch — treat as no evidence.
@@ -181,15 +182,29 @@ public struct GitManager: Sendable {
 
     /// Resolves `<branch>@{push}` — the remote branch this branch would push to.
     ///
-    /// This is the discriminator between a branch's *head* ref and its *base*:
-    /// `branch.<name>.merge` alone cannot tell them apart, because a worktree
-    /// branch cut from the base branch tracks the base. git refuses to resolve
-    /// `@{push}` in that case, which is the answer we want.
+    /// A `.resolved` answer is a strong positive signal about where a branch's
+    /// commits land, but it is NOT a discriminator between a head ref and a
+    /// base: under git's default `push.default = simple`, `@{push}` refuses
+    /// whenever the upstream's name differs from the local branch's — which is
+    /// true both for a branch tracking its base AND for a branch pushed under a
+    /// different name. Measured on real git (`simple`): base-tracking and
+    /// rename-push both report no destination, while a plainly-pushed branch
+    /// resolves. Under `push.default = upstream` all three resolve. Callers must
+    /// therefore treat `.noPushDestination` as "no information", never as
+    /// evidence that a branch tracks a base.
     public func pushBranchName(worktreePath: String, branch: String) async -> PushBranchResolution {
+        await pushBranchName(worktreePath: worktreePath, branch: branch, executable: "/usr/bin/git")
+    }
+
+    /// Seam for the two `.lookupFailed` producers real git will not perform on
+    /// demand: an exit-0 answer that is not a ref, and a launch failure. Tests
+    /// substitute a stub executable; production always passes real git.
+    func pushBranchName(worktreePath: String, branch: String, executable: String) async -> PushBranchResolution {
         do {
             let output = try await run(
                 arguments: ["rev-parse", "--symbolic-full-name", "\(branch)@{push}"],
-                at: worktreePath
+                at: worktreePath,
+                executable: executable
             )
             guard let name = Self.pushBranchShortName(fromFullRef: output) else {
                 logger.debug("pushBranchName: unparseable @{push} ref for \(branch, privacy: .public)")

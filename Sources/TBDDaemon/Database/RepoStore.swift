@@ -279,6 +279,19 @@ public struct RepoStore: Sendable {
         }
     }
 
+    /// Update a repo's default branch. Written by the health validator, which
+    /// re-probes it on every pass: the value stored at `repo.add` time can be
+    /// wrong (detection is best-effort there and falls back to "main") or go
+    /// stale when a project renames its default branch.
+    public func updateDefaultBranch(id: UUID, defaultBranch: String) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET defaultBranch = ? WHERE id = ?",
+                arguments: [defaultBranch, id.uuidString]
+            )
+        }
+    }
+
     /// Update a repo's filesystem path. Used by `tbd repo relocate`.
     public func updatePath(id: UUID, path: String) async throws {
         try await writer.write { db in

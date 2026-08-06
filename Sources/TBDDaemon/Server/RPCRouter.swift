@@ -548,6 +548,12 @@ public final class RPCRouter: Sendable {
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
+        // Each repo's default branch, fetched once per pass rather than per
+        // worktree. It tells a tracked BASE from a rename-push target — see
+        // `PRStatusManager.branchCandidates`, and `headRefMismatchedMatches` for
+        // why a stale value here can only cost a missed heal.
+        let defaultBranchByRepo = Dictionary(
+            uniqueKeysWithValues: (try await db.repos.list()).map { ($0.id, $0.defaultBranch) })
         var infos: [PRStatusManager.PollWorktree] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
@@ -556,6 +562,7 @@ public final class RPCRouter: Sendable {
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
+                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
                 pushBranch: pushBranch,
                 worktreePath: wt.path,
                 prNumber: wt.prNumber
@@ -607,14 +614,18 @@ public final class RPCRouter: Sendable {
         // Read the branch facts through the SAME cache the poll uses. Reading
         // git directly here would let a user refresh attach a PR that the very
         // next poll — still inside the cache's TTL, still holding the older
-        // facts — judges by a different candidate list and clears again. Only
-        // the push branch is needed to match, but resolving both warms the pair
-        // the next poll reads.
-        let (_, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
+        // facts — judges by a different candidate list and clears again.
+        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
+        var defaultBranch: String?
+        if let repoID = wt.repoID {
+            defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
+        }
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
+            upstreamBranch: upstreamBranch,
+            defaultBranch: defaultBranch,
             pushBranch: pushBranch,
             repoPath: wt.path,
             prNumber: wt.prNumber

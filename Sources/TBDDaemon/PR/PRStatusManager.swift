@@ -15,13 +15,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRStatusMana
 public actor PRStatusManager {
 
     /// One worktree's poll inputs: its identity, the branch it owns, the branch
-    /// it merely tracks (`upstreamBranch`), where git says it would push
-    /// (`pushBranch`), its checkout path (which repo it belongs to), and the PR
-    /// number it was created from, if any.
+    /// it merely tracks (`upstreamBranch`), its repo's default branch, where git
+    /// says it would push (`pushBranch`), its checkout path (which repo it
+    /// belongs to), and the PR number it was created from, if any.
     public typealias PollWorktree = (
         id: UUID,
         branch: String,
         upstreamBranch: String?,
+        defaultBranch: String?,
         pushBranch: GitManager.PushBranchResolution,
         worktreePath: String,
         prNumber: Int?
@@ -56,8 +57,11 @@ public actor PRStatusManager {
     /// would be re-queried on every poll forever — exactly what
     /// `cachedNumberFallback` excludes terminal states to avoid. The trade: a
     /// transient `gh` outage costs re-verification until the next daemon run.
-    /// On a path that polls continuously, that is the right side to err on;
-    /// `invalidate` clears the flag whenever the attachment changes.
+    /// On a path that polls continuously, that is the right side to err on.
+    ///
+    /// The bound really is per daemon run: `invalidate` clears the flag, but it
+    /// has no production caller today, so nothing shortens the window in a
+    /// running daemon.
     private var headRefVerifiedIDs: Set<UUID> = []
 
     /// Behavior seam for the `gh` subprocess. Production leaves it nil and
@@ -381,7 +385,7 @@ public actor PRStatusManager {
     /// merge-queue field set the batch query does. `gh repo view` resolves the
     /// checkout's `owner/name` so the query can scope to this repo+branch —
     /// which, unlike the 100-PR viewer batch, always finds an old PR.
-    public func refresh(worktreeID: UUID, branch: String,
+    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, defaultBranch: String?,
                         pushBranch: GitManager.PushBranchResolution,
                         repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
         // A stored PR number (fork PRs, or a PR whose head we renamed locally)
@@ -394,7 +398,8 @@ public actor PRStatusManager {
         guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
             return cache[worktreeID]   // can't resolve owner/name → leave cache unchanged
         }
-        let candidates = Self.branchCandidates(localBranch: branch, pushBranch: pushBranch)
+        let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch,
+                                               defaultBranch: defaultBranch, pushBranch: pushBranch)
         for candidate in candidates {
             let args = Self.prByBranchArgs(owner: ownerRepo.owner, name: ownerRepo.name, branch: candidate)
             let result = await runGHResult(args: args, repoPath: repoPath)
@@ -804,26 +809,57 @@ public actor PRStatusManager {
     /// Head-branch names to try when matching a worktree to a PR, in priority
     /// order (the worktree's own branch first).
     ///
-    /// The second candidate serves exactly one case: a local branch pushed to a
-    /// remote branch under a DIFFERENT name, whose PR can only be found under
-    /// the remote name. That case is identified by `@{push}` — git's own answer
-    /// to "where does this branch push to" — not by the tracking config.
-    /// `branch.<name>.merge` cannot tell a head from a base: a worktree branch
-    /// cut from the base branch tracks the base, so using the tracked branch as
-    /// a head candidate attached whatever PR someone once opened FROM that base
-    /// (or, for a stacked branch, from its parent feature branch) to every
-    /// worktree whose own branch had no PR yet, and pinned it there.
+    /// Beyond the local branch there are two possible candidates, each guarding
+    /// a different failure:
     ///
-    /// `.noPushDestination` — what git reports for a branch tracking its base
-    /// under the default `push.default = simple` — and `.lookupFailed` both
-    /// yield the local branch alone. A failed lookup must never widen the list:
-    /// see `headRefMismatchedMatches`, which refuses to clear anything when the
-    /// derivation had no answer.
-    static func branchCandidates(localBranch: String, pushBranch: GitManager.PushBranchResolution) -> [String] {
-        guard case .resolved(let pushed) = pushBranch, pushed != localBranch else {
-            return [localBranch]
+    /// - The **tracked branch**, but only when it names neither the local branch
+    ///   nor the repo's default branch. It is what finds a rename-push — a local
+    ///   branch pushed to a remote branch under a different name, whose PR is
+    ///   only findable there (PR #212). Excluding the default branch is the fix
+    ///   for the mis-attachment this whole path exists to prevent:
+    ///   `branch.<name>.merge` records the *base* a branch was cut from, so
+    ///   offering it as a head ref attached whatever PR someone once opened FROM
+    ///   the base branch to every worktree whose own branch had no PR yet.
+    /// - The **push branch**, when `@{push}` resolved — subject to the same
+    ///   default-branch exclusion. It is what finds a triangular workflow, where
+    ///   a push refspec sends the branch somewhere neither name predicts. The
+    ///   exclusion is not optional: under `push.default = upstream`, `@{push}`
+    ///   IS the upstream, so a base-tracking branch resolves straight to the
+    ///   default branch (measured on real git) and an unfiltered push candidate
+    ///   would reopen this very bug for anyone using that config.
+    ///
+    /// KNOWN RESIDUAL: a stacked branch tracking a non-default feature base
+    /// keeps its tracked-branch candidate (the base is not the default branch),
+    /// so it can still be attached to that base's PR. Same class as the bug this
+    /// fixes, narrower, and unobserved in the field — deliberately not addressed
+    /// here.
+    ///
+    /// A nil `defaultBranch` therefore leaves the local branch alone as the only
+    /// candidate: without knowing the base, no other name can be shown not to be
+    /// one, and a wrong head-ref candidate is the whole bug.
+    static func branchCandidates(
+        localBranch: String,
+        upstreamBranch: String?,
+        defaultBranch: String?,
+        pushBranch: GitManager.PushBranchResolution
+    ) -> [String] {
+        var candidates = [localBranch]
+        guard let defaultBranch else { return candidates }
+        var pushed: String?
+        if case .resolved(let name) = pushBranch { pushed = name }
+        for name in [upstreamBranch, pushed].compactMap({ $0 }) {
+            guard name != defaultBranch, !candidates.contains(name) else { continue }
+            candidates.append(name)
         }
-        return [localBranch, pushed]
+        return candidates
+    }
+
+    /// `branchCandidates` for one poll entry — the single derivation the matcher
+    /// and the heal share, so the heal can never judge against a list the
+    /// matcher did not use.
+    static func candidatesFor(_ wt: PollWorktree) -> [String] {
+        branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch,
+                         defaultBranch: wt.defaultBranch, pushBranch: wt.pushBranch)
     }
 
     // MARK: - JSON parsing (internal but static for testability)
@@ -891,7 +927,8 @@ public actor PRStatusManager {
             guard !matchedIDs.contains(wt.id),
                   let cached = cachedStatus(wt.id),
                   cached.state != .merged, cached.state != .closed else { return nil }
-            return (wt.id, wt.branch, wt.upstreamBranch, wt.pushBranch, wt.worktreePath, cached.number)
+            return (wt.id, wt.branch, wt.upstreamBranch, wt.defaultBranch, wt.pushBranch,
+                    wt.worktreePath, cached.number)
         }
     }
 
@@ -936,7 +973,7 @@ public actor PRStatusManager {
     /// Match unnumbered worktrees against the viewer batch, scoped to each
     /// worktree's own repo: a node only matches when its URL's owner/name
     /// equals the worktree's resolved repo. Candidate order is preserved
-    /// (local branch first, then the push branch — see `branchCandidates`). A worktree
+    /// (own branch first, then any tracked/push branch — see `branchCandidates`). A worktree
     /// whose repo can't be resolved gets NO match, so the caller keeps its
     /// cached status — the same degrade behavior as the numbered path
     /// (`groupNumberedByRepo`); matching it unscoped could apply another
@@ -949,7 +986,7 @@ public actor PRStatusManager {
         let byRepoBranch = bestNodeByRepoBranch(nodes)
         return unnumbered.compactMap { wt in
             guard let repo = resolveRepo(wt.worktreePath) else { return nil }
-            let candidates = branchCandidates(localBranch: wt.branch, pushBranch: wt.pushBranch)
+            let candidates = candidatesFor(wt)
             for candidate in candidates {
                 if let node = byRepoBranch[repoBranchKey(owner: repo.owner, name: repo.name, branch: candidate)] {
                     return (wt.id, node)
@@ -997,21 +1034,29 @@ public actor PRStatusManager {
     /// So a momentarily narrower candidate list would otherwise turn a
     /// conservative failure-to-attach into a destructive delete.
     ///
-    /// Three conditions must therefore all hold:
+    /// Four conditions must therefore all hold:
     ///
-    /// - The candidate derivation gave a definitive answer. `.lookupFailed`
-    ///   means the `@{push}` lookup never ran to an answer, so the list may be
-    ///   narrower than the truth — skip the worktree entirely.
+    /// - The `@{push}` lookup ran to an answer. `.lookupFailed` means the
+    ///   candidate list may be narrower than the truth — skip the worktree.
     /// - The PR's head ref is not a candidate.
     /// - The PR's head ref IS the branch this worktree merely *tracks*
-    ///   (`upstreamBranch`) rather than one it owns. That is the positive
-    ///   evidence: the attachment is to a base branch (the repo's default
-    ///   branch, or a stacked branch's parent), not to this worktree's work.
-    ///   A nil upstream (unknown tracking config, including a failed `git
-    ///   config` read) is likewise no evidence, so nothing is cleared.
+    ///   (`upstreamBranch`) rather than one it owns.
+    /// - That tracked branch IS the repo's default branch — positive evidence
+    ///   that the attachment is to a BASE, not to the worktree's own work. This
+    ///   is load-bearing precisely when the default branch is unknown: in a
+    ///   rename-push the tracked branch is the worktree's own PR head, and with
+    ///   no known default `branchCandidates` cannot offer it, so the three
+    ///   conditions above would all hold for a perfectly valid attachment and
+    ///   delete it. Stated directly rather than leaned on as a consequence of
+    ///   how candidates happen to be built today.
     ///
-    /// A head ref that is neither a candidate nor the tracked branch is left
-    /// alone: unexplained, but not demonstrably wrong.
+    /// Note the asymmetry with `branchCandidates`, which is what makes leaning
+    /// on a stored `repo.defaultBranch` safe here even though it can be stale: a
+    /// wrong default branch costs a MISSED heal (nothing is destroyed), never a
+    /// wrong attachment. Do not "simplify" the two uses into one shared gate.
+    ///
+    /// A head ref that is neither a candidate nor the tracked default branch is
+    /// left alone: unexplained, but not demonstrably wrong.
     ///
     /// Scoped to unnumbered worktrees by construction: only IDs present in
     /// `unnumbered` are judged, so a worktree created from a PR row (which
@@ -1024,9 +1069,11 @@ public actor PRStatusManager {
         let byID = Dictionary(unnumbered.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return matches.compactMap { match in
             guard let wt = byID[match.worktreeID], wt.pushBranch != .lookupFailed else { return nil }
-            let candidates = branchCandidates(localBranch: wt.branch, pushBranch: wt.pushBranch)
+            let candidates = candidatesFor(wt)
             let head = match.node.headRefName
-            guard !candidates.contains(head), let tracked = wt.upstreamBranch, tracked == head else {
+            guard !candidates.contains(head),
+                  let tracked = wt.upstreamBranch, tracked == head,
+                  let defaultBranch = wt.defaultBranch, tracked == defaultBranch else {
                 return nil
             }
             return (match.worktreeID, head, candidates)
@@ -1048,9 +1095,9 @@ public actor PRStatusManager {
     /// nothing. Absence of evidence is not proof of mis-attachment.
     ///
     /// Worktrees that could never satisfy `headRefMismatchedMatches` — a
-    /// `.lookupFailed` push resolution, or no known tracked branch — are skipped
-    /// before the query rather than after it: their answer could not be acted
-    /// on, so the round trip would buy nothing.
+    /// `.lookupFailed` push resolution, no known tracked branch, or no known
+    /// default branch — are skipped before the query rather than after it: their
+    /// answer could not be acted on, so the round trip would buy nothing.
     static func headRefVerificationTargets(
         unnumbered: [PollWorktree],
         matchedIDs: Set<UUID>,
@@ -1063,9 +1110,10 @@ public actor PRStatusManager {
             guard !matchedIDs.contains(wt.id),
                   !verifiedIDs.contains(wt.id),
                   wt.pushBranch != .lookupFailed,
-                  wt.upstreamBranch != nil,
+                  wt.upstreamBranch != nil, wt.defaultBranch != nil,
                   let cached = cachedStatus(wt.id) else { return nil }
-            return (wt.id, wt.branch, wt.upstreamBranch, wt.pushBranch, wt.worktreePath, cached.number)
+            return (wt.id, wt.branch, wt.upstreamBranch, wt.defaultBranch, wt.pushBranch,
+                    wt.worktreePath, cached.number)
         }
     }
 

@@ -124,6 +124,52 @@ struct GitManagerTests {
         cleanup()
     }
 
+    /// Write an executable stub that stands in for `git` in `pushBranchName`.
+    private func makeGitStub(named name: String, script: String) throws -> String {
+        let path = tempDir.appendingPathComponent(name).path
+        try "#!/bin/sh\n\(script)\n".write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        return path
+    }
+
+    @Test func pushBranchNameTreatsAnUnparseableAnswerAsLookupFailure() async throws {
+        // An exit-0 answer that is not a ref. Real git will not produce this on
+        // demand, but the arm matters: `.lookupFailed` is what STOPS the PR heal
+        // from deleting an attachment, so it must not be reachable only in
+        // theory. Anything but a ref means we learned nothing.
+        let stub = try makeGitStub(named: "git-garbage", script: "echo 'not-a-ref'")
+
+        let resolution = await git.pushBranchName(
+            worktreePath: repoDir.path, branch: "tbd/my-branch", executable: stub)
+
+        #expect(resolution == .lookupFailed)
+        cleanup()
+    }
+
+    @Test func pushBranchNameTreatsALaunchFailureAsLookupFailure() async throws {
+        // The other producer: the subprocess never runs at all.
+        let missing = tempDir.appendingPathComponent("no-such-git").path
+
+        let resolution = await git.pushBranchName(
+            worktreePath: repoDir.path, branch: "tbd/my-branch", executable: missing)
+
+        #expect(resolution == .lookupFailed)
+        cleanup()
+    }
+
+    @Test func pushBranchNameTreatsAGitRefusalAsNoPushDestination() async throws {
+        // The complement, held apart from the two above: git ran and answered.
+        let stub = try makeGitStub(
+            named: "git-refuses",
+            script: "echo \"fatal: cannot resolve 'simple' push to a single destination\" >&2; exit 128")
+
+        let resolution = await git.pushBranchName(
+            worktreePath: repoDir.path, branch: "tbd/my-branch", executable: stub)
+
+        #expect(resolution == .noPushDestination)
+        cleanup()
+    }
+
     @Test func pushBranchShortNameStripsTheRemoteAndKeepsSlashesInTheBranch() {
         #expect(GitManager.pushBranchShortName(fromFullRef: "refs/remotes/origin/tbd/my-branch\n")
                 == "tbd/my-branch")
