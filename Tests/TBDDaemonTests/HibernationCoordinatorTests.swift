@@ -379,6 +379,123 @@ struct HibernationCoordinatorTests {
                 "a non-parked wake must not touch tmux; got: \(recorded.snapshot())")
     }
 
+    // MARK: - Unparked rows: "already awake" must be a provable claim
+
+    /// The bug this section exists to fix. The row is unparked — TBD believes
+    /// the terminal is awake — but its pane is gone. The old answer was an
+    /// unconditional `.notHibernated` ("already awake, no-op"), a claim about a
+    /// live session made without ever asking tmux.
+    @Test func wakeOnUnparkedRowWithMissingPaneReportsSessionGone() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .missing })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID)
+                == .sessionGone(paneID: "%0", detail: .paneMissing))
+    }
+
+    /// A pane that outlived its process (`remain-on-exit`) is just as dishonest
+    /// a basis for "already awake" as a missing one — the row refers to a shell.
+    @Test func wakeOnUnparkedRowWithExitedProcessReportsSessionGone() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .dead })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID)
+                == .sessionGone(paneID: "%0", detail: .processExited))
+    }
+
+    /// Pane-id reuse (#384): the row's coordinate now names a live STRANGER.
+    /// Someone else's healthy pane is not evidence this session is alive.
+    @Test func wakeOnUnparkedRowWhosePaneBelongsToAnotherTerminalReportsSessionGone() async throws {
+        let (db, _, terminalID) = try await setup()
+        let stranger = UUID().uuidString
+        let tmux = TmuxManager(dryRun: true,
+                               dryRunPaneSendTarget: { _, _ in .live(terminalID: stranger) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID)
+                == .sessionGone(paneID: "%0",
+                                detail: .paneBelongsToAnotherTerminal(actualTerminalID: stranger)))
+    }
+
+    /// Reporting only — `.sessionGone` must never respawn or recreate. Making
+    /// tmux authoritative over the parked flag is the separate, riskier change
+    /// this deliberately stops short of (#586).
+    @Test func sessionGoneReportsWithoutMutatingTmuxOrTheRow() async throws {
+        let (db, _, terminalID) = try await setup()
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) },
+                               dryRunPaneSendTarget: { _, _ in .missing })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        _ = await coord.wake(terminalID: terminalID)
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(!joined.contains { $0.contains("respawn-window") || $0.contains("new-window") },
+                "sessionGone must not respawn or recreate anything; got: \(joined)")
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false)
+        #expect(after?.tmuxPaneID == "%0")
+    }
+
+    /// The safety property that makes this shippable without a spec. A probe
+    /// that merely FAILED proves nothing, so it must keep the benign historical
+    /// answer — never be read as a dead terminal. tmux calls fail spuriously
+    /// exactly when the box is loaded enough for the session to be alive.
+    @Test func unreadablePaneProbeFailsClosedToBenignNoOp() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in
+            throw TmuxError.timedOut(command: "tmux list-panes", timeout: .seconds(15))
+        })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
+    }
+
+    /// A live pane carrying no identity is left alone — refusal requires
+    /// POSITIVE disagreement, the same rule the send path follows.
+    @Test func wakeOnUnparkedRowWithLivePaneStaysBenignNoOp() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true,
+                               dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
+    }
+
+    /// A pane that answers with THIS terminal's own id agrees, so the row's
+    /// "awake" is supported and the benign no-op stands.
+    @Test func wakeOnUnparkedRowWhosePaneAgreesStaysBenignNoOp() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in
+            .live(terminalID: terminalID.uuidString)
+        })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
+    }
+
+    /// A parked row still takes the existing recovery path, not the new
+    /// reporting one — `.sessionGone` is reachable only from the unparked gate.
+    @Test func parkedRowWithGoneWindowStillRecoversRatherThanReporting() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
+                               dryRunPaneSendTarget: { _, _ in .missing })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+    }
+
     @Test func wakeUnknownTerminalNotFound() async throws {
         let (db, _, _) = try await setup()
         let result = await coordinator(db).wake(terminalID: UUID())
