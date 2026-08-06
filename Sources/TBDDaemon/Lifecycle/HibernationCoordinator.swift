@@ -11,9 +11,33 @@ public enum HibernateResult: Equatable, Sendable {
     case notFound
 }
 
+/// How an unparked terminal's pane disagreed with the row that claims it is
+/// awake. Only states tmux gave a positive answer for appear here; "the probe
+/// failed" is deliberately not a case, because it is not a disagreement.
+public enum UnparkedPaneDisagreement: Equatable, Sendable {
+    /// tmux cannot find the pane — it, its window, or the whole server is gone.
+    case paneMissing
+    /// The pane object survives (`remain-on-exit`) but its process has exited,
+    /// so the row's "awake" refers to a shell, not a session.
+    case processExited
+    /// The pane is alive but answers with a DIFFERENT terminal's id: this row's
+    /// coordinate went stale and now points at a stranger's pane after tmux
+    /// reused the id (#384). Someone else's live pane is not evidence that this
+    /// session is healthy.
+    case paneBelongsToAnotherTerminal(actualTerminalID: String)
+}
+
 public enum WakeResult: Equatable, Sendable {
     case ok
     case notHibernated   // idempotent no-op: nothing to wake
+    /// The row is NOT parked — TBD believes this terminal is awake — but its
+    /// pane says otherwise, so there is no live session for an "already awake"
+    /// answer to refer to. `detail` names which way it disagreed. Distinct from
+    /// `.notHibernated` so a caller can tell a benign idempotent no-op from a
+    /// terminal that needs recovery, and so a dropped `prompt` is reported
+    /// rather than silently discarded. Nothing is respawned — see
+    /// `classifyUnparkedWake` for why repair is a separate change.
+    case sessionGone(paneID: String, detail: UnparkedPaneDisagreement)
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
     case inFlight        // a wake for this terminal is already respawning
@@ -480,14 +504,85 @@ public actor HibernationCoordinator {
 
     // MARK: - Wake
 
+    /// Answer a wake aimed at a row TBD believes is already awake.
+    ///
+    /// The previous answer was an unconditional `.notHibernated` — "already
+    /// awake, nothing to do" — read straight off the DB parked flags. That is
+    /// a claim about a live tmux session made without ever looking at tmux,
+    /// and on a fleet it is often false: a window dies (server restart,
+    /// `kill-window`, a crash) without anything clearing the row. Measured on
+    /// a live fleet, 34 of 49 rows the DB called awake had no pane. The caller
+    /// then got neither a wake nor an error, and any `initialPrompt` was
+    /// silently dropped.
+    ///
+    /// So ask — using the SAME probe `terminal.send` asks with
+    /// (`TmuxManager.paneSendTarget`), rather than adding a second liveness
+    /// primitive that would drift from it. That probe already answers both
+    /// halves of the question: is a process there, and is the pane still ours.
+    ///
+    /// Only a POSITIVE disagreement downgrades the answer, exactly as on the
+    /// send path. A probe that merely threw keeps the benign historical no-op:
+    /// a failed tmux call proves nothing, and tmux calls fail spuriously
+    /// precisely when the machine is loaded enough for the session to be alive.
+    /// A pane carrying no identity at all is likewise left alone.
+    ///
+    /// This reports; it deliberately does NOT repair. Respawning an unparked
+    /// row would make tmux authoritative over the parked flag, and then one
+    /// false-negative probe destroys a live session's in-flight work.
+    /// Auto-recovery needs a human design decision and is tracked in #586, not
+    /// decided here. Recovery today stays the parked-row path below and the
+    /// explicit `terminal.recreateWindow` RPC.
+    private func classifyUnparkedWake(_ terminal: Terminal) async -> WakeResult {
+        // No worktree row means no server name to probe with — nothing can be
+        // proven, so keep the benign historical answer.
+        guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+            return .notHibernated
+        }
+        let target: PaneSendTarget
+        do {
+            target = try await tmux.paneSendTarget(
+                server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+        } catch {
+            // Couldn't ask. Fail closed to the benign answer.
+            return .notHibernated
+        }
+
+        let disagreement: UnparkedPaneDisagreement
+        switch target {
+        case .live(let paneTerminalID):
+            // No identity to compare, or it agrees — the historical no-op.
+            guard let paneTerminalID,
+                  paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
+            else { return .notHibernated }
+            disagreement = .paneBelongsToAnotherTerminal(actualTerminalID: paneTerminalID)
+        case .missing:
+            disagreement = .paneMissing
+        case .dead:
+            disagreement = .processExited
+        }
+
+        logger.warning("""
+            wake: terminal \(terminal.id, privacy: .public) is unparked but its pane \
+            \(terminal.tmuxPaneID, privacy: .public) on server \
+            \(worktree.tmuxServer, privacy: .public) disagrees \
+            (\(String(describing: disagreement), privacy: .public)) — reporting sessionGone \
+            instead of "already awake"
+            """)
+        return .sessionGone(paneID: terminal.tmuxPaneID, detail: disagreement)
+    }
+
     /// Respawn `claude --resume <sessionID>` in the hibernated terminal's
     /// kept-alive window. Idempotent: a non-hibernated terminal is a no-op, and
     /// concurrent wakes for the same terminal collapse to one respawn.
     ///
-    /// If the window is GONE (killed, or the whole tmux server died — e.g. a
-    /// machine reboot), the window is recreated (ensureServer + createWindow)
-    /// and the same resume command spawned there; the terminal row keeps its
-    /// identity and gets the new window/pane ids persisted.
+    /// For a PARKED row whose window is GONE (killed, or the whole tmux server
+    /// died — e.g. a machine reboot), the window is recreated (ensureServer +
+    /// createWindow) and the same resume command spawned there; the terminal
+    /// row keeps its identity and gets the new window/pane ids persisted.
+    ///
+    /// That recovery covers parked rows ONLY, because it lives downstream of
+    /// the parked check below. An UNPARKED row whose session died is reported
+    /// (`.sessionGone`) but not repaired — see `classifyUnparkedWake`.
     public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -495,7 +590,7 @@ public actor HibernationCoordinator {
         // Wake ANY parked row, not just `hibernatedAt`-marked ones: legacy rows
         // and the reconcile / recreate-window paths may carry only `suspendedAt`.
         // `clearHibernated` nils both columns, so this fully un-parks either.
-        guard terminal.isParked else { return .notHibernated }
+        guard terminal.isParked else { return await classifyUnparkedWake(terminal) }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
         guard !wakesInFlight.contains(terminalID) else { return .inFlight }
         guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {

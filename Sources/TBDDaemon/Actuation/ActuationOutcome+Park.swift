@@ -42,6 +42,15 @@ extension ActuationOutcome {
         case .inFlight: return .refused(.inFlight)
         // The terminal row is gone, or the directory its worktree named is.
         case .notFound, .worktreeMissing: return .refused(.notFound)
+        // The row claims awake but its pane disagrees. A stale coordinate that
+        // resolved to a live stranger is `targetMismatch` — the one reason that
+        // can say so; a gone or exited pane is the named target genuinely being
+        // absent.
+        case .sessionGone(_, let detail):
+            switch detail {
+            case .paneBelongsToAnotherTerminal: return .refused(.targetMismatch)
+            case .paneMissing, .processExited: return .refused(.notFound)
+            }
         // The row is there but cannot be woken as asked: nothing to resume, or
         // the profile it was pinned to no longer exists.
         case .noSessionID, .profileMissing: return .refused(.notEligible)
@@ -57,6 +66,13 @@ extension ActuationOutcome {
         case .noSessionID: return "No session ID to resume"
         case .respawnFailed(let reason): return reason
         case .worktreeMissing(let path): return "Worktree directory missing on disk: \(path)"
+        case .sessionGone(let paneID, let detail):
+            switch detail {
+            case .paneMissing: return "Pane \(paneID) is gone"
+            case .processExited: return "Pane \(paneID) survives but its process exited"
+            case .paneBelongsToAnotherTerminal(let actual):
+                return "Pane \(paneID) answers with a different terminal: \(actual)"
+            }
         case .profileMissing(let profileID):
             return "Profile no longer exists: \(profileID.uuidString)"
         }

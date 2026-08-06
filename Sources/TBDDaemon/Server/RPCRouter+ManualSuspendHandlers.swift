@@ -60,6 +60,12 @@ extension RPCRouter {
         case .ok, .notHibernated, .inFlight:
             // notHibernated / inFlight are benign no-ops for an idempotent wake.
             return .ok()
+        case .sessionGone(let paneID, let detail):
+            // Not benign: the row claims awake but its pane disagrees, so this
+            // resume reached nothing. Same honest answer as `terminal.wake`.
+            return RPCResponse(
+                error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
+                code: RPCErrorCode.terminalSessionGone.rawValue)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:

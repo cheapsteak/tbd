@@ -108,6 +108,12 @@ public enum RPCErrorCode: String, Sendable {
     /// terminal is mid-turn or holding a permission prompt AND its window is
     /// still alive. The CLI maps this to exit 2; `--force` drops the rails.
     case terminalBusy
+    /// A `terminal.wake` was aimed at a row TBD believes is awake whose pane
+    /// positively disagrees — it is gone, its process exited, or it answers
+    /// with another terminal's id. Reported as an error rather than the benign
+    /// `woken: false` no-op, because there is no live session behind the row:
+    /// the caller's `prompt` went nowhere and the terminal needs recovery.
+    case terminalSessionGone
 }
 
 // MARK: - RPC Method Names
