@@ -173,6 +173,95 @@ public struct GitManager: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Where a branch would push to, as resolved by git itself (`@{push}`).
+    ///
+    /// Deliberately tri-state. Collapsing "git says there is no push
+    /// destination" into the same value as "the lookup could not be performed"
+    /// would let a transient subprocess failure read as evidence about the
+    /// branch — and callers act on that evidence.
+    public enum PushBranchResolution: Sendable, Equatable {
+        /// `@{push}` resolved to this bare branch name (remote prefix stripped).
+        case resolved(String)
+        /// git ran and answered that the branch has no single push destination.
+        /// Carries no information about WHY: under `push.default = simple` a
+        /// branch tracking its base and a branch pushed under a different name
+        /// both land here ("cannot resolve 'simple' push to a single
+        /// destination").
+        case noPushDestination
+        /// The lookup itself failed (subprocess error, timeout, unparseable
+        /// ref). Says nothing about the branch — treat as no evidence.
+        case lookupFailed
+    }
+
+    /// Resolves `<branch>@{push}` — the remote branch this branch would push to.
+    ///
+    /// A `.resolved` answer is a strong positive signal about where a branch's
+    /// commits land, but it is NOT a discriminator between a head ref and a
+    /// base: under git's default `push.default = simple`, `@{push}` refuses
+    /// whenever the upstream's name differs from the local branch's — which is
+    /// true both for a branch tracking its base AND for a branch pushed under a
+    /// different name. Measured on real git (`simple`): base-tracking and
+    /// rename-push both report no destination, while a plainly-pushed branch
+    /// resolves. Under `push.default = upstream` all three resolve. Callers must
+    /// therefore treat `.noPushDestination` as "no information", never as
+    /// evidence that a branch tracks a base.
+    public func pushBranchName(worktreePath: String, branch: String) async -> PushBranchResolution {
+        await pushBranchName(worktreePath: worktreePath, branch: branch, executable: "/usr/bin/git")
+    }
+
+    /// Seam for the two `.lookupFailed` producers real git will not perform on
+    /// demand: an exit-0 answer that is not a ref, and a launch failure. Tests
+    /// substitute a stub executable; production always passes real git.
+    func pushBranchName(worktreePath: String, branch: String, executable: String) async -> PushBranchResolution {
+        do {
+            let output = try await run(
+                arguments: ["rev-parse", "--symbolic-full-name", "\(branch)@{push}"],
+                at: worktreePath,
+                executable: executable
+            )
+            guard let name = Self.pushBranchShortName(fromFullRef: output) else {
+                logger.debug("pushBranchName: unparseable @{push} ref for \(branch, privacy: .public)")
+                return .lookupFailed
+            }
+            return .resolved(name)
+        } catch is GitError {
+            // git ran to completion and refused: no single push destination.
+            // A repo-level failure (path gone, not a git repository) also exits
+            // non-zero and lands here. That is safe for the one consumer that
+            // deletes state: it additionally requires the branch's tracking
+            // config, read from the same repo by the same kind of subprocess, so
+            // a broken checkout yields no evidence there either.
+            return .noPushDestination
+        } catch {
+            // Timeout or launch failure — the lookup never produced an answer.
+            logger.debug("pushBranchName: lookup failed for \(branch, privacy: .public): \(String(describing: error), privacy: .public)")
+            return .lookupFailed
+        }
+    }
+
+    /// Strip a fully-qualified push ref down to the bare branch name it names on
+    /// the remote: `refs/remotes/origin/tbd/my-branch` → `tbd/my-branch`. Branch
+    /// names may contain `/`; remote names may not, so exactly one component is
+    /// dropped for the remote. A local `refs/heads/...` destination (a push ref
+    /// pointing at this repo) is handled too. Any other shape returns nil so the
+    /// caller degrades to "no evidence" rather than inventing a branch name.
+    static func pushBranchShortName(fromFullRef ref: String) -> String? {
+        let parts = ref
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        let dropped: [String]
+        if parts.count >= 4, parts[0] == "refs", parts[1] == "remotes" {
+            dropped = Array(parts.dropFirst(3))
+        } else if parts.count >= 3, parts[0] == "refs", parts[1] == "heads" {
+            dropped = Array(parts.dropFirst(2))
+        } else {
+            return nil
+        }
+        let name = dropped.joined(separator: "/")
+        return name.isEmpty ? nil : name
+    }
+
     /// Fetches from origin for the given branch, with optional timeout override.
     public func fetch(repoPath: String, branch: String, timeout: Duration? = nil) async throws {
         _ = try await run(arguments: ["fetch", "origin", branch], at: repoPath, timeout: timeout)

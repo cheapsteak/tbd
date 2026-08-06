@@ -78,6 +78,112 @@ struct GitManagerTests {
         cleanup()
     }
 
+    // MARK: - @{push} resolution (base vs head discrimination)
+
+    /// Wire `repoDir` to a fresh bare remote and push the default branch, so
+    /// `@{push}` has something real to resolve against.
+    private func addBareRemoteAndPushDefault() async throws -> String {
+        let base = try await git.detectDefaultBranch(repoPath: repoDir.path)
+        let remotePath = tempDir.appendingPathComponent("remote.git").path
+        try await GitManagerTests.shell("git init --bare '\(remotePath)'", at: tempDir)
+        try await GitManagerTests.shell("git remote add origin '\(remotePath)'", at: repoDir)
+        try await GitManagerTests.shell("git push -u origin \(base)", at: repoDir)
+        return base
+    }
+
+    @Test func pushBranchNameReportsNoDestinationForABranchTrackingItsBase() async throws {
+        // The shape every worktree branch cut from the base branch has: it
+        // TRACKS the base, and git refuses to derive a push destination from
+        // that. This is the discriminator the PR matcher relies on — the
+        // tracking config alone cannot tell a head ref from a base ref.
+        let base = try await addBareRemoteAndPushDefault()
+        try await GitManagerTests.shell("git checkout -b tbd/my-branch", at: repoDir)
+        try await GitManagerTests.shell("git config branch.tbd/my-branch.remote origin", at: repoDir)
+        try await GitManagerTests.shell("git config branch.tbd/my-branch.merge refs/heads/\(base)", at: repoDir)
+        try await GitManagerTests.shell("git config push.default simple", at: repoDir)
+
+        let resolution = await git.pushBranchName(worktreePath: repoDir.path, branch: "tbd/my-branch")
+
+        #expect(resolution == .noPushDestination)
+        cleanup()
+    }
+
+    @Test func pushBranchNameResolvesARenamePush() async throws {
+        // The one case a second head-ref candidate exists for: the branch is
+        // pushed under a different name, so its PR is only findable there.
+        _ = try await addBareRemoteAndPushDefault()
+        try await GitManagerTests.shell("git checkout -b local-x", at: repoDir)
+        try await GitManagerTests.shell("git push origin local-x:renamed-on-remote", at: repoDir)
+        try await GitManagerTests.shell("git config branch.local-x.remote origin", at: repoDir)
+        try await GitManagerTests.shell("git config branch.local-x.merge refs/heads/renamed-on-remote", at: repoDir)
+        try await GitManagerTests.shell("git config push.default upstream", at: repoDir)
+
+        let resolution = await git.pushBranchName(worktreePath: repoDir.path, branch: "local-x")
+
+        #expect(resolution == .resolved("renamed-on-remote"))
+        cleanup()
+    }
+
+    /// Write an executable stub that stands in for `git` in `pushBranchName`.
+    private func makeGitStub(named name: String, script: String) throws -> String {
+        let path = tempDir.appendingPathComponent(name).path
+        try "#!/bin/sh\n\(script)\n".write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        return path
+    }
+
+    @Test func pushBranchNameTreatsAnUnparseableAnswerAsLookupFailure() async throws {
+        // An exit-0 answer that is not a ref. Real git will not produce this on
+        // demand, but the arm matters: `.lookupFailed` is what STOPS the PR heal
+        // from deleting an attachment, so it must not be reachable only in
+        // theory. Anything but a ref means we learned nothing.
+        let stub = try makeGitStub(named: "git-garbage", script: "echo 'not-a-ref'")
+
+        let resolution = await git.pushBranchName(
+            worktreePath: repoDir.path, branch: "tbd/my-branch", executable: stub)
+
+        #expect(resolution == .lookupFailed)
+        cleanup()
+    }
+
+    @Test func pushBranchNameTreatsALaunchFailureAsLookupFailure() async throws {
+        // The other producer: the subprocess never runs at all.
+        let missing = tempDir.appendingPathComponent("no-such-git").path
+
+        let resolution = await git.pushBranchName(
+            worktreePath: repoDir.path, branch: "tbd/my-branch", executable: missing)
+
+        #expect(resolution == .lookupFailed)
+        cleanup()
+    }
+
+    @Test func pushBranchNameTreatsAGitRefusalAsNoPushDestination() async throws {
+        // The complement, held apart from the two above: git ran and answered.
+        let stub = try makeGitStub(
+            named: "git-refuses",
+            script: "echo \"fatal: cannot resolve 'simple' push to a single destination\" >&2; exit 128")
+
+        let resolution = await git.pushBranchName(
+            worktreePath: repoDir.path, branch: "tbd/my-branch", executable: stub)
+
+        #expect(resolution == .noPushDestination)
+        cleanup()
+    }
+
+    @Test func pushBranchShortNameStripsTheRemoteAndKeepsSlashesInTheBranch() {
+        #expect(GitManager.pushBranchShortName(fromFullRef: "refs/remotes/origin/tbd/my-branch\n")
+                == "tbd/my-branch")
+        #expect(GitManager.pushBranchShortName(fromFullRef: "refs/heads/local-only") == "local-only")
+    }
+
+    @Test func pushBranchShortNameRejectsAnUnexpectedShape() {
+        // An unparseable ref must degrade to "no evidence" (the caller maps nil
+        // to `.lookupFailed`) rather than invent a branch name.
+        #expect(GitManager.pushBranchShortName(fromFullRef: "origin/whatever") == nil)
+        #expect(GitManager.pushBranchShortName(fromFullRef: "refs/remotes/origin/") == nil)
+        #expect(GitManager.pushBranchShortName(fromFullRef: "") == nil)
+    }
+
     /// Regression test for a race in `GitManager.run()` where the readability handler
     /// did `availableData` and `accumulator.append` in two non-atomic steps,
     /// allowing `terminationHandler` to snapshot between them and drop the chunk.
