@@ -47,38 +47,6 @@ import Foundation
         #expect(await v.validate(repo: repo) == .missing)
     }
 
-    @Test func validateAllRefreshesAStaleDefaultBranch() async throws {
-        // The stored value is best-effort at `repo.add` time (detection failure
-        // falls back to "main") and goes stale when a project renames its default
-        // branch. PR matching uses it to tell a tracked base from a rename-push
-        // target, so the health pass — which already resolves HEAD — writes it back.
-        let url = try makeGitRepo()   // real default branch: main
-        defer { try? FileManager.default.removeItem(at: url) }
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(
-            path: url.path, displayName: "real", defaultBranch: "wrong-branch")
-
-        await RepoHealthValidator(git: GitManager()).validateAll(db: db)
-
-        #expect((try await db.repos.get(id: repo.id))?.defaultBranch == "main")
-        #expect((try await db.repos.get(id: repo.id))?.status == .ok)
-    }
-
-    @Test func validateAllLeavesTheDefaultBranchAloneWhenTheRepoIsUnreadable() async throws {
-        // No probe, no answer, no write: a missing repo must not have its stored
-        // default branch overwritten with a guess.
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(
-            path: "/this/path/does/not/exist/\(UUID().uuidString)",
-            displayName: "ghost",
-            defaultBranch: "develop")
-
-        await RepoHealthValidator(git: GitManager()).validateAll(db: db)
-
-        #expect((try await db.repos.get(id: repo.id))?.defaultBranch == "develop")
-        #expect((try await db.repos.get(id: repo.id))?.status == .missing)
-    }
-
     @Test func validateAllPersistsTransitions() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(

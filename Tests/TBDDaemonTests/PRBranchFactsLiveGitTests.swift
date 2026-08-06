@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
@@ -16,7 +17,6 @@ import TBDShared
 struct PRBranchFactsLiveGitTests {
 
     private struct Fixture {
-        let tempDir: URL
         let repoDir: URL
         let defaultBranch: String
     }
@@ -24,15 +24,19 @@ struct PRBranchFactsLiveGitTests {
     /// A repo with a bare origin and three branches covering the cases that
     /// matter: one tracking its base, one pushed under a different name, and one
     /// pushed under its own name.
-    private static func makeFixture() async throws -> Fixture {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    ///
+    /// Every command runs through `TestSupport.shell`, which THROWS on a
+    /// non-zero exit and fences out the developer's global git config. Both
+    /// matter more than usual here: a silently-failing fixture leaves a repo
+    /// with no commits and no remote-tracking refs, where every `@{push}`
+    /// degrades to "no destination" and both arms of this test pass while
+    /// proving nothing — precisely the failure mode the suite exists to catch.
+    private static func makeFixture(in tempDir: URL) async throws -> Fixture {
         let repoDir = tempDir.appendingPathComponent("repo")
         try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
         let remotePath = tempDir.appendingPathComponent("remote.git").path
 
         try await shell("git init", at: repoDir)
-        try await shell("git config user.email 'test@test.com'", at: repoDir)
-        try await shell("git config user.name 'Test'", at: repoDir)
         try await shell("git commit --allow-empty -m 'init'", at: repoDir)
         let base = try await GitManager().detectDefaultBranch(repoPath: repoDir.path)
         try await shell("git init --bare '\(remotePath)'", at: tempDir)
@@ -54,18 +58,13 @@ struct PRBranchFactsLiveGitTests {
         try await shell("git checkout -b plain", at: repoDir)
         try await shell("git push -u origin plain", at: repoDir)
 
-        return Fixture(tempDir: tempDir, repoDir: repoDir, defaultBranch: base)
-    }
+        // The fixture's own preconditions: a real commit and real
+        // remote-tracking refs. Without them every `@{push}` answer below is
+        // vacuous, so assert them rather than trusting the setup.
+        try await shell("git rev-parse --verify HEAD", at: repoDir)
+        try await shell("git rev-parse --verify refs/remotes/origin/renamed-on-remote", at: repoDir)
 
-    private static func shell(_ command: String, at directory: URL) async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
-        process.currentDirectoryURL = directory
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
+        return Fixture(repoDir: repoDir, defaultBranch: base)
     }
 
     /// Read the real facts for one branch and assemble the poll entry the PR
@@ -91,11 +90,14 @@ struct PRBranchFactsLiveGitTests {
     }
 
     @Test("candidates and heal behave identically under both push.default values",
+          .timeLimit(.minutes(1)),
           arguments: ["simple", "upstream"])
     func branchFactsDriveMatchingAndHealing(pushDefault: String) async throws {
-        let fixture = try await Self.makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.tempDir) }
-        try await Self.shell("git config push.default \(pushDefault)", at: fixture.repoDir)
+        // Registered BEFORE setup so a throwing fixture doesn't leak the dir.
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fixture = try await Self.makeFixture(in: tempDir)
+        try await shell("git config push.default \(pushDefault)", at: fixture.repoDir)
         let git = GitManager()
         let base = fixture.defaultBranch
 

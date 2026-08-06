@@ -648,6 +648,19 @@ struct PRStatusManagerTests {
         #expect(sameAsTracked == ["local-x", "renamed-on-remote"])
     }
 
+    @Test("branchCandidates drops a push branch that names the default branch")
+    func branchCandidatesDropsDefaultBranchPushTarget() {
+        // Under `push.default = upstream`, `@{push}` IS the upstream, so a
+        // base-tracking branch resolves straight to the default branch. Without
+        // this exclusion the base would be a head-ref candidate again for
+        // everyone on that config — the whole bug, reopened.
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main",
+            pushBranch: .resolved("main"))
+
+        #expect(candidates == ["tbd/my-branch"])
+    }
+
     @Test("branchCandidates drops the tracked branch when the default branch is unknown")
     func branchCandidatesWithoutDefaultBranch() {
         // Without knowing the base, a tracked-branch candidate risks the original
@@ -1581,11 +1594,14 @@ struct PRStatusManagerTests {
 
     @Test("headRefMismatchedMatches keeps a rename-push match under git's default push config")
     func headRefHealKeepsRenamePushMatch() {
-        // The dangerous case: with `push.default = simple` a rename-push reports
-        // NO push destination, and its tracked branch IS its own PR head — so
-        // "head is not a candidate" and "head is the tracked branch" both hold
-        // for a perfectly valid attachment. Only "the tracked branch is the
-        // repo's DEFAULT branch" separates it from a base-branch mis-attachment.
+        // With `push.default = simple` a rename-push reports NO push
+        // destination, so the tracked branch is the only thing that makes its PR
+        // findable — and it is offered as a candidate here because it is not the
+        // default branch, which is what stops the heal ("head is not a
+        // candidate" fails first). The condition that the tracked branch be the
+        // DEFAULT branch is what covers this shape when the default branch is
+        // unknown and no candidate can be offered: see
+        // headRefHealKeepsMatchWhenDefaultBranchUnknown.
         let wt = UUID()
         let node = prNode(number: 9, url: "https://github.com/acme/acme-prod/pull/9",
                           branch: "renamed-on-remote")

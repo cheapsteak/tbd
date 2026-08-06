@@ -15,45 +15,31 @@ public struct RepoHealthValidator: Sendable {
         self.git = git
     }
 
-    /// What one probe of a repo observed: the status it *should* have, and the
-    /// default branch git currently reports (nil when it could not be read).
-    struct Observation {
-        let status: RepoStatus
-        let defaultBranch: String?
-    }
-
     /// Returns the status the repo *should* have based on filesystem reality.
     /// Does not write to the database — caller is responsible for persisting
     /// any change.
     public func validate(repo: Repo) async -> RepoStatus {
-        await observe(repo: repo).status
-    }
-
-    /// The full probe. `validate` keeps its narrower signature for callers that
-    /// only act on status; `validateAll` uses this one so the default branch the
-    /// HEAD probe already resolved is persisted instead of discarded.
-    func observe(repo: Repo) async -> Observation {
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: repo.path, isDirectory: &isDir)
         if !exists || !isDir.boolValue {
             logger.debug("Repo \(repo.displayName, privacy: .public) at \(repo.path, privacy: .public) is missing on disk")
-            return Observation(status: .missing, defaultBranch: nil)
+            return .missing
         }
         if await !git.isGitRepo(path: repo.path) {
             logger.debug("Repo \(repo.displayName, privacy: .public) at \(repo.path, privacy: .public) exists but is not a git repo")
-            return Observation(status: .missing, defaultBranch: nil)
+            return .missing
         }
-        // detectDefaultBranch doubles as the HEAD-resolution probe: a repo whose
-        // HEAD does not resolve is `.missing`. If this ever grows network calls
+        // We use detectDefaultBranch as a HEAD-resolution probe — the result
+        // is discarded, we only care that the command succeeds (i.e. the repo
+        // is readable and HEAD is valid). If this ever grows network calls
         // (e.g. ls-remote), swap to a purpose-built local-only health probe.
-        let detected: String
         do {
-            detected = try await git.detectDefaultBranch(repoPath: repo.path)
+            _ = try await git.detectDefaultBranch(repoPath: repo.path)
         } catch {
             logger.debug("Repo \(repo.displayName, privacy: .public) HEAD did not resolve: \(error.localizedDescription, privacy: .public)")
-            return Observation(status: .missing, defaultBranch: nil)
+            return .missing
         }
-        return Observation(status: .ok, defaultBranch: detected)
+        return .ok
     }
 
     /// Validates every repo in the database, persisting status changes only
@@ -70,25 +56,13 @@ public struct RepoHealthValidator: Sendable {
             return
         }
         for repo in repos {
-            let observation = await observe(repo: repo)
-            if observation.status != repo.status {
+            let observed = await validate(repo: repo)
+            if observed != repo.status {
                 do {
-                    try await db.repos.updateStatus(id: repo.id, status: observation.status)
-                    logger.info("Repo \(repo.displayName, privacy: .public) transitioned \(repo.status.rawValue, privacy: .public) → \(observation.status.rawValue, privacy: .public)")
+                    try await db.repos.updateStatus(id: repo.id, status: observed)
+                    logger.info("Repo \(repo.displayName, privacy: .public) transitioned \(repo.status.rawValue, privacy: .public) → \(observed.rawValue, privacy: .public)")
                 } catch {
                     logger.error("validateAll: failed to update status for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
-            }
-            // Keep the stored default branch honest. It is best-effort at
-            // `repo.add` time (detection failure falls back to "main") and goes
-            // stale when a project renames its default branch — and PR matching
-            // uses it to tell a tracked base from a rename-push target.
-            if let detected = observation.defaultBranch, detected != repo.defaultBranch {
-                do {
-                    try await db.repos.updateDefaultBranch(id: repo.id, defaultBranch: detected)
-                    logger.info("Repo \(repo.displayName, privacy: .public) default branch \(repo.defaultBranch, privacy: .public) → \(detected, privacy: .public)")
-                } catch {
-                    logger.error("validateAll: failed to update default branch for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }
         }

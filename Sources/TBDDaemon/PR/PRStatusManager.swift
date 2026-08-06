@@ -828,15 +828,36 @@ public actor PRStatusManager {
     ///   default branch (measured on real git) and an unfiltered push candidate
     ///   would reopen this very bug for anyone using that config.
     ///
-    /// KNOWN RESIDUAL: a stacked branch tracking a non-default feature base
-    /// keeps its tracked-branch candidate (the base is not the default branch),
-    /// so it can still be attached to that base's PR. Same class as the bug this
-    /// fixes, narrower, and unobserved in the field — deliberately not addressed
-    /// here.
+    /// A nil `defaultBranch` leaves the local branch alone as the only candidate:
+    /// without knowing the base, no other name can be shown not to be one, and a
+    /// wrong head-ref candidate is the whole bug.
     ///
-    /// A nil `defaultBranch` therefore leaves the local branch alone as the only
-    /// candidate: without knowing the base, no other name can be shown not to be
-    /// one, and a wrong head-ref candidate is the whole bug.
+    /// KNOWN RESIDUALS, all narrow and all deliberately not addressed here:
+    ///
+    /// - A **stacked branch** tracking a non-default feature base keeps its
+    ///   tracked-branch candidate (that base is not the default branch), so it
+    ///   can still be attached to the base's PR. Same class as the bug this
+    ///   fixes, narrower, unobserved in the field.
+    /// - A **stale or wrong `repo.defaultBranch`** makes the exclusion miss, so
+    ///   the fix silently does not apply on that repo. The stored value is
+    ///   written once at repo registration and never refreshed: `repo.add`
+    ///   detection is best-effort, and TBD registers pre-existing checkouts
+    ///   rather than cloning them, so `refs/remotes/origin/HEAD` — the only
+    ///   authoritative source `git` offers locally — is usually absent and
+    ///   detection falls back to whatever branch is checked out. Re-probing it
+    ///   periodically was tried and reverted: the fallback makes it a
+    ///   current-branch reader, so a main checkout parked on a feature branch
+    ///   would rewrite the stored value on every daemon start and thrash a fact
+    ///   that also picks the base for every new worktree, the fresh-revive base,
+    ///   and the ahead/behind sweep.
+    /// - A **rename-push whose target is named like the default branch** (e.g. a
+    ///   fork PR pushed as `fix-thing:main`) is indistinguishable from a base
+    ///   attachment: the tracked branch is `main`, the repo default is
+    ///   legitimately `main`, and every heal condition holds on a PR that really
+    ///   is this branch's own. That loss is durable, not a missed poll — the
+    ///   candidate list will never offer `main` again, so neither
+    ///   `matchUnnumbered` nor `refresh()` can rediscover it. It needs the push
+    ///   target's name to equal the repo default, which is why it is accepted.
     static func branchCandidates(
         localBranch: String,
         upstreamBranch: String?,
@@ -1051,9 +1072,12 @@ public actor PRStatusManager {
     ///   how candidates happen to be built today.
     ///
     /// Note the asymmetry with `branchCandidates`, which is what makes leaning
-    /// on a stored `repo.defaultBranch` safe here even though it can be stale: a
-    /// wrong default branch costs a MISSED heal (nothing is destroyed), never a
-    /// wrong attachment. Do not "simplify" the two uses into one shared gate.
+    /// on a stored `repo.defaultBranch` safe here even though it can be stale
+    /// (see the residuals listed there): a wrong value costs a MISSED heal —
+    /// nothing is destroyed, and no attachment becomes wrong that was not
+    /// already wrong. What it does cost is silence: on a repo whose stored
+    /// default branch is wrong, this fix simply does not apply. Do not
+    /// "simplify" the two uses into one shared gate.
     ///
     /// A head ref that is neither a candidate nor the tracked default branch is
     /// left alone: unexplained, but not demonstrably wrong.
