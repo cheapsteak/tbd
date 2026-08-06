@@ -105,7 +105,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python3 -m pip install pytest jsonschema
+        run: python3 -m pip install pytest jsonschema pyyaml
 
       - name: Run review-script tests
         run: python3 -m pytest .github/workflows/claude-review-v2/tests/ -q
