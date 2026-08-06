@@ -165,31 +165,30 @@ struct TranscriptEstimatorAccuracyTests {
     /// ESTIMATOR uses is derived from the theme font, so it follows a host that
     /// differs; the fixture TEXT cannot, since where a given sentence breaks is a
     /// property of the size it was written at.
-    private static let calibratedBodyPointSize: CGFloat = 13
+    nonisolated private static let calibratedBodyPointSize: CGFloat = 13
 
     /// Whether this host runs at the text size the fixtures were calibrated for.
-    private static var hostIsAtCalibratedTextSize: Bool {
+    nonisolated private static var hostIsAtCalibratedTextSize: Bool {
         NSFont.preferredFont(forTextStyle: .body).pointSize == calibratedBodyPointSize
     }
 
-    private static var textSizePreconditionMessage: String {
-        "SKIPPED TranscriptEstimatorAccuracyTests fixture budgets: they are calibrated for a "
-            + "\(f(calibratedBodyPointSize)) pt system body font and this host renders at "
-            + "\(f(NSFont.preferredFont(forTextStyle: .body).pointSize)) pt, where the fixture "
-            + "sentences fall on different wrap boundaries. The estimator itself is font-derived "
-            + "and stays guarded by `wrapArithmeticStaysCalibrated`, which compares against "
-            + "measurement at whatever size the host runs. To pin this suite too, re-derive the "
-            + "fixture text and budgets at your size."
+    nonisolated private static var textSizePreconditionMessage: String {
+        "these fixtures are calibrated for a \(f(calibratedBodyPointSize)) pt system body font and "
+            + "this host renders at \(f(NSFont.preferredFont(forTextStyle: .body).pointSize)) pt, "
+            + "where the fixture sentences fall on different wrap boundaries. NOTE what this "
+            + "stands down: the entire BLOCK model — list and paragraph spacing, fenced and "
+            + "indented code, tables, headings, links, raw HTML, the usage badge and the "
+            + "AskUserQuestion card — is pinned only by these fixtures and by "
+            + "`structuredCorpusNeverMateriallyOverReserves`, which is generated and therefore "
+            + "coarse. `wrapArithmeticStaysCalibrated` covers the wrapped-line arithmetic ONLY: "
+            + "its corpus is single-paragraph prose with no newlines, so it sees none of the "
+            + "block model. To pin this suite too, re-derive the fixture text and budgets at "
+            + "your size."
     }
 
-    @Test("every row kind's estimate stays inside its point budget at both column widths")
+    @Test("every row kind's estimate stays inside its point budget at both column widths",
+          .enabled(if: hostIsAtCalibratedTextSize, Comment(rawValue: textSizePreconditionMessage)))
     func perKindErrorStaysWithinBudget() throws {
-        guard Self.hostIsAtCalibratedTextSize else {
-            // Loud, not silent: a skipped guard that says nothing is worse than a
-            // spurious red, because nobody notices it stopped guarding.
-            print(Self.textSizePreconditionMessage)
-            return
-        }
         let measurements = try Self.measureEveryKind()
         var failures: [String] = []
         let budgetByID = Dictionary(uniqueKeysWithValues: Self.budgets.map { ($0.id, $0) })
@@ -223,12 +222,9 @@ struct TranscriptEstimatorAccuracyTests {
             + "\n\n" + Self.table(measurements)))
     }
 
-    @Test("no row kind reserves more space than it measures, at either column width")
+    @Test("no row kind reserves more space than it measures, at either column width",
+          .enabled(if: hostIsAtCalibratedTextSize, Comment(rawValue: textSizePreconditionMessage)))
     func residualBiasKeepsCorrectionsGrowing() throws {
-        guard Self.hostIsAtCalibratedTextSize else {
-            print(Self.textSizePreconditionMessage)
-            return
-        }
         let measurements = try Self.measureEveryKind()
         // 0.5 pt of slack because `correctRowHeightIfNeeded` itself ignores
         // differences that small — below it there is no correction to have a
@@ -298,27 +294,233 @@ struct TranscriptEstimatorAccuracyTests {
         let total = exact + over + under
         let exactRate = Double(exact) / Double(total)
         let meanLineError = CGFloat(signedLineError) / CGFloat(total)
-        let summary = """
-            \(total) single-paragraph messages across 2 column widths × 2 roles: \
-            \(exact) exact, \(under) one line short, \(over) one line long \
-            (exact rate \(String(format: "%.1f", exactRate * 100))%, \
-            mean \(String(format: "%+.3f", meanLineError)) lines). \
-            Worst: \(Self.sf(worst?.delta ?? 0)) pt at width \(Self.f(worst?.width ?? 0)) \
-            on a \(worst?.text.count ?? 0)-character paragraph.
-            """
+        // Deliberately NOT gated on the host text size, unlike the fixture tests:
+        // it generates its corpus and compares against measurement, so it is one of
+        // the two things here that still guard anything on a large-text host. The
+        // thresholds were swept at 13 pt, so a red at another size may be
+        // re-calibration rather than regression — say so rather than let the reader
+        // guess.
+        let sizeCaveat = NSFont.preferredFont(forTextStyle: .body).pointSize
+            == Self.calibratedBodyPointSize
+            ? ""
+            : " NOTE: `wrapCalibration` was swept at \(Self.f(Self.calibratedBodyPointSize)) pt and "
+                + "this host renders at "
+                + "\(Self.f(NSFont.preferredFont(forTextStyle: .body).pointSize)) pt, so re-derive "
+                + "the factor before treating this as a regression."
+        let summary = "\(total) single-paragraph messages across 2 column widths x 2 roles: "
+            + "\(exact) exact, \(under) one line short, \(over) one line long (exact rate "
+            + "\(String(format: "%.1f", exactRate * 100))%, mean "
+            + "\(String(format: "%+.3f", meanLineError)) lines). Worst: \(Self.sf(worst?.delta ?? 0)) "
+            + "pt at width \(Self.f(worst?.width ?? 0)) on a \(worst?.text.count ?? 0)-character "
+            + "paragraph."
 
-        // Achieved: 94.1% exact, mean -0.011 lines, 34 one line short against 23 one
-        // line long, worst miss exactly one line.
         #expect(exactRate >= 0.92, Comment(rawValue: "the wrapped-line arithmetic has drifted off "
-            + "its calibration plateau. \(summary)"))
+            + "its calibration plateau. \(summary)\(sizeCaveat)"))
         #expect(meanLineError <= 0, Comment(rawValue: "the wrapped-line arithmetic now over-counts "
-            + "lines on average, so corrections shrink rows. \(summary)"))
+            + "lines on average, so corrections shrink rows. \(summary)\(sizeCaveat)"))
         #expect(under > over, Comment(rawValue: "the residual no longer leans toward the growing "
-            + "side. \(summary)"))
+            + "side. \(summary)\(sizeCaveat)"))
         // A miss is a wrap boundary landing on the wrong side, which is worth
         // exactly one rendered line. Anything larger is a modelling error.
         #expect(abs(worst?.delta ?? 0) <= Self.renderedLineHeight,
-                Comment(rawValue: "a paragraph missed by more than one rendered line. \(summary)"))
+                Comment(rawValue: "a paragraph missed by more than one rendered line. "
+                    + "\(summary)\(sizeCaveat)"))
+    }
+
+    // MARK: - Generated structured corpus
+
+    /// The counterpart to `wrapArithmeticStaysCalibrated`, and the answer to how
+    /// the link and raw-HTML over-reservations went unnoticed: they were unnoticed
+    /// because no HAND-WRITTEN fixture happened to contain a link or a `<details>`
+    /// block, and one fixture per structural branch will always have that hole.
+    /// That corpus is single-paragraph prose, so it sees the wrap arithmetic and
+    /// nothing else. This one generates whole MESSAGES out of randomly combined
+    /// blocks — prose, bullet and ordered lists, fenced and indented code, GFM
+    /// tables, headings, links, raw HTML, inline markup and blockquotes, at both
+    /// column widths, both roles, with and without a usage badge — and asserts the
+    /// property that actually matters rather than exactness.
+    ///
+    /// It cannot assert exactness: generated text lands on wrap boundaries all the
+    /// time, and every such landing is worth a whole rendered line. What it CAN
+    /// assert is that the estimator does not MATERIALLY over-reserve, because
+    /// over-reserving is the defect this whole guard exists for — a row that
+    /// shrinks when it realizes pulls unread content up into the reading area.
+    ///
+    /// Three thresholds, each sized just past what is achieved today:
+    ///
+    /// - no single message over-reserves by more than three rendered lines. A new
+    ///   unmodelled block kind shows up here first and loudly: disabling the
+    ///   raw-HTML branch takes the worst case to +288 pt;
+    /// - fewer than 9% of messages over-reserve at all (6.3% today). Disabling the
+    ///   link handling alone takes it to 17.6%, because that shape recurs;
+    /// - the mean signed error stays under +2 pt per message (+0.7 today).
+    ///
+    /// The residual is not noise and is worth knowing before re-tuning: 178 of the
+    /// 202 over-reservations are exactly one rendered line (+16) or one line plus a
+    /// list gap (+20), and the +20 family is the nested-list / loose-continuation
+    /// shape `chatBubbleEstimate` documents as deliberately unmodelled, where the
+    /// RENDERER collapses content this estimate correctly predicts.
+    ///
+    /// Ungated on host text size for the same reason as
+    /// `wrapArithmeticStaysCalibrated`: it measures rather than assumes, so it is
+    /// one of the two things still guarding the estimator when the fixture suites
+    /// stand down.
+    @Test("a generated corpus of structured messages never materially over-reserves")
+    func structuredCorpusNeverMateriallyOverReserves() throws {
+        var overReserving: [(label: String, exact: CGFloat, estimate: CGFloat, delta: CGFloat)] = []
+        var signedTotal: CGFloat = 0
+        var total = 0
+        var generator = SplitMix64(seed: 0x5EED_1234)
+
+        for _ in 0..<Self.corpusMessageCount {
+            let (shape, text) = Self.randomMessage(&generator)
+            for width in Self.widths {
+                for role in [TranscriptBubbleGeometry.Role.assistant, .user] {
+                    for badged in [false, true] {
+                        // A user prompt never carries a usage badge.
+                        let usage: TokenUsage? = (badged && role == .assistant)
+                            ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
+                            : nil
+                        let item: TranscriptItem = role == .user
+                            ? .userPrompt(id: "corpus", text: text, timestamp: nil)
+                            : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
+                        let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(item),
+                                                        badgeUsage: usage)
+                        let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
+                        let measured = TranscriptBubbleGeometry.rowHeight(
+                            blocksHeight: MessageBlockMeasurer().blocksHeight(
+                                TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: usage),
+                                bodyWidth: TranscriptBubbleGeometry.bodyWidth(
+                                    columnWidth: width, role: role)))
+                        total += 1
+                        signedTotal += estimate - measured
+                        if estimate - measured > 0.5 {
+                            overReserving.append((
+                                "\(shape) @\(Self.f(width)) \(role == .user ? "user" : "assistant")"
+                                    + (usage != nil ? " +badge" : ""),
+                                measured, estimate, estimate - measured))
+                        }
+                    }
+                }
+            }
+        }
+
+        let worst = overReserving.map(\.delta).max() ?? 0
+        let rate = Double(overReserving.count) / Double(total)
+        let mean = signedTotal / CGFloat(total)
+        var histogram: [Int: Int] = [:]
+        for row in overReserving { histogram[Int(row.delta.rounded()), default: 0] += 1 }
+        let bySize = histogram.sorted { $0.key < $1.key }
+            .map { "+\($0.key): \($0.value)" }.joined(separator: ", ")
+        let offenders = overReserving.sorted { $0.delta > $1.delta }.prefix(8)
+            .map { "  \($0.label): measured \(Self.f($0.exact)), estimate \(Self.f($0.estimate)), "
+                + Self.sf($0.delta) }
+            .joined(separator: "\n")
+        let summary = "\(total) generated messages (\(Self.corpusMessageCount) shapes x 2 widths "
+            + "x 2 roles x badge): \(overReserving.count) over-reserve "
+            + "(\(String(format: "%.1f", rate * 100))%), worst \(Self.sf(worst)) pt, mean "
+            + "\(Self.sf(mean)) pt. Over-reservations by size: \(bySize).\nWorst offenders:\n"
+            + offenders
+
+        // Achieved: worst +40 pt, rate 6.3% (202 of 3200), mean +0.7 pt.
+        #expect(worst <= 3 * Self.renderedLineHeight, Comment(rawValue: "a generated message "
+            + "over-reserved by more than three rendered lines, which is what a whole unmodelled "
+            + "block kind looks like. \(summary)"))
+        #expect(rate < 0.09, Comment(rawValue: "too many generated messages over-reserve — a "
+            + "structural shape has stopped being modelled. \(summary)"))
+        #expect(mean <= 2, Comment(rawValue: "the estimator now over-reserves on average across "
+            + "structured messages. \(summary)"))
+    }
+
+    private static let corpusMessageCount = 400
+
+    /// A deterministic PRNG, so the corpus is the same on every run and on every
+    /// machine — a fuzzer that finds a different defect each run cannot be a
+    /// regression guard.
+    private struct SplitMix64 {
+        private var state: UInt64
+        init(seed: UInt64) { state = seed }
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+        mutating func int(_ range: ClosedRange<Int>) -> Int {
+            range.lowerBound + Int(next() % UInt64(range.count))
+        }
+        mutating func pick<T>(_ items: [T]) -> T { items[int(0...(items.count - 1))] }
+    }
+
+    private static let corpusWords = ("the quick brown fox jumps over a lazy dog while nine bright "
+        + "ravens watch from the old stone wall and consider whether the transcript estimator will "
+        + "finally agree with the measurement it stands in for because a biased reservation reads "
+        + "to a reader as motion")
+        .split(separator: " ").map(String.init)
+
+    private static func corpusSentence(_ rng: inout SplitMix64, _ count: Int) -> String {
+        (0..<count).map { _ in rng.pick(corpusWords) }.joined(separator: " ")
+    }
+
+    /// One to five randomly chosen blocks, separated by blank lines. The label
+    /// names the blocks in order so a failure says which combination broke.
+    private static func randomMessage(_ rng: inout SplitMix64) -> (String, String) {
+        var names: [String] = []
+        var parts: [String] = []
+        for _ in 0...rng.int(0...4) {
+            let (name, text) = randomBlock(&rng)
+            names.append(name)
+            parts.append(text)
+        }
+        return (names.joined(separator: "+"), parts.joined(separator: "\n\n"))
+    }
+
+    private static func randomBlock(_ rng: inout SplitMix64) -> (String, String) {
+        switch rng.int(0...10) {
+        case 0:
+            return ("prose", corpusSentence(&rng, rng.int(3...60)))
+        case 1:
+            return ("list", (0...rng.int(1...5))
+                .map { _ in "- " + corpusSentence(&rng, rng.int(3...20)) }.joined(separator: "\n"))
+        case 2:
+            let count = rng.int(2...5)
+            return ("ordered", (1...count)
+                .map { index in "\(index). " + corpusSentence(&rng, rng.int(3...15)) }
+                .joined(separator: "\n"))
+        case 3:
+            let code = (0...rng.int(1...8)).map { _ in "let \(rng.pick(corpusWords)) = \(rng.int(0...999))" }
+            return ("fence", "```swift\n" + code.joined(separator: "\n") + "\n```")
+        case 4:
+            return ("indented", (0...rng.int(1...6))
+                .map { _ in "    let \(rng.pick(corpusWords)) = \(rng.int(0...999))" }
+                .joined(separator: "\n"))
+        case 5:
+            let columns = rng.int(2...4)
+            let header = "| " + (0..<columns).map { _ in rng.pick(corpusWords) }.joined(separator: " | ") + " |"
+            let separator = "| " + (0..<columns).map { _ in "---" }.joined(separator: " | ") + " |"
+            let rows = (0...rng.int(1...4)).map { _ in
+                "| " + (0..<columns).map { _ in rng.pick(corpusWords) }.joined(separator: " | ") + " |"
+            }
+            return ("table", ([header, separator] + rows).joined(separator: "\n"))
+        case 6:
+            return ("heading", String(repeating: "#", count: rng.int(1...3)) + " "
+                + corpusSentence(&rng, rng.int(2...8)))
+        case 7:
+            let path = (0...rng.int(1...6)).map { _ in rng.pick(corpusWords) }.joined(separator: "/")
+            return ("link", "See [\(corpusSentence(&rng, rng.int(1...4)))](https://example.com/\(path).md) "
+                + corpusSentence(&rng, rng.int(3...25)))
+        case 8:
+            return ("html", "<details>\n<summary>\(corpusSentence(&rng, 3))</summary>\n\n"
+                + corpusSentence(&rng, rng.int(5...20)) + "\n\n</details>")
+        case 9:
+            return ("quote", "> " + corpusSentence(&rng, rng.int(5...40)))
+        default:
+            return ("inline", corpusSentence(&rng, rng.int(3...15))
+                + " `\(rng.pick(corpusWords))_\(rng.pick(corpusWords))()` "
+                + corpusSentence(&rng, rng.int(3...15))
+                + " **\(rng.pick(corpusWords))** and *\(rng.pick(corpusWords))*.")
+        }
     }
 
     /// Height of one wrapped body line, read off the production renderer rather
