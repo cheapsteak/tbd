@@ -120,7 +120,13 @@ def test_the_session_prompt_explains_the_restored_directory() -> None:
 # workflow's banner, CLAUDE.md, docs/pr-review-gate.md, design spec §5) — none of
 # which a future edit has to read. Splitting the reviewer into
 # claude-code-review.yml + claude-code-review-legacy.yml is what created the
-# collision risk, so it is pinned here rather than left to review vigilance.
+# collision risk, so it is checked here rather than left to review vigilance.
+#
+# DEFENSE IN DEPTH, NOT A GATE. The job that runs this suite ("Review scripts
+# tests") is not among main's required contexts — those are `test`, `Lint` and
+# `claude-review` — so a PR that reintroduces a colliding job goes red here and
+# stays mergeable. This test makes the breakage visible and named; it does not
+# stop it. Making it stop anything means adding this job to the required list.
 
 
 def _load(path: Path) -> dict:
