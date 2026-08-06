@@ -1316,7 +1316,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 "tr", "track", "ul"
             ]
 
-            /// Whether `line` is a reference-link DEFINITION            /// Whether `line` is a reference-link DEFINITION — `[ref]: url` — which
+            /// Whether `line` is a reference-link DEFINITION — `[ref]: url` — which
             /// the renderer consumes and draws nothing for.
             private static func isLinkDefinition(_ line: String) -> Bool {
                 guard line.hasPrefix("[") else { return false }
