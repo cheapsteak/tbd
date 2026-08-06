@@ -213,8 +213,9 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   a review. This path writes NOTHING to the PR: it posts no comment and minimizes
   none. The prior review is still the current review of an unchanged diff, so it stays
   visible and unannotated, and the re-assertion is the check result itself. A new
-  human comment does **not** defeat the skip in the first version (accepted: a human
-  can re-request review by pushing or re-running the check).
+  human comment does **not** defeat the skip in the first version. Pushing a commit is
+  the only way to re-request a review: patch-id over a fixed merge base is
+  deterministic, so re-running the check recomputes the same value and skips again.
 - **Skip fail-direction**: the skip fires only when the comment fetch succeeded, both
   markers parse, and the recorded verdict is exactly `APPROVE` or `REJECT`. Any other
   state — fetch error, no prior review comment, missing or malformed marker,
@@ -360,11 +361,16 @@ restored from the base branch, so a repair reaches the gate only after it merges
 is why the recovery path below is an admin merge rather than a re-run.
 
 **Rollback trigger.** Requiredness is reverted — this job renamed back and the
-single-session reviewer's `pull_request_target:` trigger restored — if the gate fails
-closed for infrastructure reasons rather than on a REJECT verdict on three PRs inside a
-week, or if one such failure blocks a merge for longer than a working day. Recovering a
+single-session reviewer's `pull_request_target:` trigger restored — when failures that
+are not REJECT verdicts stop being isolated: when admin-merging around the gate has
+become the routine way changes land rather than an occasional recovery. Recovering a
 single blocked PR does not need the rollback: an admin merge of the fix is enough, and
 is the expected first response.
+
+The condition is deliberately a judgment rather than a count. Nothing enforces it, and
+the decision it informs is a human's; a number would only invite arguing that this
+week's failures fell one short. What it has to do is make an obvious pattern impossible
+to keep explaining away one PR at a time.
 
 The naming follows from how GitHub matches a required check: **by job name, not by
 workflow file**. That makes the job key the load-bearing identifier and gives the

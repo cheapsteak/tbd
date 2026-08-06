@@ -286,12 +286,20 @@ jobs:
           # --paginate concatenates one JSON array per page; `jq -s add` merges
           # them. Comment bodies are untrusted text and are only ever moved
           # between files by jq — never interpolated into the shell.
-          jq -s -r --arg login "$APP_LOGIN" '
+          body_file="$RUNNER_TEMP/claude-review-v2/prior-review-body.txt"
+          if ! jq -s -r --arg login "$APP_LOGIN" '
             add
             | map(select(.user.login == $login and (.body | startswith("<!-- claude-review-v2 -->"))))
             | (last | .body) // ""
-          ' "$all_comments" > "$RUNNER_TEMP/claude-review-v2/prior-review-body.txt"
-          echo "Wrote prior v2 review-comment body ($(wc -c < "$RUNNER_TEMP/claude-review-v2/prior-review-body.txt") bytes) for $APP_LOGIN."
+          ' "$all_comments" > "$body_file"; then
+            # A truncated-but-present file would read as the honest "no prior
+            # comment" and full-review for the wrong reason. Remove it so
+            # prepare.py sees "fetch failed" — same full review, true reason.
+            rm -f "$body_file"
+            echo "::warning::Could not parse the fetched PR comments — not writing a prior-review-body file. prepare.py fails toward a full review."
+            exit 0
+          fi
+          echo "Wrote prior v2 review-comment body ($(wc -c < "$body_file") bytes) for $APP_LOGIN."
 
       - name: Prepare (skip decision + discussion context)
         id: prepare
