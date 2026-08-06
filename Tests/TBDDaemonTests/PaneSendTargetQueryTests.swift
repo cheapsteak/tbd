@@ -12,6 +12,10 @@ import Testing
 @Suite("Pane send-target query")
 struct PaneSendTargetQueryTests {
 
+    /// A stand-in for the only thing TBD ever plants in `TBD_TERMINAL_ID`: a
+    /// terminal row's `id.uuidString`.
+    static let plantedID = "6E4B1C2A-9F03-4D57-8B11-2C7E5A0D9F44"
+
     // MARK: - Command builders
 
     @Test("the target query asks one list-panes for all four facts")
@@ -66,22 +70,24 @@ struct PaneSendTargetQueryTests {
 
     @Test("the stamped pane option wins over the start command")
     func parseStampedWins() {
-        let line = "%7\t0\tSTAMPED\t/bin/zsh -ic \"export TBD_TERMINAL_ID='INLINED'; claude\"\n"
+        let line = "%7\t0\tSTAMPED\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
         #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7") == .live(terminalID: "STAMPED"))
     }
 
     @Test("an unstamped pane still answers from its start command")
     func parseFallsBackToStartCommand() {
-        let line = "%7\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='INLINED'; claude\"\n"
-        #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7") == .live(terminalID: "INLINED"))
+        let line = "%7\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
+        #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7")
+            == .live(terminalID: Self.plantedID))
     }
 
     /// The start command is last precisely so its own tabs and separators stay
     /// inside it — the split takes the remainder rather than a fifth field.
     @Test("a tab inside the start command does not split it into a fifth field")
     func parseStartCommandWithTab() {
-        let line = "%7\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='ID9'; printf 'a\tb'\"\n"
-        #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7") == .live(terminalID: "ID9"))
+        let line = "%7\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; printf 'a\tb'\"\n"
+        #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7")
+            == .live(terminalID: Self.plantedID))
     }
 
     // MARK: - Selecting the pane the send actually named
@@ -143,17 +149,10 @@ struct PaneSendTargetQueryTests {
     @Test("the quoted export form TBD actually plants is read back exactly")
     func resolveQuotedExport() {
         // The literal shape `newWindowCommand` produces from the `env` map.
-        let command = "/bin/zsh -ic \"export TBD_TERMINAL_ID='9C1E-AB'; "
+        let command = "/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; "
             + "export TBD_WORKTREE_ID='11'; claude\""
-        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command) == "9C1E-AB")
-    }
-
-    @Test("an unquoted planted value stops at the first separator")
-    func resolveUnquoted() {
-        #expect(TmuxManager.resolvePaneTerminalID(
-            paneOption: "", startCommand: "env TBD_TERMINAL_ID=9C1E-AB claude") == "9C1E-AB")
-        #expect(TmuxManager.resolvePaneTerminalID(
-            paneOption: "", startCommand: "TBD_TERMINAL_ID=9C1E-AB; claude") == "9C1E-AB")
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
+            == Self.plantedID)
     }
 
     @Test("a pane carrying neither source resolves to nil, never to a guess")
@@ -163,5 +162,98 @@ struct PaneSendTargetQueryTests {
         #expect(TmuxManager.resolvePaneTerminalID(paneOption: "   ", startCommand: "") == nil)
         #expect(TmuxManager.resolvePaneTerminalID(
             paneOption: "", startCommand: "/bin/zsh -ic \"export TBD_TERMINAL_ID=''; vim\"") == nil)
+    }
+
+    // MARK: - User-authored text in the start command cannot forge an identity
+
+    /// Both spawn paths inline the env map the same way, so the anchor the
+    /// resolver looks for holds for the in-place profile swap too. Asserted
+    /// against the builders rather than a hand-written literal, because the
+    /// resolver's narrowness is only safe while this stays true.
+    @Test("both spawn paths emit the assignment shape the resolver anchors on")
+    func bothSpawnPathsEmitTheAnchor() throws {
+        let env = ["TBD_TERMINAL_ID": Self.plantedID]
+        let spawned = try #require(TmuxManager.newWindowCommand(
+            server: "tbd-acme", session: "main", cwd: "/tmp", shellCommand: "claude",
+            env: env).last)
+        let respawned = try #require(TmuxManager.respawnWindowCommand(
+            server: "tbd-acme", windowID: "@3", cwd: "/tmp", shellCommand: "claude",
+            env: env).last)
+        #expect(spawned.contains(TmuxManager.terminalIDExportAnchor))
+        #expect(respawned.contains(TmuxManager.terminalIDExportAnchor))
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: spawned)
+            == Self.plantedID)
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: respawned)
+            == Self.plantedID)
+    }
+
+    /// The env map is inlined sorted by key, and `TBD_PROMPT_INSTRUCTIONS`
+    /// carries a repo's arbitrary user-authored custom instructions — so it is
+    /// inlined BEFORE `TBD_TERMINAL_ID` and any unanchored substring search
+    /// reads the user's prose as the pane's identity. A pane that misreports
+    /// its identity is refused as a stranger for the whole life of its window.
+    @Test("instructions containing the bare env-var name do not poison resolution")
+    func resolveIgnoresBareNameInInstructions() throws {
+        let command = try #require(TmuxManager.newWindowCommand(
+            server: "tbd-acme", session: "main", cwd: "/tmp", shellCommand: "claude",
+            env: [
+                "TBD_PROMPT_INSTRUCTIONS":
+                    "When paging a sibling, read TBD_TERMINAL_ID= from its pane env first.",
+                "TBD_TERMINAL_ID": Self.plantedID,
+            ]).last)
+        // The decoy really does precede the real assignment in the emitted string.
+        let decoy = try #require(command.range(of: "TBD_TERMINAL_ID="))
+        let real = try #require(command.range(of: TmuxManager.terminalIDExportAnchor))
+        #expect(decoy.lowerBound < real.lowerBound)
+
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
+            == Self.plantedID)
+    }
+
+    /// The same hazard one step further: prose that spells the assignment out
+    /// with a quoted value, so an anchored-but-first-match-only search would
+    /// hand back the quoted garbage. Scanning every occurrence steps over it.
+    @Test("instructions containing a quoted decoy value do not poison resolution")
+    func resolveStepsOverQuotedDecoy() throws {
+        let command = try #require(TmuxManager.newWindowCommand(
+            server: "tbd-acme", session: "main", cwd: "/tmp", shellCommand: "claude",
+            env: [
+                "TBD_PROMPT_INSTRUCTIONS":
+                    "Never run: export TBD_TERMINAL_ID='not-a-uuid' — it breaks routing.",
+                "TBD_TERMINAL_ID": Self.plantedID,
+            ]).last)
+        // The quote-escaping leaves a complete anchor inside the instructions.
+        #expect(command.ranges(of: TmuxManager.terminalIDExportAnchor).count == 2)
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
+            == Self.plantedID)
+
+        // The same property stated directly, independent of the escaping rules.
+        let handWritten = "/bin/zsh -ic \"export TBD_TERMINAL_ID='decoy'; "
+            + "export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\""
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: handWritten)
+            == Self.plantedID)
+    }
+
+    /// Fail-open on a value that is not a terminal id at all: nil means "this
+    /// pane gave no answer", and the send proceeds. Returning the garbage would
+    /// be a positive disagreement and refuse a healthy pane.
+    @Test("a non-UUID value in the real slot resolves to nil, not to garbage")
+    func resolveRejectsNonUUIDValue() {
+        let command = "/bin/zsh -ic \"export TBD_TERMINAL_ID='not-a-uuid'; claude\""
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command) == nil)
+        // Truncated: the anchor is there but the quote never closes.
+        #expect(TmuxManager.resolvePaneTerminalID(
+            paneOption: "", startCommand: "export TBD_TERMINAL_ID='\(Self.plantedID)") == nil)
+    }
+
+    /// The pane-option path never reaches the start-command parser, so no
+    /// amount of user text in the command can influence a stamped pane.
+    @Test("the stamped pane option is unaffected by decoys in the start command")
+    func resolveStampWinsOverDecoys() {
+        let command = "/bin/zsh -ic \"export TBD_PROMPT_INSTRUCTIONS='"
+            + "export TBD_TERMINAL_ID=\(Self.plantedID)'; export TBD_TERMINAL_ID='"
+            + "11111111-2222-3333-4444-555555555555'; claude\""
+        #expect(TmuxManager.resolvePaneTerminalID(paneOption: "STAMPED", startCommand: command)
+            == "STAMPED")
     }
 }
