@@ -253,7 +253,39 @@ struct TerminalSendDispatchTests {
         let response = try await send(fixture, text: "ls", submit: true, verify: true)
 
         #expect(!response.success)
-        #expect(response.error?.contains("keeps no transcript") == true)
+        #expect(response.error?.contains("shell session") == true)
+        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.verifier.armings.isEmpty)
+        let outcome = try lastOutcome(at: fixture.logPath)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
+    }
+
+    /// Codex is an agent, so it gets attribution — a composer does not execute
+    /// the tag, and knowing who is addressing you is worth having on any agent.
+    @Test("a codex target still receives the envelope")
+    func codexTargetGetsTheEnvelope() async throws {
+        let fixture = try await makeFixture(kind: .codex)
+        #expect(try await send(fixture, text: "status?", submit: true).success)
+
+        let rowID = try #require(try requestRow(at: fixture.logPath)["id"] as? String)
+        #expect(fixture.pastes.pastes == [
+            "<tbd-dispatch id=\"\(rowID)\" from=\"anonymous\"/>\nstatus?"
+        ])
+    }
+
+    /// But it cannot be verified. §12 gives Codex a different adapter — the
+    /// app-server protocol's in-protocol acknowledgement — and this slice
+    /// implements only the Claude transcript read, which would answer
+    /// `undetermined` forever. Refuse rather than promise evidence the target
+    /// cannot produce, exactly as for a shell.
+    @Test("--verify against a codex target is refused until its adapter exists")
+    func verifyAgainstCodexRefused() async throws {
+        let fixture = try await makeFixture(kind: .codex)
+        let response = try await send(fixture, text: "status?", submit: true, verify: true)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("only") == true)
         #expect(fixture.pastes.pastes.isEmpty)
         #expect(fixture.verifier.armings.isEmpty)
         let outcome = try lastOutcome(at: fixture.logPath)

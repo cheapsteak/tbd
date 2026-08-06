@@ -50,6 +50,17 @@ private final class ScriptedObservationSource: DeliveryObservationSource, @unche
         self.answers = answers
     }
 
+    /// Re-script the fake after construction. The envelope needle is composed
+    /// from the act's id, and the log mints that id only once the harness
+    /// exists — so a test that wants "the envelope IS there" has to say so
+    /// after seeding.
+    func scriptEnvelope(for id: String, state: TerminalActivityState) {
+        lock.withLock {
+            answers = [Answer.envelope(for: id, state: state)]
+            round = 0
+        }
+    }
+
     var factsCalls: Int { lock.withLock { _factsCalls } }
     var tailReads: Int { lock.withLock { _tailReads } }
     var requestedWindows: [Int] { lock.withLock { _requestedWindows } }
@@ -598,7 +609,10 @@ struct DeliveryVerifierTests {
 
         await harness.verifier.replayMissedObservations(activeSegmentPath: harness.logPath)
 
-        #expect(try results(at: harness.logPath) == ["dispatched", "not-landed"])
+        // `undetermined`, not `not-landed`: a replayed act can be arbitrarily
+        // old, so a bounded tail that finds nothing proves nothing. See
+        // `replayNeverAssertsNonDelivery`.
+        #expect(try results(at: harness.logPath) == ["dispatched", "undetermined"])
         let observation = try #require(try rows(at: harness.logPath).last)
         #expect(observation["confirms"] as? String == id)
         // §12 leaves repair to playbook judgment, and a payload whose premise
@@ -643,6 +657,68 @@ struct DeliveryVerifierTests {
         await harness.verifier.replayMissedObservations(activeSegmentPath: harness.logPath)
         #expect(try results(at: harness.logPath) == ["dispatched"])
         #expect(harness.source.factsCalls == 0)
+    }
+
+    /// The replay can confirm a landing but must never assert a non-delivery.
+    ///
+    /// The 64 KiB tail is sound for the one-minute re-check because nothing can
+    /// push a just-pasted envelope out of it without the session being
+    /// `.working`. A replayed act has no such bound — it can be a day old, and
+    /// real transcripts here run to megabytes — so the same absence proves
+    /// nothing, while `activityState` is still whatever it was when the daemon
+    /// died. Claiming `not-landed` from that would manufacture a loud
+    /// non-delivery verdict about a payload that very likely landed.
+    @Test("a replayed observation reads an absent envelope as undetermined, never not-landed")
+    func replayNeverAssertsNonDelivery() async throws {
+        let dispatchedAt = Self.fixedNow
+        let bootedAt = dispatchedAt.addingTimeInterval(86_400)
+        let harness = try makeHarness(
+            answers: [.silence(state: .idle)], now: bootedAt, logNow: dispatchedAt)
+        let actID = try await seedVerifiedDispatch(harness, dispatchedAt: dispatchedAt)
+
+        await harness.verifier.replayMissedObservations(activeSegmentPath: harness.logPath)
+
+        // The live timer would have called this not-landed and retried; the
+        // replay may not, and re-delivers nothing either way.
+        #expect(try results(at: harness.logPath) == ["dispatched", "undetermined"])
+        #expect(harness.redeliveries.calls.isEmpty)
+        let row = try #require(try rows(at: harness.logPath).last)
+        #expect(row["confirms"] as? String == actID)
+        #expect((row["error"] as? String)?.contains("absence is not evidence") == true)
+    }
+
+    /// Finding the envelope late is still positive evidence — the replay is
+    /// only barred from concluding the negative.
+    @Test("a replayed observation still confirms a landing when the envelope is there")
+    func replayStillConfirmsALanding() async throws {
+        let dispatchedAt = Self.fixedNow
+        let bootedAt = dispatchedAt.addingTimeInterval(86_400)
+        let harness = try makeHarness(
+            answers: [.silence(state: .idle)], now: bootedAt, logNow: dispatchedAt)
+        let actID = try await seedVerifiedDispatch(harness, dispatchedAt: dispatchedAt)
+        harness.source.scriptEnvelope(for: actID, state: .working)
+
+        await harness.verifier.replayMissedObservations(activeSegmentPath: harness.logPath)
+
+        #expect(try results(at: harness.logPath) == ["dispatched", "landed-and-acting"])
+        #expect(harness.redeliveries.calls.isEmpty)
+    }
+
+    /// A verified send whose observation never ran — the replay's work list.
+    @discardableResult
+    private func seedVerifiedDispatch(
+        _ harness: Harness, dispatchedAt: Date
+    ) async throws -> String {
+        let log = ActuationLog(path: harness.logPath, now: { dispatchedAt })
+        var request = ActuationRow(actor: .anonymous, kind: .send)
+        request.method = RPCMethod.terminalSend
+        request.target = .local(worktree: UUID(), terminal: Self.terminal)
+        request.message = "status?"
+        request.submit = true
+        request.verify = true
+        let id = try await log.appendRequest(request)
+        await log.appendOutcome(confirms: id, result: .dispatched)
+        return id
     }
 
     /// The replay's window is the active segment. An act from a rotated day is

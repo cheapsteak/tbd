@@ -1210,7 +1210,9 @@ public final class TBDDatabase: Sendable {
         // migration is ever needed to flip the default later.
         //
         // The flag does not gate the dispatch envelope — attribution rides
-        // every text send regardless (§12).
+        // every text send to an agent regardless, verified or not (§12).
+        // Whether a target gets one at all is a property of the target: a shell
+        // would execute the tag, so it receives the text alone.
         migrator.registerMigration("v69_config_delivery_verification") { db in
             try db.addColumnIfMissing(
                 table: "config", column: "delivery_verification_enabled",

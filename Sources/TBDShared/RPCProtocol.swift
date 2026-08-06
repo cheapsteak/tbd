@@ -1510,8 +1510,9 @@ public struct TerminalListParams: Codable, Sendable {
 /// submitting, and `--submit` is not deprecated.
 public struct TerminalSendParams: Codable, Sendable {
     public let terminalID: UUID
-    /// The message, verbatim. Delivered behind a `<tbd-dispatch …/>` envelope
-    /// line (§12); the record stores what the caller wrote, not the envelope.
+    /// The message, verbatim. Delivered to an agent session behind a
+    /// `<tbd-dispatch …/>` envelope line (§12) and to a shell as-is; either way
+    /// the record stores what the caller wrote, not the envelope.
     /// An empty string keeps its existing meaning: nothing is pasted, and a
     /// bare `--submit` still presses Enter.
     public let text: String?

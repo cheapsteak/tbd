@@ -91,6 +91,41 @@ struct ActuationRecordReaderTests {
         #expect(reader.readRows().map { $0.message } == ["day one", "day two", "day three"])
     }
 
+    /// The one case rotation's collision handling exists for, which plain name
+    /// order gets exactly backwards.
+    ///
+    /// `ActuationLog.rotationDestination` leaves the earlier segment as
+    /// `actuations-<day>.jsonl` and names the later one `actuations-<day>-1.jsonl`,
+    /// and `-` (0x2D) sorts before `.` (0x2E) — so `.sorted()` returns the later
+    /// segment first. That writer chose a numeric suffix over concatenation
+    /// precisely so nobody's record would be silently reordered, and reading it
+    /// back by name would reorder it anyway. `DeliveryRecord.statuses` now reads
+    /// outcomes in record order, so this is no longer cosmetic.
+    @Test("a same-day collision segment reads after the segment it followed")
+    func sameDayCollisionSegmentsReadInWriteOrder() async throws {
+        let directory = try Self.makeDirectory()
+        let path = directory.appendingPathComponent("actuations.jsonl").path
+        for (name, message) in [
+            ("actuations-2026-08-05.jsonl", "earlier"),
+            ("actuations-2026-08-05-1.jsonl", "later"),
+            ("actuations-2026-08-06.jsonl", "next day"),
+        ] {
+            var row = sendRow(message: message)
+            row.id = message
+            row.ts = "2026-08-05T12:00:00.000Z"
+            let line = try JSONEncoder().encode(row) + Data("\n".utf8)
+            try line.write(to: directory.appendingPathComponent(name))
+        }
+
+        let reader = ActuationRecordReader(activePath: path)
+        #expect(reader.segmentPaths().map { ($0 as NSString).lastPathComponent } == [
+            "actuations-2026-08-05.jsonl",
+            "actuations-2026-08-05-1.jsonl",
+            "actuations-2026-08-06.jsonl",
+        ])
+        #expect(reader.readRows().map { $0.message } == ["earlier", "later", "next day"])
+    }
+
     @Test("a record with nothing in it yet reads as no rows, not as a failure")
     func absentRecordReadsEmpty() {
         let reader = ActuationRecordReader(

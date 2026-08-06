@@ -376,18 +376,24 @@ does not read a text payload; it records it verbatim — every send lands in
 TBD's actuation log (`~/tbd/actuations.jsonl`) with the caller identity as
 declared, and a caller with no identity is logged as anonymous.
 
-Every text payload is delivered under a one-line envelope naming the
+A text payload sent to an agent is delivered under a one-line envelope naming the
 actuation row and that caller —
 `<tbd-dispatch id="a3f1b2c3d4e5" from="supervisor:acme-platform"/>` on its
 own line, then your text verbatim — so the receiving agent sees who is
 addressing it and the transcript carries an identifier the record can join
-on. It rides every text send, verified or not: a script of your own that
-declares no identity still delivers one, reading `from="anonymous"`. A keys
-payload carries no envelope.
+on. It rides every text send to an agent, verified or not: a script of your
+own that declares no identity still delivers one, reading `from="anonymous"`.
+A keys payload carries no envelope, and neither does a send to a plain shell
+pane — nothing there reads the tag, and `--submit` would run it as a command
+line of its own, so a shell receives your text alone.
 
 `--verify` opts into landing confirmation — a tail read of the target
 transcript's JSONL for that envelope, with the re-check deadline as its
-default timeout. It requires `--submit`, since text left standing in a
+default timeout. It is available for **Claude sessions only** — a shell keeps
+no transcript to observe, and a Codex session's acknowledgement arrives by a
+different mechanism that is not built yet, so asking to verify either is
+refused rather than accepted and answered *undetermined* forever. It
+requires `--submit`, since text left standing in a
 composer never enters the conversation and so can never reach a transcript,
 and it is refused with `--keys`, which leaves no transcript trace to read,
 and with an empty `--text`, which pastes nothing and so writes no envelope

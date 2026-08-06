@@ -2516,10 +2516,18 @@ actuation row's ID and the identity the row was attributed to —
 `<tbd-dispatch id="a3f1" from="supervisor:acme-web"/>`, then the message
 verbatim — which doubles as honest attribution: the receiving agent sees who
 is addressing it, down to `from="anonymous"` when the caller declared no
-identity. The envelope rides every text send, `--verify` or not, because a
-prefix that appears only sometimes is one no reader can rely on. A keys
-payload carries none: a key sequence has nowhere to put a line of text, and
-typing one ahead of an interrupt would itself be an intervention. That is
+identity. The envelope rides every text send to an agent, `--verify` or not,
+because a prefix that appears only sometimes is one no reader can rely on.
+Two targets get none. A keys payload carries no envelope: a key sequence has
+nowhere to put a line of text, and typing one ahead of an interrupt would
+itself be an intervention. And a **shell** session receives the text alone —
+`tbd terminal send` into a plain shell pane is a supported thing to do, and
+every property that makes the envelope worth having is a property of an
+agent: nothing in a shell reads the tag, no transcript records it, there is
+nothing to join back to, and a submitted line would simply be executed. The
+envelope is unconditional along the axis that matters — whether delivery is
+being verified — and conditional only on the target being something it means
+anything to. That is
 why `--verify` and `--keys` are refused together (§3) — keys reach no
 transcript, so there is no observation to be made.
 No second ID namespace exists; the row ID is the identifier, so dispatch,
@@ -2568,8 +2576,19 @@ replay below — stands behind a daemon config column,
 request went unhonored rather than receiving a quiet unverified send. A
 caller that asked for confirmation must never be answered with a silence
 that reads like one. The envelope is deliberately outside the flag —
-attribution belongs on every dispatch, and a prefix that comes and goes with
-a config column is worse than one that is always there.
+attribution belongs on every dispatch that carries one, and a prefix that
+comes and goes with a config column is worse than one that is always there.
+
+Verification is narrower than the envelope, and narrower still than the
+fleet. It is available where an adapter exists that can actually answer:
+today that is a Claude session, whose harness writes the submitted message
+into its transcript JSONL. A shell keeps no transcript, and the Codex
+adapter's answer comes from the app-server protocol's in-protocol
+acknowledgement rather than from an envelope — a different mechanism, and
+one that is not built. Asking to verify either is refused rather than
+accepted and quietly answered *undetermined* forever, for the reason the
+whole section exists: promising evidence a target cannot produce rebuilds
+the silent-failure class one layer up.
 
 That one full attempt — adapter fallback and the evidence-bounded single
 retry included — is the whole of TBD-side persistence for any send. Beyond

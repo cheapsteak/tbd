@@ -33,20 +33,48 @@ struct ActuationRecordReader: Sendable {
     /// The files that make up the record, oldest first: the rotated day
     /// segments in name order, then the active file.
     ///
-    /// Name order is chronological by construction — segments are stamped
-    /// `YYYY-MM-DD`, which sorts lexicographically — and rotation writes no
-    /// header, footer or marker row, so concatenating them *is* the record
-    /// (§6). The active file always comes last: it holds the newest rows.
+    /// Segments are stamped `YYYY-MM-DD`, which sorts lexicographically, and
+    /// rotation writes no header, footer or marker row — so concatenating them
+    /// *is* the record (§6). The active file always comes last: it holds the
+    /// newest rows.
+    ///
+    /// **Sorted by (day, collision index), not by name.** A plain `.sorted()`
+    /// gets the one case rotation's collision handling exists for exactly
+    /// backwards: `ActuationLog.rotationDestination` leaves the earlier segment
+    /// as `actuations-<day>.jsonl` and names the later one
+    /// `actuations-<day>-1.jsonl`, and `-` (0x2D) sorts before `.` (0x2E), so
+    /// name order puts the later segment first. That writer chose a numeric
+    /// suffix over concatenation precisely so nobody's record would be silently
+    /// reordered; reading it back by name would reorder it anyway. The rule is
+    /// cheap to state and the cost of being wrong is no longer cosmetic —
+    /// `DeliveryRecord.statuses` reads outcomes in record order.
     func segmentPaths() -> [String] {
         let directory = (activePath as NSString).deletingLastPathComponent
         let names = (try? fileManager.contentsOfDirectory(atPath: directory)) ?? []
         let activeName = (activePath as NSString).lastPathComponent
         let rotated = names
             .filter { $0 != activeName && $0.hasPrefix("actuations-") && $0.hasSuffix(".jsonl") }
-            .sorted()
-            .map { (directory as NSString).appendingPathComponent($0) }
+            .map { (name: $0, order: Self.segmentOrder(ofName: $0)) }
+            .sorted { ($0.order.day, $0.order.index) < ($1.order.day, $1.order.index) }
+            .map { (directory as NSString).appendingPathComponent($0.name) }
         guard fileManager.fileExists(atPath: activePath) else { return rotated }
         return rotated + [activePath]
+    }
+
+    /// A rotated segment's place in the record: its stamped day, and which
+    /// segment of that day it is. `actuations-2026-08-05.jsonl` is index 0 and
+    /// `actuations-2026-08-05-1.jsonl` is index 1, matching the order
+    /// `ActuationLog.rotationDestination` writes them in.
+    ///
+    /// A name that fits neither shape keeps its whole stem as the day and sorts
+    /// by that — unknown, but stable and never interleaved into a real day.
+    static func segmentOrder(ofName name: String) -> (day: String, index: Int) {
+        let stem = String(name.dropFirst("actuations-".count).dropLast(".jsonl".count))
+        let parts = stem.split(separator: "-", omittingEmptySubsequences: false)
+        if parts.count == 4, let index = Int(parts[3]) {
+            return (parts[0..<3].joined(separator: "-"), index)
+        }
+        return (stem, 0)
     }
 
     /// Every parseable row in the record, oldest first.
@@ -154,10 +182,6 @@ enum DeliveryRecord {
         now: Date,
         deadline: TimeInterval = acknowledgementDeadline
     ) -> [DeliveryAssessment] {
-        // The newest observed result per confirmed request. Later rows win:
-        // one request may carry several outcomes (dispatched → not-landed →
-        // dispatched → landed-and-acting), and the last observation is the one
-        // that still stands.
         // What each act's outcomes leave it standing at, walked in record order.
         //
         // Order matters, and the retry is why: it shares the original act's id

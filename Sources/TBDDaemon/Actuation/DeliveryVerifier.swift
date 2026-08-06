@@ -280,8 +280,14 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     /// when the caller knows it. The startup replay does not — the record keeps
     /// no session id — and passes `nil`, which skips the comparison; that is
     /// safe there precisely because the replay never re-delivers.
+    /// `mayConcludeNotLanded` is the caller's attestation that the bounded tail
+    /// window can actually span the interval since dispatch — true for the
+    /// one-minute re-check, false for the startup replay, where the act may be a
+    /// day old and its envelope megabytes behind the window's edge. Absence is
+    /// only evidence when presence would have been visible.
     func observe(
-        actuationID: String, terminalID: UUID, expectedSessionID: String? = nil
+        actuationID: String, terminalID: UUID, expectedSessionID: String? = nil,
+        mayConcludeNotLanded: Bool = true
     ) async -> DeliveryObservation {
         guard let facts = await source.facts(forTerminal: terminalID) else {
             return DeliveryObservation(
@@ -335,6 +341,24 @@ actor DeliveryVerifier: DeliveryVerificationArming {
             // The only positive evidence of non-delivery §12 accepts: the
             // transcript is readable, the envelope is absent, and the session
             // is verifiably not mid-turn.
+            //
+            // ...but absence is only evidence when presence would have been
+            // visible. The window's soundness argument is that the envelope was
+            // pasted within the last minute, so nothing could have pushed it out
+            // of 64 KiB without the session being `.working`. A replayed act has
+            // no such bound — it can be a day old, and a live transcript here
+            // measured 7.1 MB, over a hundred times the window — so the same
+            // absence proves nothing. Claiming `not-landed` there would
+            // manufacture a non-delivery verdict, loudly, about a payload that
+            // very likely landed. Finding the envelope still counts: that is
+            // positive evidence either way.
+            guard mayConcludeNotLanded else {
+                return DeliveryObservation(
+                    .undetermined,
+                    detail: "no dispatch envelope in the transcript tail, but this observation "
+                        + "is running late and the bounded tail cannot span the interval since "
+                        + "dispatch — absence is not evidence here")
+            }
             return DeliveryObservation(
                 .notLanded,
                 detail: "no dispatch envelope in the transcript tail and the session is "
@@ -461,7 +485,8 @@ actor DeliveryVerifier: DeliveryVerificationArming {
                 continue
             }
             let observation = await observe(
-                actuationID: assessment.request.id, terminalID: terminalID)
+                actuationID: assessment.request.id, terminalID: terminalID,
+                mayConcludeNotLanded: false)
             await record(observation, confirming: assessment.request.id)
             if observation.result != .landedAndActing
                 && observation.result != .landedButStillBlocked {

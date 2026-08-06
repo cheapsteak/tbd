@@ -907,8 +907,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// confirmation.
     ///
     /// What it deliberately does NOT gate: the dispatch envelope. Attribution
-    /// belongs on every text dispatch, and a prefix that comes and goes with a
-    /// config column is worse than one that is always there.
+    /// belongs on every text dispatch to an agent, verified or not, and a prefix
+    /// that comes and goes with a config column is worse than one that is always
+    /// there. (Whether a target receives the envelope at all is a property of
+    /// the target, not of this flag: shells do not.)
     public var deliveryVerificationEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.

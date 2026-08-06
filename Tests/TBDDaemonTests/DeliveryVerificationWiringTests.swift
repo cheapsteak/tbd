@@ -169,7 +169,9 @@ struct DeliveryVerificationWiringTests {
         #expect(source.tailReads == 1)
         let written = observations(at: fixture.logPath)
         #expect(written.count == 1)
-        #expect(written.first?.result == .observed(.notLanded))
+        // `undetermined`, not `not-landed`: a replayed act can be arbitrarily
+        // old, so a bounded tail finding nothing is not evidence of anything.
+        #expect(written.first?.result == .observed(.undetermined))
         #expect(written.first?.confirms == actID)
     }
 

@@ -129,17 +129,22 @@ struct TerminalSend: AsyncParsableCommand {
                                   (--keys "C-c"). Enter is itself a key, so
                                   --submit does not apply here.
 
-            Every non-empty text payload is delivered behind a one-line
-            attribution envelope carrying the send's record id and the caller's
-            declared identity, then the message verbatim. The receiving agent
-            sees who is addressing it.
+            A non-empty text payload sent to an AGENT session is delivered
+            behind a one-line attribution envelope carrying the send's record id
+            and the caller's declared identity, then the message verbatim, so
+            the receiving agent sees who is addressing it. A shell target gets
+            the text alone: nothing there reads the tag, and --submit would run
+            it as a command line of its own.
 
             --verify additionally asks the daemon to confirm the payload landed,
             by looking for that envelope in the session's transcript. It needs
             --submit (text left standing in a composer never enters the
             conversation) and cannot be combined with --keys (keys reach no
-            transcript). It is refused, rather than quietly downgraded, while
-            delivery verification is disabled daemon-side.
+            transcript). It is available for Claude sessions only — a shell
+            keeps no transcript, and Codex's acknowledgement arrives by a
+            different mechanism that is not built yet. It is refused, rather
+            than quietly downgraded, while delivery verification is disabled
+            daemon-side.
             """
     )
 

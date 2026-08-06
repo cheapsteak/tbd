@@ -1956,15 +1956,19 @@ extension RPCRouter {
         // nothing ever looked. Both conditions therefore refuse, and neither
         // types anything.
         if payload.isVerifyArmed {
-            // A shell has no transcript, so no observation can ever be made
-            // about it: verification would arm a re-check that must return
-            // `undetermined` every time. Refuse rather than promise evidence
-            // this target can never produce.
-            if !Self.carriesDispatchEnvelope(terminal) {
+            // Only a target with an adapter that can answer may be verified. A
+            // shell keeps no transcript at all, and Codex's adapter is a
+            // different mechanism §12 describes but this slice does not build —
+            // either way the one observation that exists would return
+            // `undetermined` every time. Refuse rather than promise evidence the
+            // target cannot produce.
+            if !Self.supportsDeliveryObservation(terminal) {
+                let kindName = (terminal.kind ?? .shell).rawValue
                 let message = """
                     terminal.send --verify was refused: terminal \
-                    \(terminal.id.uuidString) is a shell, which keeps no transcript for a \
-                    delivery to be observed in — nothing was sent. Resend without --verify.
+                    \(terminal.id.uuidString) is a \(kindName) session, and delivery can only \
+                    be observed for a Claude session today — nothing was sent. Resend without \
+                    --verify.
                     """
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
@@ -2030,15 +2034,15 @@ extension RPCRouter {
                 // behave as before. Skip an empty body entirely (don't paste an empty
                 // buffer) but still press Enter below if requested.
                 //
-                // Every NON-EMPTY text payload rides behind the dispatch
+                // A non-empty text payload to an AGENT rides behind the dispatch
                 // envelope (§12): a one-line tag carrying this row's id and the
                 // identity the row was attributed to, then the caller's message
                 // verbatim. It is attribution the receiving agent can read, and
                 // — because a submitted message's verbatim content lands in the
                 // transcript JSONL — it is the machine fact a later observation
-                // looks for, requiring nothing of the agent. It rides every text
-                // send, verified or not: a prefix that appears only sometimes is
-                // one no reader can rely on.
+                // looks for, requiring nothing of the agent. Unconditional along
+                // the axis that matters: verified or not, a prefix that appears
+                // only sometimes is one no reader can rely on.
                 //
                 // An EMPTY payload keeps today's behaviour exactly: nothing is
                 // pasted, and a bare `--submit` still presses Enter. `tbd
@@ -2189,6 +2193,15 @@ extension RPCRouter {
               let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
             return .refused(.notFound)
         }
+        // The kind is re-read too, not just the pane. A `recreateWindow` landing
+        // between the observation and this retry can turn an agent terminal into
+        // a shell while keeping its id, and the payload we are holding opens
+        // with an envelope — which a shell would run as a command line of its
+        // own. The eligibility that admitted the first send has to still hold
+        // for the second.
+        guard Self.supportsDeliveryObservation(terminal) else {
+            return .refused(.notEligible)
+        }
         let outcome: ActuationOutcome
         do {
             outcome = try await terminalSendSerializer.run(terminalID: terminalID) {
@@ -2222,7 +2235,8 @@ extension RPCRouter {
 
     // MARK: - terminal.send payload shape
 
-    /// The dispatch envelope §12 puts ahead of every non-empty text payload.
+    /// The dispatch envelope §12 puts ahead of a non-empty text payload bound
+    /// for an agent (see `carriesDispatchEnvelope` for which targets those are).
     ///
     /// `id` is the actuation row's own id — there is no second identifier
     /// namespace, so dispatch, transcript receipt and outcome all join on one
@@ -2252,6 +2266,26 @@ extension RPCRouter {
         case .claude, .codex: return true
         case .shell: return false
         }
+    }
+
+    /// Whether an adapter exists that can actually observe a delivery to this
+    /// target — the narrower question `--verify` turns on.
+    ///
+    /// Claude only, today. §12 is explicit that the envelope-in-the-transcript
+    /// read is *the Claude adapter's* implementation of the observation, and
+    /// that "the Codex adapter gets the same answer from the app-server
+    /// protocol's in-protocol acknowledgement" — a different mechanism, and one
+    /// this slice does not build. A Codex session records no Claude-shaped
+    /// transcript path, so the one observation that exists would answer
+    /// `undetermined` every time.
+    ///
+    /// So this is the same refusal a shell gets, for the same stated reason:
+    /// promising evidence a target cannot produce is the failure this whole
+    /// mechanism exists to end. Codex still receives the envelope — attribution
+    /// is worth having to any agent, and a composer does not execute it — but it
+    /// cannot be verified until its adapter lands.
+    static func supportsDeliveryObservation(_ terminal: Terminal) -> Bool {
+        (terminal.kind ?? .shell) == .claude
     }
 
     /// Reject the payload shapes that name no coherent act, before a row exists.
