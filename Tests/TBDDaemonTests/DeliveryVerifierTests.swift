@@ -20,6 +20,10 @@ private final class ScriptedObservationSource: DeliveryObservationSource, @unche
         var activityState: TerminalActivityState = .idle
         /// `nil` stands for an unreadable transcript.
         var tail: Data? = Data()
+        /// What a read wider than the cheap window returns, when that differs —
+        /// the envelope having been pushed out of the last 64 KiB by a session
+        /// that acted on it and went idle inside the deadline.
+        var wideTail: Data?
         /// Which conversation currently occupies the terminal. A round whose
         /// value differs from the armed one stands for a `/clear` or an account
         /// swap between dispatch and re-check.
@@ -87,7 +91,13 @@ private final class ScriptedObservationSource: DeliveryObservationSource, @unche
             _tailReads += 1
             _requestedWindows.append(maxBytes)
             // `facts` already advanced past this round's answer.
-            return answers[min(max(round - 1, 0), answers.count - 1)]?.tail
+            let answer = answers[min(max(round - 1, 0), answers.count - 1)]
+            // A wider read sees what the cheap window could not — the shape of
+            // a session that wrote past 64 KiB since dispatch.
+            if maxBytes > DeliveryVerifier.tailWindowBytes, let wide = answer?.wideTail {
+                return wide
+            }
+            return answer?.tail
         }
     }
 }
@@ -97,6 +107,7 @@ private final class ScriptedObservationSource: DeliveryObservationSource, @unche
 private final class RedeliveryRecorder: @unchecked Sendable {
     struct Call: Sendable, Equatable {
         let terminalID: UUID
+        let sessionID: String?
         let payload: String
         let submit: Bool
     }
@@ -111,10 +122,12 @@ private final class RedeliveryRecorder: @unchecked Sendable {
 
     var calls: [Call] { lock.withLock { _calls } }
 
-    var seam: @Sendable (UUID, String, Bool) async -> ActuationOutcome {
-        { [self] terminalID, payload, submit in
+    var seam: @Sendable (UUID, String?, String, Bool) async -> ActuationOutcome {
+        { [self] terminalID, sessionID, payload, submit in
             lock.withLock {
-                _calls.append(Call(terminalID: terminalID, payload: payload, submit: submit))
+                _calls.append(Call(
+                    terminalID: terminalID, sessionID: sessionID,
+                    payload: payload, submit: submit))
             }
             return outcome
         }
@@ -304,7 +317,10 @@ struct DeliveryVerifierTests {
         let harness = try makeHarness(answers: [.silence(state: .idle)])
         _ = await harness.verifier.observe(
             actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal)
-        #expect(harness.source.requestedWindows == [65_536])
+        // Both reads are bounded, and neither is "the whole file": the cheap
+        // window first, then the escalation that must prove an absence before
+        // the retry may act on it.
+        #expect(harness.source.requestedWindows == [65_536, 8_388_608])
         #expect(DeliveryVerifier.tailWindowBytes == 65_536)
     }
 
@@ -397,8 +413,10 @@ struct DeliveryVerifierTests {
             == "<tbd-dispatch id=\"\(id)\" from=\"anonymous\"/>\nstatus?")
         #expect(harness.redeliveries.calls.first?.terminalID == Self.terminal)
         #expect(harness.redeliveries.calls.first?.submit == true)
-        // Two re-checks, and only two.
-        #expect(harness.source.tailReads == 2)
+        // Two re-checks, and only two. Counted on `facts`, which is called
+        // exactly once per observation — `tailReads` now doubles whenever an
+        // absence escalates to the wider read.
+        #expect(harness.source.factsCalls == 2)
         // The anomaly's durable half: the last observed row names what was missing.
         let last = try #require(try rows(at: harness.logPath).last)
         #expect((last["error"] as? String)?.isEmpty == false)
@@ -501,6 +519,80 @@ struct DeliveryVerifierTests {
         #expect(harness.redeliveries.calls.isEmpty)
     }
 
+    /// The window's soundness argument is about the *interval*, but the mapping
+    /// reads `activityState` at observation time — so a session that receives
+    /// the payload, writes more than 64 KiB acting on it (tool results are
+    /// stored verbatim) and is back to idle before second sixty would read as
+    /// absent-and-not-mid-turn. That is the sole licence for the retry, so the
+    /// cheap window alone would re-paste an instruction the agent already had.
+    /// Absence escalates to a wider read before it accuses.
+    @Test("an envelope pushed past the cheap window is found by the wider read, not retried")
+    func absenceEscalatesBeforeAccusing() async throws {
+        let id = "a3f1b2c3d4e5"
+        var answer = ScriptedObservationSource.Answer.silence(state: .idle)
+        answer.wideTail = ScriptedObservationSource.Answer.envelope(for: id, state: .idle).tail
+        let harness = try makeHarness(answers: [answer])
+        await harness.verifier.armVerification(
+            actuationID: id, terminalID: Self.terminal, sessionID: nil,
+            deliveredPayload: "x", submit: true)
+        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await awaitDeliveryCycle(harness.verifier, observed: {
+            "\((try? results(at: harness.logPath)) ?? []) rows, "
+                + "\(harness.redeliveries.calls.count) re-deliveries"
+        })
+
+        // It landed. Nothing is re-sent, and the record says so.
+        #expect(try results(at: harness.logPath) == ["landed-but-still-blocked"])
+        #expect(harness.redeliveries.calls.isEmpty)
+        // Two reads: the cheap window, then the escalation.
+        #expect(harness.source.requestedWindows == [65_536, 8_388_608])
+    }
+
+    /// And when the wider read is itself capped — the transcript is longer than
+    /// the escalated window — absence still proves nothing, so the verdict is
+    /// undetermined rather than a manufactured non-delivery.
+    @Test("absence in a transcript longer than the escalated window is undetermined")
+    func absenceInAnOversizeTranscriptIsUndetermined() async throws {
+        var answer = ScriptedObservationSource.Answer.silence(state: .idle)
+        answer.wideTail = Data(repeating: 0x20, count: DeliveryVerifier.escalatedWindowBytes)
+        let harness = try makeHarness(answers: [answer])
+        await harness.verifier.armVerification(
+            actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal, sessionID: nil,
+            deliveredPayload: "x", submit: true)
+        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await awaitDeliveryCycle(harness.verifier, observed: {
+            "\((try? results(at: harness.logPath)) ?? []) rows"
+        })
+
+        #expect(try results(at: harness.logPath) == ["undetermined"])
+        #expect(harness.redeliveries.calls.isEmpty)
+    }
+
+    /// The escalation must not disarm the retry: a transcript the wide read
+    /// covers entirely, still missing the envelope, is real evidence.
+    @Test("absence proven across the whole transcript still licenses the one retry")
+    func provenAbsenceStillRetries() async throws {
+        let id = "a3f1b2c3d4e5"
+        let harness = try makeHarness(answers: [
+            .silence(state: .idle),
+            .envelope(for: id, state: .working),
+        ])
+        await harness.verifier.armVerification(
+            actuationID: id, terminalID: Self.terminal, sessionID: nil,
+            deliveredPayload: "x", submit: true)
+        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await awaitDeliveryCycle(harness.verifier, observed: {
+            "\((try? results(at: harness.logPath)) ?? []) rows, "
+                + "\(harness.redeliveries.calls.count) re-deliveries"
+        })
+
+        #expect(try results(at: harness.logPath)
+            == ["not-landed", "dispatched", "landed-and-acting"])
+        #expect(harness.redeliveries.calls.count == 1)
+        #expect(harness.redeliveries.calls.first?.sessionID == nil)
+    }
+
     /// A retry the daemon declined is not "the payload failed" — the record has
     /// to be able to say a stale coordinate was refused, and it confirms the
     /// ORIGINAL request id rather than opening a second one.
@@ -526,9 +618,9 @@ struct DeliveryVerifierTests {
         #expect(try results(at: harness.logPath) == ["not-landed", "refused"])
         #expect(written.contains { $0["reason"] as? String == "target-mismatch" })
         // A retry that never reached the pane is not re-checked — and is not
-        // sent a second time either.
+        // sent a second time either. One observation, whatever it cost in reads.
         #expect(harness.redeliveries.calls.count == 1)
-        #expect(harness.source.tailReads == 1)
+        #expect(harness.source.factsCalls == 1)
     }
 
     @Test("a transport-failed retry is recorded as transport-failed")
@@ -548,7 +640,8 @@ struct DeliveryVerifierTests {
         // cycle without a second observation row.
         #expect(try results(at: harness.logPath) == ["not-landed", "transport-failed"])
         #expect(harness.redeliveries.calls.count == 1)
-        #expect(harness.source.tailReads == 1)
+        // One observation, whatever it cost in reads.
+        #expect(harness.source.factsCalls == 1)
     }
 
     /// A retry that dispatched leaves no `error` on its outcome row.

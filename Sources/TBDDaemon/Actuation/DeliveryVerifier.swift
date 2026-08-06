@@ -117,12 +117,33 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     /// and an absent envelope there is `undetermined`, never `not-landed`.
     static let tailWindowBytes = 64 * 1024
 
+    /// The window a *second* read uses before the observation is allowed to
+    /// accuse the transport of losing a payload.
+    ///
+    /// The 64 KiB window's soundness argument is about the interval — nothing
+    /// could push a just-pasted envelope out of it without the session being
+    /// busy — but the mapping tests `activityState` at *observation* time, and a
+    /// session can receive a payload, emit far more than 64 KiB acting on it
+    /// (tool results are stored verbatim), and be back to `.idle` well before
+    /// second sixty. That reads as absence, and absence is the sole licence for
+    /// the retry — so the cheap window alone would re-paste an instruction the
+    /// agent already received.
+    ///
+    /// So absence escalates rather than concludes: re-read a far larger window,
+    /// and only claim non-delivery when that read provably covered the whole
+    /// file. It costs one big read on the rare path that is about to do
+    /// something consequential, and nothing at all on the common one. Still a
+    /// bounded tail read and still no parse (§3) — a byte search over 8 MiB is
+    /// milliseconds, and the largest transcript measured on this machine was
+    /// 7.1 MB.
+    static let escalatedWindowBytes = 8 * 1024 * 1024
+
     private let log: ActuationLog
     private let source: any DeliveryObservationSource
     /// Re-delivers an identical payload under its identical envelope id, and
     /// reports what the transport did — so a refused or transport-failed retry
     /// is classified honestly instead of collapsing into "the payload failed".
-    private let redeliver: @Sendable (UUID, String, Bool) async -> ActuationOutcome
+    private let redeliver: @Sendable (UUID, String?, String, Bool) async -> ActuationOutcome
     private let deadline: Duration
     private let now: @Sendable () -> Date
     private let clock: any Clock<Duration>
@@ -143,7 +164,7 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     init(
         log: ActuationLog,
         source: any DeliveryObservationSource,
-        redeliver: @escaping @Sendable (UUID, String, Bool) async -> ActuationOutcome,
+        redeliver: @escaping @Sendable (UUID, String?, String, Bool) async -> ActuationOutcome,
         deadline: Duration = .seconds(DeliveryRecord.acknowledgementDeadline),
         now: @escaping @Sendable () -> Date = { Date() },
         clock: any Clock<Duration> = ContinuousClock()
@@ -183,8 +204,10 @@ actor DeliveryVerifier: DeliveryVerificationArming {
         let actuationID: String
         let terminalID: UUID
         /// The conversation this payload was delivered into. Compared at every
-        /// observation, so a session rebound between dispatch and re-check is
-        /// caught before the retry can type into a stranger.
+        /// observation *and* again inside the re-delivery, because the gap
+        /// between the two spans a DB write, two reads and a serializer queue —
+        /// long enough for a `/clear` to land in it. Checking only at the
+        /// observation would leave the retry typing into a stranger.
         let sessionID: String?
         let payload: String
         let submit: Bool
@@ -228,7 +251,8 @@ actor DeliveryVerifier: DeliveryVerificationArming {
         // shares the original request row (`ActuationSurface`'s boundary rule).
         // Its own synchronous result is still a fact about that act, so it gets
         // an outcome row confirming the same id.
-        let retry = await redeliver(armed.terminalID, armed.payload, armed.submit)
+        let retry = await redeliver(
+            armed.terminalID, armed.sessionID, armed.payload, armed.submit)
         // `error` stays nil when the retry dispatched. A row reading
         // `dispatched` with a populated error field reads as a failure to
         // anything querying the record, and the second dispatch needs no
@@ -343,15 +367,11 @@ actor DeliveryVerifier: DeliveryVerificationArming {
             // is verifiably not mid-turn.
             //
             // ...but absence is only evidence when presence would have been
-            // visible. The window's soundness argument is that the envelope was
-            // pasted within the last minute, so nothing could have pushed it out
-            // of 64 KiB without the session being `.working`. A replayed act has
-            // no such bound — it can be a day old, and a live transcript here
-            // measured 7.1 MB, over a hundred times the window — so the same
-            // absence proves nothing. Claiming `not-landed` there would
-            // manufacture a non-delivery verdict, loudly, about a payload that
-            // very likely landed. Finding the envelope still counts: that is
-            // positive evidence either way.
+            // visible, and two things can hide a delivered envelope from a
+            // bounded tail. A replayed act can be a day old, which the caller
+            // declares. And a live session can simply have written past the
+            // window since dispatch — so before accusing the transport, look
+            // harder.
             guard mayConcludeNotLanded else {
                 return DeliveryObservation(
                     .undetermined,
@@ -359,10 +379,8 @@ actor DeliveryVerifier: DeliveryVerificationArming {
                         + "is running late and the bounded tail cannot span the interval since "
                         + "dispatch — absence is not evidence here")
             }
-            return DeliveryObservation(
-                .notLanded,
-                detail: "no dispatch envelope in the transcript tail and the session is "
-                    + "\(facts.activityState.rawValue) — verifiably not mid-turn")
+            return await concludeAbsence(
+                actuationID: actuationID, path: path, state: facts.activityState)
         case (false, .working):
             // Absence while mid-turn proves nothing: the harness may not have
             // written the line yet. No positive evidence, so no retry.
@@ -376,6 +394,45 @@ actor DeliveryVerifier: DeliveryVerificationArming {
                 detail: "no dispatch envelope in the transcript tail and the session state "
                     + "is unknown")
         }
+    }
+
+    /// Absence in the cheap window is a question, not an answer: re-read a far
+    /// larger one, and claim non-delivery only if that read provably covered the
+    /// whole file.
+    ///
+    /// `transcriptTail` seeks to `size - maxBytes` and reads to the end, so a
+    /// result shorter than the window it asked for *is* the whole file — which
+    /// is exactly the proof this needs, at no extra syscall. Anything larger and
+    /// still missing the envelope leaves the question open, which is
+    /// `undetermined`, which is never retried.
+    private func concludeAbsence(
+        actuationID: String, path: String, state: TerminalActivityState
+    ) async -> DeliveryObservation {
+        guard let wide = await source.transcriptTail(
+            atPath: path, maxBytes: Self.escalatedWindowBytes) else {
+            return DeliveryObservation(
+                .undetermined,
+                detail: "the transcript became unreadable at \(path) while confirming an "
+                    + "absent dispatch envelope")
+        }
+        if Self.envelopeAppears(actuationID: actuationID, inTail: wide) {
+            // It landed after all, and the cheap window simply could not see
+            // that far back. The session is not mid-turn, so it is blocked again.
+            return DeliveryObservation(
+                state == .working ? .landedAndActing : .landedButStillBlocked)
+        }
+        guard wide.count < Self.escalatedWindowBytes else {
+            return DeliveryObservation(
+                .undetermined,
+                detail: "no dispatch envelope in the last "
+                    + "\(Self.escalatedWindowBytes) bytes, but the transcript is longer than "
+                    + "that — the payload may have been delivered and written past the window, "
+                    + "so absence is not evidence")
+        }
+        return DeliveryObservation(
+            .notLanded,
+            detail: "no dispatch envelope anywhere in the transcript and the session is "
+                + "\(state.rawValue) — verifiably not mid-turn")
     }
 
     /// Whether the dispatch envelope for `actuationID` appears in the tail.
@@ -454,8 +511,10 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     /// **It never re-delivers.** §12 puts "what to *do* about an unconfirmed
     /// act — re-send, journal, shrug" in playbook judgment, never compiled
     /// repair, and a payload whose premise is an unbounded interval old is
-    /// exactly the stale-premise send §3 forbids. So a replayed `not-landed`
-    /// records the outcome and the anomaly, and stops.
+    /// exactly the stale-premise send §3 forbids. It also cannot conclude
+    /// `not-landed` at all — `mayConcludeNotLanded: false` — because a bounded
+    /// tail cannot span an interval of unknown length. It records what it can
+    /// establish, writes the anomaly, and stops.
     ///
     /// `.awaitingObservation` acts are left alone: their deadline has not
     /// passed, so nothing is owed yet.

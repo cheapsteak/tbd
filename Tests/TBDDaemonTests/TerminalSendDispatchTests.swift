@@ -293,6 +293,62 @@ struct TerminalSendDispatchTests {
         #expect(outcome["reason"] as? String == "not-eligible")
     }
 
+    // MARK: - The retry's own production path
+
+    /// `redeliverVerifiedPayload` is what the verifier's injected seam actually
+    /// calls, and every verifier test fakes it — so its guards need exercising
+    /// here or nowhere. It re-checks eligibility and the addressed conversation,
+    /// not just the pane, because the gap between the observation and the paste
+    /// spans a DB write, two reads and a serializer queue.
+    @Test("the retry re-pastes the identical bytes when the target still qualifies")
+    func redeliveryPastesWhenEligible() async throws {
+        let fixture = try await makeFixture()
+        let outcome = await fixture.router.redeliverVerifiedPayload(
+            terminalID: fixture.terminal.id,
+            sessionID: fixture.terminal.claudeSessionID,
+            payload: "<tbd-dispatch id=\"abc\" from=\"anonymous\"/>\nstatus?",
+            submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(fixture.pastes.pastes == [
+            "<tbd-dispatch id=\"abc\" from=\"anonymous\"/>\nstatus?"
+        ])
+    }
+
+    /// A `/clear` between the observation and the retry rebinds the terminal to
+    /// a new conversation while keeping its pane. The payload is an instruction
+    /// addressed to the session that is no longer there.
+    @Test("the retry refuses a terminal rebound to another session, and types nothing")
+    func redeliveryRefusesARebindingSession() async throws {
+        let fixture = try await makeFixture()
+        try await fixture.router.db.terminals.updateSession(
+            id: fixture.terminal.id, sessionID: "session-after-clear", transcriptPath: nil)
+
+        let outcome = await fixture.router.redeliverVerifiedPayload(
+            terminalID: fixture.terminal.id,
+            sessionID: "session-at-dispatch",
+            payload: "status?", submit: true)
+
+        #expect(outcome == .refused(.targetMismatch))
+        #expect(fixture.pastes.pastes.isEmpty)
+    }
+
+    /// And a target that stopped being verifiable — a `recreateWindow` turning
+    /// an agent terminal into a shell while keeping its id — refuses too. The
+    /// payload it is holding opens with an envelope a shell would execute.
+    @Test("the retry refuses a target that is no longer an observable agent")
+    func redeliveryRefusesAnIneligibleTarget() async throws {
+        let fixture = try await makeShellFixture()
+        let outcome = await fixture.router.redeliverVerifiedPayload(
+            terminalID: fixture.terminal.id,
+            sessionID: fixture.terminal.claudeSessionID,
+            payload: "<tbd-dispatch id=\"abc\" from=\"anonymous\"/>\nstatus?",
+            submit: true)
+
+        #expect(outcome == .refused(.notEligible))
+        #expect(fixture.pastes.pastes.isEmpty)
+    }
+
     /// `from` is the row's own actor, not a constant: the receiving agent sees
     /// who is addressing it, down to the rail when a daemon rail sends.
     @Test("the envelope's from attribute names the declared actor")

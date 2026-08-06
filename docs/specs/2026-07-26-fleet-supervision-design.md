@@ -1551,7 +1551,9 @@ account, not a wrong action. The third category is **human-authored process**.
   For re-checks, the startup replay
   surfaces acts past their deadline with no outcome, and
   the daemon performs those observations then: the envelope is durable in the
-  transcript, so a late read resolves what the timer would have (§12). Until
+  transcript, so a late read can still confirm a landing — though not its
+  absence, which a bounded read cannot establish across an unbounded
+  interval (§12). Until
   it runs, such actions render as unconfirmed by construction — the
   query-time rule, not a recovery sweep.
 
@@ -2511,7 +2513,7 @@ race itself biting; if one does, the fix joins this family (the send path
 refusing when the composer is unreachable) and stays content-blind.
 
 **Receipt is a passive machine observation; the agent cooperates in nothing.**
-Every dispatched text payload opens with a one-line envelope carrying the
+A dispatched text payload bound for an agent opens with a one-line envelope carrying the
 actuation row's ID and the identity the row was attributed to —
 `<tbd-dispatch id="a3f1" from="supervisor:acme-web"/>`, then the message
 verbatim — which doubles as honest attribution: the receiving agent sees who
@@ -2611,12 +2613,14 @@ act whose observation never ran renders as unconfirmed by construction
 (§7). The observation itself is recoverable from the record alone — the
 actuation row's timestamp fixes the deadline, and the envelope is durable in
 the transcript — so at startup the daemon replays the record, finds acts
-past their deadline with no outcome, and performs the same observation late,
-writing the outcome the timer would have written (§7). The observation only:
-the replay never re-delivers, because the retry exists to close a
-sixty-second gap, and a payload whose premise is an unbounded interval old
-is exactly the stale-premise send this design refuses to issue (§3). A
-replayed *not landed* records the outcome and the anomaly, and stops. What a
+past their deadline with no outcome, and performs the same observation late
+(§7). Late, it can confirm a landing but never assert the opposite: a bounded
+tail read cannot span an interval of unknown length, so an absent envelope
+there is *undetermined*. It re-delivers nothing either way, because the retry
+exists to close a sixty-second gap, and a payload whose premise is an
+unbounded interval old is exactly the stale-premise send this design refuses
+to issue (§3). The late observation records what it could establish, writes
+the anomaly, and stops. What a
 restart costs is cadence, stated plainly: P1-6's sixty-second window degrades
 to the startup scan or the next evaluation. What to *do* about a late-confirmed or
 unconfirmed act — re-send, journal, shrug — stays playbook judgment, never

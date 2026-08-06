@@ -270,9 +270,10 @@ public final class Daemon: Sendable {
         let verifier = DeliveryVerifier(
             log: actuationLog,
             source: source ?? DatabaseDeliveryObservationSource(db: database),
-            redeliver: { [rpcRouter] terminalID, payload, submit in
+            redeliver: { [rpcRouter] terminalID, sessionID, payload, submit in
                 await rpcRouter.redeliverVerifiedPayload(
-                    terminalID: terminalID, payload: payload, submit: submit)
+                    terminalID: terminalID, sessionID: sessionID,
+                    payload: payload, submit: submit)
             })
         rpcRouter.deliveryVerifier = verifier
         await verifier.replayMissedObservations(activeSegmentPath: actuationLog.path)

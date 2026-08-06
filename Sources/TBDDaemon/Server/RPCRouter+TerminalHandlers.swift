@@ -2187,7 +2187,7 @@ extension RPCRouter {
     /// since. And it queues in the same per-terminal lane, so a retry can never
     /// splice itself into a concurrent send's paste.
     func redeliverVerifiedPayload(
-        terminalID: UUID, payload: String, submit: Bool
+        terminalID: UUID, sessionID: String?, payload: String, submit: Bool
     ) async -> ActuationOutcome {
         guard let terminal = try? await db.terminals.get(id: terminalID),
               let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
@@ -2201,6 +2201,15 @@ extension RPCRouter {
         // for the second.
         guard Self.supportsDeliveryObservation(terminal) else {
             return .refused(.notEligible)
+        }
+        // And the conversation is re-checked here, not only at the observation.
+        // The gap between the two spans a DB write, two reads and this
+        // serializer's queue — long enough for a `/clear` to land in it — and
+        // the payload being held is an instruction addressed to the session
+        // that is no longer there. A rebind makes this a send to a stranger,
+        // which is the one thing the retry must never be.
+        guard terminal.claudeSessionID == sessionID else {
+            return .refused(.targetMismatch)
         }
         let outcome: ActuationOutcome
         do {

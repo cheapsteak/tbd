@@ -205,7 +205,7 @@ struct DeliveryVerificationWiringTests {
         let clock = TestClock()
         fixture.router.deliveryVerifier = DeliveryVerifier(
             log: fixture.log, source: source,
-            redeliver: { _, _, _ in .dispatched }, clock: clock)
+            redeliver: { _, _, _, _ in .dispatched }, clock: clock)
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
@@ -235,7 +235,7 @@ struct DeliveryVerificationWiringTests {
         let verifier = DeliveryVerifier(
             log: fixture.log,
             source: DatabaseDeliveryObservationSource(db: fixture.db),
-            redeliver: { _, _, _ in .dispatched },
+            redeliver: { _, _, _, _ in .dispatched },
             clock: clock)
         fixture.router.deliveryVerifier = verifier
 
