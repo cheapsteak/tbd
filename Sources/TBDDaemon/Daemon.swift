@@ -231,6 +231,55 @@ public final class Daemon: Sendable {
         await healthValidator.validateAll(db: database)
     }
 
+    /// Wire the delivery verifier and perform the startup replay, gated on
+    /// `delivery_verification_enabled` and skipped in mock mode.
+    ///
+    /// Extracted from `start()` for the same reason
+    /// `performStartupReconciliation` was: both branches of the flag have to be
+    /// testable without spawning sockets or background tasks.
+    ///
+    /// **While the flag is off the verifier is simply absent.** Nothing arms,
+    /// nothing replays, and no transcript is ever read — and an armed send
+    /// never gets that far, because `terminal.send` refuses `--verify` ahead of
+    /// touching the pane.
+    ///
+    /// The flag is read once, here; `terminal.send` reads the column per call.
+    /// Those two clocks disagree for exactly one window — the flag flipped on,
+    /// this daemon not yet restarted — and the send path closes it by refusing
+    /// on an absent verifier as well as on an off column. Otherwise a send in
+    /// that window would dispatch with nothing armed and render `unconfirmed`
+    /// forever: a silence that reads like a delivery failure when nothing ever
+    /// looked. So the two halves fail closed together, and enabling the flag
+    /// means enabling it *and* restarting, which is what the soak instructions
+    /// say.
+    @discardableResult
+    static func wireDeliveryVerification(
+        mockMode: MockMode?,
+        database: TBDDatabase,
+        rpcRouter: RPCRouter,
+        actuationLog: ActuationLog,
+        source: (any DeliveryObservationSource)? = nil
+    ) async -> DeliveryVerifier? {
+        guard mockMode == nil else {
+            daemonLogger.info("Mock mode: skipping delivery verification")
+            return nil
+        }
+        guard (try? await database.config.get())?.deliveryVerificationEnabled == true else {
+            return nil
+        }
+        let verifier = DeliveryVerifier(
+            log: actuationLog,
+            source: source ?? DatabaseDeliveryObservationSource(db: database),
+            redeliver: { [rpcRouter] terminalID, sessionID, payload, submit in
+                await rpcRouter.redeliverVerifiedPayload(
+                    terminalID: terminalID, sessionID: sessionID,
+                    payload: payload, submit: submit)
+            })
+        rpcRouter.deliveryVerifier = verifier
+        await verifier.replayMissedObservations(activeSegmentPath: actuationLog.path)
+        return verifier
+    }
+
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
     static func ensureScratchDir() {
         let fm = FileManager.default
@@ -565,6 +614,12 @@ public final class Daemon: Sendable {
         // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
         await performStartupReconciliation(
             mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
+            actuationLog: actuationLog)
+
+        // 11b. Delivery acknowledgement (design §12): wire the verifier and
+        // replay the observations the last daemon's timers died owing.
+        await Daemon.wireDeliveryVerification(
+            mockMode: mockMode, database: database, rpcRouter: rpcRouter,
             actuationLog: actuationLog)
 
         if mockMode == nil {

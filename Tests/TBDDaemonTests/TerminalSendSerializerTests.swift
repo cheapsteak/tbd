@@ -31,18 +31,38 @@ struct TerminalSendSerializerTests {
         }
     }
 
-    /// Poll until `condition` holds or the deadline passes. Bounded wait, not a
+    /// Poll every 10 ms until `condition` holds, recording an Issue at the
+    /// caller's source location once `deadline` passes. Bounded wait, not a
     /// sleep-as-synchronization: it bounds a hang and asserts nothing on its own.
+    /// A final post-deadline re-check absorbs a sleep slice that overshoots after
+    /// the condition became true.
+    ///
+    /// It records rather than throws so that the test body always runs to
+    /// completion. Both callers hold an `async let` child parked on a `Gate` that
+    /// the body opens further down; unwinding early would leave the scope's
+    /// implicit await on a continuation nobody resumes, and the child cannot be
+    /// cancelled out of it because `TerminalSendSerializer.run` awaits an
+    /// unstructured task. A timeout is therefore reported and the body carries on
+    /// to open the gate. The diagnostic stays an `Error` passed to
+    /// `Issue.record(_: some Error)`: only that form lands on the primary failure
+    /// line, which is the part CI summaries keep.
+    ///
+    /// The signature stays `throws` for the inner `Task.sleep` alone.
     private func waitUntil(
-        _ description: String, _ condition: @Sendable () async -> Bool
+        _ description: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @Sendable () async -> Bool
     ) async throws {
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + ciSafeDeadline
         while ContinuousClock.now < deadline {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
+        if await condition() { return }
         struct Timeout: Error, CustomStringConvertible { let description: String }
-        throw Timeout(description: "timed out waiting for \(description)")
+        Issue.record(
+            Timeout(description: "timed out waiting for \(description)"),
+            sourceLocation: sourceLocation)
     }
 
     @Test("a second send to the same terminal queues behind the first, and is not refused")

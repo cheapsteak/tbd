@@ -22,6 +22,7 @@ extension RPCRouter {
         target: ActuationTarget,
         message: String? = nil,
         submit: Bool? = nil,
+        verify: Bool? = nil,
         prompt: String? = nil,
         agent: String? = nil,
         profile: String? = nil
@@ -31,6 +32,7 @@ extension RPCRouter {
         row.target = target
         row.message = message
         row.submit = submit
+        row.verify = verify
         row.prompt = prompt
         row.agent = agent
         row.profile = profile

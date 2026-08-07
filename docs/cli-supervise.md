@@ -360,21 +360,60 @@ script, a wake program, a sweep program's continuation policy, the
 supervisor itself.
 
 ```
-tbd terminal send --terminal <id> --text "…" [--verify]
-tbd terminal send --terminal <id> --keys "…" [--verify]
+tbd terminal send --terminal <id> --text "…" [--submit] [--verify]
+tbd terminal send --terminal <id> --keys "…"
 ```
 
-Payloads, not verbs: `--text` delivers a message and submits it (also how a
-pending question is answered — the adapter clears a machine-known dialog
-first); `--keys` sends named keys chosen after reading the screen; an
-interrupt is a keys payload. Exactly one payload flag per call. The daemon
+Payloads, not verbs: `--text` carries a message and `--submit` sends it —
+without `--submit` the text is typed into the composer and left there for a
+human to send, so a message meant to be acted on passes both (that pair is
+also how a pending question is answered — the adapter clears a machine-known
+dialog first); `--keys` sends named keys chosen after reading the screen; an
+interrupt is a keys payload. Exactly one payload flag per call, and
+`--submit` belongs only to a text payload — Enter is itself a key, so a keys
+sequence that means to submit spells it out (`--keys "Escape Enter"`). The daemon
 does not read a text payload; it records it verbatim — every send lands in
 TBD's actuation log (`~/tbd/actuations.jsonl`) with the caller identity as
-declared, and a caller with no identity is logged as anonymous. `--verify`
-opts into landing confirmation — a tail read of the target transcript's
-JSONL, with the re-check deadline as its default timeout. TBD makes one
-full attempt and never retries; the synchronous result is honest and
-machine-readable, and what happens next is the caller's policy.
+declared, and a caller with no identity is logged as anonymous.
+
+A text payload sent to an agent is delivered under a one-line envelope naming the
+actuation row and that caller —
+`<tbd-dispatch id="a3f1b2c3d4e5" from="supervisor:acme-platform"/>` on its
+own line, then your text verbatim — so the receiving agent sees who is
+addressing it and the transcript carries an identifier the record can join
+on. It rides every text send this verb makes to an agent, verified or not: a
+script of your own that declares no identity still delivers one, reading
+`from="anonymous"`.
+A keys payload carries no envelope, and neither does a send to a plain shell
+pane — nothing there reads the tag, and `--submit` would run it as a command
+line of its own, so a shell receives your text alone. Two of TBD's own
+in-daemon rails — the watch desk's nudges and the rate-limit auto-continue —
+type into a session without going through this verb; their sends are in the
+actuation log like any other, but they carry no envelope and cannot be
+verified.
+
+`--verify` opts into landing confirmation — a tail read of the target
+transcript's JSONL for that envelope, with the re-check deadline as its
+default timeout. It is available for **Claude sessions only** — a shell keeps
+no transcript to observe, and a Codex session's acknowledgement arrives by a
+different mechanism that is not built yet, so asking to verify either is
+refused rather than accepted and answered *undetermined* forever. It
+requires `--submit`, since text left standing in a
+composer never enters the conversation and so can never reach a transcript,
+and it is refused with `--keys`, which leaves no transcript trace to read,
+and with an empty `--text`, which pastes nothing and so writes no envelope
+to look for. It is also gated on the daemon's `delivery_verification_enabled`
+config, shipped off and flipped with the `config.setDeliveryVerification`
+RPC (`daemon.capabilities` reads it back). **Enabling it means enabling it
+and then restarting the daemon**, which wires the observation machinery at
+startup; until that restart `--verify` is refused with a message saying so.
+While the flag is off a `--verify` send is likewise refused outright, with
+the flag named, rather than quietly delivered as an unverified one — a
+caller that asked for confirmation is never answered with silence. TBD makes
+one full attempt — including the single re-delivery it will make on positive
+evidence that the first never landed — and nothing beyond it; the
+synchronous result is honest and machine-readable, and what happens next is
+the caller's policy.
 
 **Supervisor-identified sends carry act-time preconditions.** When the
 ambient supervisor identity (`TBD_PROJECT`) is present, the daemon rechecks
@@ -407,7 +446,7 @@ project's `proposals.md`, unchanged.
 
 ```
 # A specific next step, decided after reading the transcript
-$ tbd terminal send --terminal t17 --text "PR #522 review comments are in; address the two blocking ones, then re-request review."
+$ tbd terminal send --terminal t17 --text "PR #522 review comments are in; address the two blocking ones, then re-request review." --submit
 ```
 
 ## Related: tbd notify

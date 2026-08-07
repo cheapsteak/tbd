@@ -90,6 +90,13 @@ public struct TmuxManager: Sendable {
     /// transport failure rather than a refusal, and a non-throwing hook would
     /// leave that branch with no way to be exercised.
     public let dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)?
+    /// Optional test hook consulted by `pasteText` in dryRun mode:
+    /// `(server, paneID, bytes)` — the payload that would have been written to
+    /// the buffer file. `dryRunRecorder` cannot carry it: the real path passes
+    /// the body through a temp FILE, so the recorded argv holds a path and not
+    /// one byte of the content. Tests that assert on WHAT was pasted — the
+    /// dispatch envelope, for one — need the bytes themselves.
+    public let dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)?
     /// Optional test hook for real (non-dryRun) mode: override the result of
     /// `windowExists(server:windowID:)`. Allows tests to force a window as dead
     /// while still having a live process running in the pane (for testing the
@@ -121,7 +128,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -134,6 +141,7 @@ public struct TmuxManager: Sendable {
         self.dryRunRespawnWindowError = dryRunRespawnWindowError
         self.dryRunKillWindowError = dryRunKillWindowError
         self.dryRunPaneSendTarget = dryRunPaneSendTarget
+        self.dryRunPasteBytes = dryRunPasteBytes
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
     }
@@ -799,9 +807,11 @@ public struct TmuxManager: Sendable {
         let pasteArgs = Self.pasteBufferCommand(server: server, bufferName: bufferName, paneID: paneID)
 
         if dryRun {
-            // Record the intended argv without touching the filesystem.
+            // Record the intended argv without touching the filesystem — plus
+            // the payload, which the argv cannot carry (it names a temp file).
             dryRunRecorder?(loadArgs)
             dryRunRecorder?(pasteArgs)
+            dryRunPasteBytes?(server, paneID, bytes)
             return
         }
 

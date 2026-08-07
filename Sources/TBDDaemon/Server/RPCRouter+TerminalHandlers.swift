@@ -60,6 +60,19 @@ actor TranscriptParseCache {
     }
 }
 
+// MARK: - The pane consultation's verdict
+
+/// A pane consultation that came back "do not type here", with the outcome the
+/// record gets and the message the caller sees.
+///
+/// One type for both typing paths — the send handler and the verifier's
+/// retry — so a refusal cannot be classified two ways depending on which one
+/// asked.
+struct PaneSendRefusal: Sendable {
+    let outcome: ActuationOutcome
+    let message: String
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -1876,6 +1889,28 @@ extension RPCRouter {
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?
     ) async throws -> RPCResponse {
+        // ─── The first of two refusal lines, and the reason they differ ───
+        //
+        // A malformed payload SHAPE is rejected here, before any row exists, as
+        // an ordinary RPC error. `RPCRouter+Actuation.swift` draws this line
+        // already: a row must not be written for a request that was never about
+        // to be dispatched. None of these combinations names a coherent act —
+        // there is no send to record, only a caller that asked for nothing, or
+        // for two contradictory things at once.
+        //
+        // The second line is below, at the flag: `--verify` while delivery
+        // verification is off IS a coherent act, one the daemon declined, so it
+        // gets a row and a refusal outcome. See there.
+        //
+        // The CLI validates these same shapes so a human gets a clean message
+        // before a socket is opened; the daemon enforces them independently
+        // because the CLI is not the only caller.
+        let payload: TerminalSendPayload
+        switch Self.validateSendShape(params) {
+        case .valid(let validated): payload = validated
+        case .malformed(let message): return RPCResponse(error: message)
+        }
+
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
@@ -1888,46 +1923,230 @@ extension RPCRouter {
         // Request row first: the target is resolved and the payload is known,
         // and nothing has touched the pane yet. The paste and the Enter are
         // sub-steps of one send, so they share this one row.
+        //
+        // The row records the caller's payload VERBATIM and without the
+        // envelope (§3, "the log records the message verbatim"). The envelope is
+        // transport framing built at delivery, and its id is this row's own id,
+        // so storing it would duplicate the row's identifier into its own body.
         let actuationID = try await beginActuation(
             .terminalSend, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
-            message: params.text, submit: params.submit == true)
+            message: payload.recordedMessage,
+            submit: payload.recordedSubmit,
+            verify: payload.recordedVerify)
 
-        // Ask the pane about itself before typing into it. tmux's own exit
-        // status cannot carry this: `send-keys` into a `remain-on-exit` dead
-        // pane exits 0, and keys sent to a reused pane id land in a live
-        // stranger's composer with no error anywhere (issue #384). Both answers
-        // arrive from ONE read-only `list-panes`, and both are read BEFORE any
-        // byte is written — so a decline here is a refusal, never a transport
-        // failure: the daemon declined without touching the transport.
-        let target: PaneSendTarget
+        // ─── The second refusal line: a well-formed act the daemon declines ───
+        //
+        // `--verify` while `delivery_verification_enabled` is off is a refusal,
+        // not a silent downgrade to an unverified send. A caller that asked for
+        // evidence must never be answered with a silence that reads like
+        // confirmation — that would rebuild, one layer up, the exact
+        // silent-failure class §12 exists to end. Nothing is typed, and the row
+        // shows the near-miss so the morning can see what the flag stopped.
+        //
+        // Read per call and only when `--verify` was armed, so an ordinary send
+        // pays no config read.
+        //
+        // Two conditions, because the flag and the machinery it enables are
+        // read at different times: the column per call, the verifier once at
+        // daemon start. Between flipping the flag on and restarting, the column
+        // says yes and there is still nothing to arm — and a send that
+        // dispatched with nothing armed would render `unconfirmed` forever,
+        // handing the caller a silence that reads like a delivery failure when
+        // nothing ever looked. Both conditions therefore refuse, and neither
+        // types anything.
+        if payload.isVerifyArmed {
+            // Only a target with an adapter that can answer may be verified. A
+            // shell keeps no transcript at all, and Codex's adapter is a
+            // different mechanism §12 describes but this slice does not build —
+            // either way the one observation that exists would return
+            // `undetermined` every time. Refuse rather than promise evidence the
+            // target cannot produce.
+            if !Self.supportsDeliveryObservation(terminal) {
+                let kindName = (terminal.kind ?? .shell).rawValue
+                let message = """
+                    terminal.send --verify was refused: terminal \
+                    \(terminal.id.uuidString) is a \(kindName) session, and delivery can only \
+                    be observed for a Claude session today — nothing was sent. Resend without \
+                    --verify.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            let enabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
+            if !enabled {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is disabled \
+                    (config.delivery_verification_enabled is off) — nothing was sent. Enable \
+                    it with the config.setDeliveryVerification RPC and restart the daemon, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            if deliveryVerifier == nil {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is enabled but \
+                    this daemon has no verifier wired, so the flag was turned on after it \
+                    started — nothing was sent. Restart the daemon to arm the observation, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+        }
+
+        // Ask the pane about itself before typing into it — the honest-transport
+        // check of issue #384 and the dead-pane class beside it. A decline here
+        // is a refusal, never a transport failure: the daemon declined without
+        // touching the transport. The consultation itself failing is the
+        // opposite, and is classified as such.
+        let refusal: PaneSendRefusal?
         do {
-            target = try await tmux.paneSendTarget(
-                server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            refusal = try await consultPaneBeforeTyping(
+                terminal: terminal, server: worktree.tmuxServer)
         } catch {
-            // The consultation itself could not be run (a wedged tmux tripping
-            // the subprocess timeout). That is a tmux command failing, not an
-            // answer about the pane, and it is classified as such.
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        if let refusal {
+            await finishActuation(actuationID, refusal.outcome, error: refusal.message)
+            return RPCResponse(error: refusal.message)
+        }
+
+        // What actually reached the pane, envelope included — nil for a payload
+        // that pasted nothing (empty text, or keys). Handed to the arming seam
+        // below so a retry can re-deliver byte-identically.
+        var deliveredPayload: String?
+
+        do {
+            switch payload {
+            case .text(let text, let submit, _):
+                // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
+                // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
+                // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
+                // multiple rapid reads, which a TUI's non-bracketed paste-burst
+                // detection mistakes for a paste and coalesces — absorbing the trailing
+                // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
+                // Enter provably outside the paste. tmux emits the wrappers iff the pane
+                // has bracketed-paste mode on — agent TUIs and modern interactive shells
+                // both enable it at the prompt; cooked-mode consumers get bare bytes and
+                // behave as before. Skip an empty body entirely (don't paste an empty
+                // buffer) but still press Enter below if requested.
+                //
+                // A non-empty text payload to an AGENT rides behind the dispatch
+                // envelope (§12): a one-line tag carrying this row's id and the
+                // identity the row was attributed to, then the caller's message
+                // verbatim. It is attribution the receiving agent can read, and
+                // — because a submitted message's verbatim content lands in the
+                // transcript JSONL — it is the machine fact a later observation
+                // looks for, requiring nothing of the agent. Unconditional along
+                // the axis that matters: verified or not, a prefix that appears
+                // only sometimes is one no reader can rely on.
+                //
+                // An EMPTY payload keeps today's behaviour exactly: nothing is
+                // pasted, and a bare `--submit` still presses Enter. `tbd
+                // terminal send --text "" --submit` is a real way to press Enter
+                // and must not start pasting a tag.
+                if !text.isEmpty {
+                    // ...and it rides every send to an AGENT. A shell is not a
+                    // reader of envelopes: it has no transcript to join back to,
+                    // and a `--submit` there would execute the tag as a command
+                    // line of its own before the caller's text ever ran. Every
+                    // sentence §12 uses to justify the envelope is about a
+                    // receiving agent and its transcript JSONL; a shell target
+                    // satisfies none of them, so prefixing one would be framing
+                    // nobody reads, delivered as a syntax error.
+                    let composed = Self.carriesDispatchEnvelope(terminal)
+                        ? Self.dispatchEnvelope(
+                            id: actuationID, from: (actor ?? .anonymous).dispatchLabel
+                        ) + "\n" + text
+                        : text
+                    try await tmux.pasteText(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        bytes: Data(composed.utf8)
+                    )
+                    deliveredPayload = composed
+                }
+
+                if submit {
+                    try await tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter"
+                    )
+                }
+
+            case .keys(let names, _):
+                // Named keys, one at a time, paced — see `PacedKeySender` for
+                // why back-to-back keys get dropped by a redrawing TUI. The
+                // `sendKey` call stays here, inside the file the actuation audit
+                // covers, and the pacing lives behind the closure.
+                try await pacedKeySender.send(names) { key in
+                    try await self.tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: key
+                    )
+                }
+            }
+        } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
         }
 
-        switch target {
+        await finishActuation(actuationID, .dispatched)
+
+        // Hand off to the observation — the record's third rung. Reached only
+        // from here, only after `.dispatched`, and only for a verify-armed text
+        // payload that actually pasted something, so a verify-less send, a
+        // refusal and a transport failure all arm nothing. See
+        // `DeliveryVerificationArming` for the full contract.
+        if payload.isVerifyArmed, let deliveredPayload {
+            await deliveryVerifier?.armVerification(
+                actuationID: actuationID,
+                terminalID: terminal.id,
+                sessionID: terminal.claudeSessionID,
+                deliveredPayload: deliveredPayload,
+                submit: payload.recordedSubmit ?? false)
+        }
+        return .ok()
+    }
+
+    // MARK: - The pane consultation, and the verifier's re-delivery
+
+    /// Consult the pane the send names, and classify the answer.
+    ///
+    /// `nil` means "proceed" — the pane is alive and either agrees it is this
+    /// terminal or claims no identity at all. Anything else is a refusal the
+    /// caller records and returns, with the message a human reads.
+    ///
+    /// tmux's own exit status cannot carry this: `send-keys` into a
+    /// `remain-on-exit` dead pane exits 0, and keys sent to a reused pane id
+    /// land in a live stranger's composer with no error anywhere (issue #384).
+    /// Both answers arrive from ONE read-only `list-panes`, read BEFORE any
+    /// byte is written. Throws only when the consultation could not be RUN — a
+    /// wedged tmux tripping the subprocess timeout — which is a tmux command
+    /// failing, not an answer about the pane.
+    ///
+    /// Shared by the send path and by `redeliverVerifiedPayload`, so the retry
+    /// cannot re-type into a pane the first send would have refused.
+    private func consultPaneBeforeTyping(
+        terminal: Terminal, server: String
+    ) async throws -> PaneSendRefusal? {
+        switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
         case .missing:
-            let message = """
+            return PaneSendRefusal(outcome: .refused(.notFound), message: """
                 tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
-                no longer exists on server \(worktree.tmuxServer) — nothing was sent
-                """
-            await finishActuation(actuationID, .refused(.notFound), error: message)
-            return RPCResponse(error: message)
+                no longer exists on server \(server) — nothing was sent
+                """)
         case .dead:
-            let message = """
+            return PaneSendRefusal(outcome: .refused(.notEligible), message: """
                 tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
                 dead (its process has exited) — nothing was sent; recreate the terminal's \
                 window first
-                """
-            await finishActuation(actuationID, .refused(.notEligible), error: message)
-            return RPCResponse(error: message)
+                """)
         case .live(let paneTerminalID):
             guard let paneTerminalID else {
                 // Absence is not disagreement. A pane spawned before TBD stamped
@@ -1939,53 +2158,223 @@ extension RPCRouter {
                     terminal identity; proceeding without verifying it is terminal \
                     \(terminal.id.uuidString, privacy: .public)
                     """)
-                break
+                return nil
             }
-            if paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
-                let message = """
-                    tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
-                    \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
-                    — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
-                    """
-                await finishActuation(actuationID, .refused(.targetMismatch), error: message)
-                return RPCResponse(error: message)
-            }
+            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString)
+                != .orderedSame else { return nil }
+            return PaneSendRefusal(outcome: .refused(.targetMismatch), message: """
+                tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
+                \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
+                — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
+                """)
         }
+    }
 
-        // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
-        // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
-        // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
-        // multiple rapid reads, which a TUI's non-bracketed paste-burst
-        // detection mistakes for a paste and coalesces — absorbing the trailing
-        // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
-        // Enter provably outside the paste. tmux emits the wrappers iff the pane
-        // has bracketed-paste mode on — agent TUIs and modern interactive shells
-        // both enable it at the prompt; cooked-mode consumers get bare bytes and
-        // behave as before. Skip an empty body entirely (don't paste an empty
-        // buffer) but still press Enter below if requested.
+    /// Re-deliver an already-recorded payload, byte-identically, for the
+    /// delivery verifier's single evidence-bounded retry (§12).
+    ///
+    /// **Writes no row of its own, and mints no id.** The retry re-delivers the
+    /// identical payload under the identical envelope id, so it is the same
+    /// actuation-level intent as the original send — a second request row would
+    /// split one intent in two and break the join that makes the ladder
+    /// readable. The verifier records this call's *outcome* against the
+    /// original request id, which is why the outcome is returned rather than
+    /// thrown: a refused or transport-failed retry must be classified as what
+    /// it was, not collapsed into "the payload failed".
+    ///
+    /// It runs the same pane consultation the first send ran, through the same
+    /// helper: a minute has passed, and the pane may have died or been reused
+    /// since. And it queues in the same per-terminal lane, so a retry can never
+    /// splice itself into a concurrent send's paste.
+    func redeliverVerifiedPayload(
+        terminalID: UUID, sessionID: String?, payload: String, submit: Bool
+    ) async -> ActuationOutcome {
+        guard let terminal = try? await db.terminals.get(id: terminalID),
+              let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+            return .refused(.notFound)
+        }
+        // The kind is re-read too, not just the pane. A `recreateWindow` landing
+        // between the observation and this retry can turn an agent terminal into
+        // a shell while keeping its id, and the payload we are holding opens
+        // with an envelope — which a shell would run as a command line of its
+        // own. The eligibility that admitted the first send has to still hold
+        // for the second.
+        guard Self.supportsDeliveryObservation(terminal) else {
+            return .refused(.notEligible)
+        }
+        // And the conversation is re-checked here, not only at the observation.
+        // The gap between the two spans a DB write, two reads and this
+        // serializer's queue — long enough for a `/clear` to land in it — and
+        // the payload being held is an instruction addressed to the session
+        // that is no longer there. A rebind makes this a send to a stranger,
+        // which is the one thing the retry must never be.
+        //
+        // A `nil` expected id is not a mismatch, and this is the same rule
+        // `DeliveryVerifier.observe` applies: it means the conversation was not
+        // identified when the payload was dispatched — a terminal whose session
+        // id had not been recorded yet — so there is no identity to compare and
+        // no rebind the comparison could detect. A session id appearing by the
+        // time the retry runs is the terminal becoming knowable, not a stranger
+        // arriving. Refusing on it would spend the one retry the mechanism gets
+        // on an absence that is evidence of nothing. A *known* id that no longer
+        // matches is still a stranger, and still refused.
+        if let sessionID, terminal.claudeSessionID != sessionID {
+            return .refused(.targetMismatch)
+        }
+        let outcome: ActuationOutcome
         do {
-            if !params.text.isEmpty {
-                try await tmux.pasteText(
+            outcome = try await terminalSendSerializer.run(terminalID: terminalID) {
+                if let refusal = try await self.consultPaneBeforeTyping(
+                    terminal: terminal, server: worktree.tmuxServer) {
+                    return refusal.outcome
+                }
+                try await self.tmux.pasteText(
                     server: worktree.tmuxServer,
                     paneID: terminal.tmuxPaneID,
-                    bytes: Data(params.text.utf8)
-                )
-            }
-
-            if params.submit == true {
-                try await tmux.sendKey(
-                    server: worktree.tmuxServer,
-                    paneID: terminal.tmuxPaneID,
-                    key: "Enter"
-                )
+                    bytes: Data(payload.utf8))
+                if submit {
+                    try await self.tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter")
+                }
+                return .dispatched
             }
         } catch {
-            await finishActuation(actuationID, .transportFailed, error: "\(error)")
-            throw error
+            // Either the consultation could not be run or the paste itself
+            // failed. Both are the transport, not a decision.
+            logger.warning("""
+                delivery retry: re-delivery to terminal \(terminalID.uuidString, privacy: .public) \
+                failed: \(error, privacy: .public)
+                """)
+            return .transportFailed
         }
+        return outcome
+    }
 
-        await finishActuation(actuationID, .dispatched)
-        return .ok()
+    // MARK: - terminal.send payload shape
+
+    /// The dispatch envelope §12 puts ahead of a non-empty text payload bound
+    /// for an agent (see `carriesDispatchEnvelope` for which targets those are).
+    ///
+    /// `id` is the actuation row's own id — there is no second identifier
+    /// namespace, so dispatch, transcript receipt and outcome all join on one
+    /// string. `from` comes from `ActuationActor.dispatchLabel`, which is
+    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or project name
+    /// can close the tag or open a second attribute.
+    static func dispatchEnvelope(id: String, from label: String) -> String {
+        "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
+    }
+
+    /// Whether this target is one the envelope means anything to.
+    ///
+    /// Agent sessions only. The envelope exists so a receiving agent can see who
+    /// is addressing it and so a later reader can join a transcript message back
+    /// to its actuation row — and a shell has neither property: nothing reads the
+    /// tag, no transcript records it, and `--submit` would run it as a command
+    /// line of its own. `tbd terminal send` into a plain shell pane is a
+    /// supported thing to do (`docs/tmux-integration.md`), so this is a real
+    /// target rather than a theoretical one.
+    ///
+    /// A terminal with no recorded kind is treated as a shell — the same
+    /// defaulting the rest of this file uses (`terminal.kind ?? .shell`), and the
+    /// conservative direction: it withholds framing rather than typing a tag into
+    /// something that may execute it.
+    static func carriesDispatchEnvelope(_ terminal: Terminal) -> Bool {
+        switch terminal.kind ?? .shell {
+        case .claude, .codex: return true
+        case .shell: return false
+        }
+    }
+
+    /// Whether an adapter exists that can actually observe a delivery to this
+    /// target — the narrower question `--verify` turns on.
+    ///
+    /// Claude only, today. §12 is explicit that the envelope-in-the-transcript
+    /// read is *the Claude adapter's* implementation of the observation, and
+    /// that "the Codex adapter gets the same answer from the app-server
+    /// protocol's in-protocol acknowledgement" — a different mechanism, and one
+    /// this slice does not build. A Codex session records no Claude-shaped
+    /// transcript path, so the one observation that exists would answer
+    /// `undetermined` every time.
+    ///
+    /// So this is the same refusal a shell gets, for the same stated reason:
+    /// promising evidence a target cannot produce is the failure this whole
+    /// mechanism exists to end. Codex still receives the envelope — attribution
+    /// is worth having to any agent, and a composer does not execute it — but it
+    /// cannot be verified until its adapter lands.
+    static func supportsDeliveryObservation(_ terminal: Terminal) -> Bool {
+        (terminal.kind ?? .shell) == .claude
+    }
+
+    /// Reject the payload shapes that name no coherent act, before a row exists.
+    ///
+    /// Returns the validated payload, or the error text the caller sees. Pure
+    /// and static so both the daemon path and its tests can reach it without a
+    /// database.
+    static func validateSendShape(
+        _ params: TerminalSendParams
+    ) -> TerminalSendShape {
+        let submit = params.submit == true
+        let verify = params.verify == true
+
+        switch (params.text, params.keys) {
+        case (.some, .some):
+            // Two payloads in one call. Which one was meant is unknowable, and
+            // guessing would type something nobody asked for.
+            return .malformed(
+                "terminal.send takes exactly one payload: --text or --keys, not both")
+
+        case (.none, .none):
+            return .malformed(
+                "terminal.send needs a payload: pass --text or --keys")
+
+        case (.none, .some(let keys)):
+            // Enter is itself a key. `--submit --keys` asks the daemon to append
+            // a keystroke to a key sequence the caller already wrote out in
+            // full, which cannot be what was meant — spell it "… Enter".
+            if submit {
+                return .malformed(
+                    "terminal.send --submit is incoherent with --keys (Enter is itself a "
+                    + "key — put it in the sequence: --keys \"Escape Enter\")")
+            }
+            // Keys never reach a transcript, so there is no observation to make
+            // and nothing an envelope could be found in (§12).
+            if verify {
+                return .malformed(
+                    "terminal.send --verify cannot be used with --keys: keys reach no "
+                    + "transcript, so delivery cannot be observed")
+            }
+            guard let names = PacedKeySender.tokenize(keys) else {
+                return .malformed(
+                    "terminal.send --keys must name between 1 and \(PacedKeySender.maxKeys) "
+                    + "whitespace-separated tmux keys (for example: --keys \"Escape Enter\")")
+            }
+            return .valid(.keys(names: names, verbatim: keys))
+
+        case (.some(let text), .none):
+            if verify {
+                // Text that is never submitted never enters the conversation and
+                // so can never appear in a transcript; verifying it would build
+                // a machine that reports not-landed every time and then retries.
+                // An EMPTY payload fails for the same reason one step earlier —
+                // nothing is pasted, so no envelope is ever written to be found.
+                // Both are refused rather than downgraded, per the never-answer-
+                // a-request-for-evidence-with-silence rule (§12).
+                if !submit {
+                    return .malformed(
+                        "terminal.send --verify requires --submit: text left standing in a "
+                        + "composer never enters the conversation, so delivery cannot be "
+                        + "observed")
+                }
+                if text.isEmpty {
+                    return .malformed(
+                        "terminal.send --verify requires a non-empty --text: an empty payload "
+                        + "pastes nothing, so there is no dispatch envelope to observe")
+                }
+            }
+            return .valid(.text(text, submit: submit, verify: verify))
+        }
     }
 
     // MARK: - Main Area Size Broadcast

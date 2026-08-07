@@ -1201,6 +1201,24 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        // Soak flag for delivery acknowledgement (fleet-supervision design
+        // §12). Default false, following the `hibernate_input_veto_enabled`
+        // (v51) / `control_mode_enabled` precedent rather than the v39/v50
+        // cautionary one: the re-check acts on no user gesture and its retry
+        // types into a live session, so the whole path ships off and is opted
+        // into for its soak. Shipping OFF also means no forcing `UPDATE`
+        // migration is ever needed to flip the default later.
+        //
+        // The flag does not gate the dispatch envelope — attribution rides
+        // every text send to an agent regardless, verified or not (§12).
+        // Whether a target gets one at all is a property of the target: a shell
+        // would execute the tag, so it receives the text alone.
+        migrator.registerMigration("v69_config_delivery_verification") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "delivery_verification_enabled",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }

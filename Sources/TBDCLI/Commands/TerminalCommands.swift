@@ -116,20 +116,96 @@ struct TerminalList: AsyncParsableCommand {
 struct TerminalSend: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "send",
-        abstract: "Send text to a terminal"
+        abstract: "Send a payload to a terminal: text, or named keys",
+        discussion: """
+            Exactly one payload per call.
+
+              --text "…"          the message. Typed into the composer and left
+                                  standing unless --submit is also passed.
+              --text "…" --submit  the message, submitted. This is the pair every
+                                  delivery uses.
+              --keys "Escape Enter"  whitespace-separated tmux key names, sent one
+                                  at a time. Interrupt is a keys payload
+                                  (--keys "C-c"). Enter is itself a key, so
+                                  --submit does not apply here.
+
+            A non-empty text payload sent to an AGENT session is delivered
+            behind a one-line attribution envelope carrying the send's record id
+            and the caller's declared identity, then the message verbatim, so
+            the receiving agent sees who is addressing it. A shell target gets
+            the text alone: nothing there reads the tag, and --submit would run
+            it as a command line of its own.
+
+            --verify additionally asks the daemon to confirm the payload landed,
+            by looking for that envelope in the session's transcript. It needs
+            --submit (text left standing in a composer never enters the
+            conversation) and cannot be combined with --keys (keys reach no
+            transcript). It is available for Claude sessions only — a shell
+            keeps no transcript, and Codex's acknowledgement arrives by a
+            different mechanism that is not built yet. It is refused, rather
+            than quietly downgraded, while delivery verification is disabled
+            daemon-side.
+            """
     )
 
     @Option(name: .long, help: "Terminal ID")
     var terminal: String
 
     @Option(name: .long, help: "Text to send")
-    var text: String
+    var text: String?
+
+    @Option(name: .long, help: "Whitespace-separated tmux key names to send, e.g. \"Escape Enter\" or \"C-c\"")
+    var keys: String?
 
     @Flag(name: .long, help: "Press Enter after sending text")
     var submit = false
 
+    @Flag(name: .long, help: "Confirm the payload landed in the session's transcript (requires --submit; not valid with --keys)")
+    var verify = false
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
+
+    /// The payload-shape rules, checked here so a human gets a clean message
+    /// before a socket is opened. Deliberately duplicated rather than
+    /// delegated: the CLI is not the only caller, so the daemon cannot rely on
+    /// this — and a human should not have to read an RPC error to learn they
+    /// passed two payloads.
+    ///
+    /// Not a complete mirror of the daemon's `validateSendShape`, and not meant
+    /// to be: the daemon additionally refuses a `--keys` value that tokenizes
+    /// to nothing or to more than `PacedKeySender.maxKeys` keys. Duplicating
+    /// the tokenizer here would mean two copies of a bound that must agree,
+    /// which is a worse failure than one extra round trip — the daemon's
+    /// refusal is specific and reaches the user as an ordinary error.
+    func validate() throws {
+        if text != nil && keys != nil {
+            throw ValidationError("Pass exactly one payload: --text or --keys, not both.")
+        }
+        if text == nil && keys == nil {
+            throw ValidationError("Pass a payload: --text or --keys.")
+        }
+        if keys != nil && submit {
+            throw ValidationError(
+                "--submit is incoherent with --keys: Enter is itself a key. "
+                + "Put it in the sequence instead, e.g. --keys \"Escape Enter\".")
+        }
+        if keys != nil && verify {
+            throw ValidationError(
+                "--verify cannot be used with --keys: keys reach no transcript, "
+                + "so delivery cannot be observed.")
+        }
+        if verify && !submit {
+            throw ValidationError(
+                "--verify requires --submit: text left standing in a composer never "
+                + "enters the conversation, so delivery cannot be observed.")
+        }
+        if verify, text?.isEmpty == true {
+            throw ValidationError(
+                "--verify requires a non-empty --text: an empty payload pastes nothing, "
+                + "so there is no dispatch envelope to observe.")
+        }
+    }
 
     mutating func run() async throws {
         guard let terminalID = UUID(uuidString: terminal) else {
@@ -139,13 +215,21 @@ struct TerminalSend: AsyncParsableCommand {
         let client = SocketClient()
         try client.callVoid(
             method: RPCMethod.terminalSend,
-            params: TerminalSendParams(terminalID: terminalID, text: text, submit: submit)
+            params: TerminalSendParams(
+                terminalID: terminalID,
+                text: text,
+                keys: keys,
+                // Preserved exactly: `--submit` is sent as a plain bool for a
+                // text payload, as it always was. A keys payload never carries
+                // it (validate() has already refused the combination).
+                submit: keys == nil ? submit : nil,
+                verify: verify ? true : nil)
         )
 
         if json {
             printJSON(["status": "sent"])
         } else {
-            print("Text sent.")
+            print(keys == nil ? "Text sent." : "Keys sent.")
         }
     }
 }
