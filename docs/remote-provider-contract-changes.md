@@ -299,7 +299,13 @@ Response:
 - **`resume_command`** – optional argv the caller runs in the new local
   workspace's first pane. Omit it when there is nothing to resume.
 - **`forks`** – required boolean. Whether local work continues to reach the
-  remote session. `true` means the two diverge from the moment of landing.
+  remote session. `true` means the two diverge from the moment of landing;
+  `false` means they stay one conversation and later local work still reaches
+  it. Report `true` unless you can actually guarantee that continuity — `false`
+  is a promise about where subsequent work goes, and over-reporting it silently
+  loses work. It also costs the caller a capability: a non-forking session can
+  only be landed once, since two local copies would be two writers on one
+  conversation.
 
 **Required?** No.
 

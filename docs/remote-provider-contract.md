@@ -6,7 +6,7 @@ This document specifies the contract a **provider** must implement to plug a rem
 
 TBD invokes the provider executable as `<exec> [args...] <verb> [flags]`. Depending on the verb, TBD may pass structured input on stdin and reads either a single JSON object or an NDJSON stream from stdout. stderr is diagnostic only — TBD logs it but never parses it — with exactly one exception: `transcript` returns its continuation cursor as a JSON envelope on stderr, and that envelope is the only stderr content any verb defines (see `transcript` below).
 
-Every invocation carries the negotiated contract major in `TBD_CONTRACT_VERSION` (see Versioning below), and the provider inherits the caller's full login environment.
+Every invocation carries a contract major in `TBD_CONTRACT_VERSION` (see Versioning below), and the provider inherits the caller's full login environment. On every verb except `describe` this is the negotiated major. `describe` is the call that produces the negotiation, so no negotiated value exists yet when it runs: it carries the **caller's own highest supported major** instead. A provider MUST NOT vary its `describe` response based on that value — `describe` answers from static local data and MUST report every major the provider supports, so that a caller supporting a newer major than the provider still negotiates down correctly rather than being told only what it asked about.
 
 Three verbs are **required**: `describe`, `create`, and `list`. Every other verb is optional and declared as a **capability** via `describe`. A caller MUST NOT invoke a verb whose capability the provider has not declared, and MUST NOT offer a user-facing action that would require one.
 
@@ -340,7 +340,9 @@ Response:
 - `remote_url` (required) — the git remote the session's work is pushed to.
 - `branch` (required) — the branch that work is on.
 - `resume_command` (optional) — argv the caller MAY run in the first pane of the reconstructed checkout to resume the conversation. It is argv, never a shell string: a caller executes it directly and never through a shell. Omitted when there is nothing to resume.
-- `forks` (required) — whether local work continues to reach the remote session. `true` means the local copy and the remote session diverge from the moment of landing, and a caller MUST present that fork as a fork rather than implying that typing in one reaches the other.
+- `forks` (required) — whether local work continues to reach the remote session.
+  - `true` — the local copy and the remote session diverge from the moment of landing. A caller MUST present that fork as a fork rather than implying that typing in one reaches the other, and MAY land the same session more than once, since each landing is an independent line of work.
+  - `false` — the landed copy and the remote session remain one conversation, and work done locally continues to reach it. A caller MUST NOT present divergence, and MUST NOT offer a second landing of the same session: two local copies of a non-forking session would be two writers on one conversation, which the contract gives no way to reconcile. A provider that cannot guarantee that continuity MUST report `true` — `false` is a promise about where subsequent work goes, and over-reporting it silently loses work.
 
 **None of these fields are trusted input.** For an external provider they come from an executable the user registered; for one built into the caller they may come from session metadata stored on a remote server, including metadata written by another device. Either way they are attacker-influenceable strings that are about to meet a program that takes options and executes transports. Three rules are mandatory:
 
