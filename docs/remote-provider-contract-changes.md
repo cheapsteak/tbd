@@ -362,7 +362,8 @@ can still do whatever manual fetch-and-checkout they do today.
 
 ## 7. Version negotiation
 
-The mechanics are unchanged from v1; only the values are new.
+Negotiation works as it did in v1, with one genuine addition at `describe` time
+covered below.
 
 **Declaring.** `describe` reports every contract major you support:
 
@@ -387,6 +388,22 @@ says so. Whatever major is chosen rides on every subsequent invocation as the
 `[1, 2]` against a v2-capable caller will now see `TBD_CONTRACT_VERSION=2`, and
 against an older caller will still see `1`.
 
+**What `describe` itself sees is new.** `describe` is the call that produces the
+negotiation, so there is no negotiated value when it runs. Under v1 it received
+a hardcoded `1`; it now receives the **caller's own highest supported major**.
+A v2-capable caller therefore invokes your `describe` with
+`TBD_CONTRACT_VERSION=2` before knowing anything about you.
+
+This is a difference in kind rather than in value, so it is worth being explicit
+about what it does and does not license. It is informational only: **you MUST
+NOT vary your `describe` response based on it.** Report every major you support
+regardless of what the caller announces. A caller that supports a newer major
+than you do still needs to see your full `contract_versions` list so it can
+negotiate down — tailoring your answer to what the caller asked about is how a
+provider ends up unusable by the very caller it was trying to accommodate. In
+practice this costs you nothing: `describe` answers from static local data, so
+there is nothing there to vary.
+
 **You must behave correctly at whichever major was negotiated.** In practice one
 code path serves both, because of how v2 was shaped:
 
@@ -406,7 +423,9 @@ must implement `stop`.
 
 **Do not branch on `TBD_CONTRACT_VERSION` unless you have a reason.** For nearly
 every provider, reading it is unnecessary — the same behavior is correct at both
-majors.
+majors. Inside `describe` it is worse than unnecessary: there the value
+describes the caller rather than any agreement with you, and branching on it is
+the mistake the MUST-NOT-vary rule above exists to prevent.
 
 ## What to do if you maintain a v1 provider
 
