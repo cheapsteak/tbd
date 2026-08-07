@@ -91,7 +91,17 @@ struct RepoSectionView: View {
         let base = "This unregisters the repo from TBD. Your git repository and files on disk are not touched."
         if activeWorktreeCount > 0 {
             let plural = activeWorktreeCount == 1 ? "worktree" : "worktrees"
-            return "\(activeWorktreeCount) active \(plural) will be archived first.\n\n\(base)"
+            // This path force-archives, which removes each worktree directory
+            // and skips the archive safety checks. Saying "files on disk are
+            // not touched" here was simply false.
+            let branchPlural = activeWorktreeCount == 1 ? "Its branch is" : "Their branches are"
+            return """
+                \(activeWorktreeCount) active \(plural) will be archived first, \
+                removing their working directories along with any uncommitted \
+                changes. \(branchPlural) kept.
+
+                This unregisters the repo from TBD. The git repository itself is not touched.
+                """
         }
         return base
     }

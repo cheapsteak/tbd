@@ -11,7 +11,61 @@ private let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
 
 @Suite("ReapSnapshot")
 struct ReapSnapshotTests {
-    // MARK: (a) Dirty worktree -> ref exists, ls-tree shows untracked, ignored absent.
+    @Test func advisoryRuntimeResidueIsSnapshottedWithoutTrustedRegistry() async throws {
+        let (tmp, repo, wt, _) = try await makeRepoWithExternalWorktree(
+            branch: "runtime", folder: "runtimewt"
+        )
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = URL(fileURLWithPath: wt)
+        // The overlay is left untracked rather than gitignored. Ignored paths
+        // are outside the classifier's boundary entirely, so an ignored
+        // overlay would prove nothing about advisory-manifest handling.
+        try Data("build-cache/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        try await shell("git add .gitignore && git commit -m ignore-build-cache", at: root)
+        try writeRuntimeOverlay(root: root, contents: Data("generated".utf8))
+
+        let git = GitManager()
+        let ref = try #require(try await ReapSnapshot(git: git).snapshotIfNeeded(
+            worktreePath: wt,
+            repoPath: repo.path,
+            headSHA: try await git.headSHA(worktreePath: wt),
+            worktreeName: "runtime",
+            now: fixedNow
+        ))
+
+        let paths = try await runGit(["ls-tree", "-r", "--name-only", ref], at: repo)
+        #expect(paths.contains(".agents/skills/demo/SKILL.md"))
+    }
+
+    @Test func divergentBootstrapRuntimeIsSnapshotted() async throws {
+        let (tmp, repo, wt, _) = try await makeRepoWithExternalWorktree(
+            branch: "divergent", folder: "divergentwt"
+        )
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = URL(fileURLWithPath: wt)
+        try writeRuntimeOverlay(root: root, contents: Data("generated".utf8))
+        try Data("build-cache/\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        try await shell("git add .gitignore && git commit -m ignore-build-cache", at: root)
+        try Data("user-edited".utf8).write(to: root.appendingPathComponent(".agents/skills/demo/SKILL.md"))
+        let indexBefore = try await runGit(["diff", "--cached", "--name-only"], at: root)
+
+        let git = GitManager()
+        let ref = try #require(try await ReapSnapshot(git: git).snapshotIfNeeded(
+            worktreePath: wt,
+            repoPath: repo.path,
+            headSHA: try await git.headSHA(worktreePath: wt),
+            worktreeName: "divergent",
+            now: fixedNow
+        ))
+
+        let paths = try await runGit(["ls-tree", "-r", "--name-only", ref], at: repo)
+        #expect(paths.contains(".agents/skills/demo/SKILL.md"))
+        #expect(paths.contains(ArchiveSafetyClassifier.manifestRelativePath))
+        let indexAfter = try await runGit(["diff", "--cached", "--name-only"], at: root)
+        #expect(indexAfter == indexBefore)
+    }
+
+    // MARK: (a) Dirty worktree -> ref preserves untracked and ignored bytes.
 
     @Test func dirtyWorktreeCreatesVerifiedSnapshotRef() async throws {
         let (tmp, repo, wt, _) = try await makeRepoWithExternalWorktree(branch: "dirty", folder: "dirtywt")
@@ -35,6 +89,8 @@ struct ReapSnapshotTests {
 
         let lsTree = try await runGit(["ls-tree", "-r", "--name-only", resolvedRef], at: repo)
         #expect(lsTree.contains("untracked.txt"))
+        // A snapshot ref is permanently reachable, so ignored bytes stay out
+        // of it — otherwise every reap would commit the worktree's build tree.
         #expect(!lsTree.contains("ignored.txt"))
     }
 
@@ -185,5 +241,29 @@ struct ReapSnapshotTests {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func writeRuntimeOverlay(root: URL, contents: Data) throws {
+        let artifact = root.appendingPathComponent(".agents/skills/demo/SKILL.md")
+        try FileManager.default.createDirectory(
+            at: artifact.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try contents.write(to: artifact)
+
+        let manifest = root.appendingPathComponent(ArchiveSafetyClassifier.manifestRelativePath)
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let json: [String: Any] = [
+            "schemaVersion": 1,
+            "producer": "agent-bootstrap",
+            "producerVersion": "test-v1",
+            "artifacts": [[
+                "path": ".agents/skills/demo/SKILL.md",
+                "kind": "runtime",
+                "sha256": ArchiveSafetyClassifier.sha256(contents),
+            ]],
+        ]
+        try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: manifest)
     }
 }

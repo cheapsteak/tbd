@@ -41,10 +41,15 @@ extension WorktreeLifecycle {
     ///
     /// - Parameters:
     ///   - worktreeID: The worktree to archive.
-    ///   - force: If true, skip running the archive hook.
-    /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
-    /// Returns the worktree and repo for phase 2.
-    public func beginArchiveWorktree(worktreeID: UUID, force: Bool = false) async throws -> (Worktree, Repo) {
+    ///   - force: If true, bypass archive-safety and active-child gates. The
+    ///     slow phase also skips the archive hook.
+    /// Phase 1 is read-only validation. It returns the exact worktree and repo
+    /// for the removal/finalization phase.
+    public func beginArchiveWorktree(
+        worktreeID: UUID,
+        force: Bool = false,
+        knownPublished: Bool = false
+    ) async throws -> (Worktree, Repo) {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -64,76 +69,41 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
         }
 
-        // Collect Claude session IDs before archiving so they survive terminal deletion
-        let terminals = try await db.terminals.list(worktreeID: worktreeID)
-        let claudeSessionIDs = terminals
-            .sorted(by: { $0.createdAt < $1.createdAt })
-            .filter(\.isClaudeResumable)
-            .compactMap(\.claudeSessionID)
-
-        // Sync the branch in DB with what git reports for the worktree path,
-        // so a rename done inside the worktree (e.g. `git branch -m`) is
-        // captured before we lose the live worktree. Without this, revive
-        // would later try to check out a stale branch that no longer exists.
-        // git canonicalizes worktree paths (e.g. /var → /private/var on macOS),
-        // so compare resolved-symlink forms when matching against `worktree.path`.
-        let resolvedWtPath = (URL(fileURLWithPath: worktree.path).resolvingSymlinksInPath()).path
-        if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path),
-           let gitWt = gitWorktrees.first(where: {
-               let resolvedGitPath = (URL(fileURLWithPath: $0.path).resolvingSymlinksInPath()).path
-               return resolvedGitPath == resolvedWtPath
-           }),
-           !gitWt.branch.isEmpty,
-           gitWt.branch != worktree.branch {
-            do {
-                try await db.worktrees.updateBranch(id: worktreeID, branch: gitWt.branch)
-                archiveLogger.info("archive: updated branch for \(worktreeID, privacy: .public) from '\(worktree.branch, privacy: .public)' to '\(gitWt.branch, privacy: .public)' (git worktree list)")
-            } catch {
-                archiveLogger.warning("archive: failed to update branch for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+        // This preflight is read-only and runs before the DB status flip,
+        // terminal teardown, hooks, or disk removal. A manifest entry only
+        // counts when both its provenance and its current bytes verify.
+        if !force {
+            let report: ArchiveSafetyReport
+            if let archiveSafetyEvaluator {
+                report = await archiveSafetyEvaluator(worktree.path, knownPublished)
+            } else {
+                report = await ArchiveSafetyClassifier(git: git).classify(
+                    worktreeID: worktreeID,
+                    worktreePath: worktree.path,
+                    knownPublished: knownPublished
+                )
             }
-        }
-
-        // Capture HEAD SHA from the live worktree directory while it still
-        // exists on disk. Persisted as a fallback for revive when the branch
-        // has been renamed or deleted.
-        var capturedSHA: String? = nil
-        if FileManager.default.fileExists(atPath: worktree.path) {
-            do {
-                capturedSHA = try await git.headSHA(worktreePath: worktree.path)
-            } catch {
-                archiveLogger.warning("archive: failed to capture HEAD SHA for \(worktreeID, privacy: .public) at \(worktree.path, privacy: .public): \(error, privacy: .public)")
+            guard report.isEligible else {
+                throw WorktreeLifecycleError.archiveUnsafe(
+                    name: worktree.name, detail: report.blockingSummary
+                )
             }
-        }
-
-        // Status flip, session save, and SHA persist all in one transaction —
-        // a crash mid-archive can't leave the row half-updated.
-        try await db.worktrees.archive(
-            id: worktreeID,
-            claudeSessionIDs: claudeSessionIDs,
-            archivedHeadSHA: capturedSHA
-        )
-
-        // Capture each terminal's scrollback into Closed Terminals history,
-        // then kill its tmux window, reaping any wedged agent that survives
-        // kill-window's SIGHUP. The archived worktree row and its history rows
-        // survive, so the captured output stays readable later.
-        for terminal in terminals {
-            await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
-        }
-
-        // Delete terminals from db
-        try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
-        try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
-        for terminal in terminals {
-            await pendingQuestions.clear(terminalID: terminal.id)
         }
 
         return (worktree, repo)
     }
 
-    /// Phase 2 (slow, fire-and-forget): Runs archive hook and removes git worktree.
-    public func completeArchiveWorktree(worktree: Worktree, repo: Repo, force: Bool = false) async {
-        // Run archive hook
+    /// Runs the hook, revalidates, removes and verifies the path, then records
+    /// the archive. No archived-final state is published before disk removal.
+    public func completeArchiveWorktree(
+        worktree: Worktree,
+        repo: Repo,
+        force: Bool = false,
+        knownPublished: Bool = false
+    ) async throws {
+        // Run the archive hook before stopping terminals. A hook failure is a
+        // recoverable precondition failure, so it must leave the worktree and
+        // its sessions usable for diagnosis and retry.
         if !force {
             let archiveHookPath = hooks.resolve(
                 event: .archive,
@@ -143,27 +113,143 @@ extension WorktreeLifecycle {
                 }
             )
             if let hookPath = archiveHookPath {
-                _ = try? await hooks.execute(
-                    hookPath: hookPath,
-                    cwd: worktree.path,
-                    env: [
-                        "TBD_EVENT": "archive",
-                        "TBD_WORKTREE_ID": worktree.id.uuidString,
-                        "TBD_WORKTREE_NAME": worktree.name,
-                        "TBD_WORKTREE_PATH": worktree.path,
-                        "TBD_REPO_PATH": repo.path,
-                        "TBD_BRANCH": worktree.branch,
-                    ],
-                    timeout: 60
-                )
+                // A failing hook stops the archive — it may be the thing that
+                // preserves work elsewhere, so proceeding past it would be
+                // unsafe. It is reported as its own error rather than as a
+                // safety refusal: the user's script is what broke, and the
+                // blocking-summary phrasing would send them to `--force`,
+                // which skips every content and publication check as well.
+                do {
+                    let (succeeded, output) = try await hooks.execute(
+                        hookPath: hookPath,
+                        cwd: worktree.path,
+                        env: [
+                            "TBD_EVENT": "archive",
+                            "TBD_WORKTREE_ID": worktree.id.uuidString,
+                            "TBD_WORKTREE_NAME": worktree.name,
+                            "TBD_WORKTREE_PATH": worktree.path,
+                            "TBD_REPO_PATH": repo.path,
+                            "TBD_BRANCH": worktree.branch,
+                        ],
+                        timeout: 60
+                    )
+                    guard succeeded else {
+                        let outputDetail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let detail = String(outputDetail.prefix(4_000))
+                        throw WorktreeLifecycleError.archiveHookFailed(
+                            name: worktree.name,
+                            detail: detail.isEmpty ? "hook exited with a nonzero status" : detail
+                        )
+                    }
+                } catch let error as WorktreeLifecycleError {
+                    throw error
+                } catch {
+                    let detail = String(String(describing: error).prefix(4_000))
+                    throw WorktreeLifecycleError.archiveHookFailed(
+                        name: worktree.name, detail: detail
+                    )
+                }
             }
         }
 
-        // git worktree remove
-        try? await git.worktreeRemove(
-            repoPath: repo.path,
-            worktreePath: worktree.path
-        )
+        // Preserve an in-worktree branch rename before the directory goes
+        // away. This is metadata repair, not archived-final publication.
+        let resolvedWorktreePath = URL(fileURLWithPath: worktree.path)
+            .resolvingSymlinksInPath().path
+        if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path),
+           let gitWorktree = gitWorktrees.first(where: {
+               URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path
+                   == resolvedWorktreePath
+           }),
+           !gitWorktree.branch.isEmpty,
+           gitWorktree.branch != worktree.branch {
+            try await db.worktrees.updateBranch(id: worktree.id, branch: gitWorktree.branch)
+        }
+
+        let capturedSHA = try? await git.headSHA(worktreePath: worktree.path)
+
+        // Silence the worktree's own writers immediately before the final
+        // safety check and removal. Everything that can fail harmlessly while
+        // terminals remain usable has already run. Terminal rows stay until
+        // disk removal is verified. If a residual failure occurs, those rows
+        // are removed and broadcast because their tmux windows are already dead.
+        let terminals = try await db.terminals.list(worktreeID: worktree.id)
+        let sessionIDs = terminals.sorted(by: { $0.createdAt < $1.createdAt })
+            .filter(\.isClaudeResumable).compactMap(\.claudeSessionID)
+        for terminal in terminals {
+            await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
+        }
+
+        do {
+            // This is intentionally the final worktree operation before
+            // removal. Terminals are dead and the hook and all metadata reads
+            // have run, so nothing can mutate the content this check attests.
+            if !force {
+                let report: ArchiveSafetyReport
+                if let archiveSafetyEvaluator {
+                    report = await archiveSafetyEvaluator(worktree.path, knownPublished)
+                } else {
+                    report = await ArchiveSafetyClassifier(git: git).classify(
+                        worktreeID: worktree.id,
+                        worktreePath: worktree.path,
+                        knownPublished: knownPublished
+                    )
+                }
+                guard report.isEligible else {
+                    throw WorktreeLifecycleError.archiveUnsafe(
+                        name: worktree.name, detail: report.blockingSummary
+                    )
+                }
+            }
+
+            if let worktreeRemover {
+                try await worktreeRemover(repo.path, worktree.path)
+            } else {
+                try await git.worktreeRemove(repoPath: repo.path, worktreePath: worktree.path)
+            }
+            guard !FileManager.default.fileExists(atPath: worktree.path) else {
+                throw WorktreeLifecycleError.archiveRemovalFailed("path still exists: \(worktree.path)")
+            }
+
+            try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+            try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+            // Publish archived-final last. Every earlier post-teardown failure
+            // therefore leaves an active row whose dead live-terminal rows can
+            // be cleaned and broadcast honestly by the catch below.
+            try await db.worktrees.archive(
+                id: worktree.id,
+                claudeSessionIDs: sessionIDs,
+                archivedHeadSHA: capturedSHA
+            )
+        } catch {
+            let archiveError = String(describing: error)
+            var cleanupFailures: [String] = []
+            do {
+                try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                for terminal in terminals {
+                    subscriptions?.broadcast(delta: .terminalRemoved(TerminalIDDelta(
+                        terminalID: terminal.id
+                    )))
+                }
+            } catch {
+                cleanupFailures.append("terminal cleanup failed: \(error)")
+            }
+            do {
+                try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: [])
+            } catch {
+                cleanupFailures.append("tab cleanup failed: \(error)")
+            }
+            for terminal in terminals { await pendingQuestions.clear(terminalID: terminal.id) }
+            let cleanupDetail = cleanupFailures.isEmpty
+                ? ""
+                : " (\(cleanupFailures.joined(separator: "; ")))"
+            throw WorktreeLifecycleError.archiveInterruptedAfterTerminalStop(
+                name: worktree.name,
+                detail: archiveError + cleanupDetail
+            )
+        }
+        for terminal in terminals { await pendingQuestions.clear(terminalID: terminal.id) }
 
         // The directory is gone from disk — fire the event-driven scratchpad
         // cleanup hook (Task 8) rather than waiting for the next hourly sweep.
@@ -175,7 +261,7 @@ extension WorktreeLifecycle {
     /// Legacy all-in-one archive (used by CLI).
     public func archiveWorktree(worktreeID: UUID, force: Bool = false) async throws {
         let (worktree, repo) = try await beginArchiveWorktree(worktreeID: worktreeID, force: force)
-        await completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
+        try await completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
     }
 
     // MARK: - Revive

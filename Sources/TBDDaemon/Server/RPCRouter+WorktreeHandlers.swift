@@ -200,35 +200,40 @@ extension RPCRouter {
 
         // One row per call, naming the worktree and no terminal: the caller
         // asked to archive a worktree, and the per-terminal captures and kills
-        // are how `WorktreeLifecycle`'s phase 1 carries that out — sub-steps of
-        // one intent, not separate actuations. Same shape as `worktree.create`,
+        // are how `WorktreeLifecycle` carries that out — sub-steps of one
+        // intent, not separate actuations. Same shape as `worktree.create`,
         // for the same reason.
         let actuationID = try await beginActuation(
             .worktreeArchive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
 
-        // Phase 1: Fast — update DB, kill tmux, return immediately
+        // Both phases run inline. The removal is deliberately not detached: a
+        // background phase two would outlive the safety check that authorized
+        // it, and could remove a worktree whose content changed in between.
         let worktree: Worktree
         let repo: Repo
         do {
             (worktree, repo) = try await lifecycle.beginArchiveWorktree(
-                worktreeID: params.worktreeID)
+                worktreeID: params.worktreeID,
+                force: params.force
+            )
+            try await lifecycle.completeArchiveWorktree(
+                worktree: worktree,
+                repo: repo,
+                force: params.force
+            )
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
         }
+        // Recorded only once the directory is actually gone — the same rule the
+        // archive path follows internally: nothing claims the archive happened
+        // while the worktree is still on disk.
         await finishActuation(actuationID, .dispatched)
 
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
             worktreeID: params.worktreeID
         )))
-
-        // Phase 2: Slow — hook + git worktree remove in background
-        let lifecycle = self.lifecycle
-        let force = params.force
-        Task.detached {
-            await lifecycle.completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
-        }
 
         return .ok()
     }

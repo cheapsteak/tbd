@@ -54,7 +54,17 @@ struct ActuationLogSweepWiringTests {
     }
 
     private func makeLifecycle(db: TBDDatabase, tmux: TmuxManager) -> WorktreeLifecycle {
-        WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        // Database-only fixtures: the worktree paths never exist on disk, so the
+        // real archive preflight would refuse them. Stub the two archive seams
+        // so these tests stay about the actuation rows a sweep writes, not about
+        // the safety gate that ArchiveSafetyClassifierTests owns.
+        WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            archiveSafetyEvaluator: { _, _ in
+                ArchiveSafetyReport(findings: [], headIsPublished: true)
+            },
+            worktreeRemover: { _, _ in }
+        )
     }
 
     // MARK: - reconcile: a worktree that left disk

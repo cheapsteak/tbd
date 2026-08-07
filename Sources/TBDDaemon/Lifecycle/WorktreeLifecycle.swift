@@ -12,6 +12,10 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
     case worktreeAlreadyActive(UUID)
     case createFailed(String)
     case invalidOperation(String)
+    case archiveUnsafe(name: String, detail: String)
+    case archiveHookFailed(name: String, detail: String)
+    case archiveInterruptedAfterTerminalStop(name: String, detail: String)
+    case archiveRemovalFailed(String)
     case worktreePathAlreadyExists(String)
     case worktreeAlreadyRegistered(String)
     /// The archived worktree's branch no longer exists and we have no captured
@@ -32,6 +36,21 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedErr
             return "Failed to create worktree: \(reason)"
         case .invalidOperation(let detail):
             return detail
+        case .archiveUnsafe(let name, let detail):
+            // The recovery belongs in the message: the app's Archive action
+            // never forces and offers no override control, so this string is a
+            // GUI user's only route to the escape hatch.
+            return "Archive blocked: \(detail). To discard this content anyway, run `tbd worktree archive \(name) --force`."
+        case .archiveHookFailed(let name, let detail):
+            // Deliberately NOT phrased as a safety refusal. A broken hook is
+            // the user's own script failing, and pointing them at --force for
+            // it would route an ordinary scripting bug through the one flag
+            // that skips every content and publication check.
+            return "Archive hook failed for \(name): \(detail). Fix the hook, or run `tbd worktree archive \(name) --force` to archive without running it."
+        case .archiveInterruptedAfterTerminalStop(let name, let detail):
+            return "Archive did not finish for \(name) after its terminals were stopped: \(detail). The worktree may still be active; inspect it before restarting work or retrying archive."
+        case .archiveRemovalFailed(let detail):
+            return "Archive removal failed: \(detail)"
         case .worktreePathAlreadyExists(let path):
             return "Cannot revive worktree: a file or directory already exists at \(path). Remove or move it and try again."
         case .worktreeAlreadyRegistered(let path):
@@ -71,6 +90,12 @@ public struct WorktreeLifecycle: Sendable {
     /// Reaper grace knobs (kept small in tests to avoid real sleeps).
     public let reaperGraceAttempts: Int
     public let reaperPollInterval: Duration
+    /// Test seam for archive preflight. Production callers leave this nil and
+    /// always use `ArchiveSafetyClassifier` against the live worktree.
+    let archiveSafetyEvaluator:
+        (@Sendable (_ worktreePath: String, _ knownPublished: Bool) async -> ArchiveSafetyReport)?
+    /// Test seam only. Production leaves this nil and uses GitManager.
+    let worktreeRemover: (@Sendable (_ repoPath: String, _ worktreePath: String) async throws -> Void)?
     /// Resolves the Codex CLI before lifecycle code creates tmux or DB state.
     /// Stored as a seam so tests do not require Codex or ChatGPT.app installed.
     let codexExecutableResolver: @Sendable () throws -> String
@@ -130,6 +155,42 @@ public struct WorktreeLifecycle: Sendable {
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
     ) {
+        self.init(
+            db: db, git: git, tmux: tmux, hooks: hooks,
+            subscriptions: subscriptions, modelProfileResolver: modelProfileResolver,
+            pendingQuestions: pendingQuestions, configDirManager: configDirManager,
+            preSessionTimeout: preSessionTimeout, preSessionPollInterval: preSessionPollInterval,
+            processSignaller: processSignaller, reaperGraceAttempts: reaperGraceAttempts,
+            reaperPollInterval: reaperPollInterval,
+            codexExecutableResolver: codexExecutableResolver,
+            codexHomeEnsurer: codexHomeEnsurer,
+            archiveSafetyEvaluator: nil, worktreeRemover: nil
+        )
+    }
+
+    /// Internal-only initializer for deterministic lifecycle tests. The
+    /// production/public initializer cannot inject an archive bypass.
+    init(
+        db: TBDDatabase,
+        git: GitManager,
+        tmux: TmuxManager,
+        hooks: HookResolver,
+        subscriptions: StateSubscriptionManager? = nil,
+        modelProfileResolver: ModelProfileResolver? = nil,
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
+        preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
+        preSessionPollInterval: TimeInterval = 0.5,
+        processSignaller: ProcessSignaller = ProductionProcessSignaller(),
+        reaperGraceAttempts: Int = 30,
+        reaperPollInterval: Duration = .milliseconds(100),
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        archiveSafetyEvaluator:
+            (@Sendable (_ worktreePath: String, _ knownPublished: Bool) async -> ArchiveSafetyReport)?,
+        worktreeRemover:
+            (@Sendable (_ repoPath: String, _ worktreePath: String) async throws -> Void)?
+    ) {
         self.db = db
         self.git = git
         self.tmux = tmux
@@ -144,6 +205,8 @@ public struct WorktreeLifecycle: Sendable {
         self.processSignaller = processSignaller
         self.reaperGraceAttempts = reaperGraceAttempts
         self.reaperPollInterval = reaperPollInterval
+        self.archiveSafetyEvaluator = archiveSafetyEvaluator
+        self.worktreeRemover = worktreeRemover
         self.codexExecutableResolver = codexExecutableResolver ?? {
             if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
             return try CodexExecutableResolver.resolve()
