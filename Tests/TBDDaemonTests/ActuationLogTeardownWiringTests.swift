@@ -55,7 +55,18 @@ struct ActuationLogTeardownWiringTests {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                // These fixtures are database-only — their worktree paths never
+                // exist on disk and have no git repo — so the real archive
+                // preflight refuses every one of them. Stub the two archive
+                // seams so these tests keep asserting what they are about (which
+                // actuation rows a teardown writes) instead of re-testing the
+                // safety gate, which ArchiveSafetyClassifierTests owns.
+                archiveSafetyEvaluator: { _, _ in
+                    ArchiveSafetyReport(findings: [], headIsPublished: true)
+                },
+                worktreeRemover: { _, _ in }
+            ),
             tmux: tmux,
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath))
