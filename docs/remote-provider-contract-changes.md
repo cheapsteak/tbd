@@ -228,10 +228,9 @@ p transcript <id> [--since <cursor>]
 ```
 
 stdout is Claude Code transcript JSONL. The cursor for the next call is returned
-in a JSON envelope on **stderr**, not as a trailing line of the data stream.
-(For every other verb stderr remains diagnostic and unparsed; this verb is the
-one exception, and the exact envelope shape is specified in the normative
-contract.)
+in a JSON envelope on **stderr**, not as a trailing line of the data stream —
+a single object, `{"cursor": "<opaque-provider-string>"}`. (For every other verb
+stderr remains diagnostic and unparsed; this verb is the one exception.)
 
 The reason the cursor does not ride in the data stream is worth internalizing:
 mixing a control record into the JSONL would make a truncated response
