@@ -33,13 +33,32 @@ about them. Revisiting that is a separate piece of work.
 
 Contract major becomes `2`. A v1 provider keeps working unchanged.
 
-**The negotiation machinery has to be built first.** `ProviderRunner.run`
-hardcodes `TBD_CONTRACT_VERSION=1` and `describeProvider` hard-requires that
-`describe.contractVersions` contains `1`. There is no per-provider negotiated
-version anywhere, and `RemoteProviderInvoking.run(_:verb:stdin:timeout:)` has no
-parameter to carry one. Negotiated version becomes provider state resolved at
-`describe` time and a parameter on the invocation protocol. This is small but it
-is a protocol change, not a free ride on existing code.
+**The negotiation machinery has to be built first, and it spans two processes.**
+`describeProvider` hard-requires that `describe.contractVersions` contains `1`,
+and **three** call sites hardcode `TBD_CONTRACT_VERSION=1`:
+
+- `ProviderRunner.run` — the daemon's ordinary verb path.
+- `ProviderEventsSupervisor` — the daemon's long-lived `events` stream, spawned
+  outside the runner.
+- `RemoteAttachTerminalView.attachEnvironment` — **in `TBDApp`, not the daemon.**
+
+The third is the one that makes this more than a parameter change. The app
+spawns `attach` itself, directly on the pane's PTY, and never passes through
+`RemoteProviderInvoking`. Negotiated state held in `RemoteProviderManager` is
+therefore invisible to it: built as a daemon-side concern alone, `attach` would
+go on announcing major 1 forever while every other verb for the same provider
+had negotiated 2. The comment above that call site already warns that the
+variable must not diverge across invocations, which is exactly the failure this
+would cause.
+
+So the negotiated major is resolved at `describe` time, stored per provider, and
+made to reach all three: a parameter on `RemoteProviderInvoking` for the runner,
+the same value threaded to the events supervisor when it spawns, and a field on
+`RemoteProviderStatus` for the app — which already carries `config`, `describe`
+and `health` over `remote.providers`, and is already in hand where the attach
+environment is built. One resolved value, three consumers, no second source of
+truth. This is small but it is a protocol and wire change, not a free ride on
+existing code.
 
 ### Snapshots declare whether they are complete
 
@@ -201,7 +220,7 @@ Storage needs a decision, because the transcript renderer cannot simply be point
 
 Spooling vendor JSONL into the Claude store would also make `ClaudeSessionScanner` list a cloud conversation as a local session of the worktree.
 
-So remote transcripts live in a TBD-owned root, `~/tbd/remote-transcripts/<provider>/<sessionID>/`, with a path helper in `TBDConstants` honoring `TBD_HOME`. `ClaudeSessionScanner` already accepts a `projectsBase` parameter.
+So remote transcripts live in a TBD-owned root, `~/tbd/remote-transcripts/<provider>/<sessionID>/`, with a path helper in `TBDConstants` honoring `TBD_HOME`. Keeping them out of the Claude store is what stops session scanning from finding them at all, which is the property that matters — the scanner looks under a projects root resolved from a worktree path, and a root TBD owns is not one it searches.
 
 **The two-root boundary is enforced at a single choke point, not per call site.** Every read goes through one resolver that takes an untrusted path and returns either a validated path under one of the two permitted roots or a refusal, and `TranscriptParser`'s entry points are reachable only through it. Enumerating handlers is what produced the current state: the guard was written for one call site, a second was added without it, and a third — `lookupDetail`, serving item-full-body requests — reads the same field independently. A list of call sites is a list that grows, and every future entry point starts unguarded by default. A choke point fails the other way round.
 
@@ -289,7 +308,9 @@ Location for a new session resolves most-specific-first:
 3. **Global default location**, when configured.
 4. **Local.**
 
-A declaration naming an unregistered provider is configuration drift: resolution degrades to the next tier and the app flags it, rather than blocking creation. Repo-less scratch spaces always resolve to local.
+A declaration naming an unregistered provider is configuration drift: resolution degrades to the next tier and the app flags it, rather than blocking creation. **A declaration naming a built-in provider whose flag is off degrades identically** — `claude-cloud` is compiled in rather than registry-loaded, so it does not fall under "unregistered" and needs saying separately. It is skipped at resolution and, importantly, **its trust prompt is never shown**: asking a user to approve a declaration for a disabled feature would display a prompt value for something that cannot run, and would leave an approval recorded for a decision they never got to act on. A disabled feature stays invisible rather than surfacing as a create that fails at the RPC gate with an error explaining nothing.
+
+Repo-less scratch spaces always resolve to local.
 
 **Why a repository's declaration outranks the user's own global default.** This is the contestable step in that order — a file written by whoever can push to a repository, placed above a setting the user chose for themselves — so it gets the same treatment as the other decisions in this document that could reasonably go the other way.
 
@@ -335,7 +356,7 @@ No test reaches the network or a real credential store: the undocumented transpo
 
 - **Contract v2** — `complete: false` adds and updates rows but never increments `missingCount` and never advances `lastSuccessfulSnapshotAt`, while still clearing a degraded health state, so a provider whose snapshots are always incomplete recovers from a transport failure and keeps Create and Send available; absent `complete` behaves as `true`; a v1 provider negotiates v1 and is unaffected; `archived` rows are returned by `list` and filtered only for display; a provider that omits `stop` gets no stop action.
 - **Ledger union** — a complete snapshot omitting a ledger row retires it; an incomplete one does not; a ledger-only row reports `state: unknown`; a discovered row wins over a ledger row for the same id.
-- **Idempotency** — the daemon's single same-key retry succeeds against a pending row rather than being refused; a doubly-failed create leaves a surfaced pending row; discovery adopts a pending row, and ten minutes of complete snapshots with no match marks it failed, driven by an injected clock rather than elapsed wall time; a matching session arriving after that is still adopted rather than ignored; Create is disabled while a create for the same repository and parameters is in flight; a `send` byte stream ending in `\r` reaches the provider as a message with the terminator stripped and interior newlines preserved.
+- **Idempotency** — the daemon's single same-key retry succeeds against a pending row rather than being refused; a doubly-failed create leaves a surfaced pending row; discovery adopts a pending row, and ten minutes of complete snapshots with no match marks it failed, evaluated through the date seam rather than a `Clock<Duration>`, since it compares a persisted creation timestamp against now — `Duration` is behavior, `Date` is data; a matching session arriving after that is still adopted rather than ignored; Create is disabled while a create for the same repository and parameters is in flight; a `send` byte stream ending in `\r` reaches the provider as a message with the terminator stripped and interior newlines preserved.
 - **Attach** — `permanent` does not arm automatic reconnect while `unexpected` does; a failed eligibility preflight still offers attach; nothing reads attach output.
 - **Land** — each precondition failure is reported without creating a worktree; a second landing gets a suffixed branch; a `branch` beginning with `-` and an `ext::`-style `remote_url` are both rejected before reaching git.
 - **Repo declarations** — an unapproved declaration does not resolve; editing an approved file re-prompts; `prompt` is displayed in full at the approval gate; a params key absent from `create_params` is dropped; command-shaped top-level keys are ignored; the root checkout's copy wins over a worktree's.
