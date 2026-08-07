@@ -6,7 +6,7 @@
 
 ## Summary
 
-TBD gains the ability to create, watch, steer, and land **Claude cloud sessions** — Claude Code sessions running on Anthropic's hosted infrastructure, reachable today only from claude.ai, the mobile and Desktop apps, and `claude --cloud` in a terminal.
+TBD gains the ability to create, watch, steer, archive, and land **Claude cloud sessions** — Claude Code sessions running on Anthropic's hosted infrastructure, reachable today only from claude.ai, the mobile and Desktop apps, and `claude --cloud` in a terminal.
 
 The integration rides the existing remote agent backend contract
 ([`2026-07-24-remote-agent-backends-design.md`](2026-07-24-remote-agent-backends-design.md),
@@ -19,17 +19,31 @@ is unsound.
 
 Three facts shape everything below.
 
-- **The documented surface is partial.** `claude --cloud "<prompt>"` creates a session, `claude -p "msg" --cloud <id>` sends to one, and `claude --cloud <id>` attaches a terminal to one. There is no documented way to enumerate sessions, stop one, or read one's conversation.
+- **The documented surface is partial.** `claude --cloud "<prompt>"` creates a session, `claude -p "msg" --cloud <id>` sends to one, and `claude --cloud <id>` attaches a terminal to one. There is no documented way to enumerate sessions, archive one, or read one's conversation. Those ride undocumented endpoints, and the design degrades to the documented floor when they are unavailable.
 - **The conversation lives on a server, not in a terminal.** Anthropic stores the transcript — messages, responses, and tool activity — and every client syncs against it. Reading a cloud session is not reading scrollback.
-- **Landing work locally is a fork.** `claude --teleport <id>` fetches the session's branch and conversation history into a checkout, but subsequent local work does not flow back. It is a one-time move, not a view.
+- **Landing work locally is a fork.** `claude --teleport <id>` fetches the session's branch and conversation history into a checkout, but subsequent local work does not flow back.
+
+**Single-account assumption.** Every cloud session TBD deals with belongs to the
+signed-in user, and TBD assumes it is the only client driving a given session at
+a given moment. Concurrent drivers are a real product possibility and explicitly
+out of scope here; nothing in this design tries to detect, arbitrate, or warn
+about them. Revisiting that is a separate piece of work.
 
 ## Part 1 — Contract v2
 
-Four additive changes. Contract major becomes `2`; `TBD_CONTRACT_VERSION=2` rides on invocations to providers that negotiate it. A v1 provider keeps working unchanged.
+Contract major becomes `2`. A v1 provider keeps working unchanged.
+
+**The negotiation machinery has to be built first.** `ProviderRunner.run`
+hardcodes `TBD_CONTRACT_VERSION=1` and `describeProvider` hard-requires that
+`describe.contractVersions` contains `1`. There is no per-provider negotiated
+version anywhere, and `RemoteProviderInvoking.run(_:verb:stdin:timeout:)` has no
+parameter to carry one. Negotiated version becomes provider state resolved at
+`describe` time and a parameter on the invocation protocol. This is small but it
+is a protocol change, not a free ride on existing code.
 
 ### Snapshots declare whether they are complete
 
-The v1 drift rule marks a session `gone` after it is absent from two consecutive successful snapshots. That is correct only when the provider enumerates its own inventory. A provider that can enumerate only part of its inventory would tombstone live sessions.
+The v1 drift rule marks a session `gone` after it is absent from two consecutive successful snapshots. `RemoteSessionStore.applySnapshot` increments `missingCount` for every row it did not see, with no notion of whether the provider could see everything. That is correct only when the provider enumerates its own inventory, and wrong for one that can enumerate only part of it.
 
 The `list` envelope and the `events` stream's `snapshot` event gain a boolean:
 
@@ -37,11 +51,29 @@ The `list` envelope and the `events` stream's `snapshot` event gain a boolean:
 {"complete": true, "sessions": [...]}
 ```
 
-- `complete: true` — this is the provider's full inventory. TBD applies the `gone` rule exactly as in v1.
-- `complete: false` — a partial view. TBD may add and update rows from it, and **must not** increment `missingCount` or retire anything.
-- Absent — treated as `true`, so v1 providers keep their existing behavior.
+- `complete: true` — the provider's full inventory. TBD applies the `gone` rule exactly as in v1.
+- `complete: false` — a partial view. TBD may add and update rows and **must not** increment `missingCount` or retire anything.
+- Absent — treated as `true`, so v1 providers are unaffected.
 
-A provider whose snapshots are never complete still gets adoption, liveness, and agent state; it forgoes only automatic tombstoning, which is the correct trade when absence carries no information.
+`complete: false` also does **not** refresh freshness. `RemoteProviderManager.apply` currently calls `markHealthy` and stamps `lastSuccessfulSnapshotAt` on any accepted snapshot, and those drive the staleness indicator and the mutation gate from [`2026-08-01-remote-stale-snapshot-design.md`](2026-08-01-remote-stale-snapshot-design.md). A partial snapshot that stamped freshness would present a half-blind inventory as current and re-open mutations against it. A partial snapshot leaves `lastSuccessfulSnapshotAt` untouched.
+
+**`complete` means complete with respect to the set TBD mirrors** — including archived sessions, per the next section. A provider that can enumerate active sessions but not archived ones reports `complete: false`.
+
+### Archived is a third axis
+
+The Session object gains `archived: bool`, defaulting false. It is orthogonal to `state` (process liveness) and `agent_state` (attention): a session can be archived while its machine is still winding down, and an active session is never implicitly archived.
+
+Archived sessions are **returned by `list`, not filtered out of it.** TBD decides what to show — active by default, archived behind a filter, mirroring the local History pane. Filtering server-side would make archived sessions look absent and trip the drift rule, and would deny TBD the archived inventory it needs for the browse-and-revive flow.
+
+Two new capabilities: `archive <id>` and `unarchive <id>`, both idempotent, both returning the session object.
+
+### `stop` becomes a capability, distinct from archiving
+
+v1 makes `stop` required and folds two operations into it — terminating the compute, and retiring the session from the inventory. One provider could do both in one call, so nothing forced them apart. A provider whose sessions are reclaimed by the platform on inactivity, with no termination call exposed to clients, can retire a session but cannot terminate one.
+
+So `stop` joins the declared capabilities and means only *terminate a running session*. Retiring is `archive`. `describe`, `create`, and `list` remain required.
+
+TBD gains capability gating for the stop action. Attach is already gated this way (`RemoteSessionActionMenu`); stop is not, and this is new work rather than an existing behavior being reused.
 
 ### `transcript` — the conversation as structured messages
 
@@ -51,11 +83,11 @@ New declared capability, distinct from `log` and not a replacement for it.
 p transcript <id> [--since <cursor>]
 ```
 
-stdout is Claude Code transcript JSONL. The response's final line carries `{"cursor": "<opaque>"}` so the next call tails rather than refetches; a provider with no incremental support omits it and TBD refetches. Cursors are opaque to TBD.
+stdout is Claude Code transcript JSONL. The cursor for the next call is returned in an **envelope on stderr**, not as a trailing line of the data stream — mixing a control record into JSONL makes a truncated response indistinguishable from a provider with no incremental support. A provider without incremental support returns no cursor and TBD refetches. Cursors are opaque to TBD.
 
-`log` remains what it is: raw ANSI scrollback bytes for a read-only terminal pane, for providers that genuinely host a terminal. Feeding structured messages into a scrollback view would lose every tool card; feeding ANSI into the transcript renderer would produce garbage. They are different data with different destinations, and a provider may implement either, both, or neither.
+`log` remains raw ANSI scrollback bytes for a read-only terminal pane, for providers that host a terminal. Structured messages in a scrollback view would lose every tool card; ANSI in the transcript renderer would produce garbage. A provider may implement either, both, or neither.
 
-The verb is not vendor-specific. Any provider running Claude Code has transcript JSONL available — a provider hosting sessions on its own machine has the files on disk beside whatever it already reads for agent state — so declaring `transcript` upgrades it from ANSI scrollback to TBD's structured transcript pane with no new transport.
+The verb is not vendor-specific. Any provider running Claude Code has transcript JSONL available, so declaring `transcript` upgrades it from ANSI scrollback to TBD's structured transcript pane with no new transport.
 
 ### `land` — reconstructing a remote session locally
 
@@ -64,8 +96,6 @@ New declared capability.
 ```
 p land <id>
 ```
-
-Returns what TBD needs to rebuild the session as a local worktree:
 
 ```json
 {
@@ -77,86 +107,116 @@ Returns what TBD needs to rebuild the session as a local worktree:
 ```
 
 - `remote_url`, `branch` — required. Where the work is.
-- `resume_command` — optional argv TBD runs in the new worktree's first pane. Omitted when the provider has nothing to resume; TBD then opens an ordinary pane.
-- `forks` — required. Whether local work continues to reach the remote session. `true` means the two diverge after landing, which TBD must show (Part 3).
+- `resume_command` — optional argv TBD runs in the new worktree's first pane. Omitted when there is nothing to resume.
+- `forks` — required. Whether local work continues to reach the remote session.
 
-`resume_command` comes from a provider the user registered, or from the daemon itself, so it is already trusted. It never originates in repository content — see Part 4.
-
-### `stop` becomes a capability
-
-v1 makes `stop` required. A provider whose sessions are reclaimed by the platform on inactivity, with no termination call exposed to clients, cannot implement it. A required verb that a legitimate provider structurally cannot supply is a contract defect, not a provider defect.
-
-`stop` joins `log`, `send`, `attach`, `events`, `transcript`, and `land` as a declared capability. `describe`, `create`, and `list` remain required. TBD hides the stop action for providers that do not declare it, the same way it already hides attach.
+**These fields are not trusted input.** For an external provider they come from an executable the user registered, but for the built-in provider they come from session metadata on a remote server, including sessions created from another device. Before any of them reaches git, TBD validates: `branch` must match a conservative ref-name pattern and must not begin with `-`; `remote_url` is only ever **compared** against the local repository's configured remote, never passed to git as a remote argument, which rules out the `ext::` transport family and its command execution. `resume_command` is accepted only from a registered executable or from the daemon's own built-in provider, never from repository content.
 
 ## Part 2 — The built-in `claude-cloud` provider
 
 ### Why this one is compiled
 
-The placement rule ([`../theory-placement.md`](../theory-placement.md)) asks whether two reasonable projects could want a behavior different. Nightwatch policies are forked per repository because "when is an agent stuck" is genuinely contested. How to talk to a specific vendor's session API is not: there is one API, and no project's convention changes its shape. That makes it a mechanism, and mechanisms compile.
+The placement rule ([`../theory-placement.md`](../theory-placement.md)) asks whether two reasonable projects could want a behavior different. Supervision policies are forked per repository because "when is an agent stuck" is genuinely contested. How to talk to a specific vendor's session API is not: there is one API, and no project's convention changes its shape. That makes it a mechanism, and mechanisms compile.
 
-Fragility is a separate axis from ownership, and it is the one that argued for keeping this editable — an undocumented endpoint moves and the fix waits on a release. Two things answer it. TBD is built from source, so a fix is a pull and a restart. And the design degrades rather than fails: when the undocumented half is unavailable, sessions TBD launched keep listing, creating, sending, and attaching, and only discovery of foreign sessions and the transcript pane go dark.
+Fragility is a separate axis from ownership. TBD is built from source, so a fix to a moved endpoint is a pull and a restart, and the design degrades rather than fails: when the undocumented half is unavailable, sessions TBD launched keep listing, creating, sending, and attaching, and only discovery of foreign sessions and the transcript pane go dark.
+
+Two things do ride along inside the compiled provider that are closer to theory than mechanism: the mapping from the vendor's session status onto the contract's `agent_state` axis, and the choice of `create_params`. Both are TBD's to own and revise, and both are stated here rather than left to implementation taste.
 
 ### Shape
 
-`RemoteProviderInvoking` is already a one-method protocol injected into `RemoteProviderManager`. The built-in provider is a second conformance, selected by a dispatcher that routes on provider name: registered names fork a subprocess through `ProviderRunner`, the reserved name is served in-process.
+`RemoteProviderInvoking` is a one-method protocol with one production conformance and one injection site. The built-in provider is a second conformance, selected by a dispatcher that routes on provider name: registered names fork a subprocess through `ProviderRunner`, the reserved name is served in-process.
 
-It synthesizes the same `ProviderResult` envelope — exit code, stdout, stderr — that a subprocess produces. Fabricating an exit code is deliberate: it forces the built-in provider through `ProviderFailureClass.classify`, the retry and backoff rules, and the `needs_auth` banner path, exactly as an external provider. There is one code path for every remote session and no special-casing downstream.
+It synthesizes the same `ProviderResult` envelope a subprocess produces. Fabricating an exit code is deliberate: it puts the built-in provider through `ProviderFailureClass.classify` and the same health, auth-banner, and staleness handling as an external provider, so nothing downstream special-cases it. (It does not inherit retry or backoff, because there is none for classified verb failures — `recordFailure` sets health and returns. The only backoff in the subsystem is the events supervisor's stream restart.)
 
-`claude-cloud` is a reserved provider name. `RemoteProviderRegistry.load` rejects it the way it already rejects duplicates, so a registry entry cannot shadow the built-in.
+`claude-cloud` is a reserved provider name. A registry entry claiming it is **skipped with a visible flag**, not rejected. `RemoteProviderRegistry.load` currently throws for the entire file on a duplicate name, and both callers swallow that — one with `try?` — so a single bad entry silently removes every provider. Skipping the offending entry and surfacing it matches how the rest of this design handles configuration drift, and avoids a total outage for anyone who registered an external adapter under that name against v1.
 
-### The ledger
+### The ledger, and what it may not do
 
-A new `claude_cloud_session` table records what TBD launched: session id, idempotency key, creation time, repository path, branch, and the parameters the create used. It is distinct from the `remote_session` mirror, and the distinction is the point — the ledger is *what this machine started*, the mirror is *what the manager last observed*. Keeping them apart preserves the contract's direction of authority for every consumer downstream.
+A new `claude_cloud_session` table records what TBD launched: session id, idempotency key and its state, creation time, repository path, branch, and the parameters used. It is distinct from the `remote_session` mirror — the ledger is *what this machine started*, the mirror is *what the manager last observed*.
 
-`list` returns the union of ledger rows and discovered sessions, keyed by session id, and sets `complete` according to whether discovery succeeded. Discovery down means ledger rows only, `complete: false`, nothing tombstoned.
+`list` returns the union of ledger rows and discovered sessions, keyed by session id. Three rules keep the union from inverting the contract's direction of authority:
+
+- **A complete snapshot retires ledger rows it omits.** If discovery succeeded and enumerated everything, a ledger row absent from it is a session that no longer exists, and the ledger drops it rather than re-asserting it. Without this rule "TBD launched it once" silently becomes "it exists permanently," and a session deleted from claude.ai could never tombstone.
+- **A ledger-only row carries `state: "unknown"`,** never a fabricated `running`. The contract forbids conflating unreachability with liveness, and with discovery down the ledger knows only that a session was created, not whether it lives. `agent_state` is likewise `unknown`.
+- **Ledger rows never suppress a discovered row.** Where both exist the discovered payload wins; the ledger contributes only rows discovery did not return.
 
 ### Verb implementations
 
-- **`describe`** — static and offline, as the contract requires. Declares `send`, `attach`, `transcript`, and `land`; declares neither `stop` nor `log`. `create_params` are `repo`, `branch`, `prompt`, and `environment`.
-- **`create`** — `claude --cloud "<prompt>"` from the repository checkout. The idempotency key is written to the ledger **before** the invocation, marked pending, and resolved to a session id on return. A replayed key whose row is still pending does not re-create: it surfaces the ambiguity to the user, because a duplicate cloud session costs more than a prompt.
+- **`describe`** — static and offline. Declares `send`, `attach`, `transcript`, `land`, `archive`, and `unarchive`; declares neither `stop` nor `log`. `create_params` are `repo`, `branch`, `prompt`, and `environment`.
+- **`create`** — `claude --cloud "<prompt>"` from the repository checkout.
 - **`list`** — ledger union discovery, per above.
-- **`send`** — `claude -p "<msg>" --cloud <id> --output-format json`, which returns `{ok, session_id, url}`. This is a structured enqueue with an acknowledgement, not keystrokes into a terminal, so it carries none of the delivery-confirmation problems that keystroke transports have.
-- **`attach`** — `claude --cloud <id>`, reached through a shim (below).
+- **`send`** — `claude -p "<msg>" --cloud <id> --output-format json`, returning `{ok, session_id, url}`. A structured enqueue with an acknowledgement, not keystrokes into a terminal, so it carries none of the delivery-confirmation problems a keystroke transport has.
+- **`attach`** — `claude --cloud <id>` on the pane's PTY, spawned directly (below).
 - **`transcript`** — reads the server-stored transcript for the session, cursor-tailed.
-- **`land`** — returns the session's repository and branch with `resume_command` of `claude --teleport <id>` and `forks: true`.
+- **`land`** — the session's repository and branch, with `resume_command` of `claude --teleport <id>` and `forks: true`.
+- **`archive` / `unarchive`** — the account's archive operation over the undocumented surface. An archived session rejects new messages, which is why archiving is a real state change and not a display preference.
 
-### Attach needs a shim, not an argv
+### Create idempotency, against the as-built handler
 
-Attach is the one verb the in-process implementation cannot serve, because it is not a request/response at all: the app spawns it on the pane's PTY and its exit code never passes through the daemon's runner. A provider compiled into the daemon has no executable for the app to spawn.
+`handleRemoteCreate` mints a **fresh** idempotency key on every RPC call, retries **once with the same key** when the provider times out, and deliberately does not persist it. That shape means the key defends exactly one thing — a transport timeout on a create that may have started — and defends nothing against a user clicking Create twice, which produces two keys and two sessions.
 
-Handing the app a bare `["claude", "--cloud", "<id>"]` is the alternative the contract rejects — a provider printing an argv for TBD to exec. Two of the three reasons dissolve for a built-in provider: `claude` authenticates at launch and refreshes itself, so nothing is frozen at print time, and it is itself a live client that owns its own reconnect. The third, vendor argv in TBD's process table, is moot when the vendor is compiled in.
+The ledger changes what is possible without changing that handler's retry:
 
-The reason that survives is exit codes. `RemoteAttachExitClass.classify` reads the attach process's exit through `ProviderFailureClass`, the contract's error table, and `claude` does not speak it. Interactive attach is gated per account, and an ineligible account exits with a code that would classify as `.unexpected` — which the reconnect policy treats as transient and eligible for automatic reconnect, so a permanent condition would retry forever.
+- The key and its state are written to the ledger **before** the invocation. The daemon's single same-key retry proceeds normally; a pending row is expected during it, not a reason to refuse.
+- If both attempts fail, the row stays `pending` and is surfaced as an unresolved create the user can act on — never silently dropped, because the session may well have started.
+- A pending row is resolved by the next complete discovery: a session matching its repository, branch and creation window adopts the row; a complete snapshot that contains no such session after a bounded window marks it failed and clears it.
+- Duplicate protection for a double-click is a UI concern, not a key concern: Create is disabled while a create for the same repository and parameters is in flight.
 
-So the attach argv is `tbd remote-attach claude-cloud <id>`, a new `TBDCLI` subcommand that execs the vendor CLI on the inherited PTY and translates its outcome into contract exit classes: ineligible account or archived session to 1, credential failure to 4, transport failure to 3, user detach to 0. `TBDCLI` is already installed as `~/.local/bin/tbd`, so this adds no install step, and routing through TBD's own binary keeps the contract's live-shim property rather than working around it.
+### Attach spawns the vendor CLI directly
 
-Nothing parses the shim's output. Per the contract, attach's stdout is a PTY byte stream and the exit code is the whole signal — which is also what the no-TUI-scraping rule requires.
+No shim. The app spawns `claude --cloud <id>` on the pane's PTY, the same way it spawns an external provider's `attach`.
 
-### Attach and transcript are one session, not two
+An intermediate translator was considered and rejected on its own terms. Its only job would be mapping the vendor CLI's exit codes onto the contract's error table, and it has no lawful input to do that with: the information distinguishing an ineligible account from a dropped transport is printed on the terminal, and parsing it is forbidden both by the no-TUI-scraping rule and by the contract's `attach` section. A translator would have had to either scrape or guess.
 
-Both surfaces read the same server-stored conversation: a message typed in the attach pane appears in the transcript pane, and one sent through `send` appears in both. This is the opposite of landing, where the local copy forks. No reconciliation is needed and none is designed; the two are windows, not replicas.
+Instead, TBD does not try to learn *why* attach ended from its exit code alone. Two changes make that safe:
 
-The attach pane is also the floor. When the undocumented half is unavailable and the transcript pane goes dark, attach still works, because it rides only documented surface.
+- **`RemoteAttachExitClass` gains a `permanent` case** distinct from `unexpected`. Today `.permanent`, `.contractBug` and `.transient` all collapse into `.unexpected`, which arms automatic reconnect — so a permanently ineligible account would retry forever at a 300s cap. A `permanent` class does not arm reconnect and says so on screen.
+- **Eligibility is a preflight, not a postmortem.** Whether the account can attach interactively is checked once against the undocumented surface, cached, and reflected by disabling the attach affordance with an explanation. This is the one place attach touches the undocumented half, and it fails open: if the preflight cannot run, attach is offered, and a failure is treated as transient.
 
-### Agent state
+Nothing parses attach's output. The exit code remains the only signal read from the process itself.
 
-Agent state comes from the discovery response's own session status, mapped onto the contract's `working` / `waiting_input` / `idle` / `exited` axis. The precise mapping is fixed at implementation time against the actual response shape; any value that does not map cleanly becomes `unknown` rather than a guess. When discovery is unavailable the axis is `unknown` for every row, and TBD shows liveness only — the contract's stated behavior for providers without instrumentation.
+### Attach, transcript, and where a remote conversation is stored
 
-No agent state is ever derived from rendered terminal output, including the attach pane's, per the no-TUI-scraping rule.
+Both surfaces read the same server-stored conversation, so a message typed in the attach pane appears in the transcript pane and one sent through `send` appears in both. This is the opposite of landing, where the local copy forks. No reconciliation is needed and none is designed.
 
-### Credentials
+Storage needs a decision, because the transcript renderer cannot simply be pointed at provider bytes. `TranscriptParser.parse(filePath:)` is file-path-based, and both RPCs reaching it enforce that the path lives under the Claude projects store — a guard added deliberately against crafted RPCs. Spooling vendor JSONL into that store would also make `ClaudeSessionScanner` list a cloud conversation as a local session of the worktree.
 
-The undocumented half authenticates with the claude.ai credential that `claude auth login` already stores. Nothing new is minted, stored, or synced, and the documented half shells out to `claude`, which handles its own auth. Credential reads go through an injected seam so tests never touch a real credential store.
+So remote transcripts live in a TBD-owned root, `~/tbd/remote-transcripts/<provider>/<sessionID>/`, with a path helper in `TBDConstants` honoring `TBD_HOME`. `ClaudeSessionScanner` already accepts a `projectsBase` parameter, and the transcript RPCs' guard widens to admit that root in addition to the Claude store — a second permitted root, never an unguarded path. Cursor-tailed responses append there, which is also what gives a remote transcript continuity across daemon restarts.
 
-## Part 3 — The land bridge
+**One open empirical question, worth answering before implementation.** Interactive Claude Code sessions always persist to disk — `--no-session-persistence` is documented as working only with `--print` — so `claude --cloud <id>` may already write an ordinary transcript JSONL locally. If it does, attaching once populates a remote session's transcript for free, and the `transcript` verb becomes the path for never-attached sessions rather than the only path. It also means the attach process must be pointed at the TBD-owned root rather than the default store, or a cloud conversation will surface as a local session of whatever worktree the pane ran in. The test is one command on a Mac: attach to a cloud session, then look for a new JSONL under the Claude projects store. The design above works either way; the answer only decides how much the `transcript` verb has to carry.
 
-A remote session row gains a **Land** action, enabled when its provider declares `land`.
+Minor and worth handling in the same pass: the transcript renderer turns file paths in tool calls into clickable local links. A remote transcript's paths refer to a different machine, so linking is suppressed for remote rows rather than dead-ending or opening an unrelated local file.
 
-`remote.land` is a new RPC. The daemon calls the provider's `land` verb, creates a worktree through the existing lifecycle path, fetches and checks out the returned branch, and spawns the first pane running `resume_command` when one is given.
+### Agent state and credentials
 
-Preconditions are checked before anything is created, and a failure explains which one failed rather than leaving a half-built worktree: the local repository must match `remote_url`, the branch must exist on the remote, and the worktree path must be free. Landing is never automatic and never triggered by session state — it is always a user gesture.
+Agent state comes from the discovery response's session status, mapped onto `working` / `waiting_input` / `idle` / `exited`. Any value that does not map cleanly becomes `unknown` rather than a guess, and with discovery unavailable every row is `unknown` and TBD shows liveness only. No agent state is ever derived from rendered terminal output, including the attach pane's.
 
-**A fork is shown as a fork.** When `land` returns `forks: true`, the landed worktree and the remote session are two things from that moment on. The remote row records that it was landed and links to the worktree; the worktree records where it came from. Neither is retired, and TBD does not imply that typing in one reaches the other. Landing the same session twice is allowed and produces a second worktree, because that is what actually happens.
+The undocumented half authenticates with the claude.ai credential `claude auth login` already stores; nothing new is minted or synced, and the documented half shells out to `claude`, which handles its own auth. Credential reads go through an injected seam so tests never touch a real credential store.
+
+## Part 3 — Landing and reviving
+
+### The land bridge
+
+A remote session row gains a **Land** action, enabled when its provider declares `land`. `remote.land` calls the verb, validates the returned fields per Part 1, creates a worktree through the existing lifecycle path, checks out the branch, and spawns the first pane running `resume_command` when one is given.
+
+Preconditions are checked before anything is created, so a failure never leaves a half-built worktree: the local repository's remote must match `remote_url`, the branch must exist on the remote, and the worktree path must be free. Landing is always a user gesture, never triggered by session state.
+
+**A fork is shown as a fork.** With `forks: true`, the landed worktree and the remote session diverge from that moment. The remote row records that it was landed and links to the worktree; the worktree records its origin. Neither is retired, and TBD never implies that typing in one reaches the other.
+
+**A second landing needs its own branch.** `git worktree add <path> <branch>` refuses to check one branch out twice, so landing the same session again cannot reuse the branch. The second landing creates `<branch>-2` (then `-3`, and so on) from the same commit, and the provenance note records that it came from the same remote session. This is deliberate rather than an error: two landings of one session are two independent local lines of work, which is exactly what the fork rule already says.
+
+### Lifecycle parity with worktrees
+
+Local worktrees already carry the model this needs: `WorktreeStatus` includes `archived`, rows keep `archivedAt`, `archivedHeadSHA` and `archivedClaudeSessions`, and both revive modes exist — plain Revive restores the archived branch and session, while Revive-fresh creates a new worktree off `origin/<default>` seeded with a forked conversation, leaving the archived row untouched ([`2026-07-27-revive-conversation-fresh-branch-design.md`](2026-07-27-revive-conversation-fresh-branch-design.md)).
+
+Remote sessions get the same vocabulary and the same two revive modes:
+
+- **Revive on the session's own branch** is `land` as described above.
+- **Revive on a fresh branch off `origin/<default>`** composes: land, then run TBD's existing revive-fresh on the landed worktree.
+
+Composition rather than a new verb is deliberate. Teleport is branch-coupled — it fetches and checks out the session's own branch and requires that branch to have been pushed — so a one-gesture fresh-branch landing would mean separating teleport's conversation fetch from its branch checkout, which nothing documented supports. The cost of composing is an intermediate worktree the user did not ask for. If that proves annoying in practice, the graduation is a branch mode on `land`, and the field evidence for it is the annoyance itself.
+
+**Sharing lifecycle vocabulary is not model unification.** Remote sessions keep their own table, RPC family, and rendering. v1 deliberately avoided the `Location {local|remote}` refactor and this does not reopen it.
 
 ## Part 4 — Repo-declared remotes
 
@@ -177,80 +237,90 @@ A repository declares which remotes it runs on in `.tbd-remotes.json` at its roo
 }
 ```
 
-The path is a single root file rather than a directory entry because `<repo>/.tbd/` already means legacy worktree storage and is gitignored in this repository — the one place the feature most needs to work.
+A single root file rather than a directory entry because `<repo>/.tbd/` already means legacy worktree storage and is gitignored in this repository — the one place the feature most needs to work.
 
-### The declaration is inert data
+**The authoritative copy is the one in the repository's registered root checkout**, not the selected worktree's. Every worktree carries its own copy, so a branch under review would otherwise get to redefine where sessions run merely by being selected.
 
-This file is authored by anyone who can push to the repository, so cloning a repository must never grant execution on the machine that clones it. TBD reads exactly three keys:
+### Trust on first use
 
-- **`provider`** — must match a provider already registered locally or the reserved built-in name. It is a reference, never a definition.
-- **`label`** — a display string, length-capped and rendered as plain text.
-- **`params`** — string values matched by name against that provider's `describe.create_params`. Unrecognized names are dropped.
+The declaration is repository content, so it is authored by anyone who can push. It is **not** inert. `params` are matched against the provider's `create_params`, and for the built-in provider those include `prompt` — so an unreviewed declaration could set the opening instruction of an agent with repository write access, network egress, and the user's credential. The general case is worse, because the whitelist is provider-defined: a third-party provider is free to declare params named for scripts, images, or environments, and TBD would faithfully pass repository-authored strings into them.
 
-Everything else is ignored: no `exec`, no `args`, no commands, no environment, no paths. Unknown keys are ignored rather than rejected, per the contract's forward-compatibility rule, but ignored means *not interpreted* — TBD never grows a key that turns repository content into something it runs.
+So a declaration takes effect only after the user has seen it and approved it:
 
-The declaration also carries no statement of what a remote *can do*. A grammar for capabilities is a policy language TBD would have to interpret and version permanently; the label is prose a human reads, and the human picks. This keeps the fourth piece small and keeps TBD out of the business of executing a schema it does not own.
+- On first encountering a declaration in a repository, TBD shows exactly what it would do — provider, label, and every parameter value verbatim, with `prompt` shown in full rather than truncated — and asks the user to approve it.
+- Approval is stored as the SHA-256 of the canonicalized declaration, keyed by repository. **Any change to the file re-prompts**, so approving once never blanket-approves whatever lands on the branch next week.
+- Until approved, resolution skips the declaration and falls through to the next tier, with a visible flag in the repository's settings. Unapproved is a degraded state, not a blocked one.
+- TBD reads only `provider`, `label`, and `params`. `provider` must name a locally registered provider or the reserved built-in name; it is a reference, never a definition. `label` is length-capped plain text. `params` values must be strings and are dropped if their name is absent from `create_params`. Unknown top-level keys are ignored per forward-compatibility, and ignored means *not interpreted* — TBD never grows a key that turns repository content into something it runs.
+
+The declaration also carries no statement of what a remote *can do*. A grammar for capabilities is a policy language TBD would have to interpret and version permanently; the label is prose a human reads, and the human picks.
 
 ### Resolution
 
 Location for a new session resolves most-specific-first:
 
 1. **Explicit per-creation choice** in the create sheet. Always available, always wins.
-2. **The repository's declaration.** A single declared remote becomes the default; several are offered in order with their labels.
+2. **The repository's approved declaration.** Several declared remotes are offered in order with their labels.
 3. **Global default location**, when configured.
 4. **Local.**
 
-A declaration naming a provider that is not registered is configuration drift, not a live fault: resolution degrades to the next tier and the app flags it in the repository's settings rather than blocking creation. Repo-less scratch spaces always resolve to local — there is no repository to carry a declaration.
+A declaration naming an unregistered provider is configuration drift: resolution degrades to the next tier and the app flags it, rather than blocking creation. Repo-less scratch spaces always resolve to local.
 
 ### This repository's own declaration
 
-TBD ships `.tbd-remotes.json` declaring `claude-cloud`, and the label says what is honestly true: cloud sessions can do specification, documentation, review-gate and shell-harness work here, but cannot build or test the project.
+TBD ships `.tbd-remotes.json` declaring `claude-cloud`, with a label saying what is honestly true: cloud sessions can do specification, documentation, review-gate and shell-harness work here, but cannot build or test the project.
 
-That is not a limitation of any cloud environment's setup script. TBD's `Package.swift` declares `platforms: [.macOS(.v15)]`, every target imports `os` — mandated by the no-`print()`-in-`Sources` rule and enforced by SwiftLint — and the app target is built on SwiftUI and AppKit. There is no Linux-clean target to build, whatever toolchain is installed. Meanwhile `scripts/test.test.sh` stubs the compiler out entirely and runs with no toolchain, as do the other shell harnesses, alongside the review-gate Python scripts and the committed-plans guard.
+That is not a limitation any setup script can lift. `TBDApp` is built on SwiftUI, AppKit and UserNotifications, and `TBDDaemon` reaches `Security` for Keychain access; every target imports `os`, whose `Logger` is Darwin-only and which the no-`print()`-in-`Sources` rule makes the only sanctioned logging path. There is no Linux-clean target to build, whatever toolchain is installed. (`Package.swift`'s `platforms:` declaration sets minimum deployment versions for Apple platforms; it is not what blocks a Linux build.) Meanwhile `scripts/test.test.sh` stubs the compiler out entirely and runs with no toolchain, as do the other shell harnesses, alongside the review-gate Python scripts and the committed-plans guard.
 
-A declaration where every remote does everything demonstrates nothing. This one has to say something real, which makes it the worked example.
+A declaration where every remote does everything demonstrates nothing. This one has to say something real, which is what makes it the worked example — and it is a worked example of a general mechanism, not a TBD-shaped feature.
 
-## Feature flag
+## Feature flags
 
-`claude_cloud_enabled` — a new `config` column, default OFF. The behavior is autonomous background polling against a network service, which is squarely inside the default-off rule.
+`claude_cloud_enabled` — a new `config` column, default OFF. The behavior is autonomous background polling against a network service, squarely inside the default-off rule.
 
-It is a separate flag from `remote_backends_enabled` rather than a reuse. That flag was written to be disposable on the reasoning that the feature is inert without a registered provider file; a provider compiled into the daemon is never inert, so folding this into it would silently convert a deletable flag into a permanent one. Both branches are tested: off means no polling, no discovery calls, and the built-in provider absent from `remote.providers`; on means the manager runs.
+**Composition is explicit: cloud requires both flags.** Every `remote.*` handler gates on `remoteBackendsEnabled` through `remoteGate()`, and the cloud provider is reached through those same verbs, so `claude_cloud_enabled` is a second gate inside the first, never a bypass. Tests assert all four combinations, not two.
 
-Graduation is a default flip after soak, then deletion, once discovery has held up across a few endpoint revisions.
+The two stay separate rather than merging because `remote_backends_enabled` was written to be *deletable* after soak, on the reasoning that the feature is inert without a registered provider file. A provider compiled into the daemon is never inert, so folding this into it would silently convert a disposable flag into a permanent one.
+
+**When `remote_backends_enabled` is deleted**, its gate is removed and `claude_cloud_enabled` becomes the sole gate for the cloud provider, with the external-provider path ungated as v1's rollout intends. That ordering matters: deleting the outer flag while the inner one is still soaking must not turn cloud on for anyone, so the deletion migration leaves `claude_cloud_enabled` untouched. Graduation for the inner flag is a default flip after soak, then deletion, once discovery has held up across a few endpoint revisions.
 
 ## Migrations and models
 
-Two migrations, each following the shared-model rule — migration, GRDB record, and the `TBDShared` Codable model in one commit, with new fields optional or defaulted:
+Each following the shared-model rule — migration, GRDB record, and the `TBDShared` Codable model in one commit, new fields optional or defaulted:
 
-- `claude_cloud_session` — the ledger table.
+- `claude_cloud_session` — the ledger table, including idempotency key state.
 - `config.claude_cloud_enabled` — the flag, defaulting to off.
+- `repo.remotes_declaration_trusted_sha` — the approved declaration hash, nullable.
 
-`remote_session` gains no columns. Landing state is recorded as a link between an existing remote row and an existing worktree row.
+`remote_session` gains no columns; landing state is a link between an existing remote row and an existing worktree row, and `archived` rides in the payload.
 
-Every new poll interval and timeout takes an injected `clock` parameter per the clock rule; persisted timestamps use the date seam.
+New poll intervals and timeouts take an injected `clock` parameter; persisted timestamps use the date seam.
 
 ## Testing
 
-No test reaches the network or a real credential store. The undocumented transport sits behind an injected client protocol, and credential reads behind an injected seam.
+No test reaches the network or a real credential store: the undocumented transport sits behind an injected client protocol, credential reads behind an injected seam.
 
-- **Contract v2** — `complete: false` adds and updates rows but never increments `missingCount`; absent `complete` behaves as `true`; a v1 provider negotiates v1 and is unaffected; `transcript` output routes to the transcript pane and `log` output to the scrollback pane; a provider that omits `stop` gets no stop action.
-- **Built-in provider** — ledger union discovery; discovery failure yields ledger-only and `complete: false`; a pending idempotency key does not re-create; failure classification and the auth banner behave identically to a subprocess provider; the reserved name is rejected from the registry file.
-- **Attach shim** — each vendor outcome maps to the intended contract exit class, driven by a stub standing in for the vendor CLI; an ineligible account classifies as permanent and does not arm automatic reconnect, while a dropped transport does; a user detach reads as clean.
-- **Land bridge** — each precondition failure is reported without creating a worktree; `forks: true` records the link both ways; landing twice produces two worktrees.
-- **Repo declarations** — `exec`, `args`, and command-shaped keys are ignored rather than honored; a params key absent from `create_params` is dropped; an unregistered provider degrades to the next tier with a visible flag; resolution order holds at each tier.
-- **Flag branches** — off and on, per the branching-conditional rule.
+- **Contract v2** — `complete: false` adds and updates rows but never increments `missingCount` and never stamps freshness or re-opens the mutation gate; absent `complete` behaves as `true`; a v1 provider negotiates v1 and is unaffected; `archived` rows are returned by `list` and filtered only for display; a provider that omits `stop` gets no stop action.
+- **Ledger union** — a complete snapshot omitting a ledger row retires it; an incomplete one does not; a ledger-only row reports `state: unknown`; a discovered row wins over a ledger row for the same id.
+- **Idempotency** — the daemon's single same-key retry succeeds against a pending row rather than being refused; a doubly-failed create leaves a surfaced pending row; discovery adopts a pending row, and a bounded window with no match marks it failed.
+- **Attach** — `permanent` does not arm automatic reconnect while `unexpected` does; a failed eligibility preflight still offers attach; nothing reads attach output.
+- **Land** — each precondition failure is reported without creating a worktree; a second landing gets a suffixed branch; a `branch` beginning with `-` and an `ext::`-style `remote_url` are both rejected before reaching git.
+- **Repo declarations** — an unapproved declaration does not resolve; editing an approved file re-prompts; `prompt` is displayed in full at the approval gate; a params key absent from `create_params` is dropped; command-shaped top-level keys are ignored; the root checkout's copy wins over a worktree's.
+- **Flag branches** — all four combinations of the two flags.
+- **Registry** — an entry claiming the reserved name is skipped and flagged while every other entry still loads.
 
 All tests use the `TBD_HOME` isolation seams and run under `scripts/test.sh`.
 
 ## Rejected alternatives
 
-- **Ship the adapter as a seeded, user-editable script.** The seeding pattern exists so projects can fork a contested policy; this is a mechanism with one correct implementation and no consumer who wants it different. Seeding would also have needed write-once semantics TBD does not have, since the existing plugin writer overwrites unconditionally — paying for a new mechanism to make something editable that nobody should edit.
+- **An attach shim translating vendor exit codes.** Its only input would have been terminal output, which two separate rules forbid reading. Preflight plus a `permanent` exit class gets the same outcome without a translator that has to guess.
+- **Ship the adapter as a seeded, user-editable script.** The seeding pattern exists so projects can fork a contested policy; this is a mechanism with one correct implementation and no consumer who wants it different.
 - **Ship the adapter as a separate repository.** Consistent with the contract's stated boundary, but this repository's own declaration would then reference a provider a fresh clone does not have, breaking the worked example on first run. Vendor neutrality lives in the contract; one implementation in the box does not compromise it.
-- **Endpoint shapes in a configuration file with the code compiled.** A middle path that looks like it buys fast fixes and instead makes TBD execute a schema it does not own, versioned forever. Either the transport is compiled or it is not.
-- **A per-session streaming transcript follow.** The relay is streaming and could support it, but a per-session stream is a new supervision shape — one process per session rather than per provider — and v1 already cut `log --follow` for that reason. Cursor polling first; graduate on evidence that latency is the complaint.
-- **Teleport as the read path.** Landing fetches a branch and forks the conversation. Using it to view a session would create a worktree per refresh and silently diverge from what it was showing.
-- **Encoding capabilities in the repository declaration.** A machine-readable statement of what a remote can do for a repository is a policy grammar; a prose label a human reads is not, and is sufficient for choosing.
+- **Endpoint shapes in a configuration file with the code compiled.** Looks like it buys fast fixes; actually makes TBD execute a schema it does not own, versioned forever.
+- **A per-session streaming transcript follow.** A per-session stream is a new supervision shape — one process per session rather than per provider — and v1 already cut `log --follow` for that reason. Cursor polling first.
+- **Teleport as the read path.** Landing forks the conversation; using it to view a session would create a worktree per refresh.
+- **Filtering archived sessions out of `list`.** They would look absent and trip the drift rule, and TBD would lose the archived inventory the revive flow browses.
+- **Encoding capabilities in the repository declaration.** A machine-readable statement of what a remote can do is a policy grammar; a prose label is not, and suffices for choosing.
 
 ## Deliberate cuts
 
-No stop for cloud sessions, since none is exposed. No `log` for cloud sessions, since there is no terminal to scroll. No diff or file viewer for remote workspaces. No automatic landing on any session state. No publishing of TBD's local sessions back to Anthropic's relay for viewing elsewhere — the inverse direction is a separate idea, and TBD's own sessions can already enable it themselves.
+No `stop` for cloud sessions, since nothing exposed terminates a running VM — archiving retires it instead. No `log` for cloud sessions, since there is no terminal to scroll. No diff or file viewer for remote workspaces. No automatic landing or archiving on any session state. No handling of concurrent drivers on one session, per the single-account assumption. No publishing of TBD's local sessions back for viewing elsewhere — the inverse direction is a separate idea, and TBD's own sessions can already enable it themselves.
