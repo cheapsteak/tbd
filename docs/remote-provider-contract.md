@@ -364,7 +364,14 @@ Response:
 
 **None of these fields are trusted input.** For an external provider they come from an executable the user registered; for one built into the caller they may come from session metadata stored on a remote server, including metadata written by another device. Either way they are attacker-influenceable strings that are about to meet a program that takes options and executes transports. Three rules are mandatory:
 
-- **`branch` MUST be validated before it reaches git.** A caller MUST match it against a conservative ref-name pattern and MUST reject a value beginning with `-`, which git would read as an option rather than a ref.
+- **`branch` MUST be validated before it reaches git.** A caller MUST reject any value that does not satisfy every rule below, and providers can rely on a plain branch name always being accepted:
+  - composed only of ASCII letters, digits, and the characters `.`, `_`, `-`, and `/`
+  - does not begin with `-` (git would read it as an option rather than a ref), `.`, or `/`
+  - does not end with `/`, `.`, or the suffix `.lock`
+  - contains no `..`, no `//`, no `@{`, and no ASCII control characters or space
+  - is not the single character `@`
+
+  These rules are a strict subset of what `git check-ref-format --branch` accepts. A caller MAY additionally run that command, but MUST NOT rely on it alone: the pattern above is the contract, so a provider can predict acceptance without matching one git version's behavior. A provider that emits ordinary branch names — including the `<prefix>/<name>` shapes agents typically produce — will never see a rejection.
 - **`remote_url` MUST only ever be compared, never passed to git as a remote argument.** A caller compares it against the local repository's already-configured remote and refuses to proceed on a mismatch. It MUST NOT hand the value to git as a remote: git's remote-URL grammar includes the `ext::` transport family, which executes a command, so a provider-supplied URL reaching git as a remote is command execution.
 - **`resume_command` MUST come only from a registered provider executable** — one the user deliberately registered, or an implementation the caller itself ships. A caller MUST NEVER accept a resume command from repository content or any other channel that is not a registered provider.
 
