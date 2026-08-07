@@ -381,11 +381,16 @@ actuation row and that caller —
 `<tbd-dispatch id="a3f1b2c3d4e5" from="supervisor:acme-platform"/>` on its
 own line, then your text verbatim — so the receiving agent sees who is
 addressing it and the transcript carries an identifier the record can join
-on. It rides every text send to an agent, verified or not: a script of your
-own that declares no identity still delivers one, reading `from="anonymous"`.
+on. It rides every text send this verb makes to an agent, verified or not: a
+script of your own that declares no identity still delivers one, reading
+`from="anonymous"`.
 A keys payload carries no envelope, and neither does a send to a plain shell
 pane — nothing there reads the tag, and `--submit` would run it as a command
-line of its own, so a shell receives your text alone.
+line of its own, so a shell receives your text alone. Two of TBD's own
+in-daemon rails — the watch desk's nudges and the rate-limit auto-continue —
+type into a session without going through this verb; their sends are in the
+actuation log like any other, but they carry no envelope and cannot be
+verified.
 
 `--verify` opts into landing confirmation — a tail read of the target
 transcript's JSONL for that envelope, with the re-check deadline as its

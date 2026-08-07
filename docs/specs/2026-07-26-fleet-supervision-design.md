@@ -440,7 +440,13 @@ those keys (§6). If a
 sequence turns out to have been wrong, the record shows exactly what was on the
 screen and exactly what was sent, which is the same accountability the
 three-condition test buys for the automatic path, obtained a different way.
-Sends are named-key and paced, following the rate-limit actuator's precedent.
+Sends are named-key and paced — one key at a time with a fixed pause between
+them (§13), following the rate-limit actuator's precedent, because an agent's
+TUI redraws between keystrokes and keys delivered back-to-back through the pty
+get dropped or reordered. The count of keys in one payload is bounded too
+(§13): `--keys` is a whitespace-split string, so a quoting mistake turns one
+call into a send that types for minutes into a live session, and a bounded
+refusal is cheap where an unbounded send is not undoable.
 In attended mode the desk suggests such a send instead of making it — an entry
 in the project's proposals doc (§6) showing the keys *and* the screen they aim
 at, so saying yes is not an act of faith.
@@ -759,8 +765,9 @@ rather than a capability wall, and the requirements doc records that descope
 ### Acting: one public send, on the record (normative)
 
 There are no desk verbs. Acting on a session is **`tbd terminal send`** —
-the public actuation, one verb for every caller: a human's script, the wake
-program, a sweep program's continuation policy, the supervisor itself.
+the public actuation, and the same one verb for every caller of it: a
+human's script, the wake program, a sweep program's continuation policy,
+the supervisor itself.
 Payloads, not verbs: `--text` carries the message and `--submit` sends
 it — text without `--submit` is typed and left standing in the composer,
 so every delivery this design describes passes both (that pair is also how
@@ -840,6 +847,24 @@ program's case memory skips re-briefing an untreated case and briefings
 carry TBD's act record. The removed gate stays removed: no rule matching,
 no content inspection, no posture judgment. The residual race is the
 milliseconds between check and keystroke.
+
+**Two in-daemon rails still type outside this verb, and closing that is
+known work.** The public send is the only actuation this design describes,
+but it is not yet the only compiled code that types into a session. Two
+older rails paste through tmux directly: the hosted desk's own nudges and
+shift wrap-up prompt, and the rate-limit rail's auto-continue, which types
+`continue` once a limit clears. Both write their own actuation rows, so the
+record's coverage holds for them — but neither carries the dispatch
+envelope and neither can be delivery-verified (§12), and the *absence* of a
+row's confirming outcome therefore says nothing about them either way.
+That is exactly the wrong way round. These two are unattended sends, made
+on no user gesture, into sessions nobody is watching — the shape the
+acknowledgement machinery exists for — while the sends that do carry the
+envelope usually have a human or a supervisor reading the result. Routing
+both through the same actuation the public verb performs, so the envelope
+and the observation cover them without a second implementation of either,
+is the work that closes this gap; until it lands, "every send" in this
+design means every send made through `tbd terminal send`.
 
 *What is deliberately not here.* No **`drive`** — it was send plus the
 record, and the record now rides every send, so a supervise-tier wrapper
@@ -2518,9 +2543,10 @@ actuation row's ID and the identity the row was attributed to —
 `<tbd-dispatch id="a3f1" from="supervisor:acme-web"/>`, then the message
 verbatim — which doubles as honest attribution: the receiving agent sees who
 is addressing it, down to `from="anonymous"` when the caller declared no
-identity. The envelope rides every text send to an agent, `--verify` or not,
-because a prefix that appears only sometimes is one no reader can rely on.
-Two targets get none. A keys payload carries no envelope: a key sequence has
+identity. The envelope rides every text send the public verb makes to an agent,
+`--verify` or not, because a prefix that appears only sometimes is one no
+reader can rely on. Two targets get none. A keys payload carries no
+envelope: a key sequence has
 nowhere to put a line of text, and typing one ahead of an interrupt would
 itself be an intervention. And a **shell** session receives the text alone —
 `tbd terminal send` into a plain shell pane is a supported thing to do, and
@@ -2554,7 +2580,11 @@ one identity check: that the terminal still holds the conversation the
 payload was addressed to. `/clear`, `/compact` and an account swap all
 rebind a session while leaving its pane untouched, so the transport's
 identity check cannot see them, and reading on would mean judging one
-conversation by another's transcript. It
+conversation by another's transcript. The transcript read is a bounded
+tail, never a parse: a cheap 64 KiB window first, and — only where the
+envelope is absent and the next word would be an accusation — a second,
+far wider 8 MiB read that must provably have covered the whole file before
+non-delivery is claimed (§13). It
 records one of four results as an outcome row referencing the act:
 
 - *Landed and acting* — delivery confirmed, session working. Done.
@@ -2601,7 +2631,11 @@ acknowledgement rather than from an envelope — a different mechanism, and
 one that is not built. Asking to verify either is refused rather than
 accepted and quietly answered *undetermined* forever, for the reason the
 whole section exists: promising evidence a target cannot produce rebuilds
-the silent-failure class one layer up.
+the silent-failure class one layer up. It is narrower than the send path
+too: the two in-daemon rails that paste directly rather than through the
+public verb (§3) write no envelope, so there is nothing for an observation
+to find, and bringing them onto the public actuation is what extends this
+section's guarantees to them.
 
 That one full attempt — adapter fallback and the evidence-bounded single
 retry included — is the whole of TBD-side persistence for any send. Beyond
@@ -2773,6 +2807,10 @@ to hunt for the value that governs a behavior:
 | Idle-intervention threshold | 40 min | shipped sweep program (sub-doc §7) |
 | Post-intervention re-check | 60 s | §4 step 7, §12 |
 | Delivery retries before anomaly | 2 sends | §12 |
+| Delivery observation tail read | 64 KiB | §12 |
+| Escalated read before claiming non-delivery | 8 MiB | §12 |
+| Pause between keys in a `--keys` payload | 150 ms | §2, §3 |
+| Keys accepted in one `--keys` payload | 32 | §2, §3 |
 | Supervisor recycle preference | 50% of the effective window, per desk | §9 |
 | Flush nudges | 50% / 60% / 70% fullness | §9 |
 | Unknown-denominator assumption | 200k, labeled | §2, §9 |
