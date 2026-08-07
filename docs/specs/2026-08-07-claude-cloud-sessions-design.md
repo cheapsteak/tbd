@@ -116,9 +116,27 @@ A new `claude_cloud_session` table records what TBD launched: session id, idempo
 - **`create`** — `claude --cloud "<prompt>"` from the repository checkout. The idempotency key is written to the ledger **before** the invocation, marked pending, and resolved to a session id on return. A replayed key whose row is still pending does not re-create: it surfaces the ambiguity to the user, because a duplicate cloud session costs more than a prompt.
 - **`list`** — ledger union discovery, per above.
 - **`send`** — `claude -p "<msg>" --cloud <id> --output-format json`, which returns `{ok, session_id, url}`. This is a structured enqueue with an acknowledgement, not keystrokes into a terminal, so it carries none of the delivery-confirmation problems that keystroke transports have.
-- **`attach`** — `claude --cloud <id>` on the pane's PTY. Interactive attach is gated per account, and `describe` must answer offline, so the capability is declared unconditionally and an ineligible account surfaces through the normal error path with the CLI's own message.
+- **`attach`** — `claude --cloud <id>`, reached through a shim (below).
 - **`transcript`** — reads the server-stored transcript for the session, cursor-tailed.
 - **`land`** — returns the session's repository and branch with `resume_command` of `claude --teleport <id>` and `forks: true`.
+
+### Attach needs a shim, not an argv
+
+Attach is the one verb the in-process implementation cannot serve, because it is not a request/response at all: the app spawns it on the pane's PTY and its exit code never passes through the daemon's runner. A provider compiled into the daemon has no executable for the app to spawn.
+
+Handing the app a bare `["claude", "--cloud", "<id>"]` is the alternative the contract rejects — a provider printing an argv for TBD to exec. Two of the three reasons dissolve for a built-in provider: `claude` authenticates at launch and refreshes itself, so nothing is frozen at print time, and it is itself a live client that owns its own reconnect. The third, vendor argv in TBD's process table, is moot when the vendor is compiled in.
+
+The reason that survives is exit codes. `RemoteAttachExitClass.classify` reads the attach process's exit through `ProviderFailureClass`, the contract's error table, and `claude` does not speak it. Interactive attach is gated per account, and an ineligible account exits with a code that would classify as `.unexpected` — which the reconnect policy treats as transient and eligible for automatic reconnect, so a permanent condition would retry forever.
+
+So the attach argv is `tbd remote-attach claude-cloud <id>`, a new `TBDCLI` subcommand that execs the vendor CLI on the inherited PTY and translates its outcome into contract exit classes: ineligible account or archived session to 1, credential failure to 4, transport failure to 3, user detach to 0. `TBDCLI` is already installed as `~/.local/bin/tbd`, so this adds no install step, and routing through TBD's own binary keeps the contract's live-shim property rather than working around it.
+
+Nothing parses the shim's output. Per the contract, attach's stdout is a PTY byte stream and the exit code is the whole signal — which is also what the no-TUI-scraping rule requires.
+
+### Attach and transcript are one session, not two
+
+Both surfaces read the same server-stored conversation: a message typed in the attach pane appears in the transcript pane, and one sent through `send` appears in both. This is the opposite of landing, where the local copy forks. No reconciliation is needed and none is designed; the two are windows, not replicas.
+
+The attach pane is also the floor. When the undocumented half is unavailable and the transcript pane goes dark, attach still works, because it rides only documented surface.
 
 ### Agent state
 
@@ -217,6 +235,7 @@ No test reaches the network or a real credential store. The undocumented transpo
 
 - **Contract v2** — `complete: false` adds and updates rows but never increments `missingCount`; absent `complete` behaves as `true`; a v1 provider negotiates v1 and is unaffected; `transcript` output routes to the transcript pane and `log` output to the scrollback pane; a provider that omits `stop` gets no stop action.
 - **Built-in provider** — ledger union discovery; discovery failure yields ledger-only and `complete: false`; a pending idempotency key does not re-create; failure classification and the auth banner behave identically to a subprocess provider; the reserved name is rejected from the registry file.
+- **Attach shim** — each vendor outcome maps to the intended contract exit class, driven by a stub standing in for the vendor CLI; an ineligible account classifies as permanent and does not arm automatic reconnect, while a dropped transport does; a user detach reads as clean.
 - **Land bridge** — each precondition failure is reported without creating a worktree; `forks: true` records the link both ways; landing twice produces two worktrees.
 - **Repo declarations** — `exec`, `args`, and command-shaped keys are ignored rather than honored; a params key absent from `create_params` is dropped; an unregistered provider degrades to the next tier with a visible flag; resolution order holds at each tier.
 - **Flag branches** — off and on, per the branching-conditional rule.
