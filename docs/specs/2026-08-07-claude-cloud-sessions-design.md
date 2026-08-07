@@ -142,7 +142,9 @@ A new `claude_cloud_session` table records what TBD launched: session id, idempo
 
 ### Verb implementations
 
-- **`describe`** — static and offline. Declares `send`, `attach`, `transcript`, `land`, `archive`, and `unarchive`; declares neither `stop` nor `log`. `create_params` are `repo`, `branch`, `prompt`, and `environment`.
+- **`describe`** — static and offline. Declares `send`, `attach`, `transcript`, `land`, `archive`, and `unarchive`; declares neither `stop` nor `log`. It reports **`contract_versions: [2]`, not `[1, 2]`** — nothing exposed terminates a running cloud session, so it cannot implement `stop`, and major 1 requires it. This is the one place in these documents where the `[1, 2]` idiom every other example shows would be wrong, and declaring a major means conforming to it. `create_params` are `repo`, `branch`, `prompt`, and `environment`.
+
+  **`environment`** names a cloud environment configured on the account — the saved bundle of network policy, environment variables, and setup script a session runs under. It is typed `string`, not `enum`, because `describe` must answer offline and the set of environments is only knowable from the account. An empty or absent value means the account's default environment; an unrecognized name is the provider's error to report at create time, not TBD's to pre-validate. It is the param a repository is most likely to want to declare, since which environment a repository's sessions need is a property of the repository — and, being a name rather than a script or a command, a declared value can select among configurations the account already has but cannot author a new one. That does not exempt it from the trust gate, which shows every declared param whatever its name.
 - **`create`** — `claude --cloud "<prompt>"` from the repository checkout.
 - **`list`** — ledger union discovery, per above.
 - **`send`** — `claude -p "<msg>" --cloud <id> --output-format json`, returning `{ok, session_id, url}`. A structured enqueue with an acknowledgement, not keystrokes into a terminal, so it carries none of the delivery-confirmation problems a keystroke transport has.
@@ -159,7 +161,7 @@ The ledger changes what is possible without changing that handler's retry:
 
 - The key and its state are written to the ledger **before** the invocation. The daemon's single same-key retry proceeds normally; a pending row is expected during it, not a reason to refuse.
 - If both attempts fail, the row stays `pending` and is surfaced as an unresolved create the user can act on — never silently dropped, because the session may well have started.
-- A pending row is resolved by the next complete discovery: a session matching its repository, branch and creation window adopts the row; a complete snapshot that contains no such session **ten minutes** after the create marks it failed and clears it.
+- A pending row is resolved by the next complete discovery: a session matching its repository, branch and creation window adopts the row. A complete snapshot containing no such session **ten minutes** after the create transitions the row to `failed` and stops surfacing it to the user. The row itself is **retained for 24 hours**, then deleted — it stops being a prompt for attention long before it stops existing, which is what lets a late-arriving session still be matched against it.
 
 Both directions of getting that number wrong are user-visible. Too short and a slow-provisioning session — capacity is allocated on demand, and a setup script runs before the session is usable — is declared failed while it is still coming up, stranding a real session outside TBD's inventory. Too long and a create that genuinely failed sits as `pending` in front of the user with nothing to act on.
 
@@ -274,6 +276,14 @@ Location for a new session resolves most-specific-first:
 4. **Local.**
 
 A declaration naming an unregistered provider is configuration drift: resolution degrades to the next tier and the app flags it, rather than blocking creation. Repo-less scratch spaces always resolve to local.
+
+**Why a repository's declaration outranks the user's own global default.** This is the contestable step in that order — a file written by whoever can push to a repository, placed above a setting the user chose for themselves — so it gets the same treatment as the other decisions in this document that could reasonably go the other way.
+
+The two-reasonable-projects test does not save it: teams could sanely disagree about whether repository configuration should be able to override a personal default, and plenty of tools answer that both ways. What settles it is the trust gate. A declaration only resolves after the user has read it and approved it, so tier 2 is not a stranger's file outranking the user's setting — it is a suggestion the user accepted, and accepting it is exactly the gesture that says "for this repository, use this instead of my default." The ordering and the gate are one mechanism, and the ordering would be indefensible without it.
+
+The named-consumer test then supplies the rest: a global default is what applies when nothing more specific is known, and a repository that has declared its remotes has told you something more specific — that this repository cannot build where the default sends it, or needs a machine the default does not provide. Ordering a general fallback above particular knowledge would make the declaration pointless for the repositories that most need it.
+
+Two properties keep the user in control regardless. The explicit per-creation choice is tier 1 and always wins, so no resolution is ever a trap. And declining a declaration is a durable state, not a dismissal: an unapproved declaration keeps falling through to the global default indefinitely.
 
 ### This repository's own declaration
 
