@@ -333,6 +333,48 @@ struct TerminalSendDispatchTests {
         #expect(fixture.pastes.pastes.isEmpty)
     }
 
+    /// Tier 2. The same conversation, still there, still named: the check the
+    /// test above proves refuses must also let the ordinary case through, or
+    /// the retry would be unreachable whenever the session id is known — which
+    /// is nearly always.
+    @Test("the retry proceeds when the addressed session is still the terminal's own")
+    func redeliveryProceedsWhenTheSessionStillMatches() async throws {
+        let fixture = try await makeFixture()
+        try await fixture.router.db.terminals.updateSession(
+            id: fixture.terminal.id, sessionID: "session-at-dispatch", transcriptPath: nil)
+
+        let outcome = await fixture.router.redeliverVerifiedPayload(
+            terminalID: fixture.terminal.id,
+            sessionID: "session-at-dispatch",
+            payload: "status?", submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(fixture.pastes.pastes == ["status?"])
+    }
+
+    /// Tier 2. A payload dispatched into a terminal whose session id was not yet
+    /// recorded carries `nil` — the conversation was never identified, so there
+    /// is no identity to compare and nothing a comparison could catch. The
+    /// observation skips its rebind check on exactly this input, and the retry
+    /// has to agree: an id appearing by the time the retry runs is the terminal
+    /// becoming knowable, not a rebind, and refusing it would spend the one
+    /// retry the mechanism gets on an absence that proves nothing.
+    @Test("the retry proceeds when the dispatch never identified a session")
+    func redeliveryProceedsWhenDispatchKnewNoSession() async throws {
+        let fixture = try await makeFixture()
+        #expect(fixture.terminal.claudeSessionID == nil)
+        try await fixture.router.db.terminals.updateSession(
+            id: fixture.terminal.id, sessionID: "session-learned-later", transcriptPath: nil)
+
+        let outcome = await fixture.router.redeliverVerifiedPayload(
+            terminalID: fixture.terminal.id,
+            sessionID: nil,
+            payload: "status?", submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(fixture.pastes.pastes == ["status?"])
+    }
+
     /// And a target that stopped being verifiable — a `recreateWindow` turning
     /// an agent terminal into a shell while keeping its id — refuses too. The
     /// payload it is holding opens with an envelope a shell would execute.

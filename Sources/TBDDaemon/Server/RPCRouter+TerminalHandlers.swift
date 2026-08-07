@@ -2208,7 +2208,17 @@ extension RPCRouter {
         // the payload being held is an instruction addressed to the session
         // that is no longer there. A rebind makes this a send to a stranger,
         // which is the one thing the retry must never be.
-        guard terminal.claudeSessionID == sessionID else {
+        //
+        // A `nil` expected id is not a mismatch, and this is the same rule
+        // `DeliveryVerifier.observe` applies: it means the conversation was not
+        // identified when the payload was dispatched — a terminal whose session
+        // id had not been recorded yet — so there is no identity to compare and
+        // no rebind the comparison could detect. A session id appearing by the
+        // time the retry runs is the terminal becoming knowable, not a stranger
+        // arriving. Refusing on it would spend the one retry the mechanism gets
+        // on an absence that is evidence of nothing. A *known* id that no longer
+        // matches is still a stranger, and still refused.
+        if let sessionID, terminal.claudeSessionID != sessionID {
             return .refused(.targetMismatch)
         }
         let outcome: ActuationOutcome
