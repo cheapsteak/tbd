@@ -379,9 +379,10 @@ import Testing
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    // makeTestRepo, not a bare repos.create: without the worktreeRoot override
+    // the created worktree — and the stray dir this test plants where it used
+    // to live — land in the developer's real ~/tbd/worktrees.
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -659,12 +660,15 @@ import Testing
         git: GitManager(),
         tmux: tmux,
         hooks: HookResolver(),
-        modelProfileResolver: resolver
+        modelProfileResolver: resolver,
+        // This is the only test in the file that spawns Claude against a
+        // RESOLVED profile, so it is the only one whose spawn ensures a
+        // per-profile config dir. Without the injection it lands in the real
+        // ~/tbd/profiles.
+        configDirManager: makeIsolatedConfigDirManager(tag: "lifecycle")
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
 
     // (a) Token must be passed via tmux -e flag, NOT inlined into the shell command body.
@@ -742,7 +746,7 @@ import Testing
 
     let windowIDsBefore = Set(terminalsBefore.map { $0.tmuxWindowID })
 
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
     #expect(terminalsAfter.count == 2, "Alive terminals must not be deleted during reconcile")
@@ -787,7 +791,7 @@ import Testing
     let suspendedBefore = try await db.terminals.get(id: suspended.id)
     #expect(suspendedBefore?.suspendedAt != nil, "Terminal should have suspendedAt set")
 
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     // All terminals must still exist after reconcile.
     terminals = try await db.terminals.list(worktreeID: wt.id)
@@ -842,7 +846,7 @@ import Testing
     )
     try await db.terminals.setHibernated(id: codex.id, sessionID: "sess-codex")
 
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let claudeAfter = try await db.terminals.get(id: claude.id)
     #expect(claudeAfter != nil, "hibernated claude terminal must survive reconcile")
@@ -886,7 +890,7 @@ import Testing
     // In dryRun mode, serverExists → true (not the reboot path).
     // windowExists → true for any ID, so the stale window is treated as alive.
     // Result: the terminal record must NOT be deleted (no dead-window deletion).
-    try await lifecycle.reconcile(repoID: repo.id)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
     #expect(terminalsAfter.count == 2, "Terminal with stale window ID must survive when server is alive (dryRun)")

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Router-level tests for `panel.get` / `panel.apply` / `panel.importLegacy`
 /// (Task 10, spec C §10). Exercises ROUTING only — `PanelCoordinator`'s
@@ -24,7 +25,8 @@ struct PanelRPCTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db)
     }

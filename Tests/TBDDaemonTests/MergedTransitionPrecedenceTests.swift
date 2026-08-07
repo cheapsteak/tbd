@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// The precedence rule when a PR merges: archive supersedes hibernate, but only
 /// when archive ACTUALLY began. The important asymmetry — an armed-but-blocked
@@ -29,10 +30,12 @@ struct MergedTransitionPrecedenceTests {
             },
             worktreeRemover: { _, _ in }
         )
-        let archive = AutoArchiveOnMergeCoordinator(db: db, lifecycle: lifecycle, subscriptions: subs)
+        let archive = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subs,
+            actuationLog: makeTestActuationLog())
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager())
+            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(), actuationLog: makeTestActuationLog())
         let hibernate = AutoHibernateOnMergeCoordinator(db: db, hibernation: hibernation, subscriptions: subs)
         let dispatcher = MergedTransitionDispatcher(archive: archive, hibernate: hibernate)
         return Deps(dispatcher: dispatcher, archive: archive, db: db)

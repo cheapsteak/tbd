@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -59,7 +60,8 @@ struct ModelProfileSpawnTests {
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
-            configDirManager: isolatedConfigDirManager()
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, recorder)
     }
@@ -297,9 +299,9 @@ struct ModelProfileSpawnTests {
     func codexReceivesMergedEnvOverrides() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
-        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        let priorCodexHome = setCodexTestHome(codexHome.path)
         defer {
-            unsetenv("TBD_TEST_CODEX_HOME")
+            restoreCodexTestHome(priorCodexHome)
             try? FileManager.default.removeItem(at: codexHome)
         }
 
@@ -337,9 +339,9 @@ struct ModelProfileSpawnTests {
     func codexEmptyConfigInjectsNothing() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
-        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        let priorCodexHome = setCodexTestHome(codexHome.path)
         defer {
-            unsetenv("TBD_TEST_CODEX_HOME")
+            restoreCodexTestHome(priorCodexHome)
             try? FileManager.default.removeItem(at: codexHome)
         }
 
@@ -531,9 +533,9 @@ struct ModelProfileSpawnTests {
     func spawnWithoutFallbackModelsUsesGlobalOverlay() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
         // The --settings flag is only emitted when the overlay file exists.
@@ -562,9 +564,9 @@ struct ModelProfileSpawnTests {
     func spawnWithFallbackModelsUsesPerSessionOverlay() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
         ClaudeHookOverlay.writeOverlay()
@@ -595,9 +597,9 @@ struct ModelProfileSpawnTests {
     func deleteRemovesPerSessionOverlay() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
-        setenv("TBD_HOME", tmp.path, 1)
+        let priorTBDHome = setTBDHome(tmp.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: tmp)
         }
         ClaudeHookOverlay.writeOverlay()
@@ -1106,7 +1108,8 @@ struct ModelProfileSpawnTests {
                 pumpTimeout: .seconds(5),
                 identityPollInterval: .milliseconds(5),
                 identityPollTimeout: .milliseconds(50)
-            ))
+            )),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db, recorder, pane)
     }

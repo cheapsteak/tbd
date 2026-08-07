@@ -52,7 +52,9 @@ actor FiredBox {
             },
             worktreeRemover: { _, _ in }
         )
-        let coord = AutoArchiveOnMergeCoordinator(db: db, lifecycle: lifecycle, subscriptions: subs)
+        let coord = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subs,
+            actuationLog: makeTestActuationLog())
         return (coord, db)
     }
 
@@ -163,7 +165,8 @@ actor FiredBox {
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(), subscriptions: subscriptions)
         let coordinator = AutoArchiveOnMergeCoordinator(
-            db: db, lifecycle: lifecycle, subscriptions: subscriptions)
+            db: db, lifecycle: lifecycle, subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog())
 
         let archived = await coordinator.handleMergedTransition(
             worktreeID: worktree.id, prNumber: 42)
@@ -209,7 +212,8 @@ actor FiredBox {
             worktreeRemover: { _, _ in }
         )
         let coordinator = AutoArchiveOnMergeCoordinator(
-            db: db, lifecycle: lifecycle, subscriptions: subscriptions)
+            db: db, lifecycle: lifecycle, subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog())
 
         let archived = await coordinator.handleMergedTransition(
             worktreeID: worktree.id, prNumber: 77)

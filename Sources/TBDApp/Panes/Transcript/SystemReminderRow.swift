@@ -27,7 +27,48 @@ struct SystemReminderRow: View {
         }
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        // Background-task notifications are not labelled reminders: they read as
+        // one gray sentence with no icon, no capsule and no timestamp. Same
+        // treatment, same shared phrasing as the native cell.
+        if kind == .taskNotification {
+            taskNotificationRow
+        } else {
+            reminderRow
+        }
+    }
+
+    private var taskNotificationRow: some View {
+        let phrasing = ActivityRowFormatter.taskNotificationPhrasing(text)
+        return ActivityRowChrome(
+            icon: nil,
+            timestamp: nil,
+            onOpen: { openTranscriptOverlay?(id) }
+        ) {
+            HStack(spacing: 6) {
+                // `ActivityRowChrome` already styles its header `.subheadline` /
+                // `.secondary` — the native cell's `.secondary` segment style.
+                Text(phrasing.phrase)
+                    .lineLimit(1)
+                // Only a failure still earns a capsule; every other outcome is
+                // already in the sentence.
+                if let failure = phrasing.failureStatus {
+                    Text(failure)
+                        .font(.caption2)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.red.opacity(0.2))
+                        .clipShape(Capsule())
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .accessibilityLabel(
+            ActivityRowFormatter.taskNotificationAccessibilityLabel(
+                text: text, timestamp: timestamp)
+        )
+    }
+
+    private var reminderRow: some View {
         ActivityRowChrome(
             icon: "info.circle",
             timestamp: timestamp,

@@ -67,10 +67,17 @@ enum UserMessageClassifier {
         }
 
         if let array = message["content"] as? [[String: Any]] {
-            return array
-                .first(where: { $0["type"] as? String == "text" })
-                .flatMap { $0["text"] as? String }
-                .flatMap { $0.isEmpty ? nil : $0 }
+            // EVERY text block, not just the first. Claude Code emits one text
+            // block PER attached image when it records where it spooled them
+            // (`[Image: source: …]`), so taking only the first silently dropped
+            // every image after the first in a multi-image paste. In the measured
+            // corpus that meta line is the only user message that ever carries
+            // more than one text block, so joining is a strict repair.
+            let texts = array
+                .filter { $0["type"] as? String == "text" }
+                .compactMap { $0["text"] as? String }
+                .filter { !$0.isEmpty }
+            return texts.isEmpty ? nil : texts.joined(separator: "\n")
         }
 
         return nil

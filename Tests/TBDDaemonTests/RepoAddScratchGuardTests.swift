@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -9,14 +10,14 @@ struct RepoAddScratchGuardTests {
     @Test func rejectsPathUnderScratchDir() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-addguard-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) }
+        let priorTBDHome = setTBDHome(home.path)
+        defer { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) }
 
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let scratchChild = TBDConstants.scratchDir.appendingPathComponent("some-project").path
         try FileManager.default.createDirectory(atPath: scratchChild, withIntermediateDirectories: true)
@@ -29,14 +30,14 @@ struct RepoAddScratchGuardTests {
     @Test func acceptsPathOutsideScratchDir() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-addguard-normal-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) }
+        let priorTBDHome = setTBDHome(home.path)
+        defer { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) }
 
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         // Create a temporary git repo outside the scratch directory
         let repoPath = FileManager.default.temporaryDirectory.appendingPathComponent("normal-repo-\(UUID().uuidString)")
@@ -89,14 +90,14 @@ struct RepoAddScratchGuardTests {
     @Test func rejectsSymlinkBypassToScratchDir() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-addguard-symlink-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) }
+        let priorTBDHome = setTBDHome(home.path)
+        defer { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) }
 
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         // Create a scratch child directory
         let scratchChild = TBDConstants.scratchDir.appendingPathComponent("symlink-test-project")

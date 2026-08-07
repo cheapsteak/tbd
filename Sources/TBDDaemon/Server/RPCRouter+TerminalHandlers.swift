@@ -60,11 +60,26 @@ actor TranscriptParseCache {
     }
 }
 
+// MARK: - The pane consultation's verdict
+
+/// A pane consultation that came back "do not type here", with the outcome the
+/// record gets and the message the caller sees.
+///
+/// One type for both typing paths — the send handler and the verifier's
+/// retry — so a refusal cannot be classified two ways depending on which one
+/// asked.
+struct PaneSendRefusal: Sendable {
+    let outcome: ActuationOutcome
+    let message: String
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
 
-    func handleTerminalCreate(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalCreate(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
 
         // Look up the worktree to get tmux server and path
@@ -108,20 +123,43 @@ extension RPCRouter {
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
 
+        // Pre-mint the terminal ID so we can inject it into the spawned env
+        // as TBD_TERMINAL_ID. Claude's SessionStart hook (registered via the
+        // TBD overlay file) reads this env var to route session events back
+        // to the right terminal record. Minted here, ahead of any tmux call,
+        // so the actuation row below can name the terminal it is about to
+        // spawn.
+        let plannedTerminalID = UUID()
+
+        // Request row before the first mutating step. `profile` is deliberately
+        // absent: it is resolved further down, after the tmux server exists, and
+        // reordering that resolution would move which failures happen before the
+        // server is created.
+        let actuationID = try await beginActuation(
+            .terminalCreate, actor: actor,
+            target: .local(worktree: params.worktreeID, terminal: plannedTerminalID),
+            prompt: params.prompt,
+            agent: (params.type ?? .shell).rawValue)
+
         // Ensure tmux server exists before creating window
-        _ = try await tmux.ensureServer(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
+        do {
+            _ = try await tmux.ensureServer(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
         await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Look up repo once for system prompt env vars and Claude session setup
         let repo: Repo?
         if let rid = worktree.repoID {
-            repo = try await db.repos.get(id: rid)
+            repo = try await actuating(actuationID) { try await db.repos.get(id: rid) }
         } else {
             repo = nil
         }
@@ -130,12 +168,6 @@ extension RPCRouter {
         // free-form env overrides (global < repo < profile). The profile scope
         // is folded in per-branch once the profile is resolved.
         let createConfig = try? await db.config.get()
-
-        // Pre-mint the terminal ID so we can inject it into the spawned env
-        // as TBD_TERMINAL_ID. Claude's SessionStart hook (registered via the
-        // TBD overlay file) reads this env var to route session events back
-        // to the right terminal record.
-        let plannedTerminalID = UUID()
 
         // Build env vars available in all TBD terminals
         var env = SystemPromptBuilder.promptLayers(
@@ -161,6 +193,9 @@ extension RPCRouter {
         // Codex pane.
         if params.type == .codex {
             guard let codexPreparation else {
+                await finishActuation(
+                    actuationID, .refused(.notEligible),
+                    error: "Codex launch preparation unexpectedly returned no result.")
                 return RPCResponse(
                     error: "Codex launch preparation unexpectedly returned no result.")
             }
@@ -191,34 +226,37 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
-            let window = try await tmux.createWindow(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.build(
-                    initialPrompt: params.prompt,
-                    executablePath: codexPreparation.executablePath),
-                env: codexEnv,
-                sensitiveEnv: codexEnvOverrides,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+            let terminal = try await actuating(actuationID) {
+                let window = try await tmux.createWindow(
+                    server: worktree.tmuxServer,
+                    session: "main",
+                    cwd: worktree.path,
+                    shellCommand: CodexSpawnCommandBuilder.build(
+                        initialPrompt: params.prompt,
+                        executablePath: codexPreparation.executablePath),
+                    env: codexEnv,
+                    sensitiveEnv: codexEnvOverrides,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
 
-            let terminal = try await db.terminals.create(
-                id: plannedTerminalID,
-                worktreeID: params.worktreeID,
-                tmuxWindowID: window.windowID,
-                tmuxPaneID: window.paneID,
-                label: TerminalLabel.codex,
-                claudeSessionID: nil,
-                profileID: nil,
-                kind: .codex
-            )
+                return try await db.terminals.create(
+                    id: plannedTerminalID,
+                    worktreeID: params.worktreeID,
+                    tmuxWindowID: window.windowID,
+                    tmuxPaneID: window.paneID,
+                    label: TerminalLabel.codex,
+                    claudeSessionID: nil,
+                    profileID: nil,
+                    kind: .codex
+                )
+            }
 
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
             )))
 
+            await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: terminal)
         }
 
@@ -252,13 +290,19 @@ extension RPCRouter {
         // surface the error instead of leaving a ghost tab.
         if isLoginSession {
             guard isClaudeType else {
-                return RPCResponse(error: "Login sessions must be Claude terminals (type: claude)")
+                let message = "Login sessions must be Claude terminals (type: claude)"
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             }
             guard params.overrideProfileID != nil else {
-                return RPCResponse(error: "Login sessions require a profile (overrideProfileID)")
+                let message = "Login sessions require a profile (overrideProfileID)"
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             }
             guard resolvedProfile != nil else {
-                return RPCResponse(error: "Profile not found or unreadable — cannot open a login session for it")
+                let message = "Profile not found or unreadable — cannot open a login session for it"
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             }
         }
 
@@ -293,7 +337,7 @@ extension RPCRouter {
 
         let claudeEnvOverrides = createConfig?.envSettingOverrides ?? [:]
         let profileConfigDir = isClaudeType
-            ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            ? configDirManager.resolveConfigDir(for: resolvedProfile)
             : nil
 
         // Pre-accept Claude Code's folder-trust dialog: this worktree belongs to
@@ -373,28 +417,31 @@ extension RPCRouter {
         } else {
             primarySensitiveEnv = spawn.sensitiveEnv
         }
-        let window = try await tmux.createWindow(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            shellCommand: spawn.command,
-            env: env,
-            sensitiveEnv: primarySensitiveEnv,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
-
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
-        let terminal = try await db.terminals.create(
-            id: plannedTerminalID,
-            worktreeID: params.worktreeID,
-            tmuxWindowID: window.windowID,
-            tmuxPaneID: window.paneID,
-            label: label,
-            claudeSessionID: claudeSessionID,
-            profileID: resolvedProfile?.profileID,
-            kind: terminalKind
-        )
+        let (window, terminal) = try await actuating(actuationID) {
+            let window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: spawn.command,
+                env: env,
+                sensitiveEnv: primarySensitiveEnv,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+
+            let terminal = try await db.terminals.create(
+                id: plannedTerminalID,
+                worktreeID: params.worktreeID,
+                tmuxWindowID: window.windowID,
+                tmuxPaneID: window.paneID,
+                label: label,
+                claudeSessionID: claudeSessionID,
+                profileID: resolvedProfile?.profileID,
+                kind: terminalKind
+            )
+            return (window, terminal)
+        }
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
@@ -409,6 +456,7 @@ extension RPCRouter {
             )
         }
 
+        await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: terminal)
     }
 
@@ -462,7 +510,9 @@ extension RPCRouter {
     }
 
 
-    func handleTerminalDelete(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalDelete(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalDeleteParams.self, from: paramsData)
 
         // Closing an already-closed terminal is a no-op SUCCESS, not an error —
@@ -472,6 +522,14 @@ extension RPCRouter {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return try RPCResponse(result: TerminalDeleteResult(closed: false, alreadyGone: true))
         }
+
+        // Request row before the rails check, not after: the rails only read
+        // state, and a refusal to close a busy session is itself something the
+        // record should show. A close of an already-gone terminal returns above
+        // without a row — nothing was acted on.
+        let actuationID = try await beginActuation(
+            .terminalDelete, actor: actor,
+            target: .local(worktree: terminal.worktreeID, terminal: terminal.id))
 
         // Optional rails (CLI sets them; --force drops them; the app never
         // does). Refuse to kill an in-flight turn or a raised permission hand,
@@ -485,18 +543,29 @@ extension RPCRouter {
         // this command's primary cleanup use case. A dead-window row cannot be
         // mid-turn, so it stays closeable without --force.
         if params.respectActivityRails == true,
-           terminal.activityState == .working || terminal.activityState == .waitingForUser,
-           let worktree = try await db.worktrees.get(id: terminal.worktreeID),
-           await tmux.windowExists(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID) {
-            let what = terminal.activityState == .working
-                ? "mid-turn"
-                : "waiting on a permission prompt"
-            return RPCResponse(
-                error: "Terminal \(params.terminalID) is \(what) "
+           terminal.activityState == .working || terminal.activityState == .waitingForUser {
+            // Resolved inside the rails branch, not in the condition list, so
+            // the lookup keeps its short-circuit (only reached when the rails
+            // are on and the row looks busy) while a DB failure still confirms
+            // the request row before it propagates.
+            let railWorktree = try await actuating(actuationID) {
+                try await db.worktrees.get(id: terminal.worktreeID)
+            }
+            if let railWorktree,
+               await tmux.windowExists(
+                server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID) {
+                let what = terminal.activityState == .working
+                    ? "mid-turn"
+                    : "waiting on a permission prompt"
+                let message = "Terminal \(params.terminalID) is \(what) "
                     + "(activityState=\(terminal.activityState.rawValue)). "
-                    + "Closing now would kill in-flight work. Pass --force to close anyway.",
-                code: RPCErrorCode.terminalBusy.rawValue
-            )
+                    + "Closing now would kill in-flight work. Pass --force to close anyway."
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(
+                    error: message,
+                    code: RPCErrorCode.terminalBusy.rawValue
+                )
+            }
         }
 
         // Terminal close cancels any pending auto-resume (spec §Cancellation).
@@ -508,18 +577,33 @@ extension RPCRouter {
         // user can view it read-only later (Session History → Closed
         // Terminals). Strictly best-effort: any failure logs inside
         // captureOnClose and the close proceeds unchanged.
-        if let worktree = try await db.worktrees.get(id: terminal.worktreeID) {
+        let worktree = try await actuating(actuationID) {
+            try await db.worktrees.get(id: terminal.worktreeID)
+        }
+        // Set when the kill itself failed. The deletion proceeds regardless
+        // (pre-existing contract — the row goes and the response is the same),
+        // so the failure is invisible in the response and has to be carried out
+        // separately, or the record would call a failed kill `dispatched`.
+        var killWindowFailure: String?
+        if let worktree {
             await db.terminalHistory.captureOnClose(terminal: terminal) {
                 try await tmux.capturePaneScrollback(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
             }
             // Kill the tmux window
-            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            do {
+                try await tmux.killWindow(
+                    server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            } catch {
+                killWindowFailure = "\(error)"
+            }
         }
 
         // Delete from DB
-        try await db.terminals.delete(id: params.terminalID)
-        try await db.tabs.delete(tabID: params.terminalID)
+        try await actuating(actuationID) {
+            try await db.terminals.delete(id: params.terminalID)
+            try await db.tabs.delete(tabID: params.terminalID)
+        }
         await pendingQuestions.clear(terminalID: params.terminalID)
         await loginSessions.cancelPendingAutoLogin(terminalID: params.terminalID)
 
@@ -531,6 +615,11 @@ extension RPCRouter {
             terminalID: terminal.id
         )))
 
+        if let killWindowFailure {
+            await finishActuation(actuationID, .transportFailed, error: killWindowFailure)
+        } else {
+            await finishActuation(actuationID, .dispatched)
+        }
         return try RPCResponse(result: TerminalDeleteResult(
             closed: true,
             alreadyGone: false,
@@ -552,7 +641,9 @@ extension RPCRouter {
     /// Claude session (no scrollback replay — Claude repaints its transcript);
     /// every other kind opens a fresh shell with the raw capture (colors
     /// intact) printed above the prompt. The history row is kept.
-    func handleTerminalHistoryRevive(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalHistoryRevive(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalHistoryReviveParams.self, from: paramsData)
 
         guard let worktree = try await db.worktrees.get(id: params.worktreeID) else {
@@ -576,9 +667,21 @@ extension RPCRouter {
         let plannedTerminalID = UUID()
         let defaultShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
-        _ = try await tmux.ensureServer(
-            server: worktree.tmuxServer, session: "main", cwd: worktree.path,
-            cols: resolvedCols, rows: resolvedRows)
+        // Request row after the terminal ID is minted and before the first
+        // tmux act, so it names the session it is about to bring back.
+        let actuationID = try await beginActuation(
+            .terminalHistoryRevive, actor: actor,
+            target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+            agent: (entry.kind ?? .shell).rawValue)
+
+        do {
+            _ = try await tmux.ensureServer(
+                server: worktree.tmuxServer, session: "main", cwd: worktree.path,
+                cols: resolvedCols, rows: resolvedRows)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
         await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Claude-kind with a live session id → resume it. Mirrors the
@@ -586,7 +689,7 @@ extension RPCRouter {
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
             let repo: Repo?
             if let rid = worktree.repoID {
-                repo = try await db.repos.get(id: rid)
+                repo = try await actuating(actuationID) { try await db.repos.get(id: rid) }
             } else {
                 repo = nil
             }
@@ -598,7 +701,7 @@ extension RPCRouter {
                 logger.warning("revive: model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
             }
-            let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
             // Reviving a closed terminal respawns claude in the same worktree,
             // so the same trust argument applies — including the seeder's
             // `foreignHead` refusal, which is why the flag lives on the row
@@ -646,20 +749,23 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: resolvedProfile?.envOverrides
             )
-            let terminal = try await spawnRevivedTerminal(
-                worktree: worktree,
-                plannedTerminalID: plannedTerminalID,
-                spawnCommand: spawn.command,
-                env: env,
-                sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
-                label: TerminalLabel.claudeCode,
-                kind: .claude,
-                claudeSessionID: sessionID,
-                profileID: resolvedProfile?.profileID,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+            let terminal = try await actuating(actuationID) {
+                try await spawnRevivedTerminal(
+                    worktree: worktree,
+                    plannedTerminalID: plannedTerminalID,
+                    spawnCommand: spawn.command,
+                    env: env,
+                    sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
+                    label: TerminalLabel.claudeCode,
+                    kind: .claude,
+                    claudeSessionID: sessionID,
+                    profileID: resolvedProfile?.profileID,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
+            }
             logger.info("revive: resumed claude session \(sessionID, privacy: .public) as terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public)")
+            await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: terminal)
         }
 
@@ -678,20 +784,23 @@ extension RPCRouter {
             "TBD_WORKTREE_ID": worktree.id.uuidString,
             "TBD_TERMINAL_ID": plannedTerminalID.uuidString,
         ]
-        let terminal = try await spawnRevivedTerminal(
-            worktree: worktree,
-            plannedTerminalID: plannedTerminalID,
-            spawnCommand: command,
-            env: env,
-            sensitiveEnv: [:],
-            label: nil,
-            kind: .shell,
-            claudeSessionID: nil,
-            profileID: nil,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
+        let terminal = try await actuating(actuationID) {
+            try await spawnRevivedTerminal(
+                worktree: worktree,
+                plannedTerminalID: plannedTerminalID,
+                spawnCommand: command,
+                env: env,
+                sensitiveEnv: [:],
+                label: nil,
+                kind: .shell,
+                claudeSessionID: nil,
+                profileID: nil,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+        }
         logger.info("revive: opened shell terminal \(terminal.id, privacy: .public) from history entry \(entry.id, privacy: .public) (capture present: \(haveCapture, privacy: .public))")
+        await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: terminal)
     }
 
@@ -776,7 +885,9 @@ extension RPCRouter {
         return .ok()
     }
 
-    func handleTerminalRecreateWindow(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalRecreateWindow(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalRecreateWindowParams.self, from: paramsData)
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
@@ -806,16 +917,33 @@ extension RPCRouter {
                 logger.info("recreateWindow: window \(terminal.tmuxWindowID, privacy: .public) for claude terminal \(terminal.id, privacy: .public) is alive — ignoring stale recreate request")
                 return try RPCResponse(result: terminal)
             }
+            // This branch actuates too, and differently: it kills a window the
+            // check above read as gone — a read that can be stale — and parks
+            // the session. That is the same act reconcile's recovery park
+            // performs, so it carries kind `hibernate` through this surface's
+            // own door (`ActuationBranch.recreateWindowRepark`). The row goes in
+            // ahead of the kill, fail-closed: an unrecordable park refuses the
+            // RPC with the window and the row untouched.
+            let reparkID = try await beginActuation(
+                .recreateWindowRepark, actor: actor,
+                target: .local(worktree: worktree.id, terminal: terminal.id))
+
             // Clean up any lingering (almost always already-dead) window to avoid orphans.
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
-            try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
-            // Drop any stale pending-question entry — the window the question
-            // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
-            await pendingQuestions.clear(terminalID: terminal.id)
-            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+            let parked = try await actuating(reparkID) { () -> Terminal? in
+                // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
+                try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+                // Drop any stale pending-question entry — the window the question
+                // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
+                await pendingQuestions.clear(terminalID: terminal.id)
+                return try await db.terminals.get(id: params.terminalID)
+            }
+            guard let updated = parked else {
+                await finishActuation(
+                    reparkID, .refused(.notFound), error: "Terminal not found after suspend")
                 return RPCResponse(error: "Terminal not found after suspend")
             }
+            await finishActuation(reparkID, .dispatched)
             logger.info("recreateWindow: parked claude terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
             return try RPCResponse(result: updated)
         }
@@ -838,6 +966,14 @@ extension RPCRouter {
             codexPreparation = nil
         }
 
+        // The respawning branch's own row, ahead of its first kill. The re-park
+        // branch above wrote its own before returning — it is an actuation in
+        // its own right, not a DB-only edit.
+        let actuationID = try await beginActuation(
+            .terminalRecreateWindow, actor: actor,
+            target: .local(worktree: worktree.id, terminal: terminal.id),
+            agent: (terminal.kind ?? .shell).rawValue)
+
         // Kill the old window if it still exists (avoids orphans)
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
 
@@ -845,20 +981,24 @@ extension RPCRouter {
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
 
         // Ensure tmux server exists
-        _ = try await tmux.ensureServer(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
+        try await actuating(actuationID) {
+            _ = try await tmux.ensureServer(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+        }
         await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             // Recreate as codex — preserve identity
             guard let codexPreparation else {
-                return RPCResponse(error: "Codex launch preparation was unavailable")
+                let message = "Codex launch preparation was unavailable"
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             }
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
@@ -886,31 +1026,38 @@ extension RPCRouter {
                 repo: recreateRepo?.envOverrides,
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
-            let window = try await tmux.createWindow(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.command(
-                    executablePath: codexPreparation.executablePath),
-                env: codexEnv,
-                sensitiveEnv: codexEnvOverrides,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+            let updatedTerminal = try await actuating(actuationID) {
+                let window = try await tmux.createWindow(
+                    server: worktree.tmuxServer,
+                    session: "main",
+                    cwd: worktree.path,
+                    shellCommand: CodexSpawnCommandBuilder.command(
+                        executablePath: codexPreparation.executablePath),
+                    env: codexEnv,
+                    sensitiveEnv: codexEnvOverrides,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
 
-            // Update tmux IDs but DO NOT call clearRecreated — that nukes the label and kind
-            try await db.terminals.updateTmuxIDs(
-                id: params.terminalID,
-                windowID: window.windowID,
-                paneID: window.paneID
-            )
-            try await db.terminals.setActivityState(id: params.terminalID, activityState: .unknown)
+                // Update tmux IDs but DO NOT call clearRecreated — that nukes the label and kind
+                try await db.terminals.updateTmuxIDs(
+                    id: params.terminalID,
+                    windowID: window.windowID,
+                    paneID: window.paneID
+                )
+                try await db.terminals.setActivityState(
+                    id: params.terminalID, activityState: .unknown)
+                return try await db.terminals.get(id: params.terminalID)
+            }
 
             // Return updated terminal
-            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+            guard let updated = updatedTerminal else {
+                await finishActuation(
+                    actuationID, .refused(.notFound), error: "Terminal not found after update")
                 return RPCResponse(error: "Terminal not found after update")
             }
 
+            await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: updated)
         } else {
             // Recreate as shell (claude or shell terminal becomes a plain shell)
@@ -920,32 +1067,49 @@ extension RPCRouter {
             // the env. Without this set, the pane would inherit whatever TBD_WORKTREE_ID
             // got baked into the tmux server's global env, leaking another worktree's
             // identity into this one.
+            //
+            // TBD_TERMINAL_ID is set for the same reason, plus one more: it is
+            // what `createWindow` stamps onto the new pane as
+            // `@tbd_terminal_id`, and an unstamped pane is one `terminal.send`
+            // can never verify (absence is not disagreement, so it proceeds
+            // unchecked). Omitting it here would leave this branch — the only
+            // spawn path that ever did — minting fresh panes that opt out of
+            // the stale-coordinate check for the rest of their life.
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-            let env: [String: String] = ["TBD_WORKTREE_ID": worktree.id.uuidString]
-            let window = try await tmux.createWindow(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                shellCommand: shell,
-                env: env,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+            let env: [String: String] = [
+                "TBD_WORKTREE_ID": worktree.id.uuidString,
+                "TBD_TERMINAL_ID": terminal.id.uuidString,
+            ]
+            let updatedTerminal = try await actuating(actuationID) {
+                let window = try await tmux.createWindow(
+                    server: worktree.tmuxServer,
+                    session: "main",
+                    cwd: worktree.path,
+                    shellCommand: shell,
+                    env: env,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
 
-            // Update the terminal record with new window/pane IDs and clear stale
-            // Claude metadata — the recreated window runs a plain shell, not Claude.
-            try await db.terminals.updateTmuxIDs(
-                id: params.terminalID,
-                windowID: window.windowID,
-                paneID: window.paneID
-            )
-            try await db.terminals.clearRecreated(id: params.terminalID)
+                // Update the terminal record with new window/pane IDs and clear stale
+                // Claude metadata — the recreated window runs a plain shell, not Claude.
+                try await db.terminals.updateTmuxIDs(
+                    id: params.terminalID,
+                    windowID: window.windowID,
+                    paneID: window.paneID
+                )
+                try await db.terminals.clearRecreated(id: params.terminalID)
+                return try await db.terminals.get(id: params.terminalID)
+            }
 
             // Return updated terminal
-            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+            guard let updated = updatedTerminal else {
+                await finishActuation(
+                    actuationID, .refused(.notFound), error: "Terminal not found after update")
                 return RPCResponse(error: "Terminal not found after update")
             }
 
+            await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: updated)
         }
     }
@@ -1179,7 +1343,9 @@ extension RPCRouter {
         return fm.fileExists(atPath: candidate.path) ? candidate : nil
     }
 
-    func handleTerminalSwapProfile(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalSwapProfile(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
 
         guard let oldTerminal = try await db.terminals.get(id: params.terminalID) else {
@@ -1310,6 +1476,23 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
+        // One row for the whole swap, on the two branches that actually reshape
+        // a live session. It sits here, as soon as the plan names what will be
+        // acted on, because the very next step already mutates state outside the
+        // daemon: the resume path copies the session transcript into the
+        // destination profile's config dir. The interrupt the in-place branch
+        // sends later is a sub-step of this one actuation, not a send of its
+        // own — and the cold (parked) swap returned above without a row, because
+        // re-homing a parked row touches no process. `.fork` names the new
+        // terminal it is about to spawn; `.inPlace` names the one it respawns.
+        let actuationID = try await beginActuation(
+            .terminalSwapProfile, actor: actor,
+            target: .local(
+                worktree: worktree.id,
+                terminal: mode == .fork ? plannedTerminalID : oldTerminal.id),
+            agent: TerminalKind.claude.rawValue,
+            profile: resolved?.profileID.uuidString)
+
         // Carry the session transcript into the DESTINATION config dir so the
         // forked `claude --resume <id>` finds the conversation. Only matters on
         // the resume path — a fresh spawn has no prior transcript to carry.
@@ -1375,7 +1558,7 @@ extension RPCRouter {
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
-            profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved))
+            profileConfigDir: configDirManager.resolveConfigDir(for: resolved))
 
         let spawn: ClaudeSpawnCommandBuilder.Result
         let storedSessionID: String
@@ -1395,7 +1578,7 @@ extension RPCRouter {
                 profileModel: resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
+                profileConfigDir: configDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
@@ -1425,7 +1608,7 @@ extension RPCRouter {
                 profileModel: resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
+                profileConfigDir: configDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
@@ -1446,35 +1629,57 @@ extension RPCRouter {
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
         let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
-        switch mode {
-        case .fork:
-            return try await forkSwapNewTab(
-                worktree: worktree,
-                plannedTerminalID: plannedTerminalID,
-                spawnCommand: spawn.command,
-                env: env,
-                sensitiveEnv: sensitiveEnv,
-                storedSessionID: storedSessionID,
-                profileID: resolved?.profileID,
-                scheduleRecapture: scheduleRecapture,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+        let response: RPCResponse
+        // Set when the in-place respawn's tmux call failed. That failure is
+        // deliberately swallowed downstream — the RPC still returns the updated
+        // row (pre-existing contract) — so it is invisible in the response and
+        // has to be carried out separately, or the record would call a failed
+        // respawn `dispatched`.
+        var respawnFailure: String?
+        do {
+            switch mode {
+            case .fork:
+                response = try await forkSwapNewTab(
+                    worktree: worktree,
+                    plannedTerminalID: plannedTerminalID,
+                    spawnCommand: spawn.command,
+                    env: env,
+                    sensitiveEnv: sensitiveEnv,
+                    storedSessionID: storedSessionID,
+                    profileID: resolved?.profileID,
+                    scheduleRecapture: scheduleRecapture,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
 
-        case .inPlace:
-            return try await inPlaceSwapRespawn(
-                oldTerminal: oldTerminal,
-                worktree: worktree,
-                spawnCommand: spawn.command,
-                env: env,
-                sensitiveEnv: sensitiveEnv,
-                storedSessionID: storedSessionID,
-                newProfileID: resolved?.profileID,
-                scheduleRecapture: scheduleRecapture,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+            case .inPlace:
+                let outcome = try await inPlaceSwapRespawn(
+                    oldTerminal: oldTerminal,
+                    worktree: worktree,
+                    spawnCommand: spawn.command,
+                    env: env,
+                    sensitiveEnv: sensitiveEnv,
+                    storedSessionID: storedSessionID,
+                    newProfileID: resolved?.profileID,
+                    scheduleRecapture: scheduleRecapture,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
+                response = outcome.response
+                respawnFailure = outcome.respawnError
+            }
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
         }
+        if let respawnFailure {
+            await finishActuation(actuationID, .transportFailed, error: respawnFailure)
+        } else {
+            // The only unsuccessful response either swap branch returns is
+            // "Terminal vanished after swap" — the row it respawned is gone.
+            await finishActuation(actuationID, response: response, refusedAs: .notFound)
+        }
+        return response
     }
 
     /// `.fork` swap: spawn a NEW window + terminal row in the same worktree,
@@ -1540,6 +1745,11 @@ extension RPCRouter {
     /// respawn so a respawn failure still leaves the row on the new account
     /// (the pane shows the error; the user can retry). The transcript was
     /// already carried into the destination config dir upstream.
+    ///
+    /// A failed respawn is therefore invisible in the returned response — by
+    /// design, and unchanged here. `respawnError` reports it out of band so the
+    /// caller's actuation row can say `transport-failed` instead of inheriting
+    /// the response's success.
     private func inPlaceSwapRespawn(
         oldTerminal: Terminal,
         worktree: Worktree,
@@ -1551,10 +1761,11 @@ extension RPCRouter {
         scheduleRecapture: Bool,
         cols: Int,
         rows: Int
-    ) async throws -> RPCResponse {
+    ) async throws -> (response: RPCResponse, respawnError: String?) {
         let server = worktree.tmuxServer
         let paneID = oldTerminal.tmuxPaneID
         let windowID = oldTerminal.tmuxWindowID
+        var respawnError: String?
 
         // 1. Gracefully interrupt the pane's current Claude before respawn.
         //    `respawn-window -k` will forcibly replace it regardless, but a
@@ -1583,8 +1794,10 @@ extension RPCRouter {
         } catch {
             // Failure path: the row keeps the new profile id (respawn can be
             // retried); the pane surfaces the error. Log clearly and still
-            // return the updated row so the app reflects the new account.
+            // return the updated row so the app reflects the new account — but
+            // hand the failure back so the record classifies it truthfully.
             logger.warning("inPlace swap: respawn failed for terminal \(oldTerminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            respawnError = "\(error)"
         }
 
         subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
@@ -1607,10 +1820,10 @@ extension RPCRouter {
         }
 
         guard let updated = try await db.terminals.get(id: oldTerminal.id) else {
-            return RPCResponse(error: "Terminal vanished after swap")
+            return (RPCResponse(error: "Terminal vanished after swap"), respawnError)
         }
         logger.info("inPlace swap: terminal \(oldTerminal.id, privacy: .public) switched to profile \(newProfileID?.uuidString ?? "ambient", privacy: .public) in window \(windowID, privacy: .public)")
-        return try RPCResponse(result: updated)
+        return (try RPCResponse(result: updated), respawnError)
     }
 
     /// Best-effort graceful interrupt of a pane's foreground program before an
@@ -1618,6 +1831,17 @@ extension RPCRouter {
     /// then C-c C-c, another settle, then a SIGTERM to the pane pid as a
     /// backstop. Every step is best-effort — failures are logged and ignored,
     /// since the subsequent `respawn-window -k` guarantees termination.
+    ///
+    /// **Acts on an unverified coordinate (issue #384).** `paneID` comes from
+    /// the terminal row, and tmux reuses pane ids, so a stale row aims this at
+    /// a live stranger — and unlike `terminal.send`, which now consults
+    /// `paneSendTarget` before typing and refuses on disagreement, what lands
+    /// here is a SIGTERM and then a forced respawn of that window. The
+    /// consultation is not the missing piece: what a *refusal* should do to a
+    /// user's account switch or hibernate is a product decision (fail it, mark
+    /// the row, or fall back to a coordinate-free path), and belongs in a spec
+    /// rather than being bolted on here. Same note on
+    /// `HibernationCoordinator`'s copy of this helper.
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
@@ -1649,8 +1873,43 @@ extension RPCRouter {
         )
     }
 
-    func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalSend(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
+        // Queue behind any send already mid-flight to this same terminal; sends
+        // to other terminals are unaffected. The whole handler runs inside the
+        // lane so the target check and the typing it authorizes cannot be
+        // separated by another caller's paste.
+        return try await terminalSendSerializer.run(terminalID: params.terminalID) {
+            try await self.performTerminalSend(params, actor: actor)
+        }
+    }
+
+    private func performTerminalSend(
+        _ params: TerminalSendParams, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        // ─── The first of two refusal lines, and the reason they differ ───
+        //
+        // A malformed payload SHAPE is rejected here, before any row exists, as
+        // an ordinary RPC error. `RPCRouter+Actuation.swift` draws this line
+        // already: a row must not be written for a request that was never about
+        // to be dispatched. None of these combinations names a coherent act —
+        // there is no send to record, only a caller that asked for nothing, or
+        // for two contradictory things at once.
+        //
+        // The second line is below, at the flag: `--verify` while delivery
+        // verification is off IS a coherent act, one the daemon declined, so it
+        // gets a row and a refusal outcome. See there.
+        //
+        // The CLI validates these same shapes so a human gets a clean message
+        // before a socket is opened; the daemon enforces them independently
+        // because the CLI is not the only caller.
+        let payload: TerminalSendPayload
+        switch Self.validateSendShape(params) {
+        case .valid(let validated): payload = validated
+        case .malformed(let message): return RPCResponse(error: message)
+        }
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
@@ -1661,34 +1920,461 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
-        // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
-        // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
-        // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
-        // multiple rapid reads, which a TUI's non-bracketed paste-burst
-        // detection mistakes for a paste and coalesces — absorbing the trailing
-        // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
-        // Enter provably outside the paste. tmux emits the wrappers iff the pane
-        // has bracketed-paste mode on — agent TUIs and modern interactive shells
-        // both enable it at the prompt; cooked-mode consumers get bare bytes and
-        // behave as before. Skip an empty body entirely (don't paste an empty
-        // buffer) but still press Enter below if requested.
-        if !params.text.isEmpty {
-            try await tmux.pasteText(
-                server: worktree.tmuxServer,
-                paneID: terminal.tmuxPaneID,
-                bytes: Data(params.text.utf8)
-            )
+        // Request row first: the target is resolved and the payload is known,
+        // and nothing has touched the pane yet. The paste and the Enter are
+        // sub-steps of one send, so they share this one row.
+        //
+        // The row records the caller's payload VERBATIM and without the
+        // envelope (§3, "the log records the message verbatim"). The envelope is
+        // transport framing built at delivery, and its id is this row's own id,
+        // so storing it would duplicate the row's identifier into its own body.
+        let actuationID = try await beginActuation(
+            .terminalSend, actor: actor,
+            target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
+            message: payload.recordedMessage,
+            submit: payload.recordedSubmit,
+            verify: payload.recordedVerify)
+
+        // ─── The second refusal line: a well-formed act the daemon declines ───
+        //
+        // `--verify` while `delivery_verification_enabled` is off is a refusal,
+        // not a silent downgrade to an unverified send. A caller that asked for
+        // evidence must never be answered with a silence that reads like
+        // confirmation — that would rebuild, one layer up, the exact
+        // silent-failure class §12 exists to end. Nothing is typed, and the row
+        // shows the near-miss so the morning can see what the flag stopped.
+        //
+        // Read per call and only when `--verify` was armed, so an ordinary send
+        // pays no config read.
+        //
+        // Two conditions, because the flag and the machinery it enables are
+        // read at different times: the column per call, the verifier once at
+        // daemon start. Between flipping the flag on and restarting, the column
+        // says yes and there is still nothing to arm — and a send that
+        // dispatched with nothing armed would render `unconfirmed` forever,
+        // handing the caller a silence that reads like a delivery failure when
+        // nothing ever looked. Both conditions therefore refuse, and neither
+        // types anything.
+        if payload.isVerifyArmed {
+            // Only a target with an adapter that can answer may be verified. A
+            // shell keeps no transcript at all, and Codex's adapter is a
+            // different mechanism §12 describes but this slice does not build —
+            // either way the one observation that exists would return
+            // `undetermined` every time. Refuse rather than promise evidence the
+            // target cannot produce.
+            if !Self.supportsDeliveryObservation(terminal) {
+                let kindName = (terminal.kind ?? .shell).rawValue
+                let message = """
+                    terminal.send --verify was refused: terminal \
+                    \(terminal.id.uuidString) is a \(kindName) session, and delivery can only \
+                    be observed for a Claude session today — nothing was sent. Resend without \
+                    --verify.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            let enabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
+            if !enabled {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is disabled \
+                    (config.delivery_verification_enabled is off) — nothing was sent. Enable \
+                    it with the config.setDeliveryVerification RPC and restart the daemon, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            if deliveryVerifier == nil {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is enabled but \
+                    this daemon has no verifier wired, so the flag was turned on after it \
+                    started — nothing was sent. Restart the daemon to arm the observation, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
         }
 
-        if params.submit == true {
-            try await tmux.sendKey(
-                server: worktree.tmuxServer,
-                paneID: terminal.tmuxPaneID,
-                key: "Enter"
-            )
+        // Ask the pane about itself before typing into it — the honest-transport
+        // check of issue #384 and the dead-pane class beside it. A decline here
+        // is a refusal, never a transport failure: the daemon declined without
+        // touching the transport. The consultation itself failing is the
+        // opposite, and is classified as such.
+        let refusal: PaneSendRefusal?
+        do {
+            refusal = try await consultPaneBeforeTyping(
+                terminal: terminal, server: worktree.tmuxServer)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        if let refusal {
+            await finishActuation(actuationID, refusal.outcome, error: refusal.message)
+            return RPCResponse(error: refusal.message)
         }
 
+        // What actually reached the pane, envelope included — nil for a payload
+        // that pasted nothing (empty text, or keys). Handed to the arming seam
+        // below so a retry can re-deliver byte-identically.
+        var deliveredPayload: String?
+
+        do {
+            switch payload {
+            case .text(let text, let submit, _):
+                // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
+                // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
+                // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
+                // multiple rapid reads, which a TUI's non-bracketed paste-burst
+                // detection mistakes for a paste and coalesces — absorbing the trailing
+                // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
+                // Enter provably outside the paste. tmux emits the wrappers iff the pane
+                // has bracketed-paste mode on — agent TUIs and modern interactive shells
+                // both enable it at the prompt; cooked-mode consumers get bare bytes and
+                // behave as before. Skip an empty body entirely (don't paste an empty
+                // buffer) but still press Enter below if requested.
+                //
+                // A non-empty text payload to an AGENT rides behind the dispatch
+                // envelope (§12): a one-line tag carrying this row's id and the
+                // identity the row was attributed to, then the caller's message
+                // verbatim. It is attribution the receiving agent can read, and
+                // — because a submitted message's verbatim content lands in the
+                // transcript JSONL — it is the machine fact a later observation
+                // looks for, requiring nothing of the agent. Unconditional along
+                // the axis that matters: verified or not, a prefix that appears
+                // only sometimes is one no reader can rely on.
+                //
+                // An EMPTY payload keeps today's behaviour exactly: nothing is
+                // pasted, and a bare `--submit` still presses Enter. `tbd
+                // terminal send --text "" --submit` is a real way to press Enter
+                // and must not start pasting a tag.
+                if !text.isEmpty {
+                    // ...and it rides every send to an AGENT. A shell is not a
+                    // reader of envelopes: it has no transcript to join back to,
+                    // and a `--submit` there would execute the tag as a command
+                    // line of its own before the caller's text ever ran. Every
+                    // sentence §12 uses to justify the envelope is about a
+                    // receiving agent and its transcript JSONL; a shell target
+                    // satisfies none of them, so prefixing one would be framing
+                    // nobody reads, delivered as a syntax error.
+                    let composed = Self.carriesDispatchEnvelope(terminal)
+                        ? Self.dispatchEnvelope(
+                            id: actuationID, from: (actor ?? .anonymous).dispatchLabel
+                        ) + "\n" + text
+                        : text
+                    try await tmux.pasteText(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        bytes: Data(composed.utf8)
+                    )
+                    deliveredPayload = composed
+                }
+
+                if submit {
+                    try await tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter"
+                    )
+                }
+
+            case .keys(let names, _):
+                // Named keys, one at a time, paced — see `PacedKeySender` for
+                // why back-to-back keys get dropped by a redrawing TUI. The
+                // `sendKey` call stays here, inside the file the actuation audit
+                // covers, and the pacing lives behind the closure.
+                try await pacedKeySender.send(names) { key in
+                    try await self.tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: key
+                    )
+                }
+            }
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+
+        await finishActuation(actuationID, .dispatched)
+
+        // Hand off to the observation — the record's third rung. Reached only
+        // from here, only after `.dispatched`, and only for a verify-armed text
+        // payload that actually pasted something, so a verify-less send, a
+        // refusal and a transport failure all arm nothing. See
+        // `DeliveryVerificationArming` for the full contract.
+        if payload.isVerifyArmed, let deliveredPayload {
+            await deliveryVerifier?.armVerification(
+                actuationID: actuationID,
+                terminalID: terminal.id,
+                sessionID: terminal.claudeSessionID,
+                deliveredPayload: deliveredPayload,
+                submit: payload.recordedSubmit ?? false)
+        }
         return .ok()
+    }
+
+    // MARK: - The pane consultation, and the verifier's re-delivery
+
+    /// Consult the pane the send names, and classify the answer.
+    ///
+    /// `nil` means "proceed" — the pane is alive and either agrees it is this
+    /// terminal or claims no identity at all. Anything else is a refusal the
+    /// caller records and returns, with the message a human reads.
+    ///
+    /// tmux's own exit status cannot carry this: `send-keys` into a
+    /// `remain-on-exit` dead pane exits 0, and keys sent to a reused pane id
+    /// land in a live stranger's composer with no error anywhere (issue #384).
+    /// Both answers arrive from ONE read-only `list-panes`, read BEFORE any
+    /// byte is written. Throws only when the consultation could not be RUN — a
+    /// wedged tmux tripping the subprocess timeout — which is a tmux command
+    /// failing, not an answer about the pane.
+    ///
+    /// Shared by the send path and by `redeliverVerifiedPayload`, so the retry
+    /// cannot re-type into a pane the first send would have refused.
+    private func consultPaneBeforeTyping(
+        terminal: Terminal, server: String
+    ) async throws -> PaneSendRefusal? {
+        switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
+        case .missing:
+            return PaneSendRefusal(outcome: .refused(.notFound), message: """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
+                no longer exists on server \(server) — nothing was sent
+                """)
+        case .dead:
+            return PaneSendRefusal(outcome: .refused(.notEligible), message: """
+                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
+                dead (its process has exited) — nothing was sent; recreate the terminal's \
+                window first
+                """)
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else {
+                // Absence is not disagreement. A pane spawned before TBD stamped
+                // identities, or by something outside TBD, answers with nothing —
+                // and refusing on nothing would turn this fix into a regression
+                // for every such pane. Only a POSITIVE disagreement refuses.
+                logger.debug("""
+                    terminal.send: pane \(terminal.tmuxPaneID, privacy: .public) claims no \
+                    terminal identity; proceeding without verifying it is terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+                return nil
+            }
+            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString)
+                != .orderedSame else { return nil }
+            return PaneSendRefusal(outcome: .refused(.targetMismatch), message: """
+                tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
+                \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
+                — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
+                """)
+        }
+    }
+
+    /// Re-deliver an already-recorded payload, byte-identically, for the
+    /// delivery verifier's single evidence-bounded retry (§12).
+    ///
+    /// **Writes no row of its own, and mints no id.** The retry re-delivers the
+    /// identical payload under the identical envelope id, so it is the same
+    /// actuation-level intent as the original send — a second request row would
+    /// split one intent in two and break the join that makes the ladder
+    /// readable. The verifier records this call's *outcome* against the
+    /// original request id, which is why the outcome is returned rather than
+    /// thrown: a refused or transport-failed retry must be classified as what
+    /// it was, not collapsed into "the payload failed".
+    ///
+    /// It runs the same pane consultation the first send ran, through the same
+    /// helper: a minute has passed, and the pane may have died or been reused
+    /// since. And it queues in the same per-terminal lane, so a retry can never
+    /// splice itself into a concurrent send's paste.
+    func redeliverVerifiedPayload(
+        terminalID: UUID, sessionID: String?, payload: String, submit: Bool
+    ) async -> ActuationOutcome {
+        guard let terminal = try? await db.terminals.get(id: terminalID),
+              let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+            return .refused(.notFound)
+        }
+        // The kind is re-read too, not just the pane. A `recreateWindow` landing
+        // between the observation and this retry can turn an agent terminal into
+        // a shell while keeping its id, and the payload we are holding opens
+        // with an envelope — which a shell would run as a command line of its
+        // own. The eligibility that admitted the first send has to still hold
+        // for the second.
+        guard Self.supportsDeliveryObservation(terminal) else {
+            return .refused(.notEligible)
+        }
+        // And the conversation is re-checked here, not only at the observation.
+        // The gap between the two spans a DB write, two reads and this
+        // serializer's queue — long enough for a `/clear` to land in it — and
+        // the payload being held is an instruction addressed to the session
+        // that is no longer there. A rebind makes this a send to a stranger,
+        // which is the one thing the retry must never be.
+        //
+        // A `nil` expected id is not a mismatch, and this is the same rule
+        // `DeliveryVerifier.observe` applies: it means the conversation was not
+        // identified when the payload was dispatched — a terminal whose session
+        // id had not been recorded yet — so there is no identity to compare and
+        // no rebind the comparison could detect. A session id appearing by the
+        // time the retry runs is the terminal becoming knowable, not a stranger
+        // arriving. Refusing on it would spend the one retry the mechanism gets
+        // on an absence that is evidence of nothing. A *known* id that no longer
+        // matches is still a stranger, and still refused.
+        if let sessionID, terminal.claudeSessionID != sessionID {
+            return .refused(.targetMismatch)
+        }
+        let outcome: ActuationOutcome
+        do {
+            outcome = try await terminalSendSerializer.run(terminalID: terminalID) {
+                if let refusal = try await self.consultPaneBeforeTyping(
+                    terminal: terminal, server: worktree.tmuxServer) {
+                    return refusal.outcome
+                }
+                try await self.tmux.pasteText(
+                    server: worktree.tmuxServer,
+                    paneID: terminal.tmuxPaneID,
+                    bytes: Data(payload.utf8))
+                if submit {
+                    try await self.tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter")
+                }
+                return .dispatched
+            }
+        } catch {
+            // Either the consultation could not be run or the paste itself
+            // failed. Both are the transport, not a decision.
+            logger.warning("""
+                delivery retry: re-delivery to terminal \(terminalID.uuidString, privacy: .public) \
+                failed: \(error, privacy: .public)
+                """)
+            return .transportFailed
+        }
+        return outcome
+    }
+
+    // MARK: - terminal.send payload shape
+
+    /// The dispatch envelope §12 puts ahead of a non-empty text payload bound
+    /// for an agent (see `carriesDispatchEnvelope` for which targets those are).
+    ///
+    /// `id` is the actuation row's own id — there is no second identifier
+    /// namespace, so dispatch, transcript receipt and outcome all join on one
+    /// string. `from` comes from `ActuationActor.dispatchLabel`, which is
+    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or project name
+    /// can close the tag or open a second attribute.
+    static func dispatchEnvelope(id: String, from label: String) -> String {
+        "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
+    }
+
+    /// Whether this target is one the envelope means anything to.
+    ///
+    /// Agent sessions only. The envelope exists so a receiving agent can see who
+    /// is addressing it and so a later reader can join a transcript message back
+    /// to its actuation row — and a shell has neither property: nothing reads the
+    /// tag, no transcript records it, and `--submit` would run it as a command
+    /// line of its own. `tbd terminal send` into a plain shell pane is a
+    /// supported thing to do (`docs/tmux-integration.md`), so this is a real
+    /// target rather than a theoretical one.
+    ///
+    /// A terminal with no recorded kind is treated as a shell — the same
+    /// defaulting the rest of this file uses (`terminal.kind ?? .shell`), and the
+    /// conservative direction: it withholds framing rather than typing a tag into
+    /// something that may execute it.
+    static func carriesDispatchEnvelope(_ terminal: Terminal) -> Bool {
+        switch terminal.kind ?? .shell {
+        case .claude, .codex: return true
+        case .shell: return false
+        }
+    }
+
+    /// Whether an adapter exists that can actually observe a delivery to this
+    /// target — the narrower question `--verify` turns on.
+    ///
+    /// Claude only, today. §12 is explicit that the envelope-in-the-transcript
+    /// read is *the Claude adapter's* implementation of the observation, and
+    /// that "the Codex adapter gets the same answer from the app-server
+    /// protocol's in-protocol acknowledgement" — a different mechanism, and one
+    /// this slice does not build. A Codex session records no Claude-shaped
+    /// transcript path, so the one observation that exists would answer
+    /// `undetermined` every time.
+    ///
+    /// So this is the same refusal a shell gets, for the same stated reason:
+    /// promising evidence a target cannot produce is the failure this whole
+    /// mechanism exists to end. Codex still receives the envelope — attribution
+    /// is worth having to any agent, and a composer does not execute it — but it
+    /// cannot be verified until its adapter lands.
+    static func supportsDeliveryObservation(_ terminal: Terminal) -> Bool {
+        (terminal.kind ?? .shell) == .claude
+    }
+
+    /// Reject the payload shapes that name no coherent act, before a row exists.
+    ///
+    /// Returns the validated payload, or the error text the caller sees. Pure
+    /// and static so both the daemon path and its tests can reach it without a
+    /// database.
+    static func validateSendShape(
+        _ params: TerminalSendParams
+    ) -> TerminalSendShape {
+        let submit = params.submit == true
+        let verify = params.verify == true
+
+        switch (params.text, params.keys) {
+        case (.some, .some):
+            // Two payloads in one call. Which one was meant is unknowable, and
+            // guessing would type something nobody asked for.
+            return .malformed(
+                "terminal.send takes exactly one payload: --text or --keys, not both")
+
+        case (.none, .none):
+            return .malformed(
+                "terminal.send needs a payload: pass --text or --keys")
+
+        case (.none, .some(let keys)):
+            // Enter is itself a key. `--submit --keys` asks the daemon to append
+            // a keystroke to a key sequence the caller already wrote out in
+            // full, which cannot be what was meant — spell it "… Enter".
+            if submit {
+                return .malformed(
+                    "terminal.send --submit is incoherent with --keys (Enter is itself a "
+                    + "key — put it in the sequence: --keys \"Escape Enter\")")
+            }
+            // Keys never reach a transcript, so there is no observation to make
+            // and nothing an envelope could be found in (§12).
+            if verify {
+                return .malformed(
+                    "terminal.send --verify cannot be used with --keys: keys reach no "
+                    + "transcript, so delivery cannot be observed")
+            }
+            guard let names = PacedKeySender.tokenize(keys) else {
+                return .malformed(
+                    "terminal.send --keys must name between 1 and \(PacedKeySender.maxKeys) "
+                    + "whitespace-separated tmux keys (for example: --keys \"Escape Enter\")")
+            }
+            return .valid(.keys(names: names, verbatim: keys))
+
+        case (.some(let text), .none):
+            if verify {
+                // Text that is never submitted never enters the conversation and
+                // so can never appear in a transcript; verifying it would build
+                // a machine that reports not-landed every time and then retries.
+                // An EMPTY payload fails for the same reason one step earlier —
+                // nothing is pasted, so no envelope is ever written to be found.
+                // Both are refused rather than downgraded, per the never-answer-
+                // a-request-for-evidence-with-silence rule (§12).
+                if !submit {
+                    return .malformed(
+                        "terminal.send --verify requires --submit: text left standing in a "
+                        + "composer never enters the conversation, so delivery cannot be "
+                        + "observed")
+                }
+                if text.isEmpty {
+                    return .malformed(
+                        "terminal.send --verify requires a non-empty --text: an empty payload "
+                        + "pastes nothing, so there is no dispatch envelope to observe")
+                }
+            }
+            return .valid(.text(text, submit: submit, verify: verify))
+        }
     }
 
     // MARK: - Main Area Size Broadcast
@@ -1813,7 +2499,7 @@ extension RPCRouter {
             // Reconcile DB against actual git worktree list
             do {
                 let beforeCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
-                try await lifecycle.reconcile(repoID: repo.id)
+                try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
                 let afterCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
                 let delta = abs(beforeCount - afterCount)
                 worktreesReconciled += delta

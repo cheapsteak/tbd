@@ -93,6 +93,11 @@ jobs:
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
+      # Same exposure as the PR job: this restores the same cache entry, so it
+      # can inherit the same damaged-checkout state. See the script's header.
+      - name: Repair the restored SwiftPM workspace if it is damaged
+        run: bash scripts/repair-spm-workspace.sh
+
       # ── Step 1: live tmux probes ────────────────────────────────────────────
       # continue-on-error so a probe failure still lets the stress loop run and
       # still gets reported; the job is failed deliberately at the end.

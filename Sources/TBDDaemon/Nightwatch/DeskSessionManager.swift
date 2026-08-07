@@ -38,6 +38,9 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Without it the 10-minute window is unreachable in a test, which is why the
     /// guard went so long with no observable beyond "doesn't throw".
     private let now: @Sendable () -> Date
+    /// The daemon's actuation record. The desk's pastes bypass the RPC router,
+    /// so this rail writes its own rows.
+    private let actuationLog: ActuationLog
 
     // MARK: - State
 
@@ -103,7 +106,8 @@ public actor DeskSessionManager: DeskSessionManaging {
         tmux: TmuxManager,
         skillDir: String,
         subscriptions: StateSubscriptionManager? = nil,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        actuationLog: ActuationLog
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -111,6 +115,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         self.subscriptions = subscriptions
         self.skillDir = skillDir
         self.now = now
+        self.actuationLog = actuationLog
         self.deskWorktreeID = nil
     }
 
@@ -261,6 +266,14 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// unrelated session*, which would then receive a pasted judge prompt plus Enter. That
     /// is issue #384, and picking the newest row alone would not prevent it.
     ///
+    /// Neither guard is sufficient on its own, and neither proves *ownership*.
+    /// `windowExists` proves a window id resolves to SOME window;
+    /// `paneCurrentCommand` proves an agent of the right kind is in the
+    /// foreground of SOME pane. A recycled pane id running a stranger's Claude
+    /// satisfies both. So each surviving candidate is asked who it is
+    /// (`paneSendTarget`) and dropped when it answers with a different terminal
+    /// — see `paneIdentityPermitsSend`.
+    ///
     /// Hibernated/suspended rows are excluded even if their tmux window still
     /// exists: their pane contains a shell, not an agent, and pasting a judge
     /// prompt there would execute it as shell input.
@@ -290,6 +303,7 @@ public actor DeskSessionManager: DeskSessionManaging {
                     """)
                 continue
             }
+            guard await paneIdentityPermitsSend(server: server, terminal: terminal) else { continue }
             if tmux.verifiesPaneCurrentCommand {
                 guard let command = try? await tmux.paneCurrentCommand(
                     server: server,
@@ -305,6 +319,83 @@ public actor DeskSessionManager: DeskSessionManaging {
             live.append(terminal)
         }
         return live
+    }
+
+    /// Ask a candidate's pane who it belongs to, before it can become the target
+    /// of a paste nobody asked for.
+    ///
+    /// The same read-only consultation `handleTerminalSend` and
+    /// `LimitResumeActuator` run, on the same rule, and the rule is the whole
+    /// point: **refusal requires POSITIVE disagreement, never absence.** A pane
+    /// that answers with no identity — spawned before TBD stamped one, or by
+    /// something outside TBD — is treated exactly as it was before this check
+    /// existed, so no pre-stamp desk regresses into a silent night. Only a pane
+    /// that names a *different* terminal is dropped.
+    ///
+    /// This rail needs it more than the send path does. Both consumers of the
+    /// candidate list paste on a timer with no user gesture behind them, and
+    /// what they paste is a judge prompt: a stranger agent on a recycled pane id
+    /// would not merely receive a stray keystroke, it would read and act on
+    /// instructions addressed to another session, with permissions bypassed.
+    ///
+    /// Excluding rather than throwing is what makes the outcome safe by
+    /// default. A dropped candidate is simply not live, so the callers'
+    /// existing "no uniquely owned live terminal … skipping" path handles it,
+    /// and `leasedJudgeTerminal` gets *more* correct: a stranger can no longer
+    /// masquerade as the lease owner, nor pad the candidate count into a
+    /// spurious fail-closed contention report.
+    ///
+    /// - Returns: `true` when this pane may be sent to.
+    private func paneIdentityPermitsSend(server: String, terminal: Terminal) async -> Bool {
+        let target: PaneSendTarget
+        do {
+            target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
+        } catch {
+            // The consultation could not be RUN at all (a wedged tmux tripping
+            // the subprocess timeout) — no answer about the pane either way.
+            // Dropped, matching how the `paneCurrentCommand` check below already
+            // treats the same wedged server: `try?` there turns a failed query
+            // into a skipped candidate. Pasting a judge prompt into a pane we
+            // could not look at is exactly what this check exists to stop, and
+            // the cost of being wrong is only a skipped tick.
+            logger.notice("""
+                Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not verify \
+                pane \(terminal.tmuxPaneID, privacy: .public) belongs to it: \
+                \(String(describing: error), privacy: .public)
+                """)
+            return false
+        }
+
+        switch target {
+        case .missing:
+            logger.notice("""
+                Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
+                pane \(terminal.tmuxPaneID, privacy: .public) no longer exists
+                """)
+            return false
+        case .dead:
+            logger.notice("""
+                Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
+                pane \(terminal.tmuxPaneID, privacy: .public) is dead
+                """)
+            return false
+        case .live(let paneTerminalID):
+            guard let paneTerminalID else { return true }
+            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
+            else { return true }
+            // Logged distinctly and loudly: to every caller this looks like an
+            // ordinary absence, and "no live terminal" is a sentence this rail
+            // prints for half a dozen benign reasons. A pane that has changed
+            // hands is not benign — it is the row's coordinate gone stale, and
+            // it stays stale until something respawns the window.
+            logger.warning("""
+                Skipping Watch Desk terminal \(terminal.id, privacy: .public): pane \
+                \(terminal.tmuxPaneID, privacy: .public) now belongs to terminal \
+                \(paneTerminalID, privacy: .public) — nothing will be pasted into it \
+                (tmux reuses pane ids, so this coordinate is stale)
+                """)
+            return false
+        }
     }
 
     private func liveAgentTerminal(
@@ -448,19 +539,40 @@ public actor DeskSessionManager: DeskSessionManaging {
                 return
             }
 
-            // Paste the wrap-up prompt text
-            try await tmux.pasteText(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                bytes: Data(NightwatchDeskPrompts.wrapUpPrompt.utf8)
-            )
+            // Request row before the paste; the paste and the Enter are one
+            // send. Fail-closed: an unrecordable wrap-up is not posted — and
+            // says so, like every other refusal on this path.
+            let actuationID: String
+            do {
+                actuationID = try await recordDeskSend(
+                    worktreeID: worktreeID,
+                    terminalID: agentTerminal.id,
+                    message: NightwatchDeskPrompts.wrapUpPrompt)
+            } catch {
+                logger.warning("Skipping Watch Desk wrap-up prompt: \(error, privacy: .public)")
+                return
+            }
 
-            // Send Enter to submit
-            try await tmux.sendKey(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                key: "Enter"
-            )
+            do {
+                // Paste the wrap-up prompt text
+                try await tmux.pasteText(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    bytes: Data(NightwatchDeskPrompts.wrapUpPrompt.utf8)
+                )
+
+                // Send Enter to submit
+                try await tmux.sendKey(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    key: "Enter"
+                )
+            } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
+                throw error
+            }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
             // Fire a completion notification
             _ = try await db.notifications.create(
@@ -564,19 +676,40 @@ public actor DeskSessionManager: DeskSessionManaging {
                 prompt = NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: skillDir)
             }
 
-            // Paste the prompt text (matches handleTerminalSend pattern for reliability)
-            try await tmux.pasteText(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                bytes: Data(prompt.utf8)
-            )
+            // Request row before the paste; the paste and the Enter are one
+            // send. Fail-closed: an unrecordable nudge is not sent, and
+            // `lastNudgeTime` below is left alone so the next tick retries.
+            let actuationID: String
+            do {
+                actuationID = try await recordDeskSend(
+                    worktreeID: worktreeID,
+                    terminalID: agentTerminal.id,
+                    message: prompt)
+            } catch {
+                logger.warning("Skipping Watch Desk nudge: \(error, privacy: .public)")
+                return
+            }
 
-            // Send Enter to submit
-            try await tmux.sendKey(
-                server: worktree.tmuxServer,
-                paneID: agentTerminal.tmuxPaneID,
-                key: "Enter"
-            )
+            do {
+                // Paste the prompt text (matches handleTerminalSend pattern for reliability)
+                try await tmux.pasteText(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    bytes: Data(prompt.utf8)
+                )
+
+                // Send Enter to submit
+                try await tmux.sendKey(
+                    server: worktree.tmuxServer,
+                    paneID: agentTerminal.tmuxPaneID,
+                    key: "Enter"
+                )
+            } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
+                throw error
+            }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
             // Record nudge time for overlap guard. `lastNudgedMode` is set only
             // here, after the paste actually went out — a nudge that failed to
@@ -589,6 +722,20 @@ public actor DeskSessionManager: DeskSessionManaging {
         } catch {
             logger.error("Failed to nudge desk session: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// One request row for a desk paste, carrying the payload verbatim.
+    /// Returns the minted id; throws when the record is unwritable even after
+    /// the writer's reopen-retry, in which case the caller must not paste.
+    private func recordDeskSend(
+        worktreeID: UUID, terminalID: UUID, message: String
+    ) async throws -> String {
+        var row = ActuationRow(
+            actor: .daemon(rail: ActuationRail.nightwatchDesk), kind: .send)
+        row.target = .local(worktree: worktreeID, terminal: terminalID)
+        row.message = message
+        row.submit = true
+        return try await actuationLog.appendRequest(row)
     }
 
     /// Gracefully close the desk session (archive it).
@@ -609,11 +756,32 @@ public actor DeskSessionManager: DeskSessionManaging {
                 return
             }
 
-            // Kill tmux windows
             let terminals = try await db.terminals.list(worktreeID: wt.id)
+
+            // This rail kills the desk's windows itself rather than through a
+            // lifecycle an RPC handler already rowed, so it writes its own —
+            // one dispose naming the desk worktree, the shape `worktree.archive`
+            // uses, because the per-terminal kills below are how this one intent
+            // is carried out. Fail-closed like the wrap-up and the nudge: an
+            // unrecordable close does not happen, and `deskWorktreeID` is left
+            // set (this returns before the reset at the end) so the next close
+            // still knows which desk to tear down.
+            var row = ActuationRow(
+                actor: .daemon(rail: ActuationRail.nightwatchDesk), kind: .dispose)
+            row.target = ActuationTarget(worktree: wt.id.uuidString)
+            let actuationID: String
+            do {
+                actuationID = try await actuationLog.appendRequest(row)
+            } catch {
+                logger.warning("Skipping Watch Desk close: \(error, privacy: .public)")
+                return
+            }
+
+            // Kill tmux windows
             for t in terminals {
                 try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
             }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
             // Delete terminal rows
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -745,14 +913,34 @@ public actor DeskSessionManager: DeskSessionManaging {
             logger.debug("Wrote judge instructions to \(path, privacy: .public)")
         }
 
+        // The rail spawns an agent session here with nobody having asked, so it
+        // writes its own row — one naming the desk worktree and no terminal, the
+        // shape `worktree.revive` uses, because the terminals are minted inside
+        // `spawnPrimaryTerminals`. This is the one chokepoint all three spawn
+        // paths pass through (fresh create, recovery, pre-nudge respawn), so a
+        // row here counts each spawn exactly once. Fail-closed: the throw
+        // reaches the same callers that already treat a failed spawn as
+        // best-effort, so an unrecordable spawn simply does not happen.
+        var row = ActuationRow(
+            actor: .daemon(rail: ActuationRail.nightwatchDesk), kind: .spawn)
+        row.target = ActuationTarget(worktree: worktree.id.uuidString)
+        let actuationID = try await actuationLog.appendRequest(row)
+
         // Use production spawn path which handles trust, overlay, and all lifecycle concerns
-        _ = try await lifecycle.spawnPrimaryTerminals(
-            worktree: worktree,
-            repo: nil,
-            skipClaude: false,
-            initialPrompt: initialPrompt,
-            preSessionTerminalID: nil
-        )
+        do {
+            _ = try await lifecycle.spawnPrimaryTerminals(
+                worktree: worktree,
+                repo: nil,
+                skipClaude: false,
+                initialPrompt: initialPrompt,
+                preSessionTerminalID: nil
+            )
+        } catch {
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            throw error
+        }
+        await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
         // Model follows the profile spawnPrimaryTerminals resolves internally —
         // resolving here too would just double the keychain-backed lookup.
         logger.info("Spawned desk terminal in \(worktree.id, privacy: .public)")

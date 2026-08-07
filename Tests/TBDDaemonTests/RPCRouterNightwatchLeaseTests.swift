@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -9,14 +10,19 @@ import Testing
 extension TBDHomeSerialized {
 @Suite("nightwatch.lease RPC handlers")
 struct RPCRouterNightwatchLeaseTests {
+    /// Restores the displaced value rather than unsetting. `scripts/test.sh`
+    /// exports `TBD_HOME` for the whole run, so `unsetenv` does not return to
+    /// "whatever the harness wanted" — it returns to the developer's real
+    /// `~/tbd`, process-wide, for every suite running concurrently, until
+    /// something happens to set it again. See `Tests/TestSupport/TBDHomeEnvSupport.swift`.
     private func isolateTBDHome() -> (URL, () -> Void) {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-lease-rpc-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(
             at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         return (home, {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: home)
         })
     }
@@ -36,7 +42,7 @@ struct RPCRouterNightwatchLeaseTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let desk = try await db.worktrees.createScratch(
             name: "watch-desk", displayName: "Watch Desk",
             path: "/tmp/watch-desk-\(UUID())", tmuxServer: "test")

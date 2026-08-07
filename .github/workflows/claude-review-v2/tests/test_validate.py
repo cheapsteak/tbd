@@ -13,7 +13,9 @@ from validate import (
     SchemaValidationError,
     check_disposition,
     main,
+    missing_specialist_report,
     missing_specialists,
+    specialist_name_from_path,
     validate_findings_file,
     validate_result_file,
     verdict_from_findings,
@@ -250,6 +252,327 @@ def test_findings_rejects_unknown_top_level_key(tmp_path: Path) -> None:
         validate_findings_file(path)
 
 
+# --- `line` may be null: findings with no line anchor ----------------------
+#
+# Repo-wide, convention, and architectural findings have no single line. A
+# model writing one emits `"line": null` — the natural JSON — which the schema
+# used to reject, failing the whole gate closed on precisely the category of
+# finding least amenable to mechanical judgment. Omission was already legal;
+# these fixtures pin that null is too.
+
+
+def _repo_wide_finding() -> dict:
+    """The real shape that broke the gate: a file, a body, no line anchor."""
+    return {
+        "id": "conventions-1",
+        "file": "CLAUDE.md",
+        "line": None,
+        "severity": "MEDIUM",
+        "title": "convention applies repo-wide, not at one line",
+        "body": "No single line anchors this; it is a property of the tree.",
+        "confidence": 0.7,
+    }
+
+
+def test_findings_null_line_is_valid(tmp_path: Path) -> None:
+    data = {"specialist": "conventions", "findings": [_repo_wide_finding()]}
+    path = _write(tmp_path / "findings-conventions.json", data)
+    parsed = validate_findings_file(path)
+    assert parsed["findings"][0]["line"] is None
+
+
+def test_result_null_line_is_valid(tmp_path: Path) -> None:
+    data = _valid_result()
+    data["findings"] = [_repo_wide_finding()]
+    data["disposition"] = [{"id": "conventions-1", "action": "kept"}]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert parsed["findings"][0]["line"] is None
+
+
+def test_findings_omitted_line_is_still_valid(tmp_path: Path) -> None:
+    finding = _repo_wide_finding()
+    del finding["line"]
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    assert "line" not in validate_findings_file(path)["findings"][0]
+
+
+@pytest.mark.parametrize("bad_line", ["42", 4.5, [], {}])
+def test_findings_non_integer_non_null_line_still_rejected(
+    tmp_path: Path, bad_line: object
+) -> None:
+    # Widening to null must not widen to "anything": a string line number is
+    # still a malformed finding.
+    finding = _repo_wide_finding()
+    finding["line"] = bad_line
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match="line"):
+        validate_findings_file(path)
+
+
+def test_main_accepts_a_null_line_finding_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The whole-run shape from the observed failure: every specialist reports,
+    # one finding has no line anchor, and the gate reaches a verdict instead of
+    # dying in validation.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": []},
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [_repo_wide_finding()]},
+    )
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": [_repo_wide_finding()],
+            "disposition": [{"id": "conventions-1", "action": "kept"}],
+            "comment_body": "## Review\nOne repo-wide finding.",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "REJECT"
+
+
+# --- `file` may be null: findings anchored to no one file -------------------
+#
+# The sibling of the `line` case above, and the same production failure a run
+# later: `at findings/1/file: None is not of type 'string'` took the whole gate
+# down with no verdict. A finding that is a property of the tree — a convention
+# applied repo-wide, an architectural shape spread over many files — has no more
+# a single file than it has a single line. `file` stays REQUIRED, so a model
+# must still state the anchor; what changed is that "there isn't one" is now a
+# sayable answer.
+#
+# The nullable set stops at the anchors. `id`, `severity`, and `title` are the
+# finding's identity, its verdict input, and its content: a null in any of them
+# is a malformed finding, not an absent anchor, and must keep failing closed.
+
+
+def _tree_wide_finding() -> dict:
+    """The real shape that broke the gate: no file, no line, still a finding."""
+    return {
+        "id": "conventions-2",
+        "file": None,
+        "line": None,
+        "severity": "MEDIUM",
+        "title": "convention holds across the tree, not at one file",
+        "body": "No single file anchors this; it is a property of the repo.",
+        "confidence": 0.6,
+    }
+
+
+def test_findings_null_file_is_valid(tmp_path: Path) -> None:
+    data = {"specialist": "conventions", "findings": [_tree_wide_finding()]}
+    path = _write(tmp_path / "findings-conventions.json", data)
+    parsed = validate_findings_file(path)
+    assert parsed["findings"][0]["file"] is None
+
+
+def test_result_null_file_is_valid(tmp_path: Path) -> None:
+    data = _valid_result()
+    data["findings"] = [_tree_wide_finding()]
+    data["disposition"] = [{"id": "conventions-2", "action": "kept"}]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert parsed["findings"][0]["file"] is None
+
+
+def test_findings_null_file_with_a_line_is_valid(tmp_path: Path) -> None:
+    # The two anchors are independent: widening one must not require the other.
+    finding = _tree_wide_finding()
+    finding["line"] = 42
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    assert validate_findings_file(path)["findings"][0]["file"] is None
+
+
+def test_findings_omitted_file_is_still_rejected(tmp_path: Path) -> None:
+    # Deliberate asymmetry with `line`, which may also be omitted. `file` stays
+    # required: the key's presence is the cheap proof the model considered the
+    # anchor, and null is how it says there is none.
+    finding = _tree_wide_finding()
+    del finding["file"]
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match="file"):
+        validate_findings_file(path)
+
+
+@pytest.mark.parametrize("bad_file", [42, 4.5, [], {}, True])
+def test_findings_non_string_non_null_file_still_rejected(
+    tmp_path: Path, bad_file: object
+) -> None:
+    # Widening to null must not widen to "anything": a numeric path is still a
+    # malformed finding.
+    finding = _tree_wide_finding()
+    finding["file"] = bad_file
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match="file"):
+        validate_findings_file(path)
+
+
+def test_main_accepts_a_null_file_finding_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The whole-run shape from run 30963170832: both specialists report, one
+    # finding is anchored to no file, and the gate reaches a verdict instead of
+    # dying in validation with no verdict written.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": []},
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [_tree_wide_finding()]},
+    )
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": [_tree_wide_finding()],
+            "disposition": [{"id": "conventions-2", "action": "kept"}],
+            "comment_body": "## Review\nOne tree-wide finding.",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "REJECT"
+
+
+# --- the nulls that must still fail closed ----------------------------------
+
+
+@pytest.mark.parametrize("field", ["id", "severity", "title"])
+def test_findings_null_in_a_load_bearing_field_still_rejected(
+    tmp_path: Path, field: str
+) -> None:
+    # `id` keys the disposition-coverage check, `severity` computes the verdict,
+    # `title` IS the finding. None of the three has an "absent" reading, so a
+    # null there is garbage the gate must keep rejecting.
+    finding = _tree_wide_finding()
+    finding[field] = None
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match=field):
+        validate_findings_file(path)
+
+
+@pytest.mark.parametrize("field", ["id", "severity", "title"])
+def test_result_null_in_a_load_bearing_field_still_rejected(
+    tmp_path: Path, field: str
+) -> None:
+    data = _valid_result()
+    data["findings"][0][field] = None
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match=field):
+        validate_result_file(path)
+
+
+def test_findings_null_specialist_still_rejected(tmp_path: Path) -> None:
+    # The specialist name is the lens's identity — it is what the completeness
+    # check matches expected lenses against.
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": None, "findings": []},
+    )
+    with pytest.raises(SchemaValidationError, match="specialist"):
+        validate_findings_file(path)
+
+
+@pytest.mark.parametrize("field", ["findings", "disposition"])
+def test_result_null_array_still_rejected(tmp_path: Path, field: str) -> None:
+    # main() iterates both; a null there is a broken run with no safe reading,
+    # not an absent anchor.
+    data = _valid_result()
+    data[field] = None
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match=field):
+        validate_result_file(path)
+
+
+# --- the optional fields are nullable too -----------------------------------
+#
+# `body`, `confidence`, `note`, and `comment_body` may all be omitted already,
+# so a null is only that same absence spelled the way a model writes it. Each
+# has either no consumer at all or one that already treats a non-string as
+# blank — rejecting the null buys nothing and costs the whole run.
+
+
+@pytest.mark.parametrize("field", ["body", "confidence"])
+def test_findings_null_optional_field_is_valid(tmp_path: Path, field: str) -> None:
+    finding = _tree_wide_finding()
+    finding[field] = None
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    assert validate_findings_file(path)["findings"][0][field] is None
+
+
+def test_findings_out_of_range_confidence_still_rejected(tmp_path: Path) -> None:
+    # Nullable does not mean unbounded: 0..1 still holds for any number given.
+    finding = _tree_wide_finding()
+    finding["confidence"] = 1.5
+    path = _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match="confidence"):
+        validate_findings_file(path)
+
+
+def test_result_null_comment_body_is_valid(tmp_path: Path) -> None:
+    # render_comment.py already treats a non-string body as blank and posts a
+    # machine-rendered fallback with a warning; failing closed here would post
+    # nothing at all, which is strictly worse.
+    data = _valid_result()
+    data["comment_body"] = None
+    path = _write(tmp_path / "review-result.json", data)
+    assert validate_result_file(path)["comment_body"] is None
+
+
+@pytest.mark.parametrize("action", ["kept", "merged"])
+def test_result_null_note_on_a_kept_entry_is_valid(
+    tmp_path: Path, action: str
+) -> None:
+    data = _valid_result()
+    data["disposition"] = [{"id": "correctness-1", "action": action, "note": None}]
+    path = _write(tmp_path / "review-result.json", data)
+    assert validate_result_file(path)["disposition"][0]["note"] is None
+
+
+@pytest.mark.parametrize("action", ["downgraded", "dropped"])
+def test_result_null_note_does_not_satisfy_the_reason_requirement(
+    tmp_path: Path, action: str
+) -> None:
+    # The one place a note is load-bearing: dropping or downgrading a finding
+    # needs a stated reason a human can read. A null must not pass for one just
+    # because the key is present.
+    data = _valid_result()
+    data["disposition"] = [{"id": "correctness-1", "action": action, "note": None}]
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match="note"):
+        validate_result_file(path)
+
+
 def test_result_downgraded_without_note_fails(tmp_path: Path) -> None:
     data = _valid_result()
     del data["disposition"][2]["note"]  # the "downgraded" entry
@@ -408,3 +731,133 @@ def test_main_unexpected_extra_specialist_warns_but_passes(
     assert "warning" in out
     assert "acme-extra" in out
     assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
+
+
+# --- the two fail-closed causes must read differently -----------------------
+#
+# Both fail closed. But "that review lens never ran" sends an operator hunting
+# an orchestrator race, and it is false when the lens ran and its file was
+# merely rejected by the validator a moment earlier.
+
+_NEVER_RAN = "never ran"
+_WAS_REJECTED = "FAILED validation"
+
+
+def test_specialist_name_from_conventional_filename() -> None:
+    assert specialist_name_from_path("findings-conventions.json") == "conventions"
+    assert specialist_name_from_path("/a/b/findings-correctness.json") == (
+        "correctness"
+    )
+
+
+def test_specialist_name_from_unconventional_filename_is_none() -> None:
+    assert specialist_name_from_path("review-result.json") is None
+    assert specialist_name_from_path("findings.json") is None
+
+
+def test_report_absent_says_never_ran_not_rejected() -> None:
+    message = missing_specialist_report(["conventions"], [])
+    assert _NEVER_RAN in message
+    assert _WAS_REJECTED not in message
+    assert "conventions" in message
+
+
+def test_report_rejected_says_rejected_not_never_ran() -> None:
+    message = missing_specialist_report(["conventions"], ["conventions"])
+    assert _WAS_REJECTED in message
+    assert _NEVER_RAN not in message
+    assert "conventions" in message
+
+
+def test_report_distinguishes_the_two_causes_in_one_run() -> None:
+    message = missing_specialist_report(
+        ["correctness", "conventions"], ["conventions"]
+    )
+    absent_clause, rejected_clause = (
+        clause for clause in message.split("; ") if _NEVER_RAN in clause or
+        _WAS_REJECTED in clause
+    )
+    assert "correctness" in absent_clause and "conventions" not in absent_clause
+    assert "conventions" in rejected_clause and (
+        "correctness" not in rejected_clause
+    )
+
+
+def test_report_always_says_failing_closed() -> None:
+    for rejected in ([], ["conventions"]):
+        assert missing_specialist_report(["conventions"], rejected).endswith(
+            "failing closed"
+        )
+
+
+def test_main_absent_specialist_reports_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert _NEVER_RAN in err
+    assert _WAS_REJECTED not in err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_rejected_specialist_file_does_not_claim_it_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The observed shape: the conventions lens ran and wrote a file the schema
+    # rejected. Saying "never ran" here is the misdiagnosis being fixed.
+    _write_specialist_file(tmp_path, "correctness")
+    _write(
+        tmp_path / "findings-conventions.json",
+        {
+            "specialist": "conventions",
+            "findings": [{"id": "conventions-1", "file": "CLAUDE.md"}],
+        },
+    )
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert _WAS_REJECTED in err
+    assert _NEVER_RAN not in err
+    # Still fails closed — only the diagnostic changed.
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_unparseable_specialist_file_is_reported_as_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A file too broken to parse still attributes to its lens by filename.
+    _write_specialist_file(tmp_path, "correctness")
+    (tmp_path / "findings-conventions.json").write_text("{not json", "utf-8")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert _WAS_REJECTED in err
+    assert _NEVER_RAN not in err
+
+
+def test_main_mixed_causes_are_reported_separately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": [{"id": "x", "file": "a"}]},
+    )
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert _NEVER_RAN in err and "correctness" in err
+    assert _WAS_REJECTED in err and "conventions" in err

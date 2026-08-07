@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
-# Runs SwiftLint --strict against .swift files changed vs. origin/main.
-# Install once via scripts/install-hooks.sh.
+# Runs SwiftLint --strict against .swift files changed vs. origin/main, then
+# the test suite through scripts/test.sh, which fences the run behind a scratch
+# TBD_HOME / TBD_CLAUDE_HOST_HOME so nothing can write into the real ~/tbd or
+# ~/.claude, plus a scratch HOME / CFFIXED_USER_HOME whose `tbd` and `.claude`
+# entries are mode 000 so code that hand-builds a home path fails at the call
+# site instead of escaping the fence.
+#
+# `--no-fingerprint`: the wrapper's other layer — diffing the real ~/tbd and
+# ~/.claude across the run — is deliberately NOT used here. It is trustworthy
+# only where nothing else writes to those directories, and a developer box is
+# the opposite of that: a live daemon creates worktree, scratch, notes and
+# channel entries throughout the minutes this pass takes, a sibling worktree
+# running scripts/restart.sh drops a state.db.pre-migration.<ts>, and Claude
+# Code writes into ~/.claude the whole time. Those reds would all be false, and
+# a hook that reddens for reasons the pusher cannot fix gets skipped with
+# TBD_SKIP_PREPUSH_TESTS=1 forever after. CI runs both layers on a runner where
+# a red is always real. The fence — the layer that actually prevents leaks —
+# is on here exactly as it is there.
+#
+# Set TBD_SKIP_PREPUSH_TESTS=1 to push without the test pass. CI still runs it
+# with the same guard, so skipping delays the answer rather than avoiding it.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -21,9 +40,64 @@ while IFS= read -r file; do
   files+=("$file")
 done < <(git diff --name-only --diff-filter=ACM "$base" HEAD -- '*.swift')
 
-if [ ${#files[@]} -eq 0 ]; then
+if [ ${#files[@]} -gt 0 ]; then
+  echo "[pre-push] Linting ${#files[@]} changed Swift file(s) with SwiftLint --strict..."
+  swiftlint --strict "${files[@]}"
+fi
+
+if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
+  echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."
   exit 0
 fi
 
-echo "[pre-push] Linting ${#files[@]} changed Swift file(s) with SwiftLint --strict..."
-swiftlint --strict "${files[@]}"
+# Two passes, mirroring test.yml's fast/quiet split — NOT one `--parallel` run
+# over everything. The tier-3 suites in TBDDaemonLiveTests spawn real tmux
+# servers and children racing deadlines, and several pin
+# `.timeLimit(.minutes(1))` as a REGRESSION DETECTOR sized for the quiet pass
+# (SubprocessTimeoutStarvationTests waits out a `sleep 90` child). Run them in
+# the parallel pass and that limit is measuring machine load instead of the
+# behaviour it was written to catch. See Tests/CLAUDE.md "Test tiers".
+#
+# The fast pass is one invocation here, not the two CI splits it into: that
+# split trades +26 s of wall time for a shorter scheduling tail on a loaded
+# runner, and locally the wall time is what the pusher is waiting on.
+#
+# Both passes carry an EXECUTED-TEST FLOOR, mirroring all three CI steps.
+# `swift test --filter`/`--skip` exits GREEN on zero matches, and the filter
+# matches the TYPE name rather than the @Suite display string — so a renamed or
+# collapsed target runs nothing and passes. The floors sit well below the real
+# counts (CI executes ~2194 + ~2342 fast, ~57 live) so ordinary test churn never
+# trips them; their job is to catch a collapse, not to track the population.
+run_pass() {
+  local label="$1" floor="$2" log; shift 2
+  log="$(mktemp -t tbd-prepush-XXXXXXXX)"
+  echo "[pre-push] Running scripts/test.sh — $label..."
+  local rc=0
+  # `|| rc=$?` so a red run still gets its temp log removed and reports the
+  # test failure rather than dying inside `set -e` with the file left behind.
+  scripts/test.sh "$@" 2>&1 | tee "$log" || rc=$?
+  local count
+  # `|| true` is load-bearing, not defensive noise. Under `set -euo pipefail` a
+  # log with NO summary line makes the first `grep` exit 1, `pipefail`
+  # propagates it, and a failing command substitution in an assignment
+  # terminates the shell outright. That is exactly the case this floor exists
+  # for — a truncated run — and without this the pusher got a bare non-zero
+  # exit, the explanatory message below never printed, and the temp log leaked.
+  count="$(grep -oE 'Test run with [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | head -1 || true)"
+  rm -f "$log"
+  if [ "$rc" -ne 0 ]; then
+    echo "[pre-push] ERROR: $label failed (exit $rc)." >&2
+    exit "$rc"
+  fi
+  if [ -z "$count" ] || [ "$count" -lt "$floor" ]; then
+    echo "[pre-push] ERROR: $label ran ${count:-no} tests (floor $floor) — the filter matched nothing, a target was renamed, or the run was truncated." >&2
+    exit 1
+  fi
+  echo "[pre-push] $label executed $count tests."
+}
+
+run_pass "fast parallel pass (scratch TBD_HOME fence)" 3700 \
+  --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+
+run_pass "quiet pass (tier-3 live suites, serial)" 35 \
+  --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'

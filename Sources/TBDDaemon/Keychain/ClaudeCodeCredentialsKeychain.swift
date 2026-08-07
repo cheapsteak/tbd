@@ -8,8 +8,8 @@ import Security
 ///     "Claude Code-credentials-<first 8 lowercase hex chars of sha256(path)>"
 ///
 /// Known vector (verified empirically): sha256 of
-/// "/Users/zionts/.claude-profiles/zadam" starts with `db64a81f`, and the
-/// keychain item "Claude Code-credentials-db64a81f" pairs with that dir.
+/// "/Users/me/.claude-profiles/acme" starts with `9c701bd6`, and the
+/// keychain item "Claude Code-credentials-9c701bd6" pairs with that dir.
 ///
 /// The bare "Claude Code-credentials" item (no suffix) belongs to the user's
 /// default `~/.claude` and must NEVER be touched by TBD. Every service name

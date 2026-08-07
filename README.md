@@ -54,8 +54,12 @@ scripts/restart.sh --quick  # skip build
 ## Test
 
 ```bash
-scripts/swift-safe test
+scripts/test.sh
 ```
+
+A thin wrapper around `swift test` — it forwards every argument, and fences the
+run behind a scratch config dir so tests cannot write into your real `~/tbd` or
+`~/.claude`.
 
 ## Migrating from Conductor
 

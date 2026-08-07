@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 @Suite("terminal.continueInCodex RPC")
 struct ContinueInCodexRPCTests {
@@ -65,7 +66,7 @@ struct ContinueInCodexRPCTests {
                 git: GitManager(),
                 tmux: tmux,
                 hooks: HookResolver()),
-            tmux: tmux)
+            tmux: tmux, actuationLog: makeTestActuationLog())
         router.codexExecutableResolver = {
             recorder.event("resolve")
             return "/opt/test/bin/codex"

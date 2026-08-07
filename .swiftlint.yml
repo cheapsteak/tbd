@@ -69,6 +69,98 @@ custom_rules:
     message: "New delays/timers take an injected clock (`clock: any Clock<Duration> = ContinuousClock()`) — see Tests/CLAUDE.md \"Clock and date seams\" and docs/specs/2026-07-24-test-hardening-design.md §5."
     severity: error
 
+  no_passwd_home_lookup:
+    name: "No account-database home lookup in Sources/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    # Every one of these resolves a home directory through the account database
+    # and defeats `CFFIXED_USER_HOME` identically. The Swift-shaped ones —
+    # `NSHomeDirectoryForUser(_:)` and `FileManager.homeDirectory(forUser:)` —
+    # matter more than the C call, not less: they are what someone reaches for
+    # first, and a rule that blocks only `getpwuid` reads as permission to use
+    # them. `getpwent` enumerates the same database one row at a time.
+    regex: '\b(getpw(uid|nam|ent)(_r)?|NSHomeDirectoryForUser)\s*\(|\bhomeDirectory\s*\(\s*forUser'
+    message: "Resolving a home directory through the account database bypasses BOTH test fences: getpwuid/getpwnam/getpwent, NSHomeDirectoryForUser(_:) and FileManager.homeDirectory(forUser:) all ignore `$HOME` and are what `CFFIXED_USER_HOME` is resolved ahead of, so they return the developer's real home under scripts/test.sh. Resolve TBD paths via TBDConstants, the host Claude store via ClaudeProfileConfigDirManager.resolveHostBaseDirectory, and anything else via NSHomeDirectory()/FileManager.homeDirectoryForCurrentUser. Suppress with `// swiftlint:disable:next no_passwd_home_lookup - <reason>` only with a reason."
+    severity: error
+
+  no_hardcoded_users_path:
+    name: "No hardcoded /Users/ path literal"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    # The two test dirs are the ones already inside the global lint scope; a
+    # custom rule cannot reach files outside it, and pulling all of Tests/ in
+    # would drag every default rule onto test code — a separate change.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+      - "Tests/(TBDSharedTests|TBDAppTests)/.*\\.swift"
+    # OPTIMIZED FOR THE PRIVACY RATIONALE, deliberately, and that decides both
+    # knobs:
+    #
+    #   - `match_kinds` includes the comment kinds. The fence rationale only
+    #     needs `string` — a doc comment cannot open a file. But this repo is
+    #     public and multi-tenant, and a real `/Users/<name>/…` in a doc comment
+    #     is exactly the leak the message warns about. Four of them were sitting
+    #     in Sources/ doc comments when this widened, which settles the question
+    #     empirically.
+    #   - the dash-encoded form is matched too (`-Users-<name>-…`), because
+    #     Claude Code's scratchpad paths spell it that way and a `/Users/`-only
+    #     regex reads them as clean.
+    #
+    # The cost of the privacy framing is that placeholder examples must use a
+    # placeholder NAME, so the rule allowlists a prefix set instead of trying to
+    # judge whether a username is real. `/Users/me`, `/Users/acme`, `/Users/x`,
+    # `/Users/test` and `/Users/...` pass; anything else is assumed to be
+    # somebody's account.
+    regex: '[/-]Users[/-](?!me|acme|x|test|\.\.\.)'
+    match_kinds:
+      - string
+      - comment
+      - doccomment
+    message: "A hardcoded /Users/<name>/ path is machine-specific in a public, multi-tenant repo, and in a string literal it also bypasses both test fences. Use a placeholder name (me / acme / x / test) in examples, and resolve real paths via TBDConstants or NSHomeDirectory(). Suppress with `// swiftlint:disable:next no_hardcoded_users_path - <reason>` only with a reason."
+    severity: error
+
+  no_home_relative_store_path:
+    name: "No hand-built path into a TBD or agent store"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    excluded:
+      # THE resolvers. `TBDConstants.configDir` and `claudeHostHome` are the
+      # single resolution points every other call site is supposed to reach
+      # through, so the one file that defines them is the one file that must
+      # compose the path by hand.
+      - "Sources/TBDShared/Constants\\.swift"
+    # THE SHAPE ALL SIX LEAKS TOOK, and the one the two rules above do NOT
+    # cover. `no_passwd_home_lookup` catches the account-database calls, which
+    # escape `CFFIXED_USER_HOME` outright — a real hazard, but not the one that
+    # actually happened here. Every leak this fence was built for went through
+    # the ordinary, fence-honouring `homeDirectoryForCurrentUser` /
+    # `NSHomeDirectory()` and then appended `tbd`, `.claude` or `.codex` to it,
+    # which silently ignores `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` /
+    # `TBD_TEST_CODEX_HOME` and lands in the developer's real store.
+    #
+    # So the regex is deliberately NOT "no home lookups" — that would fire on
+    # ~20 legitimate sites (tilde-abbreviation for display, `~/Library`
+    # fallbacks, defaulted injection seams) and get disabled. It fires only when
+    # a home lookup is followed, within 80 characters, by a path component naming
+    # one of the three stores. The `[/"]` on both sides keeps it to whole
+    # components: `~/.ssh/tbd-agent.sock` does not match, `~/tbd/worktrees` does.
+    #
+    # WHAT IT CANNOT SEE, stated plainly rather than left to be assumed: the home
+    # value has to be visible near the append. A path assembled from a `home`
+    # that arrived as a function parameter, or was read into a property in
+    # another file, matches nothing here. This narrows the shape; it does not
+    # close it. Review still has to ask where a store path came from.
+    regex: '(?:NSHomeDirectory\s*\(\s*\)|homeDirectoryForCurrentUser)[\s\S]{0,80}?[/"]\.?(?:claude|codex|tbd)[/"]'
+    # Code only. Every doc comment in this repo that DESCRIBES this leak spells
+    # the leak out verbatim, so including the comment kinds would fire on the
+    # very passages that document the rule.
+    match_kinds:
+      - identifier
+      - string
+    message: "Don't hand-build a path into ~/tbd, ~/.claude or ~/.codex out of the home directory — it ignores TBD_HOME / TBD_CLAUDE_HOST_HOME / TBD_TEST_CODEX_HOME and writes into the developer's real store under scripts/test.sh. Use TBDConstants (configDir, reposDir, worktreesDir, …), TBDConstants.claudeHostHome / ClaudeProfileConfigDirManager.resolveHostBaseDirectory, or CodexHomeManager. Suppress with `// swiftlint:disable:next no_home_relative_store_path - <reason>` only with a reason."
+    severity: error
+
   no_scrollview_in_transcript_cards:
     name: "No direct ScrollView in transcript row cards"
     # included/excluded HERE take REGEX (not glob), matched against file path.
@@ -161,4 +253,69 @@ custom_rules:
       - identifier
       - string
     message: "capture-pane text may only be passed through verbatim (display/transport/snapshot) from allowlisted files — never parsed for agent state. See CLAUDE.md 'No TUI screen-scraping'."
+    severity: error
+
+  actuation_primitive_allowlist:
+    name: "Actuation primitive called outside the audited set"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    # Only the daemon actuates sessions; the app and the CLI reach it by RPC.
+    included:
+      - "Sources/TBDDaemon/.*\\.swift"
+    excluded:
+      # THE ALLOWLIST: every file the actuation-log audit traced to a covering
+      # row. It exists because the wired set was found incomplete nine times
+      # across five review passes — each miss was a new call site nobody thought
+      # to check. Adding a file here means asserting that its acts are already
+      # recorded, and draws the same review scrutiny as capture_pane_allowlist.
+      #
+      # Granularity, stated plainly: this is FILE-level, like the rule above. A
+      # new call inside an already-allowlisted file is not caught — a reviewer
+      # still has to read those files. What it does catch is the shape the
+      # misses actually took: a primitive called from a file that had never
+      # actuated before.
+      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                          # defines the primitives; the implementation, not a caller
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers; each writes its own row before acting
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.create/delete/archive; one scratch-named row per call
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInCodexHandlers\\.swift" # terminal.continueInCodex; spawn row + rollback kill
+      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"          # park/wake engine: RPC rows plus the auto-hibernate rail's entry point
+      # The shared lifecycle internals and phases. They stay deliberately
+      # silent — `worktree.archive` and the reconcile sweep both reach them, and
+      # a row down here would double-count every teardown — so their acts are
+      # covered by the handler or rail row written one layer up.
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"               # killWindowAndReap / captureThenKillWindow themselves
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Archive\\.swift"     # archive teardown; covered by worktree.archive / auto-archive-on-merge
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Forget\\.swift"      # forget teardown; covered by worktree.forget
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Create\\.swift"      # primary-terminal spawn; covered by worktree.create / scratch.create / revive
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal spawn and close; covered by worktree.rerunPreSession / create
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
+      - "Sources/TBDDaemon/Nightwatch/DeskSessionManager\\.swift"             # the nightwatch-desk rail: its pastes, spawn and close
+      - "Sources/TBDDaemon/Claude/LimitResumeActuator\\.swift"                # the limit-resume rail: Escape / continue / Enter
+    # Call sites only, which decides both odd-looking pieces of this regex:
+    #
+    #   - `(?<!func )` skips DECLARATIONS. TmuxManager's `public func
+    #     killWindow`, TerminalStore's `setHibernated`, and the protocol
+    #     witnesses LimitResumeActuator declares are the primitives being
+    #     defined, not acts being performed — and skipping them keeps
+    #     TerminalStore.swift (a DB layer that must never actuate) fully
+    #     covered instead of allowlisted for a declaration.
+    #   - `sendCommand` requires a `server:` label ahead of it, via a zero-width
+    #     lookahead so the label stays outside the matched range. Control mode's
+    #     `TmuxControlConnection.sendCommand(_ command: String)` is an unrelated
+    #     method that happens to share the name: it writes a line to the tmux
+    #     control socket. Matching on the label distinguishes the two by shape
+    #     rather than allowlisting the control-mode plumbing, which would blind
+    #     the rule to a real actuation added there later.
+    #
+    # Raw `kill(` is deliberately NOT in this list: no regex can separate a
+    # signal sent to a session's process from ordinary subprocess reaping, and a
+    # rule that fired on both would be one people disable. The two
+    # session-relevant sites (HibernationCoordinator, RPCRouter+TerminalHandlers)
+    # already sit in allowlisted files above and are covered by the manual audit.
+    regex: '(?<!func )\b(?:killWindowAndReap|captureThenKillWindow|killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\(|(?<!func )\bsendCommand\s*\((?=\s*server:)'
+    # Code only. Several doc comments name these primitives while explaining the
+    # boundary (`ClaudeSpawnCommandBuilder` points at `createWindow(sensitiveEnv:)`),
+    # and firing on the prose that documents the rule is how a rule gets disabled.
+    match_kinds:
+      - identifier
+    message: "Acts that touch a session's process, pty or lifecycle must be recorded by exactly one actuation row — written by the RPC handler the request came through, or by the entry point of the rail that started it — so calling one of these primitives from a file outside the audited set means the act would go unrecorded. Read Sources/TBDDaemon/Actuation/ActuationSurface.swift for the boundary rule and the wiring pattern, wire the row, then add the file to this allowlist in the same commit."
     severity: error

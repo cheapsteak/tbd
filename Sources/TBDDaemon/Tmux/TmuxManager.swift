@@ -3,6 +3,20 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager")
 
+/// What one read-only `list-panes` consultation says about a pane that a send
+/// is aimed at. Read before anything is typed; see `paneSendTargetQuery`.
+public enum PaneSendTarget: Sendable, Equatable {
+    /// tmux cannot find the pane — it, its window, or the whole server is gone.
+    case missing
+    /// The pane object exists (`remain-on-exit` kept it) but its process has
+    /// exited. `send-keys` into it still exits 0 and the keys go nowhere.
+    case dead
+    /// The pane is alive. `terminalID` is the TBD terminal UUID the pane itself
+    /// answered with, or `nil` when the pane carries no identity to compare —
+    /// a pane spawned before TBD stamped one, or by something outside TBD.
+    case live(terminalID: String?)
+}
+
 public struct TmuxManager: Sendable {
     /// Hard ceiling on any single tmux subprocess. tmux control operations
     /// (respawn-window, new-session, kill-window, capture-pane, …) normally
@@ -58,6 +72,31 @@ public struct TmuxManager: Sendable {
     /// it, dryRun respawnWindow always succeeds, which makes the wake path's
     /// respawn-failure branch (`WakeResult.respawnFailed`) untestable.
     public let dryRunRespawnWindowError: (@Sendable (String) -> Error?)?
+    /// Optional test hook consulted by `killWindow` in dryRun mode: return a
+    /// non-nil error for a `(server, windowID)` pair to simulate the kill
+    /// failing (server wedged, window already reaped by someone else, …).
+    /// Without it, dryRun killWindow always succeeds, which makes the close
+    /// paths' transport-failure branch — the one the actuation record
+    /// classifies as `transport-failed` rather than `dispatched` — untestable.
+    public let dryRunKillWindowError: (@Sendable (String, String) -> Error?)?
+    /// Optional test hook consulted by `paneSendTarget` in dryRun mode:
+    /// `(server, paneID)` → what the pane answers. Without it, dryRun reports
+    /// `.live(terminalID: nil)` — alive, carrying no identity — which is the
+    /// branch that proceeds, so a fixture that never spawned a real pane keeps
+    /// behaving exactly as it did before the send path started asking.
+    ///
+    /// Throwing, because "the consultation could not be run at all" is one of
+    /// the answers: it is the wedged-tmux path the send classifies as a
+    /// transport failure rather than a refusal, and a non-throwing hook would
+    /// leave that branch with no way to be exercised.
+    public let dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)?
+    /// Optional test hook consulted by `pasteText` in dryRun mode:
+    /// `(server, paneID, bytes)` — the payload that would have been written to
+    /// the buffer file. `dryRunRecorder` cannot carry it: the real path passes
+    /// the body through a temp FILE, so the recorded argv holds a path and not
+    /// one byte of the content. Tests that assert on WHAT was pasted — the
+    /// dispatch envelope, for one — need the bytes themselves.
+    public let dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)?
     /// Optional test hook for real (non-dryRun) mode: override the result of
     /// `windowExists(server:windowID:)`. Allows tests to force a window as dead
     /// while still having a live process running in the pane (for testing the
@@ -89,7 +128,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -100,6 +139,9 @@ public struct TmuxManager: Sendable {
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
         self.dryRunCreateWindowError = dryRunCreateWindowError
         self.dryRunRespawnWindowError = dryRunRespawnWindowError
+        self.dryRunKillWindowError = dryRunKillWindowError
+        self.dryRunPaneSendTarget = dryRunPaneSendTarget
+        self.dryRunPasteBytes = dryRunPasteBytes
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
     }
@@ -182,17 +224,41 @@ public struct TmuxManager: Sendable {
         ["-L", server, "has-session", "-t", session]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
-        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
-        // -i keeps it interactive (loads .zshrc), -c runs the command
-        // After the command exits, the pane closes (tmux default behavior)
-        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    /// Prefix `shellCommand` with one `export KEY='value'; ` per `env` entry,
+    /// sorted by key, single-quoting each value with the standard `'\''`
+    /// escape for an embedded quote.
+    ///
+    /// Shared by `newWindowCommand` and `respawnWindowCommand` deliberately.
+    /// `resolvePaneTerminalID` reads a pane's identity back out of exactly this
+    /// text, anchored on `terminalIDExportAnchor`, and that anchor is only safe
+    /// while every spawn path emits the identical shape. Two independently
+    /// maintained copies could drift and reopen the forgery hole on one path.
+    static func envExportPrefixed(_ shellCommand: String, env: [String: String]) -> String {
         var envPrefix = ""
         for (key, value) in env.sorted(by: { $0.key < $1.key }) {
             let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
             envPrefix += "export \(key)='\(escaped)'; "
         }
-        let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
+        return envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
+    }
+
+    /// tmux `-e KEY=VALUE` flags, sorted by key. Shared by the two spawn
+    /// builders for the same reason as `envExportPrefixed`.
+    static func sensitiveEnvFlags(_ sensitiveEnv: [String: String]) -> [String] {
+        var eFlags: [String] = []
+        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
+            eFlags.append("-e")
+            eFlags.append("\(key)=\(value)")
+        }
+        return eFlags
+    }
+
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
+        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
+        // -i keeps it interactive (loads .zshrc), -c runs the command
+        // After the command exits, the pane closes (tmux default behavior)
+        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let fullCommand = envExportPrefixed(shellCommand, env: env)
         // `sensitiveEnv` carries values that must be in the spawned window's
         // PROCESS environment before the shell starts, via tmux's -e KEY=VALUE
         // flag — NOT inlined into the shell command argv like `env` above.
@@ -205,11 +271,7 @@ public struct TmuxManager: Sendable {
         //   - rc-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook panes):
         //     the `env` export-prefix runs after `.zshrc` completes, so only
         //     -e values are visible while rc files execute.
-        var eFlags: [String] = []
-        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
-            eFlags.append("-e")
-            eFlags.append("\(key)=\(value)")
-        }
+        let eFlags = sensitiveEnvFlags(sensitiveEnv)
         // Note: size flags (-x/-y) are intentionally NOT emitted here. tmux's
         // `new-window` does not support those flags (only `new-session`,
         // `split-window`, `resize-window`, and `resize-pane` do). The session's
@@ -225,8 +287,9 @@ public struct TmuxManager: Sendable {
     }
 
     /// Respawn (replace the running program of) an existing window's pane
-    /// IN PLACE, keeping the same window id and pane id. Mirrors
-    /// `newWindowCommand`'s env handling — the `env` map is inlined as an
+    /// IN PLACE, keeping the same window id and pane id. Shares
+    /// `newWindowCommand`'s env handling through `envExportPrefixed` and
+    /// `sensitiveEnvFlags` — the `env` map is inlined as an
     /// `export …; ` prefix on the shell command (runs AFTER rc files), while
     /// `sensitiveEnv` is passed via tmux `-e KEY=VALUE` so it's in the process
     /// environment before the shell starts (kept out of `ps aux`, and visible
@@ -245,17 +308,8 @@ public struct TmuxManager: Sendable {
         sensitiveEnv: [String: String] = [:]
     ) -> [String] {
         let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        var envPrefix = ""
-        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
-            envPrefix += "export \(key)='\(escaped)'; "
-        }
-        let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
-        var eFlags: [String] = []
-        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
-            eFlags.append("-e")
-            eFlags.append("\(key)=\(value)")
-        }
+        let fullCommand = envExportPrefixed(shellCommand, env: env)
+        let eFlags = sensitiveEnvFlags(sensitiveEnv)
         return ["-L", server, "respawn-window", "-k", "-t", windowID, "-c", cwd]
             + eFlags
             + [userShell, "-ic", fullCommand]
@@ -346,6 +400,152 @@ public struct TmuxManager: Sendable {
 
     public static func paneCurrentCommandQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_command}"]
+    }
+
+    /// The pane option TBD stamps with a terminal's UUID at spawn, so a later
+    /// send can ask the pane who it is. `@`-prefixed names are tmux's own
+    /// namespace for user options; the value is per-pane and freed with the
+    /// pane, which is what makes a *reused* pane id answer empty rather than
+    /// with its predecessor's identity.
+    public static let terminalIDPaneOption = "@tbd_terminal_id"
+
+    /// Stamp `terminalID` onto a pane so it can identify itself later.
+    ///
+    /// `target` may be a pane id or a window id — tmux resolves a window target
+    /// to that window's active pane. The window form is only used right after a
+    /// `respawn-window -k`, which collapses the window to its original single
+    /// pane, so "active pane" is unambiguously the terminal's own pane even if
+    /// the user had split it by hand a moment earlier.
+    public static func setPaneTerminalIDCommand(
+        server: String, target: String, terminalID: String
+    ) -> [String] {
+        ["-L", server, "set-option", "-p", "-t", target, terminalIDPaneOption, terminalID]
+    }
+
+    /// Separator between the four fields of `paneSendTargetQuery`.
+    ///
+    /// A tab: neither a pane id, nor `0`/`1`, nor a UUID can contain one, and
+    /// the only field that could — the start command — is last, so it takes the
+    /// remainder of the line rather than being split.
+    static let paneSendTargetSeparator: Character = "\t"
+
+    /// One read-only consultation answering everything a send needs to know
+    /// about its target: does the pane exist, is its process still alive, and
+    /// which TBD terminal does the pane itself say it belongs to.
+    ///
+    /// `list-panes` rather than `display-message`: it exits non-zero with
+    /// `can't find pane: %N` when the pane, its window, or the server is gone,
+    /// whereas `display-message -p` prints an empty line and exits 0 — which
+    /// would report a vanished pane as a healthy one. It is also the primitive
+    /// the sibling pane queries above already use.
+    ///
+    /// `#{pane_id}` leads the format because `list-panes -t %N` does NOT list
+    /// only `%N`: it lists every pane in `%N`'s **window**, `%N` merely picking
+    /// the window. A TBD window normally holds one pane, but a user can split
+    /// one by hand at any time, and then the first line answers for a pane the
+    /// send never named — a stranger's `pane_dead` and a stranger's identity,
+    /// which is precisely a false refusal. So the line is selected by pane id
+    /// rather than by position; see `parsePaneSendTarget`.
+    public static func paneSendTargetQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "list-panes", "-t", paneID, "-F",
+         "#{pane_id}\(paneSendTargetSeparator)"
+         + "#{pane_dead}\(paneSendTargetSeparator)"
+         + "#{\(terminalIDPaneOption)}\(paneSendTargetSeparator)"
+         + "#{pane_start_command}"]
+    }
+
+    /// Classify `paneSendTargetQuery`'s stdout for the pane the send named.
+    /// Pure, so the classification is unit-testable without a tmux server.
+    ///
+    /// Only the line whose `#{pane_id}` is `paneID` counts — the query returns
+    /// one line per pane in the target's window. A run with no such line means
+    /// tmux answered about a window that no longer holds this pane, which is
+    /// the same fact as `can't find pane`: `.missing`.
+    static func parsePaneSendTarget(_ output: String, paneID: String) -> PaneSendTarget {
+        for line in output.split(separator: "\n") {
+            let fields = line.split(
+                separator: paneSendTargetSeparator, maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count == 4 else { continue }
+            guard fields[0].trimmingCharacters(in: .whitespaces) == paneID else { continue }
+            if fields[1].trimmingCharacters(in: .whitespaces) == "1" { return .dead }
+            return .live(terminalID: resolvePaneTerminalID(
+                paneOption: String(fields[2]), startCommand: String(fields[3])))
+        }
+        // rc 0 but no line for this pane (including no output at all): nothing
+        // answered for the coordinate the send named.
+        return .missing
+    }
+
+    /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
+    /// emit for one entry of the `env` map. Both build the prefix from the one
+    /// shared `envExportPrefixed`, so a pane spawned either way — including the
+    /// in-place profile swap — carries this literal.
+    static let terminalIDExportAnchor = "export TBD_TERMINAL_ID='"
+
+    /// Which TBD terminal a pane says it is, or nil when the pane carries no
+    /// answer at all.
+    ///
+    /// Two sources, in order. The `@tbd_terminal_id` pane option is stamped by
+    /// `createWindow`/`respawnWindow`. The fallback reads the same id back out
+    /// of `#{pane_start_command}`, because TBD plants `TBD_TERMINAL_ID` through
+    /// the `env` map and `newWindowCommand` inlines that map as an
+    /// `export KEY='value'; ` prefix on the command string — so every pane
+    /// spawned before the option existed still carries its own id. macOS forbids
+    /// reading another process's environment (SIP), so the start command, not
+    /// `ps eww`, is where the planted value remains legible.
+    ///
+    /// The fallback is deliberately narrow, because the start command also
+    /// carries *user-authored free text*: the env map is inlined sorted by key,
+    /// and `TBD_PROMPT_INSTRUCTIONS` — a repo's custom instructions — sorts
+    /// before `TBD_TERMINAL_ID` and so appears earlier in the same string. A
+    /// bare `TBD_TERMINAL_ID=` substring search would read whatever the user
+    /// happened to write as the pane's identity, and a pane that misreports its
+    /// identity is refused as a stranger for the whole life of its window. So
+    /// the search anchors on the full assignment TBD actually emits, and the
+    /// extracted value must parse as a `UUID` — the only thing TBD ever plants
+    /// there. Anything else resolves to nil, which means "no answer" and lets
+    /// the send proceed.
+    ///
+    /// Every occurrence of the anchor is scanned rather than just the first, so
+    /// a decoy anchor earlier in the string is stepped over and the real id
+    /// further along still resolves.
+    ///
+    /// What a decoy anchor sitting inside an env *value* actually yields is
+    /// worth stating exactly, because it is never the decoy's own payload.
+    /// `envExportPrefixed` escapes an embedded `'` as `'\''`, so instructions
+    /// reading `export TBD_TERMINAL_ID='decoy'` are emitted as
+    /// `export TBD_TERMINAL_ID='\''decoy'\''`: the anchor consumes that first
+    /// quote and the value read is everything up to the next quote — a lone
+    /// backslash. A decoy that instead ends the env entry right at the `=`
+    /// reads as the `; export …=` text that always follows the entry's closing
+    /// quote. Neither parses as a `UUID`, so the scan steps past and finds the
+    /// real id. That guarantee comes from the escaping, not from the resolver,
+    /// which is why the two must stay coupled — see `envExportPrefixed`.
+    ///
+    /// Residual adversarial case: an *unescaped* complete
+    /// `export TBD_TERMINAL_ID='<valid uuid>'` earlier in the start command
+    /// would be read first. No `env` value can produce one, per the escaping
+    /// above, so it would have to arrive through `shellCommand` itself. And it
+    /// can only cause a false *refusal* of a healthy pane, never a false
+    /// *accept* — a stranger's pane cannot be made to answer with this
+    /// terminal's id, and the false accept is the direction that would actually
+    /// type into someone else's composer.
+    static func resolvePaneTerminalID(paneOption: String, startCommand: String) -> String? {
+        let stamped = paneOption.trimmingCharacters(in: .whitespaces)
+        if !stamped.isEmpty { return stamped }
+
+        var searchFrom = startCommand.startIndex
+        while let anchor = startCommand.range(
+            of: terminalIDExportAnchor, range: searchFrom..<startCommand.endIndex) {
+            searchFrom = anchor.upperBound
+            let rest = startCommand[anchor.upperBound...]
+            // No closing quote anywhere after this anchor means no later
+            // occurrence can be well-formed either.
+            guard let close = rest.firstIndex(of: "'") else { return nil }
+            let value = String(rest[..<close])
+            if UUID(uuidString: value) != nil { return value }
+        }
+        return nil
     }
 
     public static func panePIDQuery(server: String, paneID: String) -> [String] {
@@ -461,6 +661,11 @@ public struct TmuxManager: Sendable {
             result = (windowID: String(parts[0]), paneID: String(parts[1]))
         }
 
+        // Label the pane with the terminal it was spawned for, so a later send
+        // can ask the pane who it is instead of trusting a DB coordinate.
+        await stampTerminalID(
+            server: server, target: result.paneID, env: env, sensitiveEnv: sensitiveEnv)
+
         // tmux's `new-window` does NOT accept -x/-y, and a freshly-created
         // window inherits its size from the session's attached client. The TBD
         // `main` session has no attached clients (we only ever attach to
@@ -501,9 +706,17 @@ public struct TmuxManager: Sendable {
         if dryRun {
             dryRunRecorder?(args)
             if let error = dryRunRespawnWindowError?(windowID) { throw error }
+            await stampTerminalID(
+                server: server, target: windowID, env: env, sensitiveEnv: sensitiveEnv)
             return
         }
         try await runTmux(args)
+        // Re-stamp: the pane object survives `respawn-window -k` (and so does an
+        // earlier stamp), but a respawn is also how a window acquires a program
+        // it did not spawn with, so the label is refreshed from the env that
+        // actually launched it. A window target resolves to its single pane.
+        await stampTerminalID(
+            server: server, target: windowID, env: env, sensitiveEnv: sensitiveEnv)
         if let cols, let rows, cols >= Self.minCols, rows >= Self.minRows {
             do {
                 try await resizeWindow(server: server, windowID: windowID, cols: cols, rows: rows)
@@ -517,6 +730,7 @@ public struct TmuxManager: Sendable {
         let args = Self.killWindowCommand(server: server, windowID: windowID)
         if dryRun {
             dryRunRecorder?(args)
+            if let error = dryRunKillWindowError?(server, windowID) { throw error }
             return
         }
         try await runTmux(args)
@@ -593,9 +807,11 @@ public struct TmuxManager: Sendable {
         let pasteArgs = Self.pasteBufferCommand(server: server, bufferName: bufferName, paneID: paneID)
 
         if dryRun {
-            // Record the intended argv without touching the filesystem.
+            // Record the intended argv without touching the filesystem — plus
+            // the payload, which the argv cannot carry (it names a temp file).
             dryRunRecorder?(loadArgs)
             dryRunRecorder?(pasteArgs)
+            dryRunPasteBytes?(server, paneID, bytes)
             return
         }
 
@@ -670,6 +886,71 @@ public struct TmuxManager: Sendable {
         }
         let args = Self.paneCurrentCommandQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Ask a pane, before anything is typed into it, whether it exists, whether
+    /// its process is alive, and which TBD terminal it belongs to.
+    ///
+    /// Read-only — a query, not an actuation. Throws only when the query itself
+    /// could not be *run*: a wedged server tripping the subprocess timeout
+    /// (`TmuxError.timedOut`) or a tmux that would not spawn at all, neither of
+    /// which this catch matches. A non-zero *exit* is read as an answer instead,
+    /// because the only way this fixed argv can exit non-zero is tmux failing to
+    /// resolve the target — `can't find pane`, or no server on that socket, both
+    /// of which mean the same thing for a send. (`paneSendTargetQuery`'s exact
+    /// argv is pinned by a unit test, so it cannot drift into a usage error that
+    /// would arrive here wearing the same clothes.)
+    public func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
+        if dryRun { return try dryRunPaneSendTarget?(server, paneID) ?? .live(terminalID: nil) }
+        let args = Self.paneSendTargetQuery(server: server, paneID: paneID)
+        do {
+            return Self.parsePaneSendTarget(try await runTmux(args), paneID: paneID)
+        } catch TmuxError.commandFailed {
+            return .missing
+        }
+    }
+
+    /// Stamp `@tbd_terminal_id` onto a freshly created or respawned pane, when
+    /// the spawn's environment says which terminal it is.
+    ///
+    /// Called centrally from `createWindow` and `respawnWindow`, so every spawn
+    /// call site is covered by the one rule "whatever you plant as
+    /// `TBD_TERMINAL_ID` is what the pane will answer with" — a call site opts
+    /// out only by not planting the variable at all, which is a hole in the
+    /// send check rather than a local choice. Best-effort: a failed stamp is
+    /// logged and swallowed, because `#{pane_start_command}` carries the same
+    /// id as a fallback (see `resolvePaneTerminalID`) and a window that spawned
+    /// fine must not be reported as failed over a label.
+    ///
+    /// Deliberately NOT backfilled onto existing panes from the DB at startup.
+    /// The DB's pane coordinate is exactly what goes stale when tmux reuses a
+    /// pane id, so backfilling would stamp the terminal's identity onto whatever
+    /// pane now holds that id — writing the wrong answer into the very check
+    /// that exists to catch it. Unstamped panes fall back to their start
+    /// command, and panes with neither are treated as unresolvable, never as
+    /// disagreeing.
+    private func stampTerminalID(
+        server: String, target: String, env: [String: String], sensitiveEnv: [String: String]
+    ) async {
+        guard let terminalID = env["TBD_TERMINAL_ID"] ?? sensitiveEnv["TBD_TERMINAL_ID"] else {
+            return
+        }
+        let args = Self.setPaneTerminalIDCommand(
+            server: server, target: target, terminalID: terminalID)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
+        do {
+            try await runTmux(args)
+        } catch {
+            logger.warning("""
+                stamping \(Self.terminalIDPaneOption, privacy: .public) on \
+                \(target, privacy: .public) (server \(server, privacy: .public)) failed: \
+                \(String(describing: error), privacy: .public) — sends fall back to \
+                #{pane_start_command} for this pane's identity
+                """)
+        }
     }
 
     public func panePID(server: String, paneID: String) async throws -> String {

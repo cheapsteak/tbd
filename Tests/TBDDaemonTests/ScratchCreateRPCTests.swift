@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -10,8 +11,8 @@ struct ScratchCreateRPCTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratchcreate-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        return (home, { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) })
+        let priorTBDHome = setTBDHome(home.path)
+        return (home, { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) })
     }
 
     @Test func createsRepoLessWorktreeRowAndDirectory() async throws {
@@ -20,7 +21,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let request = try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil))
         let response = await router.handle(request)
@@ -45,7 +46,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let response = await router.handle(
             try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
@@ -75,9 +76,9 @@ struct ScratchCreateRPCTests {
         // sandbox temp dir so it never touches the developer's real config.
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratch-codex-\(UUID().uuidString)")
-        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        let priorCodexHome = setCodexTestHome(codexHome.path)
         defer {
-            unsetenv("TBD_TEST_CODEX_HOME")
+            restoreCodexTestHome(priorCodexHome)
             try? FileManager.default.removeItem(at: codexHome)
         }
 
@@ -86,7 +87,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let response = await router.handle(
             try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
@@ -106,7 +107,7 @@ struct ScratchCreateRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date())
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let r1 = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "notes")))
         let w1 = try r1.decodeResult(Worktree.self)

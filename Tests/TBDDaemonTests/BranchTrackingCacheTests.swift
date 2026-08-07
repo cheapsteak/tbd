@@ -16,11 +16,11 @@ private final class MutableClock: @unchecked Sendable {
     func advance(by seconds: TimeInterval) { lock.lock(); value = value.addingTimeInterval(seconds); lock.unlock() }
 }
 
-struct UpstreamBranchCacheTests {
+struct BranchTrackingCacheTests {
 
     @Test func freshHitDoesNotRefetch() async {
         let clock = MutableClock(Date(timeIntervalSince1970: 0))
-        let cache = UpstreamBranchCache(ttl: 60, now: { clock.now() })
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
         let counter = FetchCounter()
 
         let first = await cache.upstreamBranchName(worktreePath: "/wt", branch: "feat") {
@@ -42,7 +42,7 @@ struct UpstreamBranchCacheTests {
 
     @Test func expiryRefetches() async {
         let clock = MutableClock(Date(timeIntervalSince1970: 0))
-        let cache = UpstreamBranchCache(ttl: 60, now: { clock.now() })
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
         let counter = FetchCounter()
 
         _ = await cache.upstreamBranchName(worktreePath: "/wt", branch: "feat") {
@@ -61,7 +61,7 @@ struct UpstreamBranchCacheTests {
 
     @Test func invalidateForcesRefetch() async {
         let clock = MutableClock(Date(timeIntervalSince1970: 0))
-        let cache = UpstreamBranchCache(ttl: 60, now: { clock.now() })
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
         let counter = FetchCounter()
 
         _ = await cache.upstreamBranchName(worktreePath: "/wt", branch: "feat") {
@@ -81,7 +81,7 @@ struct UpstreamBranchCacheTests {
 
     @Test func nilValuesAreCached() async {
         let clock = MutableClock(Date(timeIntervalSince1970: 0))
-        let cache = UpstreamBranchCache(ttl: 60, now: { clock.now() })
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
         let counter = FetchCounter()
 
         let first = await cache.upstreamBranchName(worktreePath: "/wt", branch: "feat") {
@@ -101,7 +101,7 @@ struct UpstreamBranchCacheTests {
 
     @Test func invalidateAllClearsEveryEntry() async {
         let clock = MutableClock(Date(timeIntervalSince1970: 0))
-        let cache = UpstreamBranchCache(ttl: 60, now: { clock.now() })
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
         let counter = FetchCounter()
 
         _ = await cache.upstreamBranchName(worktreePath: "/a", branch: "x") {
@@ -122,7 +122,7 @@ struct UpstreamBranchCacheTests {
 
     @Test func retainDropsEntriesOutsideActiveSet() async {
         let clock = MutableClock(Date(timeIntervalSince1970: 0))
-        let cache = UpstreamBranchCache(ttl: 60, now: { clock.now() })
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
         let counter = FetchCounter()
 
         // Seed entries for two worktree paths A and B.
@@ -149,6 +149,78 @@ struct UpstreamBranchCacheTests {
             _ = await counter.increment(); return "develop"
         }
         #expect(bMiss == "develop")
+        #expect(await counter.count == 3)
+    }
+
+    // MARK: - @{push} resolution
+
+    @Test func pushBranchIsCachedWithinTTLAndRefetchedAfter() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+
+        let first = await cache.pushBranch(worktreePath: "/wt", branch: "feat") {
+            _ = await counter.increment(); return .resolved("renamed-on-remote")
+        }
+        #expect(first == .resolved("renamed-on-remote"))
+        #expect(await counter.count == 1)
+
+        clock.advance(by: 59)
+        let cached = await cache.pushBranch(worktreePath: "/wt", branch: "feat") {
+            _ = await counter.increment(); return .noPushDestination
+        }
+        #expect(cached == .resolved("renamed-on-remote"))
+        #expect(await counter.count == 1)
+
+        clock.advance(by: 2)
+        let refetched = await cache.pushBranch(worktreePath: "/wt", branch: "feat") {
+            _ = await counter.increment(); return .noPushDestination
+        }
+        #expect(refetched == .noPushDestination)
+        #expect(await counter.count == 2)
+    }
+
+    @Test func pushAndUpstreamEntriesAreIndependentButPrunedTogether() async {
+        // One key, two facts: `retain` must not leave a push entry behind for a
+        // worktree whose upstream entry it just dropped.
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+
+        _ = await cache.upstreamBranchName(worktreePath: "/a", branch: "x") {
+            _ = await counter.increment(); return "main"
+        }
+        _ = await cache.pushBranch(worktreePath: "/a", branch: "x") {
+            _ = await counter.increment(); return .noPushDestination
+        }
+        #expect(await counter.count == 2)
+
+        await cache.retain(active: [(worktreePath: "/b", branch: "y")])
+
+        _ = await cache.pushBranch(worktreePath: "/a", branch: "x") {
+            _ = await counter.increment(); return .lookupFailed
+        }
+        #expect(await counter.count == 3)
+    }
+
+    @Test func invalidateDropsPushEntriesToo() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+
+        _ = await cache.pushBranch(worktreePath: "/wt", branch: "feat") {
+            _ = await counter.increment(); return .noPushDestination
+        }
+        await cache.invalidate(worktreePath: "/wt")
+        _ = await cache.pushBranch(worktreePath: "/wt", branch: "feat") {
+            _ = await counter.increment(); return .noPushDestination
+        }
+        #expect(await counter.count == 2)
+
+        await cache.invalidateAll()
+        _ = await cache.pushBranch(worktreePath: "/wt", branch: "feat") {
+            _ = await counter.increment(); return .noPushDestination
+        }
         #expect(await counter.count == 3)
     }
 }

@@ -15,6 +15,12 @@ public final class RPCRouter: Sendable {
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
     public let hibernationCoordinator: HibernationCoordinator
+    /// Append-only record of every state-changing actuation this router
+    /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
+    /// the whole daemon writes one file. Handlers append a request row before
+    /// their first mutating step and an outcome row after the act returns —
+    /// see `RPCRouter+Actuation.swift`.
+    public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
@@ -41,6 +47,17 @@ public final class RPCRouter: Sendable {
     /// Session-limit auto-resume scheduler. `nil` in mock mode / tests that
     /// don't need it; set post-construction like `claudeUsagePoller`.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
+    /// Delivery acknowledgement (design §12). `terminal.send` hands a
+    /// dispatched, verify-armed text send here and this is the only caller —
+    /// see `DeliveryVerificationArming`. `nil` everywhere until the verifier
+    /// lands; a nil verifier means the observation is simply never armed, and
+    /// the act renders `unconfirmed` by `DeliveryRecord.statuses`, which is the
+    /// honest answer rather than a claim. Set post-construction like
+    /// `claudeUsagePoller`.
+    nonisolated(unsafe) var deliveryVerifier: (any DeliveryVerificationArming)?
+    /// Paces the keys of a `--keys` payload. A `var` so tests can inject a
+    /// `TestClock`; production never replaces the default.
+    nonisolated(unsafe) var pacedKeySender = PacedKeySender()
     /// Live connected-client count, supplied by the SocketServer after it is
     /// constructed (the router is built first in Daemon.swift, so it cannot
     /// take the server as an init dependency). Mirrors `claudeUsagePoller`
@@ -98,11 +115,16 @@ public final class RPCRouter: Sendable {
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
     let prListCoordinator = PRListCoordinator()
-    /// TTL cache for per-worktree upstream branch lookups, so `pr.list` stops
-    /// spawning a `git config` subprocess per worktree on every poll.
-    let upstreamBranchCache = UpstreamBranchCache()
+    /// TTL cache for the per-worktree branch facts PR matching needs (upstream
+    /// and `@{push}`), so `pr.list` stops spawning git subprocesses per worktree
+    /// on every poll — and so the poll and an on-select refresh agree.
+    let branchTrackingCache = BranchTrackingCache()
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
+    /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
+    /// never interleave in one composer. Different terminals still send in
+    /// parallel — see `TerminalSendSerializer`.
+    let terminalSendSerializer = TerminalSendSerializer()
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, terminal handlers open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.
@@ -131,8 +153,10 @@ public final class RPCRouter: Sendable {
         loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
         remoteManager: RemoteProviderManager? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
-        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        actuationLog: ActuationLog
     ) {
+        self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle
         self.tmux = tmux
@@ -148,7 +172,8 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
-            subscriptions: subscriptions, configDirManager: configDirManager
+            subscriptions: subscriptions, configDirManager: configDirManager,
+            actuationLog: actuationLog
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
@@ -190,17 +215,17 @@ public final class RPCRouter: Sendable {
             case RPCMethod.repoAdd:
                 return try await handleRepoAdd(request.paramsData)
             case RPCMethod.repoRemove:
-                return try await handleRepoRemove(request.paramsData)
+                return try await handleRepoRemove(request.paramsData, actor: request.actor)
             case RPCMethod.repoList:
                 return try await handleRepoList()
             case RPCMethod.scratchCreate:
-                return try await handleScratchCreate(request.paramsData)
+                return try await handleScratchCreate(request.paramsData, actor: request.actor)
             case RPCMethod.scratchDelete:
-                return try await handleScratchDelete(request.paramsData)
+                return try await handleScratchDelete(request.paramsData, actor: request.actor)
             case RPCMethod.scratchPromote:
                 return try await handleScratchPromote(request.paramsData)
             case RPCMethod.scratchArchive:
-                return try await handleScratchArchive(request.paramsData)
+                return try await handleScratchArchive(request.paramsData, actor: request.actor)
             case RPCMethod.scratchRevive:
                 return try await handleScratchRevive(request.paramsData)
             case RPCMethod.repoUpdateInstructions:
@@ -218,17 +243,17 @@ public final class RPCRouter: Sendable {
             case RPCMethod.repoListOpenPRs:
                 return try await handleRepoListOpenPRs(request.paramsData)
             case RPCMethod.worktreeCreate:
-                return try await handleWorktreeCreate(request.paramsData)
+                return try await handleWorktreeCreate(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeList:
                 return try await handleWorktreeList(request.paramsData)
             case RPCMethod.worktreeArchive:
-                return try await handleWorktreeArchive(request.paramsData)
+                return try await handleWorktreeArchive(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeRerunPreSession:
-                return try await handleWorktreeRerunPreSession(request.paramsData)
+                return try await handleWorktreeRerunPreSession(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeRevive:
-                return try await handleWorktreeRevive(request.paramsData)
+                return try await handleWorktreeRevive(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeReviveConversationFresh:
-                return try await handleWorktreeReviveConversationFresh(request.paramsData)
+                return try await handleWorktreeReviveConversationFresh(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeAdopt:
                 return try await handleWorktreeAdopt(request.paramsData)
             case RPCMethod.worktreeRename:
@@ -238,21 +263,21 @@ public final class RPCRouter: Sendable {
             case RPCMethod.worktreeMove:
                 return try await handleWorktreeMove(request.paramsData)
             case RPCMethod.worktreeForget:
-                return try await handleWorktreeForget(request.paramsData)
+                return try await handleWorktreeForget(request.paramsData, actor: request.actor)
             case RPCMethod.terminalCreate:
-                return try await handleTerminalCreate(request.paramsData)
+                return try await handleTerminalCreate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalContinueInCodex:
-                return try await handleTerminalContinueInCodex(request.paramsData)
+                return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
-                return try await handleTerminalSend(request.paramsData)
+                return try await handleTerminalSend(request.paramsData, actor: request.actor)
             case RPCMethod.terminalDelete:
-                return try await handleTerminalDelete(request.paramsData)
+                return try await handleTerminalDelete(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
             case RPCMethod.terminalSwapProfile:
-                return try await handleTerminalSwapProfile(request.paramsData)
+                return try await handleTerminalSwapProfile(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSessionEvent:
                 return try await handleTerminalSessionEvent(request.paramsData)
             case RPCMethod.terminalActivityEvent:
@@ -294,15 +319,15 @@ public final class RPCRouter: Sendable {
             case RPCMethod.daemonCapabilities:
                 return try await handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
-                return try await handleTerminalSuspend(request.paramsData)
+                return try await handleTerminalSuspend(request.paramsData, actor: request.actor)
             case RPCMethod.terminalResume:
-                return try await handleTerminalResume(request.paramsData)
+                return try await handleTerminalResume(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeSuspend:
-                return try await handleWorktreeSuspend(request.paramsData)
+                return try await handleWorktreeSuspend(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeResume:
-                return try await handleWorktreeResume(request.paramsData)
+                return try await handleWorktreeResume(request.paramsData, actor: request.actor)
             case RPCMethod.terminalRecreateWindow:
-                return try await handleTerminalRecreateWindow(request.paramsData)
+                return try await handleTerminalRecreateWindow(request.paramsData, actor: request.actor)
             case RPCMethod.noteCreate:
                 return try await handleNoteCreate(request.paramsData)
             case RPCMethod.noteGet:
@@ -316,7 +341,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalHistoryList:
                 return try await handleTerminalHistoryList(request.paramsData)
             case RPCMethod.terminalHistoryRevive:
-                return try await handleTerminalHistoryRevive(request.paramsData)
+                return try await handleTerminalHistoryRevive(request.paramsData, actor: request.actor)
             case RPCMethod.terminalOutput:
                 return try await handleTerminalOutput(request.paramsData)
             case RPCMethod.terminalConversation:
@@ -431,9 +456,9 @@ public final class RPCRouter: Sendable {
             case RPCMethod.nightwatchLeaseRelease:
                 return try await handleNightwatchLeaseRelease(request.paramsData)
             case RPCMethod.terminalHibernate:
-                return try await handleTerminalHibernate(request.paramsData)
+                return try await handleTerminalHibernate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalWake:
-                return try await handleTerminalWake(request.paramsData)
+                return try await handleTerminalWake(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetKeepWarm:
                 return try await handleTerminalSetKeepWarm(request.paramsData)
             case RPCMethod.configSetAutoHibernate:
@@ -442,6 +467,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetHibernateInputVeto:
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
+            case RPCMethod.configSetDeliveryVerification:
+                return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetAutoTrustWorktrees:
@@ -453,11 +480,11 @@ public final class RPCRouter: Sendable {
             case RPCMethod.remoteSessions:
                 return try await handleRemoteSessions()
             case RPCMethod.remoteCreate:
-                return try await handleRemoteCreate(request.paramsData)
+                return try await handleRemoteCreate(request.paramsData, actor: request.actor)
             case RPCMethod.remoteStop:
-                return try await handleRemoteStop(request.paramsData)
+                return try await handleRemoteStop(request.paramsData, actor: request.actor)
             case RPCMethod.remoteSend:
-                return try await handleRemoteSend(request.paramsData)
+                return try await handleRemoteSend(request.paramsData, actor: request.actor)
             case RPCMethod.remoteLog:
                 return try await handleRemoteLog(request.paramsData)
             case RPCMethod.remoteRename:
@@ -513,6 +540,7 @@ public final class RPCRouter: Sendable {
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
+            deliveryVerificationEnabled: config.deliveryVerificationEnabled,
             autoTrustWorktrees: config.autoTrustWorktrees,
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
@@ -538,29 +566,51 @@ public final class RPCRouter: Sendable {
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String, prNumber: Int?)] = []
+        // Each repo's default branch, fetched once per pass rather than per
+        // worktree. It tells a tracked BASE from a rename-push target — see
+        // `PRStatusManager.branchCandidates`, and `headRefMismatchedMatches` for
+        // why a stale value here can only cost a missed heal.
+        let defaultBranchByRepo = Dictionary(
+            uniqueKeysWithValues: (try await db.repos.list()).map { ($0.id, $0.defaultBranch) })
+        var infos: [PRStatusManager.PollWorktree] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
-            // Route the per-worktree `git config` lookup through the TTL cache
-            // so a poll storm doesn't spawn one subprocess per worktree per poll.
-            let upstreamBranch = await upstreamBranchCache.upstreamBranchName(
-                worktreePath: wt.path,
-                branch: wt.branch
-            ) { [git] in
-                await git.upstreamBranchName(worktreePath: wt.path, branch: wt.branch)
-            }
+            let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
             infos.append((
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
+                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
+                pushBranch: pushBranch,
                 worktreePath: wt.path,
                 prNumber: wt.prNumber
             ))
         }
         await prManager.fetchAll(worktrees: infos)
         // Prune at the END so we never drop an entry this pass just populated.
-        await upstreamBranchCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
+        await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         return PRListResult(statuses: await prManager.allStatuses())
+    }
+
+    /// The per-branch git facts PR matching needs: the branch this one tracks,
+    /// and where git says it would push (`@{push}`). Both go through the TTL
+    /// cache so a poll storm doesn't spawn two subprocesses per worktree per
+    /// poll, and so every consumer — poll and on-select refresh alike — sees the
+    /// same answer within a TTL window.
+    private func branchFacts(
+        worktreePath: String, branch: String
+    ) async -> (upstream: String?, push: GitManager.PushBranchResolution) {
+        let upstream = await branchTrackingCache.upstreamBranchName(
+            worktreePath: worktreePath, branch: branch
+        ) { [git] in
+            await git.upstreamBranchName(worktreePath: worktreePath, branch: branch)
+        }
+        let push = await branchTrackingCache.pushBranch(
+            worktreePath: worktreePath, branch: branch
+        ) { [git] in
+            await git.pushBranchName(worktreePath: worktreePath, branch: branch)
+        }
+        return (upstream, push)
     }
 
     /// Scratch spaces are repo-less and have no PR — exclude them so the
@@ -579,15 +629,22 @@ public final class RPCRouter: Sendable {
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
-        let upstreamBranch = await git.upstreamBranchName(
-            worktreePath: wt.path,
-            branch: wt.branch
-        )
+        // Read the branch facts through the SAME cache the poll uses. Reading
+        // git directly here would let a user refresh attach a PR that the very
+        // next poll — still inside the cache's TTL, still holding the older
+        // facts — judges by a different candidate list and clears again.
+        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
+        var defaultBranch: String?
+        if let repoID = wt.repoID {
+            defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
+        }
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
             upstreamBranch: upstreamBranch,
+            defaultBranch: defaultBranch,
+            pushBranch: pushBranch,
             repoPath: wt.path,
             prNumber: wt.prNumber
         )

@@ -88,6 +88,30 @@ public enum TBDConstants {
     /// is unset or empty, preserving production behavior.
     public static var claudeScratchpadBase: URL { claudeScratchpadBase(environment: ProcessInfo.processInfo.environment) }
 
+    /// The host Claude store — `TBD_CLAUDE_HOST_HOME` when set, `~/.claude`
+    /// otherwise — resolved from the given environment dictionary.
+    ///
+    /// **The single resolution point for that override, package-wide.** It
+    /// lives in `TBDShared` rather than beside its daemon-side caller because
+    /// `TBDApp` needs it too and does not link `TBDDaemonLib`:
+    /// `LegacyHookSettingsPath` hand-built `homeDirectoryForCurrentUser/.claude`
+    /// for a dialog body, which is display-only today but shows the wrong path
+    /// under any override and is the exact shape of the leak
+    /// `LegacyHookScanner.globalSettingsPath` had.
+    /// `ClaudeProfileConfigDirManager.resolveHostBaseDirectory` delegates here.
+    public static func claudeHostHome(environment: [String: String]) -> URL {
+        if let override = environment["TBD_CLAUDE_HOST_HOME"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
+    }
+
+    /// The host Claude store. Resolves `TBD_CLAUDE_HOST_HOME` on every access,
+    /// like the other overrides here, so a process that sets it after first
+    /// read gets the new value.
+    public static var claudeHostHome: URL { claudeHostHome(environment: ProcessInfo.processInfo.environment) }
+
     public static func hookPath(repoID: UUID, eventName: String, environment: [String: String]) -> String {
         reposDir(environment: environment)
             .appendingPathComponent(repoID.uuidString)
@@ -204,5 +228,17 @@ public enum TBDConstants {
     }
     public static var agentProvidersPath: String {
         agentProvidersPath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Path to the append-only actuation record: `~/tbd/actuations.jsonl`.
+    /// The daemon is its only writer; rotated day segments
+    /// (`actuations-<YYYY-MM-DD>.jsonl`) sit beside it in the same directory.
+    /// Honors `TBD_HOME` like every other derived path — never hand-build it
+    /// from `$HOME`.
+    public static func actuationLogPath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("actuations.jsonl").path
+    }
+    public static var actuationLogPath: String {
+        actuationLogPath(environment: ProcessInfo.processInfo.environment)
     }
 }

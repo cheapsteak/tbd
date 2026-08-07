@@ -41,6 +41,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var daemon_panel_surface_enabled: Bool?
     var agent_panel_control_enabled: Bool?
     var remote_backends_enabled: Bool?
+    /// Delivery acknowledgement (design §12). Nil/absent means OFF — the
+    /// `v69_config_delivery_verification` column default.
+    var delivery_verification_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -58,7 +61,17 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             nightwatchMode: nightwatch_mode
                 .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
             autoHibernateEnabled: auto_hibernate_enabled ?? false,
-            hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
+            // Clamped on read (not just on write) so every consumer sees a
+            // bounded value regardless of what's actually in the row — a
+            // hand-edited DB, a value written by an older/newer daemon
+            // build, or any other row that bypassed `setAutoHibernate`.
+            hibernateIdleMinutes: min(
+                max(
+                    hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
+                    Config.minHibernateIdleMinutes
+                ),
+                Config.maxHibernateIdleMinutes
+            ),
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
             hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
@@ -69,7 +82,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
             panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
             agentPanelControlEnabled: agent_panel_control_enabled ?? false,
-            remoteBackendsEnabled: remote_backends_enabled ?? false
+            remoteBackendsEnabled: remote_backends_enabled ?? false,
+            deliveryVerificationEnabled: delivery_verification_enabled ?? false
         )
     }
 }
@@ -241,9 +255,13 @@ public struct ConfigStore: Sendable {
 
     /// Persist the auto-hibernate master switch + idle-timeout (minutes). The
     /// minutes value is floored at 1 so a zero/negative can't make the idle
-    /// timer hibernate everything on the next sweep.
+    /// timer hibernate everything on the next sweep, and ceilinged at 99 days
+    /// so a stale or hand-edited value can't produce an absurd timeout.
+    /// `ConfigRecord.toModel()` applies the same clamp on every read, so a
+    /// row that bypassed this method — hand-edited SQL, a value written by a
+    /// different daemon build — still comes back bounded.
     public func setAutoHibernate(enabled: Bool, idleMinutes: Int) async throws {
-        let minutes = max(1, idleMinutes)
+        let minutes = min(max(Config.minHibernateIdleMinutes, idleMinutes), Config.maxHibernateIdleMinutes)
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET auto_hibernate_enabled = ?, hibernate_idle_minutes = ? WHERE id = ?",
@@ -272,6 +290,27 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET hibernate_input_veto_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the delivery-acknowledgement opt-in (default OFF, soaking).
+    ///
+    /// **Enabling it takes effect at the next daemon start.** `terminal.send`
+    /// re-reads this column per call — but only when the caller armed
+    /// `--verify`, so an ordinary send pays nothing — while the observation
+    /// machinery it gates is wired once, at startup. In between, `--verify` is
+    /// refused with a message naming the restart, rather than dispatched with
+    /// nothing armed.
+    ///
+    /// Turning it off does not cancel observations already armed; it stops new
+    /// ones from being armed and makes `--verify` a refusal again — and that
+    /// half does apply to the next send.
+    public func setDeliveryVerification(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET delivery_verification_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

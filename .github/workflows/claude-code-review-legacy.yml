@@ -1,0 +1,331 @@
+# ⚠️  RETAINED AS A RESTORATION SOURCE, NOT A WORKING FALLBACK. This workflow does not
+# run on its own, and DISPATCHING IT DOES NOT REVIEW ANYTHING — every step below that
+# reads `github.event.pull_request.*` is empty under workflow_dispatch, so the trust
+# step sees no author, its permission probe fails, and the run exits at the fork gate
+# with a misleading "this PR is from a fork" error before any review logic executes.
+# That is a dead end by construction, not a bug to work around at dispatch time.
+#
+# What it IS for: the merge gate is claude-code-review.yml, whose `claude-review` job
+# produces the required check. This is the single-session reviewer it replaced, kept in
+# the tree so that reviving it is re-adding a `pull_request_target:` trigger (and
+# renaming the job) rather than reconstructing 300 lines from git history. Reviving it
+# is a deliberate edit-and-merge, not a button.
+#
+# Its job is named `claude-review-legacy`, NOT `claude-review`: branch protection
+# matches a required check by job name, so two jobs sharing that name would both report
+# into the gate. Rename it back only as part of retiring the fan-out pipeline.
+#
+# Delete this file once the fan-out gate has held across enough real PRs that nobody
+# would reach back for it — or as soon as it stops working, since a restoration source
+# that has quietly rotted is worse than none.
+#
+# Background on the merge-gate design (trust model, verdict token + Stop hook,
+# exact-match enforce): docs/pr-review-gate.md.
+name: Claude Code Review (legacy)
+
+on:
+  # workflow_dispatch ONLY, and only because a workflow with no trigger at all is
+  # invalid — this one must never fire automatically, since running two full reviews per
+  # PR is exactly what retiring it saved. The dispatch entry is a placeholder to keep the
+  # file valid, NOT an invocation path: see the banner above for why a hand-triggered run
+  # exits at the trust gate without reviewing anything.
+  workflow_dispatch:
+
+concurrency:
+  # Keyed on the dispatched ref, not a PR number: there is no PR under
+  # workflow_dispatch, so a PR-keyed group would collapse every manual run into one
+  # bucket and have each new dispatch cancel the last.
+  group: claude-review-legacy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review-legacy:
+    # Vestigial under workflow_dispatch (there is no pull_request payload, so this is
+    # always true), and kept only so the draft skip is already correct for anyone who
+    # restores a PR trigger while reviving this fallback.
+    if: github.event.pull_request.draft != true
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      actions: read
+      checks: read
+
+    steps:
+      - name: Determine author trust
+        id: trust
+        # Trusted = the branch lives in this repo, OR the author has PUSH access to it.
+        #
+        # This deliberately checks effective permission rather than the PR's
+        # `author_association`. `COLLABORATOR` is granted to anyone invited to
+        # collaborate at ANY level — including read-only and triage — and `MEMBER`
+        # would cover every org member if this repo ever moves under an org. Since a
+        # trusted author gets their fork's code executed in this job (see the
+        # allow-unsafe-pr-checkout comment below and docs/pr-review-gate.md), the gate
+        # must admit only people who could already push a branch here and run this
+        # workflow anyway. Otherwise a triage-level collaborator gains code execution
+        # alongside CLAUDE_CODE_OAUTH_TOKEN and the reviewer App token.
+        #
+        # NOTE: on a PUBLIC repo this endpoint returns "read" for a complete stranger
+        # rather than 404, so `read` and `none` must both be treated as untrusted —
+        # only admin/maintain/write may pass. Verified in Actions: the default
+        # GITHUB_TOKEN reads this endpoint fine with just `contents: read`
+        # (zionts -> write, octocat -> read), so no App token is needed here and the
+        # reviewer App is still minted only after the gate passes.
+        #
+        # Injection safety: no PR-controlled text is interpolated into the script.
+        # The author login arrives via env (and GitHub logins are [A-Za-z0-9-] only),
+        # and only the literal strings true/false are written to $GITHUB_OUTPUT.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          set -uo pipefail
+
+          # Probe unconditionally — even for same-repo PRs, where the result does not
+          # affect the verdict — so that every run logs whether the App token can read
+          # collaborator permissions at all. A same-repo PR therefore proves the probe
+          # works before any fork PR has to depend on it.
+          if probe_out="$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" --jq '.permission' 2>&1)"; then
+            perm="$probe_out"
+          else
+            perm="probe-failed"
+            echo "::warning::Could not read collaborator permission for $PR_AUTHOR: $probe_out"
+            echo "::warning::Until this resolves, fork PRs are all treated as untrusted (fail closed). Same-repo branches are unaffected."
+          fi
+          echo "Permission probe for '$PR_AUTHOR' on '$REPO': $perm (same-repo branch: $SAME_REPO)"
+
+          if [ "$SAME_REPO" = "true" ]; then
+            trusted=true
+          else
+            case "$perm" in
+              admin|maintain|write) trusted=true ;;
+              *)                    trusted=false ;;
+            esac
+          fi
+
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
+          echo "Trusted: $trusted"
+
+      - name: Block untrusted fork
+        if: steps.trust.outputs.trusted != 'true'
+        run: |
+          echo "::error::Claude review is required, but this PR is from a fork whose author does not have push access to this repository, so it cannot be auto-reviewed (the review executes the checked-out branch's tooling alongside repository secrets). A maintainer can push the branch to this repository to have it reviewed. No untrusted code is executed here."
+          exit 1
+
+      - name: Checkout PR head
+        if: steps.trust.outputs.trusted == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Full history, not depth 1: the reviewer needs a merge-base with the
+          # base branch for `git diff origin/main...HEAD` (a shallow clone made
+          # that impossible — PR #434 diagnostics), and git log/blame for
+          # premise-audit checks. The repo packs to ~10 MB; the cost is seconds.
+          #
+          # NOT sufficient on its own for a FORK PR: the head SHA is not reachable
+          # from any base-repo branch, so checkout fetches it as a targeted fetch
+          # and the clone stays shallow regardless of this value. The "Ensure a
+          # merge-base" step below repairs that — don't delete it thinking
+          # fetch-depth covers it.
+          fetch-depth: 0
+          # actions/checkout v7.0.0 (backported to the floating v4 tag in v4.4.0,
+          # 2026-07-20) refuses to check out a fork PR head under
+          # pull_request_target unless this opt-in is set. Its check is purely
+          # event_name + head.repo != base.repo — it cannot see the author-trust
+          # step above, so without this EVERY fork PR fails the required
+          # claude-review check even from a COLLABORATOR (PR #545). This step is
+          # already gated on trusted == true, so the opt-in restores exactly the
+          # pre-v4.4.0 behavior and adds no exposure. Untrusted forks are still
+          # blocked before reaching here. See docs/pr-review-gate.md.
+          allow-unsafe-pr-checkout: true
+
+      - name: Reset any pre-committed verdict file
+        if: steps.trust.outputs.trusted == 'true'
+        # SECURITY: the verdict file lives in the checked-out (PR-controlled) tree.
+        # Delete any copy the PR itself committed so the only file the enforce step
+        # and Stop hook can read is one THIS review session wrote. Without this a PR
+        # could commit claude-verdict.txt=APPROVE and, if the review session were
+        # killed or timed out before writing its own, sail through the gate.
+        run: rm -f "$GITHUB_WORKSPACE/claude-verdict.txt"
+
+      - name: Ensure a merge-base with the base branch
+        if: steps.trust.outputs.trusted == 'true'
+        # `fetch-depth: 0` does NOT give a fork PR full history. The head SHA
+        # isn't reachable from any base-repo branch, so checkout fetches just
+        # that commit and the clone stays shallow — `origin/<base>` ends up with
+        # a single commit and no common ancestor with HEAD.
+        #
+        # Measured on PR #545, the first fork PR through this gate:
+        #   git rev-parse --is-shallow-repository -> true
+        #   git diff origin/main...HEAD -> fatal: no merge base
+        # The reviewer silently fell back to `gh pr diff`, which still yields a
+        # diff but loses `git log`/`git blame` — exactly what the premise-audit
+        # instructions in the prompt below depend on. Same-repo PRs were never
+        # affected, which is why this survived until the gate admitted forks.
+        #
+        # `--unshallow` errors on an already-complete repo, hence the guard.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -uo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            echo "Shallow clone (expected on a fork PR) — unshallowing."
+            git fetch --no-tags --unshallow origin
+          else
+            echo "Clone already complete — nothing to unshallow."
+          fi
+
+          # Self-reporting check: if this ever regresses, the run says so rather
+          # than the reviewer quietly degrading to gh-pr-diff-only again.
+          if merge_base="$(git merge-base "origin/$BASE_REF" HEAD 2>&1)"; then
+            echo "Merge base with origin/$BASE_REF: $merge_base"
+          else
+            # git merge-base exits 1 with no output on unrelated histories.
+            echo "::warning::No merge base with origin/$BASE_REF (${merge_base:-unrelated histories}). The reviewer will fall back to \`gh pr diff\` and lose git log/blame for premise-audit checks."
+          fi
+
+      - name: Restore review hooks from the base branch
+        if: steps.trust.outputs.trusted == 'true'
+        # The Stop hook + its settings.json must come from the BASE branch, not the PR
+        # head. Two reasons: (1) a PR branch created before the hooks existed doesn't
+        # contain them, and the action then hard-errors on a missing `settings:` file
+        # (ENOENT) — this blocked pre-existing fork PRs; (2) a PR must not be able to
+        # neuter the gate that reviews it. github.event.pull_request.base.ref is the
+        # base branch under pull_request_target; FETCH_HEAD is its tip after the fetch.
+        # No --depth=1 on this fetch: it would re-introduce shallow grafts and undo
+        # the unshallow the previous step just performed.
+        run: |
+          git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+          rm -rf "$GITHUB_WORKSPACE/.github/workflows/claude-review-hooks"
+          git checkout FETCH_HEAD -- .github/workflows/claude-review-hooks
+
+      - name: Mint reviewer app token
+        id: app-token
+        if: steps.trust.outputs.trusted == 'true'
+        # A dedicated GitHub App whose slug contains "claude" (e.g. tbd-claude-reviewer)
+        # so the action's sticky-comment matcher recognizes its own prior comment and
+        # updates it in place instead of posting a new one every run. The matcher keys
+        # on the Claude App id OR a "Bot" login containing "claude"
+        # (create-initial.ts) — github-actions[bot] matches neither, which is why the
+        # OIDC-fallback GITHUB_TOKEN produced duplicate comments. See docs/pr-review-gate.md.
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLAUDE_REVIEWER_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_REVIEWER_APP_PRIVATE_KEY }}
+
+      - name: Run Claude Code Review
+        if: steps.trust.outputs.trusted == 'true'
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Post GitHub comments as the dedicated claude-named App (see the mint step
+          # above) so sticky-comment updating works across runs. We can't use the
+          # OIDC->Claude-App token here because that exchange 401s under
+          # pull_request_target (anthropics/claude-code-action#1017), and a plain
+          # GITHUB_TOKEN (github-actions[bot]) isn't recognized by the sticky matcher.
+          github_token: ${{ steps.app-token.outputs.token }}
+          show_full_output: true
+          use_sticky_comment: true
+          track_progress: true
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          # Installs a Stop hook that refuses to end the session until a clean,
+          # machine-readable verdict (exactly APPROVE or REJECT) has been written
+          # to claude-verdict.txt. Keeps the merge gate an exact string match with
+          # no regex/intent-guessing over free-form review prose.
+          settings: ${{ github.workspace }}/.github/workflows/claude-review-hooks/settings.json
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            IMPORTANT: The repository is checked out locally at the PR's head commit WITH FULL GIT HISTORY (all branches). Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. Get the diff from `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD` or `gh pr diff`; `git log` and `git blame` are available for history checks. Do not run `git fetch` — everything is already local. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
+
+            Additional review instructions:
+
+            Do not comment on formatting/linting/style issues. These are handled by CI.
+
+            Do not use `mcp__github_inline_comment__create_inline_comment`. Do not leave inline comments. State file path and line numbers in the primary comment.
+
+            Do not read or review changes in generated files like graphql codegen output.
+
+            Default-off flag requirement: a PR that introduces NEW autonomous or destructive behavior — anything that acts without a user gesture (background sweeps, timers, "auto-" anything), kills processes, deletes or mutates persisted state, or sends input to sessions — or that wholesale-replaces a load-bearing path (rendering, input routing, persistence) must gate that behavior behind a flag that defaults to OFF (see the CLAUDE.md section "Large or risky new behavior ships behind a default-off flag"). An ungated introduction with no justification in the PR description is High severity for autonomous or destructive behavior, Medium for a wholesale path replacement. A written justification can satisfy this (e.g. the behavior only runs on an explicit user action, or it extends behavior already behind a flag). Do not demand flags for bug fixes, small additive UI, refactors, changes to already-gated behavior, or DB schema migrations themselves (they cannot be flag-gated; the CLAUDE.md migration rules govern them) — flag sprawl is its own defect.
+
+            TUI screen-scraping is a High-severity defect. REJECT any PR that adds logic parsing captured terminal screen text (tmux capture-pane output, pane text, composer lines) to infer agent state — e.g. matching TUI glyphs like ❯, prompts, placeholder or status strings. Agent state must come from machine interfaces (Claude Code hooks, transcript JSONL, control mode, exit codes). Likewise treat as High severity any file added to the `excluded:` lists of the `no_tui_scraping_literals` or `capture_pane_allowlist` rules in .swiftlint.yml without a compelling justification in the PR description. See the CLAUDE.md section "No TUI screen-scraping".
+
+            Public repo, multi-tenant product. This repository is public and TBD is used by people across different organizations. Treat as High severity any change that checks private context into the tree — real employer, org, repo, host, account, person, or ticket names, internal URLs, machine-specific paths, or another organization's product features, roadmaps, or task descriptions — in code, docs, tests, or fixtures; the convention is `acme`/`acme-prod` placeholders. Treat as Medium severity any feature, default, hardcoded value, or doc framed around one repo, one project, or one individual's setup rather than generalizing across users and orgs. See the CLAUDE.md section "Public repo, multi-tenant product".
+
+            INVESTIGATION REQUIREMENTS for guard/safety-shaped changes. Apply this section when the PR adds or modifies a guard, veto, safety check, gate, or interceptor whose failure could lose user data or state, or let an unsafe action proceed — NOT routine logging, telemetry, or UI observers. For such changes the dangerous bug is usually not in the diff: it is a false belief about unchanged code. Verify the premises, not just the logic built on them. This is targeted verification of the load-bearing premises (typically a handful), not an exhaustive audit — keep it within a fraction of your turn budget.
+
+            1. Premise audit: extract every factual claim the PR description or design doc makes about EXISTING code — especially universally quantified ones ("all", "every", "only", "single chokepoint", "already handled", "verified"). Verify each with Grep/Read and cite file:line evidence. A false premise is a High severity finding even when the new code is internally correct. The more thorough and persuasive the PR description, the MORE its factual claims deserve verification — a well-argued writeup pre-frames the reviewer, and errors that survived the author's own careful reasoning live precisely in the premises.
+            2. Interception completeness: if the change observes an event at one point in order to cover "all" occurrences, enumerate the other producers of that event codebase-wide (flag-gated alternates, fallback paths, legacy paths, CLI vs GUI splits) and confirm each one actually crosses the instrumented point. Default-off branches are where universal claims fail.
+            3. Fail-direction analysis: enumerate every state in which the mechanism's input signal is nil, empty, stale, cleared, or reset, and classify each as fail-open (allows the guarded action) or fail-closed (blocks it). Every fail-open path needs an explicit justification in a code comment or the PR description; an unjustified fail-open path is at least Medium severity.
+            4. Guard lifecycle / proxy-signal audit: if the guard self-clears, list every cause of clearing and check that each one implies the hazard is actually gone. When condition A stands in for semantic event B ("marker advanced" for "user acted"), list every cause of A and check each implies B.
+            5. Claims-vs-tests reconciliation: for each guarantee the PR claims its tests prove ("fails safe", "cannot lose data"), confirm a test exercises the layer where that guarantee could break — a unit test restating the new logic does not prove an end-to-end claim.
+
+            Record the assumption table (claim → verified/refuted → file:line evidence) in your Phase 1 notes file. Refuted premises go through Phase 2 validation like any other finding (re-check the evidence — a misread grep is not a refutation); any premise you still judge refuted after Phase 2 must appear in the posted review as a finding. If the PR is not guard/safety-shaped, skip this section entirely — do not pad reviews of mechanical changes with it.
+
+            IMPORTANT: You are to execute in three phases. Do not write the review content to your text response during Phases 1 and 2 — save that for Phase 3. Tool calls and brief phase transitions are fine.
+
+            Phase 1: Write out your feedback and comments on the changes in a local txt file in the current working directory (not to GitHub). Use the Write tool to create the file, not shell redirection. Do not write to /tmp/.
+
+            Phase 2: Read each piece of feedback individually, and consider if they're valid. If they are not valid, do not include it in the comment to GitHub. For feedback asking for tests, consider if the test would require too much mocking to be useful, and do not suggest adding tests that would mostly test 3rd party libraries or APIs. Avoid being persnickety. Keep a count of invalid or persnickety feedback filtered out.
+
+            Phase 3: Read your filtered notes from the file, then post the formatted review using `mcp__github_comment__update_claude_comment`. This tool updates the sticky comment on the PR. Output only the review content with no phase narration or process commentary.
+            Do NOT use `gh pr comment` — it creates comments outside the sticky comment and they won't be updated on re-review.
+
+            Format:
+            - The verdict (e.g. "✅ Approve", or "🧌 Reject" with changes requested) should be up at the very top. Do not approve PRs with unaddressed Medium or High severity issues.
+            - Consider whether each item should be considered "high", "medium", or "minor" in severity.
+            - High severity should NOT be measured as high relative to other feedback, but should try to use an objective scale.
+            - Minor items should be tucked into an html <details><summary>..</summary> ... </details> section.
+            - Don't spill ink glazing the PR (Strengths and Highlights should be rarely warranted and extremely succinct).
+            - Include a count of invalid feedback not posted.
+
+            VERDICT GATE (required, machine-read): Before you finish, use the Write tool to create the file `claude-verdict.txt` in the repository root containing EXACTLY one uppercase word and nothing else — either `APPROVE` or `REJECT`. Write `REJECT` if the PR has any unaddressed High or Medium severity issue; otherwise write `APPROVE`. This single token drives a required merge gate and is compared exactly, so the file must contain no other text, punctuation, emoji, or explanation (keep all of that in the sticky comment). A stop hook will refuse to let the session end until this file contains exactly APPROVE or REJECT.
+
+            DIAGNOSTICS: At the very end of your comment, add a collapsed section:
+            <details><summary>Review diagnostics</summary>
+            List any tool calls that failed or were denied (e.g. "Write to /tmp/ blocked", "gh api denied"). If none failed, say so. This helps us tune the workflow permissions and allowedTools over time.
+            </details>
+
+            Do NOT submit a formal GitHub review (no `gh pr review`). Your outputs are the sticky comment via `mcp__github_comment__update_claude_comment` and the `claude-verdict.txt` file.
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+          # 80 was set after a large review (#364) exhausted its turns without
+          # writing the verdict file (which fails closed). The investigation
+          # requirements above add mandatory work on guard/safety PRs — the
+          # large-review class — so the budget carries headroom for it.
+          claude_args: |
+            --max-turns 100
+            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git merge-base:*),WebSearch,Read,Write,Glob,Grep,Task"
+
+      - name: Enforce review verdict (block merge on Reject)
+        if: steps.trust.outputs.trusted == 'true'
+        run: |
+          verdict_file="$GITHUB_WORKSPACE/claude-verdict.txt"
+          if [ ! -f "$verdict_file" ]; then
+            echo "::error::Claude review recorded no verdict file — failing closed. Re-run the review."
+            exit 1
+          fi
+          # Whitespace-trimmed exact comparison — NO regex/substring matching, so
+          # review prose can never be misread as a verdict. The Stop hook normally
+          # guarantees the file is exactly APPROVE or REJECT; because the pre-review
+          # reset deleted any PR-committed copy, a killed/timed-out session leaves no
+          # file here and this step fails closed rather than trusting stale content.
+          verdict="$(tr -d '[:space:]' < "$verdict_file")"
+          echo "Recorded verdict: '$verdict'"
+          case "$verdict" in
+            APPROVE)
+              echo "Claude approved — merge gate satisfied." ;;
+            REJECT)
+              echo "::error::Claude review requested changes. Resolve the flagged High/Medium issues and push again."
+              exit 1 ;;
+            *)
+              echo "::error::Verdict file did not contain exactly APPROVE or REJECT (got '$verdict') — failing closed."
+              exit 1 ;;
+          esac

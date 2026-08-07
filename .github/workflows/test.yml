@@ -60,6 +60,16 @@ jobs:
       - name: SwiftLint (strict)
         run: swiftlint --strict
 
+      # The fence in `scripts/test.sh` is what stands between the suite and the
+      # developer's real ~/tbd, ~/.claude and ~/.codex, and its guards were
+      # proven once by hand when they landed — which is not a regression test.
+      # This harness drives every one of them against fixture directories with
+      # a stub `swift`: no build, no real home touched, ~11 s. It runs HERE
+      # rather than in the `test` job so a weakened fence fails fast, before a
+      # two-minute build; and on macOS because the guards read BSD `stat -f`.
+      - name: Test the test fence
+        run: bash scripts/test.test.sh
+
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
@@ -78,7 +88,11 @@ jobs:
     name: Review scripts tests
     runs-on: ubuntu-latest
     # Unit tests for the claude-review-v2 bookend scripts (prepare.py /
-    # validate.py — see docs/specs/2026-08-03-pr-review-fanout-design.md §4).
+    # validate.py / render_comment.py) plus the workflow's own post/enforce
+    # shell, which a test extracts by step name and runs against a stub `gh`
+    # (docs/specs/2026-08-03-pr-review-fanout-design.md §4). That harness needs
+    # `jq` and `bash`, both preinstalled on ubuntu-latest — it skips without jq
+    # rather than testing a stubbed selector.
     # No paths filter: the suite runs in seconds, and an unconditional run can
     # never leave the check unreported on a PR that happens to touch the
     # scripts indirectly.
@@ -91,7 +105,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python3 -m pip install pytest jsonschema
+        run: python3 -m pip install pytest jsonschema pyyaml
 
       - name: Run review-script tests
         run: python3 -m pytest .github/workflows/claude-review-v2/tests/ -q
@@ -156,6 +170,16 @@ jobs:
           key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
+
+      # A restored `.build/` can come back with a dependency checkout present but
+      # its manifest missing, which fails the job at manifest planning before a
+      # single test compiles (run 30557645064, PR #554 — a docs-only diff). The
+      # stored cache entry was intact; the rerun restored the same key and
+      # passed. Probe the workspace here and re-resolve if it is damaged, so that
+      # class of red self-heals instead of costing a rerun. Rationale, and why
+      # only checkouts/ and repositories/ are discarded, in the script's header.
+      - name: Repair the restored SwiftPM workspace if it is damaged
+        run: bash scripts/repair-spm-workspace.sh
 
       # Workaround for swiftlang/swift-package-manager#7715: a cache-restored
       # `.build/` can hold a stale object archive for a first-party library
@@ -273,6 +297,37 @@ jobs:
       # that) — it is to catch a *collapse or rename* of a target that is
       # named in one of these regexes, where `--filter`/`--skip` would
       # otherwise zero-match or over-skip its way to a green run of nothing.
+      #
+      # ---------------------------------------------------------------------
+      # Why every pass goes through `scripts/test.sh` and not bare `swift test`
+      #
+      # The wrapper points `TBD_HOME`, `TBD_SOCKET_PATH` and
+      # `TBD_CLAUDE_HOST_HOME` at a scratch dir for the run, points `HOME` and
+      # `CFFIXED_USER_HOME` at a second one whose `tbd` and `.claude` entries
+      # are mode 000 (so code that assembles a path out of the home directory
+      # rather than asking fails with EACCES at its own call site) and, as a
+      # backstop, fingerprints the real `~/tbd` and `~/.claude` on either side
+      # and fails the step if anything appeared or vanished. `CLAUDE.md` has said
+      # "Tests must not touch ~/tbd" all along, and the suite quietly violated
+      # it anyway: 18k orphan profile dirs and ~2.9k fake worktrees accumulated
+      # on a developer box before anyone noticed. No per-test assertion could
+      # have caught it — the invariant belongs to the whole run.
+      #
+      # THIS JOB IS THE ONLY PLACE THE FINGERPRINT RUNS, and every step below
+      # asks for it with an explicit `--fingerprint`. The wrapper's default is
+      # gated on `$CI`, which a runner sets — the explicit flag says so in the
+      # workflow and survives a runner that does not. The pre-push hook
+      # passes `--no-fingerprint` and keeps the fence alone, because a developer
+      # box writes to `~/tbd` and `~/.claude` for reasons that have nothing to
+      # do with the run under way — a live daemon creating worktree/scratch/
+      # notes/channel entries, a sibling worktree's `restart.sh` dropping a
+      # `state.db.pre-migration.<ts>`, Claude Code writing its own store — and a
+      # guard that reddens for reasons the pusher cannot fix gets disabled. A
+      # runner has none of that, which is what makes a red here always real.
+      #
+      # A CI runner has no `~/tbd` to pollute, so the guard reads as a no-op
+      # there. It is not: an empty `~/tbd` makes it MORE sensitive, because the
+      # fingerprint goes from "absent" to a listing on the first stray write.
       # ---------------------------------------------------------------------
       - name: Test (fast parallel pass 1/2 — TBDDaemonTests)
         # A tier-1 test can still hang indefinitely: an over-long TestClock
@@ -290,8 +345,13 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          swift test --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1)
+          scripts/test.sh --fingerprint --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
+          # with no summary line makes the first `grep` exit 1 and a failing
+          # command substitution in an assignment kills the shell — so the
+          # truncated-run case this floor exists for would die before ever
+          # reaching the `::error::` below.
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1 || true)
           # `swift test --filter/--skip` exits GREEN on zero matches, so a bad
           # regex or a renamed target would silently run nothing and pass.
           if [ -z "$count" ] || [ "$count" -lt 1800 ]; then
@@ -319,8 +379,13 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          swift test --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1)
+          scripts/test.sh --fingerprint --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
+          # with no summary line makes the first `grep` exit 1 and a failing
+          # command substitution in an assignment kills the shell — so the
+          # truncated-run case this floor exists for would die before ever
+          # reaching the `::error::` below.
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1 || true)
           # `swift test --filter/--skip` exits GREEN on zero matches, so an
           # over-broad skip or a renamed target would silently run nothing and
           # pass.
@@ -344,8 +409,13 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          swift test --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1)
+          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
+          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
+          # with no summary line makes the first `grep` exit 1 and a failing
+          # command substitution in an assignment kills the shell — so the
+          # truncated-run case this floor exists for would die before ever
+          # reaching the `::error::` below.
+          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1 || true)
           if [ -z "$count" ] || [ "$count" -lt 35 ]; then
             echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
             exit 1

@@ -31,24 +31,49 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
     let hostBaseDirectory: URL
 
-    public init(baseDirectory: URL? = nil, hostBaseDirectory: URL? = nil) {
+    /// The host Claude store: `TBD_CLAUDE_HOST_HOME` when set, `~/.claude`
+    /// otherwise. **The single resolution point for that override** — anything
+    /// that hand-builds `homeDirectoryForCurrentUser/.claude` escapes the fence
+    /// `scripts/test.sh` puts around the developer's real store, which is how
+    /// `LegacyHookScanner.globalSettingsPath` came to name the real
+    /// `settings.json` under the wrapper.
+    ///
+    /// - Parameter environment: the environment to read, or `nil` for the
+    ///   process's. `nil`-and-resolve-in-the-body rather than a
+    ///   `ProcessInfo.processInfo.environment` default argument: a defaulted
+    ///   cross-module computed class property is the shape behind the Xcode
+    ///   26.3 `unsafeMutableAddressor` link failure (see
+    ///   `Sources/TBDShared/HookResolver.swift`), and it would snapshot the
+    ///   whole environ even at call sites that discard the result.
+    ///
+    ///   A test asserting the *production* `~/.claude` fallback passes `[:]`
+    ///   rather than unsetting the process-global variable, which would hand
+    ///   every concurrently running suite the real host store.
+    public static func resolveHostBaseDirectory(environment: [String: String]? = nil) -> URL {
+        // Delegates to `TBDConstants.claudeHostHome(environment:)`, which is
+        // where the resolution actually lives now that `TBDApp` — which does
+        // not link `TBDDaemonLib` — needs it as well. This entry point stays as
+        // the daemon-side name every call site and doc reference already uses.
+        TBDConstants.claudeHostHome(environment: environment ?? ProcessInfo.processInfo.environment)
+    }
+
+    /// - Parameter hostEnvironment: the environment `TBD_CLAUDE_HOST_HOME` is
+    ///   read from when `hostBaseDirectory` is not injected, or `nil` for the
+    ///   process's. Named for what it governs: `baseDirectory`'s own fallback
+    ///   still reads `TBD_HOME` through `TBDConstants.configDir`, which this
+    ///   parameter does not reach. Read below the `hostBaseDirectory` guard, so
+    ///   an explicit injection never pays for an environ snapshot it discards.
+    public init(baseDirectory: URL? = nil,
+                hostBaseDirectory: URL? = nil,
+                hostEnvironment: [String: String]? = nil) {
         // Resolve inside the init to keep the `TBDConstants.configDir` access
         // out of the caller's compilation context — see HookResolver for the
         // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
         self.baseDirectory = baseDirectory
             ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
 
-        // Honor TBD_CLAUDE_HOST_HOME env var (e.g., for test isolation, matching
-        // the TBD_HOME pattern used by TBDConstants). Falls back to ~/.claude/
-        // in production.
-        if let override = hostBaseDirectory {
-            self.hostBaseDirectory = override
-        } else if let envOverride = ProcessInfo.processInfo.environment["TBD_CLAUDE_HOST_HOME"], !envOverride.isEmpty {
-            self.hostBaseDirectory = URL(fileURLWithPath: envOverride, isDirectory: true)
-        } else {
-            self.hostBaseDirectory = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude", isDirectory: true)
-        }
+        self.hostBaseDirectory = hostBaseDirectory
+            ?? Self.resolveHostBaseDirectory(environment: hostEnvironment)
     }
 
     public func profileDirectory(forProfileID profileID: UUID) -> URL {
@@ -465,15 +490,20 @@ extension ClaudeProfileConfigDirManager {
     ///
     /// Filesystem errors are logged and swallowed — failing to write
     /// the config dir shouldn't break terminal spawn.
-    static func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
+    ///
+    /// Deliberately an **instance** method with no static twin. A static
+    /// version used to exist and silently built its own manager on
+    /// `TBDConstants.configDir`, which resolves `TBD_HOME` on every access —
+    /// so every caller that had carefully injected a temp-dir manager still
+    /// wrote into the real `~/tbd/profiles`. There is one way to ask, and it
+    /// goes through the manager you hold.
+    func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
         guard let profile else { return nil }
-
-        let manager = ClaudeProfileConfigDirManager()
 
         switch profile.kind {
         case .oauth:
             do {
-                let url = try manager.ensureOAuthDir(forProfileID: profile.profileID)
+                let url = try ensureOAuthDir(forProfileID: profile.profileID)
                 return url.path
             } catch {
                 logger.warning("failed to ensure oauth config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -486,7 +516,7 @@ extension ClaudeProfileConfigDirManager {
                 return nil
             }
             do {
-                let url = try manager.ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
+                let url = try ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
                 return url.path
             } catch {
                 logger.warning("failed to ensure api-key config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")

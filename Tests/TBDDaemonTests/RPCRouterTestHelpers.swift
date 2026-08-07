@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Shared test fixture for all RPCRouter-* test files.
 ///
@@ -25,7 +26,8 @@ struct RPCRouterTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
     }
 }

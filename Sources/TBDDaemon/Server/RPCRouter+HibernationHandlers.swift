@@ -3,11 +3,43 @@ import TBDShared
 
 extension RPCRouter {
 
+    /// The message for a wake aimed at an unparked row whose pane disagrees.
+    /// Shared by `terminal.wake` and `terminal.resume` so the two verbs cannot
+    /// describe the same state differently. Always names
+    /// `tbd terminal conversation`, which still reads a dead session's messages
+    /// — context can be rebuilt before the terminal is closed.
+    static func unparkedWakeMessage(
+        paneID: String, detail: UnparkedPaneDisagreement
+    ) -> String {
+        let cause: String
+        switch detail {
+        case .paneMissing:
+            cause = "its tmux pane (\(paneID)) is gone"
+        case .processExited:
+            cause = "its tmux pane (\(paneID)) is still there but its process has exited"
+        case .paneBelongsToAnotherTerminal(let actual):
+            cause = "its pane coordinate (\(paneID)) now points at a different terminal (\(actual))"
+        }
+        return """
+            TBD's row says this terminal is awake, but \(cause) — so nothing was woken and any \
+            prompt was NOT delivered. Its conversation is still readable with `tbd terminal \
+            conversation <id>`, so context can be rebuilt before closing it.
+            """
+    }
+
     /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
     /// process, keep the tmux window). Honors the running/permission rails.
-    func handleTerminalHibernate(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalHibernate(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalHibernateParams.self, from: paramsData)
+        let actuationID = try await beginActuation(
+            .terminalHibernate, actor: actor,
+            target: await resolvedTerminalTarget(params.terminalID))
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
+        await finishActuation(
+            actuationID, ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         switch result {
         case .ok:
             // Hibernating cancels any pending auto-resume inside the
@@ -26,13 +58,22 @@ extension RPCRouter {
 
     /// `terminal.wake` — respawn `claude --resume <id>` in the hibernated
     /// terminal's kept-alive window. Idempotent.
-    func handleTerminalWake(_ paramsData: Data) async throws -> RPCResponse {
+    func handleTerminalWake(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalWakeParams.self, from: paramsData)
+        let actuationID = try await beginActuation(
+            .terminalWake, actor: actor,
+            target: await resolvedTerminalTarget(params.terminalID),
+            prompt: params.prompt)
         let result = await hibernationCoordinator.wake(
             terminalID: params.terminalID, cols: params.cols, rows: params.rows,
             allowDefaultProfileFallback: params.fallbackToDefaultProfile ?? false,
             initialPrompt: params.prompt
         )
+        await finishActuation(
+            actuationID, ActuationOutcome.classify(result),
+            error: ActuationOutcome.detail(result))
         switch result {
         case .ok:
             return try RPCResponse(result: TerminalWakeResult(woken: true))
@@ -41,6 +82,14 @@ extension RPCRouter {
             // autonomous callers know their `prompt` was NOT delivered (the
             // terminal is live; pasting into it now could hit a human session).
             return try RPCResponse(result: TerminalWakeResult(woken: false))
+        case .sessionGone(let paneID, let detail):
+            // NOT a benign no-op: the row claims awake but its pane disagrees,
+            // so there was nothing live to deliver `prompt` to. An error (not
+            // `woken: false`) is what lets an autonomous caller tell this apart
+            // from "already awake and healthy".
+            return RPCResponse(
+                error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
+                code: RPCErrorCode.terminalSessionGone.rawValue)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:

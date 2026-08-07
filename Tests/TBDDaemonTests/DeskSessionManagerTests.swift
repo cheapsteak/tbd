@@ -70,6 +70,36 @@ private final class PaneCommands: @unchecked Sendable {
     }
 }
 
+/// What each pane answers when asked who it belongs to. Empty by default, so
+/// every pane reports `.live(terminalID: nil)` — alive, carrying no identity —
+/// which is the branch that proceeds, leaving fixtures that predate the
+/// consultation behaving exactly as they did.
+private final class PaneIdentities: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answers: [String: PaneSendTarget] = [:]
+    private var unreachable: Set<String> = []
+
+    func set(_ target: PaneSendTarget, for paneID: String) {
+        lock.lock(); defer { lock.unlock() }
+        answers[paneID] = target
+    }
+
+    /// Make the consultation itself fail for a pane — a wedged tmux, not an
+    /// answer about the pane.
+    func markUnreachable(_ paneID: String) {
+        lock.lock(); defer { lock.unlock() }
+        unreachable.insert(paneID)
+    }
+
+    func answer(for paneID: String) throws -> PaneSendTarget {
+        lock.lock(); defer { lock.unlock() }
+        if unreachable.contains(paneID) {
+            throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(15))
+        }
+        return answers[paneID] ?? .live(terminalID: nil)
+    }
+}
+
 private final class SpawnFailureSwitch: @unchecked Sendable {
     private let lock = NSLock()
     private var failing = false
@@ -102,8 +132,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -117,7 +147,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // First call creates
@@ -144,8 +175,8 @@ extension TBDHomeSerialized {
 
             // Run twice to test directory collision handling
             for attempt in 1...2 {
-                setenv("TBD_HOME", tmpHome.path, 1)
-                defer { unsetenv("TBD_HOME") }
+                let priorTBDHome = setTBDHome(tmpHome.path)
+                defer { restoreTBDHome(priorTBDHome) }
 
                 let db = try TBDDatabase(inMemory: true)
                 let lifecycle = WorktreeLifecycle(
@@ -159,7 +190,8 @@ extension TBDHomeSerialized {
                     db: db,
                     lifecycle: lifecycle,
                         tmux: TmuxManager(dryRun: true),
-                    skillDir: skillDir
+                    skillDir: skillDir,
+                    actuationLog: makeTestActuationLog()
                 )
 
                 let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -175,8 +207,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -190,7 +222,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Nudge with non-existent ID should not throw
@@ -205,8 +238,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -220,7 +253,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -243,8 +277,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -258,7 +292,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let dayDesk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -279,8 +314,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -294,7 +329,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Ensure creates desk with terminal
@@ -329,8 +365,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -344,7 +380,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create a desk with a Claude terminal so nudges don't fail on missing terminal
@@ -374,8 +411,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -389,7 +426,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .nightwatch)
@@ -434,8 +472,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -449,7 +487,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -485,8 +524,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -504,7 +543,8 @@ extension TBDHomeSerialized {
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir,
-                now: clock.provider
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -547,8 +587,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -564,7 +604,8 @@ extension TBDHomeSerialized {
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir,
-                now: clock.provider
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
@@ -595,8 +636,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -612,7 +653,8 @@ extension TBDHomeSerialized {
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 skillDir: skillDir,
-                now: clock.provider
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
             )
 
             let desk = try await manager.ensureDeskSession(mode: .nightwatch)
@@ -643,8 +685,8 @@ extension TBDHomeSerialized {
                 .appendingPathComponent("tbd-desk-conc-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -657,7 +699,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: "/tmp/skill"
+                skillDir: "/tmp/skill",
+                actuationLog: makeTestActuationLog()
             )
 
             // Fire two ensures concurrently: without the FIFO gate both pass the
@@ -679,8 +722,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -694,7 +737,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create initial desk (caches ID internally)
@@ -725,8 +769,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -740,7 +784,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create a desk
@@ -779,8 +824,8 @@ extension TBDHomeSerialized {
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmpHome) }
 
-            setenv("TBD_HOME", tmpHome.path, 1)
-            defer { unsetenv("TBD_HOME") }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
 
             let db = try TBDDatabase(inMemory: true)
             let lifecycle = WorktreeLifecycle(
@@ -794,7 +839,8 @@ extension TBDHomeSerialized {
                 db: db,
                 lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
-                skillDir: skillDir
+                skillDir: skillDir,
+                actuationLog: makeTestActuationLog()
             )
 
             // Create initial desk (caches ID internally)
@@ -827,21 +873,27 @@ extension TBDHomeSerialized {
         /// Temp TBD_HOME + in-memory DB + a DeskSessionManager whose own tmux records argv
         /// and consults a mutable dead-window set. The lifecycle gets a separate dry-run
         /// tmux so desk *creation* never lands in the recorder the assertions read.
-        /// Caller owns cleanup of `home` and TBD_HOME.
+        /// Caller owns cleanup of `home` and TBD_HOME — hence `priorTBDHome` in
+        /// the tuple: restoring means putting the caller's value back, so the
+        /// fixture has to hand out what it displaced rather than let the caller
+        /// guess (guessing `unsetenv` here is what leaked the real `~/tbd`).
         private func makeDeskFixture(tag: String) throws -> (
             db: TBDDatabase, manager: DeskSessionManager,
             recorder: DeskTmuxRecorder, dead: DeadWindows,
-            commands: PaneCommands, spawnFailures: SpawnFailureSwitch, home: URL
+            commands: PaneCommands, identities: PaneIdentities,
+            spawnFailures: SpawnFailureSwitch, home: URL,
+            priorTBDHome: String?
         ) {
             let home = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-desk-\(tag)-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-            setenv("TBD_HOME", home.path, 1)
+            let priorTBDHome = setTBDHome(home.path)
 
             let db = try TBDDatabase(inMemory: true)
             let recorder = DeskTmuxRecorder()
             let dead = DeadWindows()
             let commands = PaneCommands(defaultCommand: "1.2.3")
+            let identities = PaneIdentities()
             let spawnFailures = SpawnFailureSwitch()
             let manager = DeskSessionManager(
                 db: db,
@@ -858,11 +910,15 @@ extension TBDHomeSerialized {
                     dryRun: true,
                     dryRunRecorder: { recorder.record($0) },
                     dryRunWindowIsDead: { dead.isDead($0) },
-                    dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) }
+                    dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) },
+                    dryRunPaneSendTarget: { _, paneID in try identities.answer(for: paneID) }
                 ),
-                skillDir: home.appendingPathComponent("skills/nightwatch").path
+                skillDir: home.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog()
             )
-            return (db, manager, recorder, dead, commands, spawnFailures, home)
+            return (
+                db, manager, recorder, dead, commands, identities, spawnFailures, home,
+                priorTBDHome)
         }
 
         /// The regression: `TerminalStore.list` orders createdAt ASC, so resolving the desk
@@ -873,7 +929,7 @@ extension TBDHomeSerialized {
         @Test("nudgeDeskSession targets the newest Claude terminal, not the oldest")
         func testNudgeTargetsNewestClaudeTerminal() async throws {
             let f = try makeDeskFixture(tag: "nudge-newest")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -907,7 +963,7 @@ extension TBDHomeSerialized {
         @Test("nudgeDeskSession skips a newer terminal whose tmux window is gone")
         func testNudgeSkipsStaleTerminal() async throws {
             let f = try makeDeskFixture(tag: "nudge-stale")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -933,7 +989,7 @@ extension TBDHomeSerialized {
         @Test("a nudge with no live terminal sends nothing and does not start the cooldown")
         func testFailedNudgeDoesNotStartCooldown() async throws {
             let f = try makeDeskFixture(tag: "nudge-cooldown")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -964,7 +1020,7 @@ extension TBDHomeSerialized {
         @Test("postShiftWrapUp targets the newest live terminal")
         func testWrapUpTargetsNewestLiveTerminal() async throws {
             let f = try makeDeskFixture(tag: "wrapup-live")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
@@ -988,6 +1044,156 @@ extension TBDHomeSerialized {
                 "wrap-up should still fire its completion notification")
         }
 
+        // MARK: - Pane ownership (#384 on the autonomous rails)
+
+        /// The hazard the window/command guards cannot see. A recycled pane id
+        /// resolves to a live window running a live Claude — both existing
+        /// checks pass — but the pane belongs to somebody else's session, and
+        /// what this rail pastes is a judge prompt an agent will read and act
+        /// on. Spawn recovery is switched off so "nothing was pasted" means the
+        /// stranger got nothing, not that a replacement absorbed the nudge.
+        @Test("a pane owned by another terminal is never nudged")
+        func testNudgeSkipsPaneOwnedByAnotherTerminal() async throws {
+            let f = try makeDeskFixture(tag: "nudge-stranger")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Same pane id, different owner — tmux recycled it under the row.
+            f.identities.set(.live(terminalID: UUID().uuidString), for: claude.tmuxPaneID)
+            f.spawnFailures.setFailing(true)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets.isEmpty, "a stranger's pane must receive nothing, got \(targets)")
+        }
+
+        /// The branch that matters most: absence is not disagreement. A pane
+        /// spawned before TBD stamped identities answers with none, and must be
+        /// treated exactly as it was before the consultation existed — refusing
+        /// on nothing would turn every pre-stamp desk into a silent night.
+        @Test("a pane that claims no identity is still nudged")
+        func testNudgeStillReachesPaneWithNoIdentity() async throws {
+            let f = try makeDeskFixture(tag: "nudge-unstamped")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            f.identities.set(.live(terminalID: nil), for: claude.tmuxPaneID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)) == [claude.tmuxPaneID],
+                "an unstamped pane must be nudged exactly as before")
+        }
+
+        @Test("a pane that names its own terminal is nudged")
+        func testNudgeReachesPaneThatNamesItsOwnTerminal() async throws {
+            let f = try makeDeskFixture(tag: "nudge-owned")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            f.identities.set(.live(terminalID: claude.id.uuidString), for: claude.tmuxPaneID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)) == [claude.tmuxPaneID],
+                "a pane that agrees it is this terminal must be nudged")
+        }
+
+        /// A consultation that cannot be RUN at all is not an answer about the
+        /// pane. The candidate is dropped, matching how the sibling
+        /// `paneCurrentCommand` check already treats a wedged server (`try?` →
+        /// skip). Skipping costs one tick; pasting into a pane nobody could
+        /// look at is the thing the check exists to stop.
+        @Test("a pane whose identity cannot be read is not nudged")
+        func testNudgeSkipsPaneWhoseIdentityCannotBeRead() async throws {
+            let f = try makeDeskFixture(tag: "nudge-wedged")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            f.identities.markUnreachable(claude.tmuxPaneID)
+            f.spawnFailures.setFailing(true)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets.isEmpty, "an unverifiable pane must receive nothing, got \(targets)")
+        }
+
+        /// `postShiftWrapUp` reaches the same candidate list on the same timer,
+        /// so it inherits the same exclusion — and its completion notification
+        /// must not fire for a shift summary that was never posted.
+        @Test("a pane owned by another terminal gets no wrap-up prompt")
+        func testWrapUpSkipsPaneOwnedByAnotherTerminal() async throws {
+            let f = try makeDeskFixture(tag: "wrapup-stranger")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            f.identities.set(.live(terminalID: UUID().uuidString), for: claude.tmuxPaneID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.postShiftWrapUp(worktreeID: desk.id)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets.isEmpty, "a stranger's pane must receive no wrap-up, got \(targets)")
+
+            let notifications = try await f.db.notifications.unread(worktreeID: desk.id)
+            #expect(
+                !notifications.contains(where: { $0.type == .taskComplete }),
+                "no wrap-up was posted, so nothing should announce that one was")
+        }
+
+        /// Dropping a stranger makes the lease logic *more* correct rather than
+        /// less. Two live-looking rows with no lease are ambiguous and fail
+        /// closed — but one of them is a recycled pane id, not a rival judge.
+        /// Excluding it leaves exactly one real candidate, so the desk takes a
+        /// lease and gets nudged instead of stalling on a phantom contention.
+        @Test("a stranger's pane is not a rival judge candidate")
+        func testStrangerPaneDoesNotCreateJudgeContention() async throws {
+            let f = try makeDeskFixture(tag: "judge-stranger")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // A newer row whose pane id has since been recycled to someone else.
+            _ = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+                label: TerminalLabel.claudeCode)
+            f.identities.set(.live(terminalID: UUID().uuidString), for: "%9")
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            #expect(
+                Array(f.recorder.pastedPanes.dropFirst(before)) == [claude.tmuxPaneID],
+                "the one real candidate must be nudged, and the stranger left alone")
+            let lease = try await f.db.watchDeskLeases.status(worktreeID: desk.id)
+            #expect(lease?.terminalID == claude.id, "the lease must name the real candidate")
+        }
+
         @Test("agent command matching distinguishes Claude, Codex, and a fallen-back shell")
         func agentCommandMatching() {
             #expect(DeskSessionManager.agentCommand("1.2.3", matches: .claude))
@@ -1002,10 +1208,10 @@ extension TBDHomeSerialized {
         func codexDeskCreateAndNudge() async throws {
             let f = try makeDeskFixture(tag: "codex-create")
             let codexHome = f.home.appendingPathComponent("codex-home", isDirectory: true)
-            setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+            let priorCodexHome = setCodexTestHome(codexHome.path)
             defer {
-                unsetenv("TBD_TEST_CODEX_HOME")
-                unsetenv("TBD_HOME")
+                restoreCodexTestHome(priorCodexHome)
+                restoreTBDHome(f.priorTBDHome)
                 try? FileManager.default.removeItem(at: f.home)
             }
             try await f.db.config.setPrimaryAgentPreference(.codex)
@@ -1027,10 +1233,10 @@ extension TBDHomeSerialized {
         func codexShellFallbackRecoversBeforeNudge() async throws {
             let f = try makeDeskFixture(tag: "codex-retry")
             let codexHome = f.home.appendingPathComponent("codex-home", isDirectory: true)
-            setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+            let priorCodexHome = setCodexTestHome(codexHome.path)
             defer {
-                unsetenv("TBD_TEST_CODEX_HOME")
-                unsetenv("TBD_HOME")
+                restoreCodexTestHome(priorCodexHome)
+                restoreTBDHome(f.priorTBDHome)
                 try? FileManager.default.removeItem(at: f.home)
             }
             try await f.db.config.setPrimaryAgentPreference(.codex)
@@ -1059,7 +1265,7 @@ extension TBDHomeSerialized {
         @Test("two live unowned judge candidates fail closed and notify once")
         func twoLiveCandidatesFailClosed() async throws {
             let f = try makeDeskFixture(tag: "judge-contention")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
             _ = try await f.db.terminals.create(
@@ -1078,7 +1284,7 @@ extension TBDHomeSerialized {
         @Test("successor spawned before transfer stays read-only and predecessor remains judge")
         func spawnBeforeTransferKeepsPredecessor() async throws {
             let f = try makeDeskFixture(tag: "judge-half-handoff")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
@@ -1099,7 +1305,7 @@ extension TBDHomeSerialized {
                     dryRunRecorder: { f.recorder.record($0) },
                     dryRunWindowIsDead: { f.dead.isDead($0) },
                     dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
-                skillDir: f.home.appendingPathComponent("skills/nightwatch").path)
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path, actuationLog: makeTestActuationLog())
             _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
             let before = f.recorder.pastedPanes.count
             await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
@@ -1116,7 +1322,7 @@ extension TBDHomeSerialized {
         @Test("dead lease owner is fenced and the sole live successor takes a higher generation")
         func deadOwnerRecovery() async throws {
             let f = try makeDeskFixture(tag: "judge-owner-loss")
-            defer { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: f.home) }
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
 
             let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
@@ -1137,7 +1343,7 @@ extension TBDHomeSerialized {
                     dryRunRecorder: { f.recorder.record($0) },
                     dryRunWindowIsDead: { f.dead.isDead($0) },
                     dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
-                skillDir: f.home.appendingPathComponent("skills/nightwatch").path)
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path, actuationLog: makeTestActuationLog())
             _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
             await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
 

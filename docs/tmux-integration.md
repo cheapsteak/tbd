@@ -148,21 +148,61 @@ This is the key feature that makes embedding work — multiple viewers can look 
 
 ## Known issues
 
-### `terminal send` silently no-ops on dead panes
+### A pane can be alive but no longer running an agent
 
-`tbd terminal send --terminal <id> --text "..." --submit` reports **"Text sent"**
-even when the target tmux pane is dead (`pane_dead=1`). The text goes nowhere and
-the caller gets no failure signal. During a 2026-07-01 multi-session rescue this
-masked five dead Claude sessions — every nudge "succeeded" while none delivered.
-
-Related trap: a pane can be alive (`pane_dead=0`) after its Claude process exits,
-leaving a bare `zsh` prompt — `send` then types into a shell, not a session.
-Ground truth today requires raw tmux:
+A pane can be alive (`pane_dead=0`) after its Claude process exits, leaving a
+bare `zsh` prompt — `terminal send` then types into a shell, not a session, and
+that is a real send into a real pane, so nothing refuses it. Ground truth still
+requires raw tmux:
 
 ```sh
 tmux -L <server> list-panes -a -F '#{pane_id} dead=#{pane_dead} cmd=#{pane_current_command}'
 ```
 
-Suggested fix: check `#{pane_dead}` before sending and exit non-zero with a
-respawn hint when dead; surface `pane_current_command` in `terminal list`/`output`
-so callers can tell "Claude running" from "shell prompt" without raw tmux.
+Worth doing: surface `pane_current_command` in `terminal list` / `output` so
+callers can tell "Claude running" from "shell prompt" without raw tmux.
+
+The two neighbouring failures are fixed. `terminal.send` consults its target
+before typing (one `list-panes` reading `#{pane_id}`, `#{pane_dead}`, the
+`@tbd_terminal_id` pane option and `#{pane_start_command}`) and returns an error
+rather than reporting success when the pane is gone, when the pane's process has
+exited, or when the pane answers with a different terminal's id than the caller
+named. `#{pane_id}` is in that list because `list-panes -t %N` answers for every
+pane in `%N`'s **window** — `%N` only picks the window — so in a hand-split
+window the send has to select its own pane's line rather than the first one.
+`send-keys` into a `remain-on-exit` dead pane exits **0**, so tmux's own status
+was never the signal; and pane ids are reused, so a stale DB coordinate used to
+type into a live stranger (issue #384). Refusal requires *positive*
+disagreement — a pane carrying no identity is sent to as before.
+
+### `terminal wake` answered the same question without asking
+
+`terminal.wake` decided "is there anything to wake?" from the database's parked
+flags alone, and answered "already awake (no-op)" whenever they were clear.
+That is a claim about a live session made without consulting tmux. Measured on
+a live fleet, **34 of 49** rows the database called awake had no pane. Because
+a wake no-op never delivers its `--prompt`, an autonomous caller got neither a
+wake nor an error.
+
+Wake now asks the same question `terminal.send` asks, through the same
+`paneSendTarget` probe, and reports what it finds:
+
+- **`.missing` / `.dead`** — no live session behind the row. Wake returns an
+  error naming the state instead of a successful no-op, so a caller can tell a
+  benign "already awake" from a terminal that needs recovery.
+- **`.live` answering a different terminal's id** — the row's pane coordinate
+  has gone stale and now points at a stranger's pane (#384). Also an error;
+  wake must not treat someone else's live pane as evidence that this session is
+  healthy.
+- **`.live` with a matching id, or none at all** — the benign no-op, unchanged.
+  As with send, refusal requires *positive* disagreement.
+- **The probe threw** — unchanged benign no-op. A tmux call that merely failed
+  proves nothing, and tmux calls fail spuriously exactly when the machine is
+  loaded enough for the session to be alive.
+
+**Wake reports here; it does not repair.** Respawning a row the database calls
+awake would make tmux authoritative over the parked flag, and one false-negative
+probe would then destroy a live session's in-flight work. Recovery stays the
+parked-row path and the explicit `terminal.recreateWindow` RPC. Reusing send's
+probe rather than adding a second one is deliberate: two liveness primitives
+would drift, and this is the one that already carries pane identity.

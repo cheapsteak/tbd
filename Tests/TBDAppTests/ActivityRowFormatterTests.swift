@@ -197,28 +197,84 @@ struct ActivityRowFormatterTests {
         #expect(ActivityRowFormatter.injectedSize(text: "", truncatedTo: 1_000_000_000) == "1.0G chars")
     }
 
-    @Test("Task notification → clock icon, 'Background · <summary>' title, status badge")
+    /// Tier 1. Background-task rows read as one gray sentence: no icon, no
+    /// "completed" capsule, no trailing timestamp — the same quieting the
+    /// activity-group summary row got.
+    @Test("Task notification: no icon, one .secondary sentence, no badge, no timestamp")
     func taskNotification() throws {
         let node = TranscriptRenderNode.makeSystemReminder(
             id: "t1", kind: .taskNotification,
-            text: "<task-notification>\n<status>completed</status>\n<summary>Agent \"X\" came to rest</summary>\n</task-notification>")
+            text: "<task-notification>\n<status>completed</status>\n<summary>Agent \"X\" finished</summary>\n</task-notification>",
+            timestamp: Date(timeIntervalSinceReferenceDate: 800_000_000))
         let p = try #require(ActivityRowFormatter.presentation(for: node))
-        #expect(p.iconSystemName == "clock.arrow.circlepath")
-        #expect(titleText(p).contains("Background"))
-        #expect(titleText(p).contains("Agent \"X\" came to rest"))
-        #expect(p.badges == [ActivityRowBadge(text: "completed", kind: .neutral)])
+        #expect(p.iconSystemName == nil)
+        #expect(p.titleSegments == [
+            ActivityRowSegment(text: "Background agent \"X\" finished", style: .secondary)
+        ])
+        #expect(p.badges.isEmpty)
+        #expect(p.timestamp == nil)
+        #expect(p.isError == false)
         #expect(p.openTargetID == "t1")
         #expect(p.titleTruncation == .byTruncatingTail)
     }
 
-    @Test("Task notification with no <summary> → falls back to status text")
-    func taskNotificationFallbackToStatus() throws {
+    /// The timestamp left the visible row but not the record (bubble precedent).
+    @Test("Task notification keeps its timestamp in the accessibility label only")
+    func taskNotificationTimestampSurvivesInAccessibilityLabel() throws {
+        let ts = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "t1a", kind: .taskNotification,
+            text: "<task-notification>\n<status>completed</status>\n<summary>Agent \"X\" finished</summary>\n</task-notification>",
+            timestamp: ts)
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        let label = try #require(p.accessibilityLabel)
+        #expect(label.contains("Background agent \"X\" finished"))
+        #expect(label.contains(ts.absoluteShort))
+        // …and the visible title does NOT carry it.
+        #expect(titleText(p).contains(ts.absoluteShort) == false)
+    }
+
+    /// Only the `Agent "…"` shape takes the "Background" lead-in; every other
+    /// envelope already names itself and would stutter.
+    @Test("Task notification: self-describing summaries are used verbatim")
+    func taskNotificationNonAgentSummariesAreVerbatim() throws {
+        for summary in [
+            "Background command \"swift build\" completed (exit code 0)",
+            "Monitor \"PR checks\" stream ended",
+            "Stop hook fired",
+            "No completion record was found for background agent \"X\""
+        ] {
+            let node = TranscriptRenderNode.makeSystemReminder(
+                id: "t5", kind: .taskNotification,
+                text: "<task-notification>\n<status>completed</status>\n<summary>\(summary)</summary>\n</task-notification>")
+            let p = try #require(ActivityRowFormatter.presentation(for: node))
+            #expect(p.titleSegments == [ActivityRowSegment(text: summary, style: .secondary)])
+        }
+    }
+
+    /// A stopped/killed task says so in its own wording, so no badge is needed.
+    @Test("Task notification: a stopped task carries the outcome in the sentence")
+    func taskNotificationStopped() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "t6", kind: .taskNotification,
+            text: "<task-notification>\n<status>killed</status>\n<summary>Agent \"X\" was stopped by user</summary>\n</task-notification>")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(titleText(p) == "Background agent \"X\" was stopped by user")
+        #expect(p.badges.isEmpty)
+    }
+
+    /// A still-running task reports status-only (no `<summary>`); the row reads
+    /// as running via present participle + "…", the activity-group idiom.
+    @Test("Task notification with no <summary> → 'Background task running…', no badge")
+    func taskNotificationRunning() throws {
         let node = TranscriptRenderNode.makeSystemReminder(
             id: "t2", kind: .taskNotification,
             text: "<task-notification>\n<status>running</status>\n</task-notification>")
         let p = try #require(ActivityRowFormatter.presentation(for: node))
-        #expect(titleText(p).contains("running"))
-        #expect(p.badges == [ActivityRowBadge(text: "running", kind: .neutral)])
+        #expect(p.titleSegments == [
+            ActivityRowSegment(text: "Background task running…", style: .secondary)
+        ])
+        #expect(p.badges.isEmpty)
     }
 
     @Test("Task notification with no summary or status → 'Background task', no badge")
@@ -227,17 +283,100 @@ struct ActivityRowFormatterTests {
             id: "t3", kind: .taskNotification,
             text: "<task-notification>\n<task-id>abc</task-id>\n</task-notification>")
         let p = try #require(ActivityRowFormatter.presentation(for: node))
-        #expect(titleText(p).contains("Background task"))
+        #expect(titleText(p) == "Background task")
         #expect(p.badges.isEmpty)
     }
 
-    @Test("Task notification with failing status → error badge kind")
+    /// Quieting the row must not delete the failure signal: a failed task keeps
+    /// its red capsule (summary wording varies by task kind and a long failure
+    /// reason truncates) AND marks the presentation as an error.
+    @Test("Task notification with failing status → error badge survives")
     func taskNotificationErrorBadge() throws {
         let node = TranscriptRenderNode.makeSystemReminder(
             id: "t4", kind: .taskNotification,
-            text: "<task-notification>\n<status>failed</status>\n<summary>boom</summary>\n</task-notification>")
+            text: "<task-notification>\n<status>failed</status>\n<summary>Agent \"X\" failed: boom</summary>\n</task-notification>")
         let p = try #require(ActivityRowFormatter.presentation(for: node))
         #expect(p.badges == [ActivityRowBadge(text: "failed", kind: .error)])
+        #expect(p.isError)
+        #expect(titleText(p) == "Background agent \"X\" failed: boom")
+        #expect(p.iconSystemName == nil)
+        #expect(p.timestamp == nil)
+
+        // Same when the envelope carries a status but no summary to phrase from.
+        let bare = TranscriptRenderNode.makeSystemReminder(
+            id: "t4b", kind: .taskNotification,
+            text: "<task-notification>\n<status>failed</status>\n</task-notification>")
+        let bareP = try #require(ActivityRowFormatter.presentation(for: bare))
+        #expect(titleText(bareP) == "Background task failed")
+        #expect(bareP.badges == [ActivityRowBadge(text: "failed", kind: .error)])
+    }
+
+    // MARK: Activity group summary badges
+
+    private func groupNode(
+        errorCount: Int = 0,
+        pendingCount: Int = 0,
+        requiresResponse: Bool = false,
+        itemCount: Int = 3,
+        bucketCounts: [ActivityBucket: Int] = [.read: 1, .bash: 2]
+    ) -> TranscriptRenderNode {
+        let summary = ActivityGroupSummary(
+            id: "g1#activity-group",
+            itemCount: itemCount,
+            bucketCounts: bucketCounts,
+            errorCount: errorCount,
+            pendingCount: pendingCount,
+            requiresResponse: requiresResponse,
+            isExpanded: false
+        )
+        return TranscriptRenderNode(id: summary.id, kind: .activityGroupSummary(summary), badgeUsage: nil)
+    }
+
+    @Test("Activity group where everything succeeded carries NO badge")
+    func activityGroupSucceededHasNoBadge() throws {
+        let p = try #require(ActivityRowFormatter.presentation(for: groupNode()))
+        #expect(p.badges.isEmpty)
+        #expect(!p.isError)
+        // …and the accessibility label drops the status clause entirely.
+        #expect(p.accessibilityLabel == "Expand Read 1 file, ran 2 shell commands")
+    }
+
+    @Test("Activity group failures and questions still badge; running work does not")
+    func activityGroupAttentionBadges() throws {
+        let failed = try #require(ActivityRowFormatter.presentation(for: groupNode(errorCount: 2)))
+        #expect(failed.badges == [ActivityRowBadge(text: "2 failed", kind: .error)])
+        #expect(failed.isError)
+
+        let asking = try #require(
+            ActivityRowFormatter.presentation(for: groupNode(requiresResponse: true)))
+        #expect(asking.badges == [ActivityRowBadge(text: "needs response", kind: .error)])
+
+        // The old "active" capsule is gone: the phrase's tense carries it.
+        let pending = try #require(ActivityRowFormatter.presentation(for: groupNode(pendingCount: 1)))
+        #expect(pending.badges.isEmpty)
+        #expect(!pending.isError)
+        #expect(titleText(pending) == "Reading 1 file, running 2 shell commands…")
+        #expect(pending.accessibilityLabel == "Expand Reading 1 file, running 2 shell commands…")
+    }
+
+    @Test("Activity group title is the whole phrase, in one secondary run")
+    func activityGroupTitleIsThePhrase() throws {
+        let p = try #require(ActivityRowFormatter.presentation(
+            for: groupNode(itemCount: 2, bucketCounts: [.bash: 2])))
+        #expect(p.titleSegments == [ActivityRowSegment(text: "Ran 2 shell commands", style: .secondary)])
+    }
+
+    @Test("Activity group summary is grayed down — never the primary label color")
+    func activityGroupSummaryRecedes() throws {
+        // The summary line is chrome between assistant prose; rendering it at
+        // `.primary` (labelColor) made it compete with the prose around it.
+        // `.secondary` keeps the subheadline size — it is greyed, not shrunk.
+        for node in [groupNode(), groupNode(errorCount: 2), groupNode(pendingCount: 1)] {
+            let p = try #require(ActivityRowFormatter.presentation(for: node))
+            #expect(p.titleSegments.count == 1)
+            #expect(p.titleSegments.allSatisfy { $0.style != .primary })
+            #expect(p.titleSegments.allSatisfy { $0.style == .secondary })
+        }
     }
 
     @Test("Skill body → 'Skill' + skill-name segments")

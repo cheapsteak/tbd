@@ -17,12 +17,26 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "file": { "type": "string" },
-        "line": { "type": "integer" },
+        "file": {
+          "type": ["string", "null"],
+          "description": "File anchor, or null when the finding has none. The key stays required — the model must state the anchor — but its value may be null, for the same reason `line` may: repo-wide, convention, and architectural findings are properties of the tree rather than of one file, and a schema that rejects the null a model naturally writes would fail the gate closed on exactly the findings that most need a human."
+        },
+        "line": {
+          "type": ["integer", "null"],
+          "description": "Line anchor, or null when the finding has none. Null is accepted as well as omission: repo-wide, convention, and architectural findings have no single line, and a schema that rejects the null a model naturally writes would fail the gate closed on exactly the findings that most need a human."
+        },
         "severity": { "enum": ["HIGH", "MEDIUM", "MINOR"] },
         "title": { "type": "string" },
-        "body": { "type": "string" },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "body": {
+          "type": ["string", "null"],
+          "description": "Elaboration, or null when the finding needs none. The field is optional, so absence is already legal; null is that same absence spelled the way a model writes it, and no consumer reads it as anything but text-or-nothing."
+        },
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Self-reported confidence in 0..1, or null when the specialist has none to offer. Optional like `body`, nullable for the same reason; no script reads it, so a null costs nothing and a rejected null costs the whole run. The bounds still apply to any number given."
+        }
       },
       "required": ["id", "file", "severity", "title"],
       "additionalProperties": false

@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -37,12 +38,34 @@ import Foundation
         #expect(layout.basePath(for: repo) == "/var/tmp/custom")
     }
 
+    /// Asserted against `TBDConstants.worktreesDir`, not a hand-built
+    /// `$HOME/tbd/worktrees`. `basePath` used to build that string itself,
+    /// which meant it ignored `TBD_HOME` and wrote real worktrees into the
+    /// developer's home no matter where the run was pointed. Re-deriving the
+    /// expectation from `$HOME` here would restate the bug as the contract.
     @Test func basePathUsesSlotWhenNoOverride() {
         var repo = Repo(path: "/tmp/x", displayName: "X")
         repo.worktreeSlot = "x"
         let layout = WorktreeLayout()
+        #expect(layout.basePath(for: repo) == TBDConstants.worktreesDir.path + "/x")
+    }
+
+    /// An INTENT ANCHOR for the production config root the assertion above no
+    /// longer states: written against `TBDConstants.worktreesDir`, that one
+    /// holds under any `TBD_HOME` — including one where the whole path is
+    /// wrong.
+    ///
+    /// What it genuinely pins is the literal `tbd` component, and nothing more.
+    /// Home resolution is composed from `homeDirectoryForCurrentUser`, the same
+    /// call the implementation makes, so this cannot catch that call changing
+    /// meaning; it catches the directory being renamed or the trailing
+    /// component being dropped. The empty environment is deliberate: reading
+    /// the process's would assert the scratch `TBD_HOME` that
+    /// `scripts/test.sh` fences the run behind rather than the production shape.
+    @Test func productionConfigRootIsTbdUnderHome() {
+        let productionRoot = TBDConstants.configDir(environment: [:]).path
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        #expect(layout.basePath(for: repo) == "\(home)/tbd/worktrees/x")
+        #expect(productionRoot == home + "/tbd")
     }
 
     @Test func legacyAndCanonicalPrefixesReturnsBoth() {
@@ -57,5 +80,43 @@ import Foundation
 
     @Test func currentVersionIsOne() {
         #expect(WorktreeLayout.currentVersion == 1)
+    }
+}
+
+// Nested under TBDHomeSerialized: mutates the process-global `TBD_HOME`.
+// See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
+    @Suite("WorktreeLayout — TBD_HOME redirection")
+    struct WorktreeLayoutTBDHomeTests {
+
+        /// The containment property `scripts/test.sh` depends on: point the
+        /// run at a scratch home and fresh worktrees follow it. Without this,
+        /// a run fenced behind `TBD_HOME` still created real directories under
+        /// the developer's `~/tbd/worktrees` — ~2.9k of them, once.
+        @Test func basePathFollowsTBDHome() {
+            let scratch = FileManager.default.temporaryDirectory
+                .appendingPathComponent("tbd-layout-\(UUID().uuidString)", isDirectory: true)
+            let priorTBDHome = setTBDHome(scratch.path)
+            defer { restoreTBDHome(priorTBDHome) }
+
+            var repo = Repo(path: "/tmp/x", displayName: "X")
+            repo.worktreeSlot = "x"
+            #expect(WorktreeLayout().basePath(for: repo) == scratch.path + "/worktrees/x")
+        }
+
+        /// The override still wins over `TBD_HOME` — the two seams compose in
+        /// one order only, and a repo pinned to an explicit root must not be
+        /// dragged into the scratch home.
+        @Test func explicitWorktreeRootStillBeatsTBDHome() {
+            let scratch = FileManager.default.temporaryDirectory
+                .appendingPathComponent("tbd-layout-\(UUID().uuidString)", isDirectory: true)
+            let priorTBDHome = setTBDHome(scratch.path)
+            defer { restoreTBDHome(priorTBDHome) }
+
+            var repo = Repo(path: "/tmp/x", displayName: "X")
+            repo.worktreeSlot = "x"
+            repo.worktreeRoot = "/var/tmp/custom"
+            #expect(WorktreeLayout().basePath(for: repo) == "/var/tmp/custom")
+        }
     }
 }

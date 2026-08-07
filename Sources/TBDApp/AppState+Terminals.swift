@@ -257,12 +257,20 @@ extension AppState {
     }
 
     /// Send text to a terminal.
+    ///
+    /// The daemon now refuses a send whose pane is gone, dead, or has been
+    /// reused by a different session, so this can fail for a reason the user
+    /// can act on ("recreate the window"). `handleConnectionError` only flips
+    /// the connected flag for disconnects, which would leave such a refusal
+    /// invisible — so it is surfaced the way this file's sibling failures are,
+    /// as an error alert carrying the daemon's own message.
     func sendToTerminal(terminalID: UUID, text: String) async {
         do {
             try await daemonClient.sendToTerminal(terminalID: terminalID, text: text)
         } catch {
             logger.error("Failed to send to terminal: \(error)")
             handleConnectionError(error)
+            showAlert("Couldn't send to terminal: \(error.localizedDescription)", isError: true)
         }
     }
 

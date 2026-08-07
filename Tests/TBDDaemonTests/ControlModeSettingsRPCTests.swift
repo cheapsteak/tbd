@@ -25,7 +25,8 @@ struct ControlModeSettingsRPCTests {
                 hooks: HookResolver()
             ),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date()
+            startTime: Date(),
+            actuationLog: makeTestActuationLog()
         )
         return (router, db)
     }

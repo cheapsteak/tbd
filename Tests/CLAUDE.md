@@ -58,6 +58,94 @@ merges and you stand down, delete your own `.build` — and reclaim only your
 own, never a sibling's, because a rebuild costs them ~2 minutes and silently
 invalidates any measurement they are midway through.
 
+## Running the suite — `scripts/test.sh`, never bare `swift test`
+
+Every invocation in this file, in `test.yml` and in the pre-push hook goes
+through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
+scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
+`TBD_TEST_CODEX_HOME`. Bare `swift test` writes into the developer's real
+`~/tbd`, `~/.claude` and `~/.codex` — 18k orphan profile dirs and ~2.9k fake
+worktrees accumulated that way before anyone noticed. Read `swift test …` below
+as `scripts/test.sh …`.
+
+Those four variables only fence code that *asks* where home is. The wrapper
+also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
+`tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
+the code that assembles a path out of the home directory instead of asking: it
+gets `EACCES` at the call site, inside the failing test, with the offending path
+in the error.
+
+**So if a test fails with "You don't have permission to save the file …" on a
+path ending in `/tbd/…`, `/.claude/…` or `/.codex/…`, read it as: this code
+hand-built a home path instead of going through `TBDConstants` (for TBD's own
+dirs and, via `claudeHostHome`, the host Claude store) or `CodexHomeManager`
+(for the Codex store).** On a developer box the same line writes into the real
+store. Fix the resolution; never relax the decoy.
+
+That scratch home is itself checked before anything is chmod'd: it must be a
+real directory (never a symlink) owned by the calling uid, and it lives under
+`$TMPDIR`, which darwin makes per-user. Under `/tmp` — mode 1777 — anyone could
+pre-create the path as a symlink, and `mkdir -p` through a symlink-to-a-directory
+succeeds silently while `chmod` resolves straight through it; pointed at `$HOME`
+that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
+`~/.claude`. The decoys are re-checked *after* the run too, since code inside it
+owns them and can chmod them back.
+
+Two things the fence does *not* cover, so the existing disciplines stay
+load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
+`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
+breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
+must be reached through an injection seam such as
+`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+(`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
+`FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
+escape both variables outright and are rejected mechanically by the
+`no_passwd_home_lookup` and `no_hardcoded_users_path` SwiftLint rules — the
+second covers `Tests/TBDSharedTests` and `Tests/TBDAppTests` as well, matches
+the dash-encoded `-Users-<name>-` form Claude Code scratchpad paths use, and
+fires in comments too, because a real username in a doc comment is a leak in a
+public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
+in examples.
+
+Neither of those is the shape the leaks actually took, so a third rule covers
+it. Every one of them went through the ordinary, fence-*honouring*
+`homeDirectoryForCurrentUser` / `NSHomeDirectory()` and then appended `tbd`,
+`.claude` or `.codex` — which resolves to the real store because it never
+consults `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` / `TBD_TEST_CODEX_HOME` at all.
+`no_home_relative_store_path` fires on a home lookup followed within 80
+characters by one of those three as a whole path component, which is narrow
+enough to leave the ~20 legitimate home lookups (tilde-abbreviation for
+display, `~/Library` fallbacks, defaulted injection seams, `~/.ssh/tbd-agent.sock`)
+untouched. Three sites carry a reasoned inline suppression: `Constants.swift`
+is excluded outright as the file that *defines* the resolvers, and
+`CodexHomeManager`, `ModelProfileKeychain.legacyStorageDir` and the frozen v-24
+conductors migration name a real path deliberately. Its limit is worth knowing
+before trusting it: the home value has to be visible near the append, so a path
+built from a `home` that arrived as a parameter matches nothing. It narrows the
+shape rather than closing it.
+
+The wrapper's last layer, a before/after fingerprint of the three real
+directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
+locally and `--no-fingerprint` forces it off. The default follows the argument
+rather than contradicting it: a live daemon and sibling worktrees write to
+`~/tbd` legitimately for the whole duration of a local run, and any concurrent
+agent session starting in a new directory mints a fresh
+`~/.claude/projects/<cwd-hash>`. It is a backstop,
+not the primary guard: it compares directory *listings*, so a leak that writes
+to a fixed path — or one that cleans up after itself in a `defer` — is invisible
+to it, while the tripwire fails on the permission check every run regardless.
+Full rationale is in the wrapper's header.
+
+The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
+runs in the `lint` CI job: it drives the symlink and ownership refusals on the
+fake home, the post-run mode-000 recheck, the fingerprint's four arms and the
+shared-lock pin against fixture directories with a stub `swift`, so it takes
+~11 s, builds nothing, and touches no real store. **Every case there is
+mutation-checked** — the assertion is shown going red against a deliberately
+weakened copy of the script. If you change a guard, change its case; if you add
+one, add a case. The guards were proven once by hand when they landed, and that
+is not a regression test.
+
 ## Test tiers
 
 Three tiers, defined by what a test may touch: tier 1 (deterministic,
@@ -324,6 +412,86 @@ Four rules. Each traces to a real flake — provenance kept so the rule sticks.
    tee'd log are unaffected — the `↳` line is present there.)
 
 Full rationale: `docs/specs/2026-07-24-test-hardening-design.md` §6.
+
+## `@MainActor` tests: suspend to drain, never pump
+
+A `@MainActor` test body **is** a block executing on the serial main queue, and in
+this test process that queue is drained by libdispatch's own main-thread drain,
+not by CFRunLoop. So for as long as the body runs synchronously, nothing else on
+that queue runs — including the deferred work the body is trying to observe.
+
+**Never spin a nested run loop to wait for something.** A nested
+`RunLoop.current.run(until:)` cannot re-enter the main queue, so it drains none
+of it. Three things were measured here — each against a loop kept alive by an
+attached timer, so it genuinely spun for its full duration rather than returning
+early — and all three hold both bare and after `NSApplication.shared` exists: a
+block enqueued with `DispatchQueue.main.async` immediately before a 0.3 s nested
+run loop had **still not run** when the loop returned; a suspended `@MainActor`
+task was **not** resumed by it; and neither was a task parked on a continuation
+resumed from a background queue — the shape a test awaiting a bounded-poll
+helper has.
+
+**Suspending is the only thing that returns the queue.** `await Task.yield()`
+hands the main actor back, the queued block runs, and only then does the
+continuation resume — so the test observes the effect it came to assert.
+
+Two shapes, and they are not interchangeable.
+`TableTranscriptHarness.drainMainQueue()` is the minimal one — a few bare
+`Task.yield()`s, no condition and no sleep. That is enough when the work is
+already on the queue and handing it back is all that was missing, but it checks
+nothing and so **carries no failure signal**: if the work needs longer than the
+yields it gets, the test proceeds as though it arrived. Use it only where the
+work is certainly enqueued. When you are waiting on something that may never
+arrive — a decode, a file read — poll instead (assertion-hygiene rule 3 above):
+`Task.sleep` between checks of a done condition, against an iteration cap, so a
+no-show fails an assertion rather than passing quietly.
+`TranscriptImageAttachmentTests.pump(_:until:)` is that shape.
+
+This does not contradict the warning under "Clock and date seams" below that
+spinning `Task.yield()` **does not converge**. The two describe opposite
+situations. There, the waiter needs *scheduling progress somewhere else* before
+it can proceed, and yielding does not produce it — that section owns the
+queueing mechanics and the measurement behind them. Here the work is already
+enqueued on the queue this body is holding, so releasing that queue is the
+entire remedy, and the surrounding loop exists only to bound how long you wait
+for a decode that may never arrive. **Yield to release something you hold;
+never to hurry something you don't.**
+
+**The failure shape is why this rule is written down.** The deferred work does
+not vanish; it runs once the body ends, inside whatever test is running by then.
+So the offending test **passes in isolation** and reds a *sibling* — the reported
+failure names innocent code. Shared process-wide state makes it concrete: a
+block that repopulates `TranscriptImageService.shared` after another test called
+`clearCaches()` corrupts that test, not its own. **`.serialized` does not help**,
+because it orders test *bodies* and this work escaped one.
+
+**What a nested run loop legitimately does** is run-loop-scheduled work only:
+`NSTimer`, `CFRunLoopSource`, AppKit display and layout. Driving those from a
+synchronous body is its one honest use, and the two `pump()` helpers in
+`Tests/TBDAppTests` exist for it. It is never a synchronization primitive for
+`DispatchQueue.main.async` or Swift concurrency — if a helper's docstring claims
+to "drain" either, the claim is false.
+
+**And it can be a silent no-op.** `run(until:)` returns immediately when no
+input source or timer is attached to the loop — measured 0.000 s bare against
+0.321 s once a timer was added. A pump that appears to be doing something may be
+doing nothing at all, at either end of the range.
+
+The compiler already closes the worst half. `NSRunLoop.h` annotates every
+spinning method — `run`, `run(until:)`, `run(_:before:)`,
+`acceptInput(for:before:)` — plus the `current` property itself with
+`NS_SWIFT_UNAVAILABLE_FROM_ASYNC`; `main` is deliberately not annotated, so the
+methods are the enforcement point and `RunLoop.main.run(until:)` is refused
+just the same. A nested loop can therefore only appear in a synchronous body or
+helper — exactly the context that can never suspend.
+**Reaching for one from an `async` test and finding it won't compile is the
+signal to yield, not to hoist the spin into a sync helper.**
+
+There is no lint rule for this, deliberately, and for the same reason rule 4
+above has none: nothing mechanical can tell "drive AppKit layout" from "wait for
+a callback" at a `RunLoop.run` call site. A rule banning the syntax would fire
+on both, would start life fully suppressed against the legitimate sites, and
+would be one people disable.
 
 ## Clock and date seams
 

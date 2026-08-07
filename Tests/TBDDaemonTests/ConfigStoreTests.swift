@@ -191,6 +191,29 @@ struct ConfigStoreTests {
         #expect(cfg.hibernateInputVetoEnabled == true)
     }
 
+    /// `delivery_verification_enabled` (v69) ships default OFF: the re-check
+    /// acts on no user gesture and its retry types into a live session.
+    @Test func deliveryVerificationDefaultsToFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.deliveryVerificationEnabled == false)
+    }
+
+    @Test func setAndGetDeliveryVerificationEnabled() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setDeliveryVerification(enabled: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.deliveryVerificationEnabled == true)
+    }
+
+    @Test func setDeliveryVerificationToFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setDeliveryVerification(enabled: true)
+        try await db.config.setDeliveryVerification(enabled: false)
+        let cfg = try await db.config.get()
+        #expect(cfg.deliveryVerificationEnabled == false)
+    }
+
     @Test func setHibernateInputVetoToFalse() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setHibernateInputVeto(enabled: true)

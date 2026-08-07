@@ -6,7 +6,9 @@ Deterministic bookend that runs AFTER the model review session
 
 - schema-validates every specialist findings file and the merged review-result,
 - with `--expected-specialists`, checks that every named specialist actually
-  produced a findings file (a partial fan-out must never read as a clean run),
+  produced a VALID findings file (a partial fan-out must never read as a clean
+  run), reporting separately whether a lens produced nothing at all or produced
+  a file the schema rejected,
 - checks the disposition list COVERS every specialist finding ID (presence only —
   the disposition's judgment is never evaluated here, spec §3.4),
 - computes the verdict from the merged findings' severities (the model never
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -73,6 +76,54 @@ def missing_specialists(expected: list[str], seen: list[str]) -> list[str]:
     return [name for name in expected if name not in seen_set]
 
 
+_FINDINGS_FILENAME_RE = re.compile(r"\Afindings-(?P<name>.+)\.json\Z")
+
+
+def specialist_name_from_path(path: str) -> str | None:
+    """Derive the specialist name from a `findings-<name>.json` path.
+
+    Used only to attribute a file that FAILED schema validation: its declared
+    `specialist` field is untrustworthy (the file may not even parse), but the
+    filename is dictated by the orchestrator prompt. Returns None for a name
+    that doesn't fit the convention — the caller then reports the plainer
+    "no findings file" diagnostic rather than guessing.
+    """
+    match = _FINDINGS_FILENAME_RE.match(Path(path).name)
+    return match.group("name") if match else None
+
+
+def missing_specialist_report(missing: list[str], rejected: list[str]) -> str:
+    """Compose the fail-closed diagnostic for expected specialists that
+    contributed no VALID findings, distinguishing the two causes.
+
+    Both causes fail closed identically; only the sentence differs, and the
+    difference matters. "That review lens never ran" points an operator at an
+    orchestrator race. When the lens ran and its file was merely rejected by
+    the validator a moment earlier, that sentence is false and sends the
+    operator hunting a race that isn't there — the real cause is the schema
+    error printed just above.
+    """
+    rejected_set = set(rejected)
+    absent = [name for name in missing if name not in rejected_set]
+    invalid = [name for name in missing if name in rejected_set]
+
+    clauses = []
+    if absent:
+        clauses.append(
+            "expected specialist(s) produced no findings file: "
+            f"{', '.join(absent)} — that review lens never ran "
+            "(orchestrator may have merged before all specialists completed)"
+        )
+    if invalid:
+        clauses.append(
+            "expected specialist(s) produced a findings file that FAILED "
+            f"validation: {', '.join(invalid)} — that review lens DID run, but "
+            "its output was rejected by the schema errors above, so its "
+            "findings were discarded"
+        )
+    return "; ".join(clauses) + "; failing closed"
+
+
 def check_disposition(
     specialist_ids: list[str], disposition: list[dict]
 ) -> list[str]:
@@ -80,7 +131,7 @@ def check_disposition(
 
     Coverage check only (spec §3.4): the disposition's CONTENT — whether a drop
     or downgrade was justified — is a judgment left visible to humans in the
-    sticky comment, never judged here.
+    review comment, never judged here.
     """
     covered = {entry.get("id") for entry in disposition}
     return [finding_id for finding_id in specialist_ids if finding_id not in covered]
@@ -174,12 +225,19 @@ def main() -> int:
 
     specialist_ids: list[str] = []
     seen_specialists: list[str] = []
+    rejected_specialists: list[str] = []
     for path in specialist_paths:
         try:
             data = validate_findings_file(path)
         except SchemaValidationError as exc:
             print(f"error: {exc}", file=sys.stderr)
             failed = True
+            # Remember WHICH lens this rejected file belonged to, so the
+            # completeness diagnostic below can say "ran but was rejected"
+            # instead of the false "never ran".
+            name = specialist_name_from_path(path)
+            if name is not None:
+                rejected_specialists.append(name)
             continue
         seen_specialists.append(data["specialist"])
         specialist_ids.extend(finding["id"] for finding in data["findings"])
@@ -193,15 +251,12 @@ def main() -> int:
         ]
         missing = missing_specialists(expected, seen_specialists)
         if missing:
-            # Fail closed: a specialist with no findings file means that whole
-            # review lens never ran (e.g. the orchestrator merged before all
-            # background specialists completed) — indistinguishable from a
-            # clean run without this check.
+            # Fail closed either way: a specialist that contributed no VALID
+            # findings is indistinguishable from a clean run without this
+            # check. The message distinguishes the two causes so an operator
+            # isn't sent hunting an orchestrator race that isn't there.
             print(
-                "error: expected specialist(s) produced no findings file: "
-                f"{', '.join(missing)} — that review lens never ran "
-                "(orchestrator may have merged before all specialists "
-                "completed); failing closed",
+                f"error: {missing_specialist_report(missing, rejected_specialists)}",
                 file=sys.stderr,
             )
             failed = True

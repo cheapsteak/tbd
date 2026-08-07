@@ -54,7 +54,6 @@ enum MarkdownAttributedRenderer {
     /// own view. Code blocks, lists, blockquotes, paragraphs, and headings all
     /// stay inside prose with unchanged inline rendering. (#129)
     static func renderBlocks(_ markdown: String, theme: TranscriptTextTheme = .chatBubble) -> [MessageBlock] {
-        let document = Document(parsing: markdown, options: [])
         var visitor = AttributedStringVisitor(theme: theme)
         var blocks: [MessageBlock] = []
         var proseRun = NSMutableAttributedString()
@@ -65,13 +64,26 @@ enum MarkdownAttributedRenderer {
             proseRun = NSMutableAttributedString()
         }
 
-        for child in document.children {
-            if let table = child as? Markdown.Table {
+        // Attached-image markers are pulled out BEFORE markdown parsing: the
+        // marker is not markdown, and an image is its own laid-out block rather
+        // than a run of text. Everything between markers still goes through the
+        // same document walk, so prose, code and tables are unaffected.
+        for segment in TranscriptImageMarker.split(markdown) {
+            switch segment {
+            case .image(let attachment):
                 flushProse()
-                let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
-                if data.columnCount > 0 { blocks.append(.table(data)) }
-            } else {
-                proseRun.append(visitor.visit(child))
+                blocks.append(.image(attachment))
+            case .text(let run):
+                let document = Document(parsing: run, options: [])
+                for child in document.children {
+                    if let table = child as? Markdown.Table {
+                        flushProse()
+                        let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
+                        if data.columnCount > 0 { blocks.append(.table(data)) }
+                    } else {
+                        proseRun.append(visitor.visit(child))
+                    }
+                }
             }
         }
         flushProse()
@@ -99,13 +111,15 @@ enum MarkdownAttributedRenderer {
     }
 }
 
-/// One typed segment of a chat message: either a run of prose (rendered markdown
-/// as an `NSAttributedString`, laid out on TextKit 1) or a GFM table (its parsed
-/// cell data, rendered as a native grid view). A message is an ordered list of
+/// One typed segment of a chat message: a run of prose (rendered markdown as an
+/// `NSAttributedString`, laid out on TextKit 1), a GFM table (its parsed cell
+/// data, rendered as a native grid view), or an image the user attached (a
+/// thumbnail that reveals the file in Finder). A message is an ordered list of
 /// these, stacked vertically inside one bubble. (#129)
 enum MessageBlock {
     case prose(NSAttributedString)
     case table(TranscriptTableData)
+    case image(TranscriptImageAttachment)
 }
 
 /// Walks the swift-markdown AST and appends styled runs. Only ever instantiated

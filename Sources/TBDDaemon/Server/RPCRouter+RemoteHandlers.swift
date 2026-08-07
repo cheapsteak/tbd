@@ -83,7 +83,9 @@ extension RPCRouter {
         return try RPCResponse(result: RemoteSessionsResult(sessions: sessions))
     }
 
-    func handleRemoteCreate(_ paramsData: Data) async throws -> RPCResponse {
+    func handleRemoteCreate(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
@@ -94,6 +96,12 @@ extension RPCRouter {
         guard let paramsJSON = Self.normalizedParamsJSON(params.paramsJSON) else {
             return RPCResponse(error: "remote.create paramsJSON must be a JSON object; got: \(params.paramsJSON)")
         }
+        // The session ID is the provider's return value, so the request row
+        // carries the provider alone; the resolved ID lands with the observed
+        // rung, not here.
+        let actuationID = try await beginActuation(
+            .remoteCreate, actor: actor,
+            target: .remote(provider: params.provider))
         // ponytail: the idempotency key is handler-scoped (retry-once on
         // timeout), not persisted — the provider dedupes on it for the
         // lifetime of a single create call, and a create that outlives even
@@ -115,22 +123,35 @@ extension RPCRouter {
             } catch let error as ProviderRunError {
                 remoteHandlerLogger.error(
                     "remote.create provider=\(params.provider, privacy: .public) timed out on both the initial call and the retry")
-                return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+                let message = Self.friendlyMessage(for: error, provider: params.provider)
+                await finishActuation(actuationID, .transportFailed, error: message)
+                return RPCResponse(error: message)
             }
         }
         if result.failureClass != nil {
             let message = result.decodedError?.message ?? "create failed (exit \(result.exitCode))"
             remoteHandlerLogger.error(
                 "remote.create provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
-        let session = try result.decoded(RemoteSessionPayload.self)
+        // A provider that exits 0 and returns garbage has lied at the transport
+        // level, so its decode failure is an outcome like any other: without
+        // this the throw would leave the request row unconfirmed forever, and
+        // the record could not tell "the create failed" from "the outcome was
+        // lost". The error propagates unchanged.
+        let session = try await actuating(actuationID) {
+            try result.decoded(RemoteSessionPayload.self)
+        }
         // Adopt immediately so the sidebar shows `starting` before the next poll.
         await manager.applyUpsert(session, provider: params.provider)
+        await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: session)
     }
 
-    func handleRemoteStop(_ paramsData: Data) async throws -> RPCResponse {
+    func handleRemoteStop(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
@@ -138,27 +159,36 @@ extension RPCRouter {
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
+        let actuationID = try await beginActuation(
+            .remoteStop, actor: actor,
+            target: .remote(provider: params.provider, session: params.sessionID))
         let result: ProviderResult
         do {
             result = try await manager.invoke(
                 providerName: params.provider, verb: ["stop", params.sessionID], stdin: nil, timeout: 30)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error("remote.stop provider=\(params.provider, privacy: .public) timed out")
-            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+            let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
         }
         if result.failureClass != nil {
             let message = result.decodedError?.message ?? "stop failed (exit \(result.exitCode))"
             remoteHandlerLogger.error(
                 "remote.stop provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
         if let session = try? result.decoded(RemoteSessionPayload.self) {
             await manager.applyUpsert(session, provider: params.provider)
         }
+        await finishActuation(actuationID, .dispatched)
         return .ok()
     }
 
-    func handleRemoteSend(_ paramsData: Data) async throws -> RPCResponse {
+    func handleRemoteSend(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
@@ -166,6 +196,10 @@ extension RPCRouter {
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
+        let actuationID = try await beginActuation(
+            .remoteSend, actor: actor,
+            target: .remote(provider: params.provider, session: params.sessionID),
+            message: params.text, submit: true)
         let result: ProviderResult
         do {
             result = try await manager.invoke(
@@ -173,14 +207,18 @@ extension RPCRouter {
                 stdin: Data(params.text.utf8), timeout: 30)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error("remote.send provider=\(params.provider, privacy: .public) timed out")
-            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+            let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
         }
         if result.failureClass != nil {
             let message = result.decodedError?.message ?? "send failed (exit \(result.exitCode))"
             remoteHandlerLogger.error(
                 "remote.send provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
+        await finishActuation(actuationID, .dispatched)
         return .ok()
     }
 

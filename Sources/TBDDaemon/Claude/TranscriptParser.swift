@@ -469,7 +469,7 @@ enum TranscriptParser {
     ///
     /// The abbreviation goes through `abbreviatingWithTildeInPath`, which only
     /// matches on path-component boundaries. A substring replace would turn
-    /// `/Users/changelog-archive/x` into `~elog-archive/x` and
+    /// `/Users/melog-archive/x` into `~log-archive/x` and
     /// `/Volumes/T7/Users/me/x` into `/Volumes/T7~/x`.
     static func injectedPathSource(
         displayPath: String?, absolutePath: String?, filename: String?

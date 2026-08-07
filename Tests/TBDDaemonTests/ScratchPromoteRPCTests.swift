@@ -1,4 +1,5 @@
 import Testing
+import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -9,14 +10,14 @@ struct ScratchPromoteRPCTests {
     private func isolate() -> (URL, () -> Void) {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("tbd-promote-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        return (home, { unsetenv("TBD_HOME"); try? FileManager.default.removeItem(at: home) })
+        let priorTBDHome = setTBDHome(home.path)
+        return (home, { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) })
     }
 
     private func makeRouter(_ db: TBDDatabase) -> RPCRouter {
         RPCRouter(db: db,
                   lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-                  tmux: TmuxManager(dryRun: true), startTime: Date())
+                  tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     private func gitInitCommit(at path: String) throws {

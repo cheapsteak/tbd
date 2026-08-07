@@ -19,9 +19,9 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-create-broadcast-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         return (home, {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: home)
         })
     }
@@ -49,7 +49,8 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             db: db,
             lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
-            subscriptions: subs
+            subscriptions: subs,
+            actuationLog: makeTestActuationLog()
         )
         return (router, deltas)
     }

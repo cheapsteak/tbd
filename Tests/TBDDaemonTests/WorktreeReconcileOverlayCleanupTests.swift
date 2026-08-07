@@ -19,9 +19,9 @@ struct WorktreeReconcileOverlayCleanupTests {
         // Isolate the overlay runtime dir from the developer's ~/tbd.
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-reconcile-overlay-\(UUID().uuidString)")
-        setenv("TBD_HOME", home.path, 1)
+        let priorTBDHome = setTBDHome(home.path)
         defer {
-            unsetenv("TBD_HOME")
+            restoreTBDHome(priorTBDHome)
             try? FileManager.default.removeItem(at: home)
         }
         ClaudeHookOverlay.writeOverlay()
@@ -67,7 +67,7 @@ struct WorktreeReconcileOverlayCleanupTests {
         #expect(overlayPath != ClaudeHookOverlay.overlayPath)
         #expect(FileManager.default.fileExists(atPath: overlayPath))
 
-        try await lifecycle.reconcile(repoID: repo.id)
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
         // Worktree archived AND its per-session overlay reclaimed.
         let reloaded = try await db.worktrees.get(id: wt.id)

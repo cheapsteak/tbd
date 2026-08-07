@@ -3,6 +3,7 @@ import os
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 struct FakeTmuxSendError: Error {}
 
@@ -32,6 +33,17 @@ final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
         }
     }
     func panePID(server: String, paneID: String) async throws -> String { panePIDValue }
+    /// What the pane answers when the actuator asks who it is. Defaults to
+    /// "alive, carrying no identity" — the branch that proceeds — so every
+    /// pre-existing test behaves exactly as it did before the actuator started
+    /// consulting its target.
+    var paneTarget: PaneSendTarget = .live(terminalID: nil)
+    /// When set, the consultation itself fails to run (wedged tmux).
+    var paneTargetError: Error?
+    func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
+        if let paneTargetError { throw paneTargetError }
+        return paneTarget
+    }
     func sendKeys(server: String, paneID: String, text: String) async throws {
         queue.sync { _sends.append("text:\(text)") }
     }
@@ -96,7 +108,7 @@ struct FakeInspector: PaneProcessInspecting {
             db: db, tmux: tmux, inspector: inspector,
             readTranscript: { _ in transcript },
             transcriptModifiedAt: { _ in transcriptMtime },
-            waiter: { _ in })   // no real sleeping in unit tests
+            waiter: { _ in }, actuationLog: makeTestActuationLog())   // no real sleeping in unit tests
     }
 
     @Test func missingTerminalIsTerminalGone() async throws {
@@ -133,6 +145,69 @@ struct FakeInspector: PaneProcessInspecting {
         tmux.windowAlive = false
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
+    }
+
+    // MARK: - Pane target consultation (eligibility step 1a)
+    //
+    // The auto-resume actuator is the component issue #384 caught typing into
+    // a stranger: `windowExists` proves a window id resolves, never that the
+    // pane still belongs to this terminal. Same rule as `terminal.send` —
+    // only a POSITIVE disagreement refuses.
+
+    @Test func paneOwnedByAnotherTerminalTypesNothing() async throws {
+        tmux.paneTarget = .live(terminalID: UUID().uuidString)
+        let outcome = await makeActuator().actuate(row)
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(message.contains(terminalID.uuidString))
+        #expect(message.contains("%1"))
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func paneWithNoIdentityStillGetsTheResume() async throws {
+        // The no-regression branch: absence is not disagreement.
+        tmux.paneTarget = .live(terminalID: nil)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .sent)
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func paneIdentityMatchIsCaseInsensitiveAndSends() async throws {
+        tmux.paneTarget = .live(terminalID: terminalID.uuidString.lowercased())
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .sent)
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func vanishedPaneIsTerminalGone() async throws {
+        tmux.paneTarget = .missing
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .terminalGone)
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func deadPaneIsTerminalGone() async throws {
+        // The case tmux reports as success: `send-keys` into a remain-on-exit
+        // pane exits 0, so only the consultation can catch it.
+        tmux.paneTarget = .dead
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .terminalGone)
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func unrunnableConsultationTypesNothing() async throws {
+        tmux.paneTargetError = FakeTmuxSendError()
+        let outcome = await makeActuator().actuate(row)
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(message.contains("could not verify the target pane"))
+        #expect(tmux.sends.isEmpty)
     }
 
     @Test func newerTranscriptRecordCancels() async throws {
@@ -185,7 +260,7 @@ struct FakeInspector: PaneProcessInspecting {
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: growing,
-            transcriptModifiedAt: { _ in nil }, waiter: { _ in })
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .sent)
     }
@@ -226,7 +301,7 @@ struct FakeInspector: PaneProcessInspecting {
         let actuator = LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: flipping,
-            transcriptModifiedAt: { _ in nil }, waiter: { _ in })
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .userAlreadyContinued)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -253,7 +328,7 @@ struct FakeInspector: PaneProcessInspecting {
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in Data("{}\n".utf8) },
             transcriptModifiedAt: { _ in nil },
-            waiter: flippingWaiter)
+            waiter: flippingWaiter, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
@@ -337,7 +412,7 @@ struct FakeInspector: PaneProcessInspecting {
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in Data("{}\n".utf8) },
             transcriptModifiedAt: { _ in nil },
-            waiter: cancellingWaiter)
+            waiter: cancellingWaiter, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
@@ -395,7 +470,7 @@ struct FakeInspector: PaneProcessInspecting {
                 reads.withLock { $0 += 1 }
                 return newerRecord
             },
-            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in })
+            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued == false)
         #expect(reads.withLock { $0 } == 0)
@@ -412,7 +487,7 @@ struct FakeInspector: PaneProcessInspecting {
                 reads.withLock { $0 += 1 }
                 return newerRecord
             },
-            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in })
+            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued)
         #expect(reads.withLock { $0 } == 1)

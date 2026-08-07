@@ -46,11 +46,20 @@ struct SocketClient: Sendable {
         FileManager.default.fileExists(atPath: socketPath)
     }
 
+    /// Identity this CLI process declares on every request: the ambient
+    /// `TBD_WORKTREE_ID` / `TBD_TERMINAL_ID` the daemon itself planted when it
+    /// spawned this session, so a session cannot mistype what it never types.
+    /// `nil` outside a TBD terminal — the field is then omitted and the daemon
+    /// records the call as anonymous, which is honest rather than wrong.
+    static let callerActor: ActuationActor? = ActuationActor.sessionFromEnvironment(
+        ProcessInfo.processInfo.environment)
+
     /// Send an RPC request to the daemon and return the response.
     func send(_ request: RPCRequest) throws -> RPCResponse {
         guard isDaemonRunning else {
             throw SocketClientError.daemonNotRunning
         }
+        let request = request.stamping(actor: Self.callerActor)
 
         // Create socket
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
