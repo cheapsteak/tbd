@@ -440,7 +440,13 @@ those keys (§6). If a
 sequence turns out to have been wrong, the record shows exactly what was on the
 screen and exactly what was sent, which is the same accountability the
 three-condition test buys for the automatic path, obtained a different way.
-Sends are named-key and paced, following the rate-limit actuator's precedent.
+Sends are named-key and paced — one key at a time with a fixed pause between
+them (§13), following the rate-limit actuator's precedent, because an agent's
+TUI redraws between keystrokes and keys delivered back-to-back through the pty
+get dropped or reordered. The count of keys in one payload is bounded too
+(§13): `--keys` is a whitespace-split string, so a quoting mistake turns one
+call into a send that types for minutes into a live session, and a bounded
+refusal is cheap where an unbounded send is not undoable.
 In attended mode the desk suggests such a send instead of making it — an entry
 in the project's proposals doc (§6) showing the keys *and* the screen they aim
 at, so saying yes is not an act of faith.
@@ -657,8 +663,10 @@ carried for a hypothetical.
 One configuration column in the daemon, on or off — added by migration and
 **shipped off**, which is the house default-off-flag rule satisfied by the
 switch itself: no second flag hides behind it, and the soak is opt-in
-coverage. (The Channels delivery adapter additionally ships behind its own
-default-off flag, §12.) Settable from the app and the
+coverage. (Two §12 mechanisms carry default-off flags of their own beside
+it: the delivery-verification re-check, which the public send offers every
+caller and supervision only shares, and the Channels delivery adapter.)
+Settable from the app and the
 CLI, broadcast when it changes, surviving restart like every other daemon
 toggle. That is P0-2's one-gesture handover for the whole fleet, unchanged in
 substance: one gesture, one ledger, one account. The switch is
@@ -757,9 +765,12 @@ rather than a capability wall, and the requirements doc records that descope
 ### Acting: one public send, on the record (normative)
 
 There are no desk verbs. Acting on a session is **`tbd terminal send`** —
-the public actuation, one verb for every caller: a human's script, the wake
-program, a sweep program's continuation policy, the supervisor itself.
-Payloads, not verbs: `--text` delivers a message and submits it (also how
+the public actuation, and the same one verb for every caller of it: a
+human's script, the wake program, a sweep program's continuation policy,
+the supervisor itself.
+Payloads, not verbs: `--text` carries the message and `--submit` sends
+it — text without `--submit` is typed and left standing in the composer,
+so every delivery this design describes passes both (that pair is also how
 an agent's `AskUserQuestion` is answered, the adapter clearing a
 machine-known dialog first, §2); `--keys` sends named keys chosen after
 reading the screen; interrupt is a keys payload. Splitting text from keys
@@ -773,8 +784,12 @@ message verbatim, so a stale premise is *visible* the moment it ships
 rather than prevented at the door (P0-8). `--verify` opts into the §12
 acknowledgment machinery — confirm the payload landed, within the re-check
 deadline (§13) — implemented as a tail read of the target transcript's
-JSONL, never a full parse. Verification is opt-in because it costs a
-transcript read; supervision's conduct says to use it.
+JSONL, never a full parse. It presupposes the pair above: verification is
+refused without `--submit`, because text left standing in a composer never
+enters the conversation and so can never reach a transcript, and refused
+with `--keys`, which reaches no transcript at all (§12). Verification is
+opt-in because it costs a transcript read; supervision's conduct says to
+use it.
 
 **Every send is logged; nobody is the reporter of their own acts.** The
 daemon executes every actuation on its own surfaces, so it records each in
@@ -832,6 +847,24 @@ program's case memory skips re-briefing an untreated case and briefings
 carry TBD's act record. The removed gate stays removed: no rule matching,
 no content inspection, no posture judgment. The residual race is the
 milliseconds between check and keystroke.
+
+**Two in-daemon rails still type outside this verb, and closing that is
+known work.** The public send is the only actuation this design describes,
+but it is not yet the only compiled code that types into a session. Two
+older rails paste through tmux directly: the hosted desk's own nudges and
+shift wrap-up prompt, and the rate-limit rail's auto-continue, which types
+`continue` once a limit clears. Both write their own actuation rows, so the
+record's coverage holds for them — but neither carries the dispatch
+envelope and neither can be delivery-verified (§12), and the *absence* of a
+row's confirming outcome therefore says nothing about them either way.
+That is exactly the wrong way round. These two are unattended sends, made
+on no user gesture, into sessions nobody is watching — the shape the
+acknowledgement machinery exists for — while the sends that do carry the
+envelope usually have a human or a supervisor reading the result. Routing
+both through the same actuation the public verb performs, so the envelope
+and the observation cover them without a second implementation of either,
+is the work that closes this gap; until it lands, "every send" in this
+design means every send made through `tbd terminal send`.
 
 *What is deliberately not here.* No **`drive`** — it was send plus the
 record, and the record now rides every send, so a supervise-tier wrapper
@@ -1543,7 +1576,9 @@ account, not a wrong action. The third category is **human-authored process**.
   For re-checks, the startup replay
   surfaces acts past their deadline with no outcome, and
   the daemon performs those observations then: the envelope is durable in the
-  transcript, so a late read resolves what the timer would have (§12). Until
+  transcript, so a late read can still confirm a landing — though not its
+  absence, which a bounded read cannot establish across an unbounded
+  interval (§12). Until
   it runs, such actions render as unconfirmed by construction — the
   query-time rule, not a recovery sweep.
 
@@ -2503,9 +2538,26 @@ race itself biting; if one does, the fix joins this family (the send path
 refusing when the composer is unreachable) and stays content-blind.
 
 **Receipt is a passive machine observation; the agent cooperates in nothing.**
-Every dispatched payload opens with a one-line envelope carrying the
-actuation row's ID — `<tbd-dispatch id="a3f1" from="supervision-desk"/>` — which
-doubles as honest attribution: the receiving agent sees who is addressing it.
+A dispatched text payload bound for an agent opens with a one-line envelope carrying the
+actuation row's ID and the identity the row was attributed to —
+`<tbd-dispatch id="a3f1" from="supervisor:acme-web"/>`, then the message
+verbatim — which doubles as honest attribution: the receiving agent sees who
+is addressing it, down to `from="anonymous"` when the caller declared no
+identity. The envelope rides every text send the public verb makes to an agent,
+`--verify` or not, because a prefix that appears only sometimes is one no
+reader can rely on. Two targets get none. A keys payload carries no
+envelope: a key sequence has
+nowhere to put a line of text, and typing one ahead of an interrupt would
+itself be an intervention. And a **shell** session receives the text alone —
+`tbd terminal send` into a plain shell pane is a supported thing to do, and
+every property that makes the envelope worth having is a property of an
+agent: nothing in a shell reads the tag, no transcript records it, there is
+nothing to join back to, and a submitted line would simply be executed. The
+envelope is unconditional along the axis that matters — whether delivery is
+being verified — and conditional only on the target being something it means
+anything to. That is
+why `--verify` and `--keys` are refused together (§3) — keys reach no
+transcript, so there is no observation to be made.
 No second ID namespace exists; the row ID is the identifier, so dispatch,
 transcript receipt, and outcome join on one string. When a submitted message
 enters the conversation, the agent's own harness writes its verbatim content
@@ -2522,8 +2574,17 @@ result vocabulary below, never the tag.
 
 **The one-minute re-check performs the observation.** The timer already exists
 for P1-6 and the transcript path is recorded for each terminal, so this adds
-no machinery. During the re-check the daemon reads two machine facts: whether
-the transcript contains the envelope, and the session's current state. It
+no machinery. During the re-check the daemon reads two machine facts — whether
+the transcript contains the envelope, and the session's current state — plus
+one identity check: that the terminal still holds the conversation the
+payload was addressed to. `/clear`, `/compact` and an account swap all
+rebind a session while leaving its pane untouched, so the transport's
+identity check cannot see them, and reading on would mean judging one
+conversation by another's transcript. The transcript read is a bounded
+tail, never a parse: a cheap 64 KiB window first, and — only where the
+envelope is absent and the next word would be an accusation — a second,
+far wider 8 MiB read that must provably have covered the whole file before
+non-delivery is claimed (§13). It
 records one of four results as an outcome row referencing the act:
 
 - *Landed and acting* — delivery confirmed, session working. Done.
@@ -2536,12 +2597,45 @@ records one of four results as an outcome row referencing the act:
   indicate a structural problem with the session, and a third send without
   evidence would risk duplicate-message bugs.
 - *Undetermined* — the observation could not be made: transcript unreadable,
-  session state unknown, adapter result ambiguous. **Never retried.** Written
+  session state unknown, adapter result ambiguous, the terminal rebound to a
+  different conversation since dispatch, or the envelope simply absent from a
+  bounded read that cannot prove it covered everything written since. That
+  last case is why absence escalates before it accuses: a session can act on a
+  payload, write past the cheap window, and be idle again inside the deadline,
+  which is indistinguishable from non-delivery until a wider read settles it.
+  **Never retried.** Written
   as an outcome and an anomaly, loud in the account. Retry proceeds only from
   *not landed*, because retrying into uncertainty risks double-instructing an
   agent that did receive the first copy — and a message to an agent running
   with permissions bypassed is arbitrary instruction injection (§3), so
   delivering it twice is not a neutral event.
+
+**The machinery carries its own flag, and refuses rather than pretends.**
+The re-check acts on no user gesture and its retry types into a live
+session, so the whole path — arming the timer, the retry, and the startup
+replay below — stands behind a daemon config column,
+`delivery_verification_enabled`, shipped off. While it is off, `--verify` is
+*refused*, with the flag named: nothing is typed, and the caller learns its
+request went unhonored rather than receiving a quiet unverified send. A
+caller that asked for confirmation must never be answered with a silence
+that reads like one. The envelope is deliberately outside the flag —
+attribution belongs on every dispatch that carries one, and a prefix that
+comes and goes with a config column is worse than one that is always there.
+
+Verification is narrower than the envelope, and narrower still than the
+fleet. It is available where an adapter exists that can actually answer:
+today that is a Claude session, whose harness writes the submitted message
+into its transcript JSONL. A shell keeps no transcript, and the Codex
+adapter's answer comes from the app-server protocol's in-protocol
+acknowledgement rather than from an envelope — a different mechanism, and
+one that is not built. Asking to verify either is refused rather than
+accepted and quietly answered *undetermined* forever, for the reason the
+whole section exists: promising evidence a target cannot produce rebuilds
+the silent-failure class one layer up. It is narrower than the send path
+too: the two in-daemon rails that paste directly rather than through the
+public verb (§3) write no envelope, so there is nothing for an observation
+to find, and bringing them onto the public actuation is what extends this
+section's guarantees to them.
 
 That one full attempt — adapter fallback and the evidence-bounded single
 retry included — is the whole of TBD-side persistence for any send. Beyond
@@ -2564,10 +2658,16 @@ act whose observation never ran renders as unconfirmed by construction
 (§7). The observation itself is recoverable from the record alone — the
 actuation row's timestamp fixes the deadline, and the envelope is durable in
 the transcript — so at startup the daemon replays the record, finds acts
-past their deadline with no outcome, and performs the same observation late,
-writing the outcome the timer would have written (§7). What a restart costs
-is cadence, stated plainly: P1-6's sixty-second window degrades to the
-startup scan or the next evaluation. What to *do* about a late-confirmed or
+past their deadline with no outcome, and performs the same observation late
+(§7). Late, it can confirm a landing but never assert the opposite: a bounded
+tail read cannot span an interval of unknown length, so an absent envelope
+there is *undetermined*. It re-delivers nothing either way, because the retry
+exists to close a sixty-second gap, and a payload whose premise is an
+unbounded interval old is exactly the stale-premise send this design refuses
+to issue (§3). The late observation records what it could establish, writes
+the anomaly, and stops. What a
+restart costs is cadence, stated plainly: P1-6's sixty-second window degrades
+to the startup scan or the next evaluation. What to *do* about a late-confirmed or
 unconfirmed act — re-send, journal, shrug — stays playbook judgment, never
 compiled repair.
 
@@ -2707,6 +2807,10 @@ to hunt for the value that governs a behavior:
 | Idle-intervention threshold | 40 min | shipped sweep program (sub-doc §7) |
 | Post-intervention re-check | 60 s | §4 step 7, §12 |
 | Delivery retries before anomaly | 2 sends | §12 |
+| Delivery observation tail read | 64 KiB | §12 |
+| Escalated read before claiming non-delivery | 8 MiB | §12 |
+| Pause between keys in a `--keys` payload | 150 ms | §2, §3 |
+| Keys accepted in one `--keys` payload | 32 | §2, §3 |
 | Supervisor recycle preference | 50% of the effective window, per desk | §9 |
 | Flush nudges | 50% / 60% / 70% fullness | §9 |
 | Unknown-denominator assumption | 200k, labeled | §2, §9 |

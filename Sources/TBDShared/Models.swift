@@ -895,6 +895,23 @@ public struct Config: Codable, Sendable, Equatable {
     /// the daemon polls provider executables in the background and can stop
     /// remote sessions, so it is opt-in until it soaks.
     public var remoteBackendsEnabled: Bool
+    /// Soak flag for delivery acknowledgement — the machinery that establishes
+    /// whether a dispatched payload actually landed (fleet-supervision design
+    /// §12). Default OFF: the re-check acts on no user gesture and its single
+    /// retry types into a live session, so the whole path is opt-in.
+    ///
+    /// What it gates: arming the re-check, the evidence-bounded retry, and the
+    /// startup replay. While it is off, `terminal.send --verify` is *refused*
+    /// with the flag named and nothing is typed — a caller that asked for
+    /// evidence must never be answered with a silence that reads like
+    /// confirmation.
+    ///
+    /// What it deliberately does NOT gate: the dispatch envelope. Attribution
+    /// belongs on every text dispatch to an agent, verified or not, and a prefix
+    /// that comes and goes with a config column is worse than one that is always
+    /// there. (Whether a target receives the envelope at all is a property of
+    /// the target, not of this flag: shells do not.)
+    public var deliveryVerificationEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -934,7 +951,8 @@ public struct Config: Codable, Sendable, Equatable {
                 gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays,
                 panelSurfaceEnabled: Bool = false,
                 agentPanelControlEnabled: Bool = false,
-                remoteBackendsEnabled: Bool = false) {
+                remoteBackendsEnabled: Bool = false,
+                deliveryVerificationEnabled: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -959,6 +977,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.panelSurfaceEnabled = panelSurfaceEnabled
         self.agentPanelControlEnabled = agentPanelControlEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
+        self.deliveryVerificationEnabled = deliveryVerificationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1008,6 +1027,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .agentPanelControlEnabled) ?? false
         remoteBackendsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remoteBackendsEnabled) ?? false
+        // Absent (older daemon / older persisted JSON) defaults to OFF, matching
+        // the v69 column default — the soak has to be opted into.
+        deliveryVerificationEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .deliveryVerificationEnabled) ?? false
     }
 }
 

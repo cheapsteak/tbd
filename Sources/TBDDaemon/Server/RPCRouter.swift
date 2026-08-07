@@ -47,6 +47,17 @@ public final class RPCRouter: Sendable {
     /// Session-limit auto-resume scheduler. `nil` in mock mode / tests that
     /// don't need it; set post-construction like `claudeUsagePoller`.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
+    /// Delivery acknowledgement (design §12). `terminal.send` hands a
+    /// dispatched, verify-armed text send here and this is the only caller —
+    /// see `DeliveryVerificationArming`. `nil` everywhere until the verifier
+    /// lands; a nil verifier means the observation is simply never armed, and
+    /// the act renders `unconfirmed` by `DeliveryRecord.statuses`, which is the
+    /// honest answer rather than a claim. Set post-construction like
+    /// `claudeUsagePoller`.
+    nonisolated(unsafe) var deliveryVerifier: (any DeliveryVerificationArming)?
+    /// Paces the keys of a `--keys` payload. A `var` so tests can inject a
+    /// `TestClock`; production never replaces the default.
+    nonisolated(unsafe) var pacedKeySender = PacedKeySender()
     /// Live connected-client count, supplied by the SocketServer after it is
     /// constructed (the router is built first in Daemon.swift, so it cannot
     /// take the server as an init dependency). Mirrors `claudeUsagePoller`
@@ -456,6 +467,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetHibernateInputVeto:
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
+            case RPCMethod.configSetDeliveryVerification:
+                return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetAutoTrustWorktrees:
@@ -527,6 +540,7 @@ public final class RPCRouter: Sendable {
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
+            deliveryVerificationEnabled: config.deliveryVerificationEnabled,
             autoTrustWorktrees: config.autoTrustWorktrees,
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
