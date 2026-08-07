@@ -333,7 +333,9 @@ trusted input, because they may originate from session metadata that was created
 somewhere other than the machine running the caller. Before any of them reaches
 git:
 
-- **`branch` must match a conservative ref-name pattern and must not begin with
+- **`branch` must match the ref-name grammar the normative contract spells out
+  under `land` — ASCII letters, digits, `.`, `_`, `-` and `/` only, with the
+  usual git ref exclusions — and must not begin with
   `-`.** A leading dash makes a branch name look like a command-line option to
   git, so it is rejected outright.
 - **`remote_url` is only ever compared against the local repository's
