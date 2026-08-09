@@ -64,9 +64,8 @@ TBD spawn path:
 ### Session naming — the one compiled change
 
 `ClaudeSpawnCommandBuilder.build` gains an optional `sessionName`
-parameter. When non-nil, non-empty, and the installed CLI supports it
-(next section), both the fresh-spawn and resume branches append
-`--name <value>`, shell-escaped. The `cmd`/shell-fallback branches are
+parameter. When non-nil and non-empty, both the fresh-spawn and resume
+branches append `--name <value>`, shell-escaped. The `cmd`/shell-fallback branches are
 untouched, and Codex spawns are out of scope — messaging is a Claude
 Code feature.
 
@@ -87,30 +86,26 @@ directories in the listing.
 Name collisions across worktrees are likewise Claude Code's problem,
 handled the same way.
 
-### Version gate on `--name`
+### CLI version floor: 2.1.76, documented rather than gated
 
-An unrecognized flag on an older installed CLI fails every Claude
-spawn — a hard regression for users who have not updated. Measured
-against CLI v2.1.226: a spawn-shaped invocation carrying an unknown
-option exits 1 with `error: unknown option '--…'` before doing anything
-else (`--version` and `--help` are the exceptions — they short-circuit
-and succeed regardless, which also makes `--version` a safe probe). The
-daemon therefore probes `claude --version` once and caches the result
-for its lifetime; the spawn path passes the builder a
-`supportsSessionName` capability bit, and the builder omits `--name`
-when it is false or the probe failed. A failed or missing probe degrades
-to today's spawn command — the probe must never block or break a spawn.
+`--name` is emitted unconditionally. `-n` / `--name` shipped in CLI
+v2.1.76 (published 2026-03-14, per the Claude Code changelog and npm
+registry; verified accepted on v2.1.226), so TBD's Claude spawn path
+requires CLI ≥ 2.1.76 — a five-month floor on a tool that self-updates
+by default, and one strictly looser than what the feature itself needs:
+messaging arrived in 2.1.224. A session on 2.1.76–2.1.223 gets a correct
+name and simply lacks the messaging tools.
 
-The gate's constant is **2.1.76**, the version that introduced
-`-n` / `--name` (per the Claude Code changelog; verified accepted on
-v2.1.226). Cross-session messaging itself arrived in 2.1.224 — a
-session on 2.1.76–2.1.223 gets a correct name and simply lacks the
-messaging tools. Both branches of the gate get tests, per the
-conditional-gate rule in `CLAUDE.md`.
+On a CLI below the floor the failure is loud and self-describing, not
+silent: measured against v2.1.226, a spawn-shaped invocation carrying an
+unknown option exits 1 with `error: unknown option '--…'` before doing
+anything else, so the pane shows exactly what to fix (`--version` and
+`--help` are the exceptions — they short-circuit and succeed
+regardless). The docs page states the floor.
 
-No feature flag beyond this gate: nothing here acts autonomously,
-destroys state, or replaces a load-bearing path — `--name` is small
-additive spawn surface.
+No feature flag: nothing here acts autonomously, destroys state, or
+replaces a load-bearing path — `--name` is small additive spawn
+surface.
 
 ### Cross-profile discovery
 
@@ -173,8 +168,9 @@ executed.
 
 `docs/cross-session-messaging.md` covers, for TBD users:
 
-- the Claude Code version requirement and how to confirm a session has
-  the feature (`/list-agents`, `/status` peer-address row);
+- the version story: TBD's spawn path requires CLI ≥ 2.1.76 (`--name`),
+  messaging needs ≥ 2.1.224, and how to confirm a session has the
+  feature (`/list-agents`, `/status` peer-address row);
 - the killswitch env vars above, with the warning that setting one via
   TBD env overrides silently disables messaging;
 - naming: sessions answer to the worktree display name; renames apply on
@@ -188,18 +184,17 @@ executed.
 - **Messaging absent** (older CLI, killswitch env, unsupported
   provider): sessions simply lack the tools; coordination falls back to
   `tbd terminal send` per the skill text. No TBD surface breaks.
-- **Version probe fails** (claude not on PATH, unparseable output):
-  builder omits `--name`; spawns behave exactly as today.
+- **CLI below the 2.1.76 floor**: every Claude spawn fails in the pane
+  with `error: unknown option '--name'` — loud, immediate, and fixed by
+  updating the CLI. Accepted in exchange for not building a version
+  probe (see Rejected alternatives).
 - **Contingent symlink seeding fails**: log and continue; the profile
   works, discovery may be fragmented for it.
 
 ## Testing
 
 - Builder unit tests: `--name` emitted and escaped; omitted when
-  `sessionName` is nil or empty or `supportsSessionName` is false.
-- Version-probe parse tests against real and malformed
-  `claude --version` output; probe-failure path yields the degraded
-  capability bit.
+  `sessionName` is nil or empty.
 - Skill-content test asserting the messaging section is present.
 - Contingent: symlink-seeding idempotency and isolation tests through
   the existing `ClaudeProfileConfigDirManager(baseDirectory:hostBaseDirectory:)`
@@ -234,3 +229,13 @@ All via `scripts/test.sh`.
 - **Slug instead of display name** — immutable, so never stale, but it
   reproduces what the cwd-derived default already provides and never
   matches what the user sees in the app.
+- **A `claude --version` capability probe gating `--name`** — a daemon
+  probe (run once, cached, plumbed to the builder as a capability bit)
+  would spare users on a pre-2.1.76 CLI from failing spawns. The
+  population it protects is anyone more than five months behind on a
+  self-updating CLI, the failure it prevents is loud and
+  self-describing rather than silent, and the feature the naming serves
+  needs 2.1.224 anyway — so the probe subsystem, its cache, and its
+  branch tests buy almost nothing. Rebuild-worthy evidence: field
+  reports of spawn failures from users legitimately pinned below
+  2.1.76 (e.g. an enterprise-frozen CLI).
