@@ -89,17 +89,23 @@ handled the same way.
 
 ### Version gate on `--name`
 
-An unrecognized flag on an older installed CLI would fail every Claude
-spawn — a hard regression for users who have not updated. The daemon
-therefore probes `claude --version` once and caches the result for its
-lifetime; the spawn path passes the builder a `supportsSessionName`
-capability bit, and the builder omits `--name` when it is false or the
-probe failed. A failed or missing probe degrades to today's spawn
-command — the probe must never block or break a spawn.
+An unrecognized flag on an older installed CLI fails every Claude
+spawn — a hard regression for users who have not updated. Measured
+against CLI v2.1.226: a spawn-shaped invocation carrying an unknown
+option exits 1 with `error: unknown option '--…'` before doing anything
+else (`--version` and `--help` are the exceptions — they short-circuit
+and succeed regardless, which also makes `--version` a safe probe). The
+daemon therefore probes `claude --version` once and caches the result
+for its lifetime; the spawn path passes the builder a
+`supportsSessionName` capability bit, and the builder omits `--name`
+when it is false or the probe failed. A failed or missing probe degrades
+to today's spawn command — the probe must never block or break a spawn.
 
-The minimum version that accepts `--name` is a field-verification item
-(the flag may predate messaging itself); the constant lands with the
-implementation. Both branches of the gate get tests, per the
+The gate's constant is **2.1.76**, the version that introduced
+`-n` / `--name` (per the Claude Code changelog; verified accepted on
+v2.1.226). Cross-session messaging itself arrived in 2.1.224 — a
+session on 2.1.76–2.1.223 gets a correct name and simply lacks the
+messaging tools. Both branches of the gate get tests, per the
 conditional-gate rule in `CLAUDE.md`.
 
 No feature flag beyond this gate: nothing here acts autonomously,
