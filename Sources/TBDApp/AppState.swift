@@ -1015,6 +1015,10 @@ final class AppState: ObservableObject {
     /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
     var recreatingTerminalIDs: Set<UUID> = []
 
+    /// App-lifetime automatic recovery attempts, keyed by stable terminal UUID.
+    /// View/coordinator reconstruction must not reset this budget.
+    var terminalRecoveryBudget = TerminalRecoveryBudget()
+
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
