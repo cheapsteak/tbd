@@ -4,6 +4,26 @@ import os
 
 private let bridgeLogger = Logger(subsystem: "com.tbd.app", category: "TmuxBridge")
 
+struct TmuxPreparedSession: Equatable, Sendable {
+    let executablePath: String
+    let arguments: [String]
+}
+
+enum TmuxPreparationStage: String, Equatable, Sendable {
+    case createViewSession
+    case linkWindow
+    case selectWindow
+    case preserveExitedOutput
+    case suppressExitedMarker
+    case verifySelection
+}
+
+enum TmuxPreparationFailure: Error, Equatable, Sendable {
+    case executableUnavailable
+    case windowMissing(failedStage: TmuxPreparationStage)
+    case commandFailed(stage: TmuxPreparationStage, output: String)
+}
+
 /// File-based debug log for diagnostics
 func debugLog(_ msg: String) {
     let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
@@ -78,6 +98,13 @@ final class TmuxBridge: @unchecked Sendable {
         ["display-message", "-p", "-t", sessionName, "#{window_id}"]
     }
 
+    static func windowIdentityQueryArgs(windowID: String) -> [String] {
+        ["display-message", "-p", "-t", windowID, "#{window_id}"]
+    }
+
+    static func killSessionArgs(sessionName: String) -> [String] {
+        ["kill-session", "-t", sessionName]
+    }
     /// Command used by the SwiftTerm PTY to attach its viewer client.
     ///
     /// `-u` is required even when the app environment normally has a UTF-8
@@ -102,53 +129,83 @@ final class TmuxBridge: @unchecked Sendable {
     ///   - panelID: Unique ID for this terminal panel (used as session name suffix)
     ///   - server: tmux server socket name (e.g. "tbd-a1b2c3d4")
     ///   - windowID: tmux window ID to display (e.g. "@3")
-    /// - Returns: Array of arguments for the tmux attach command, or nil on failure
-    func prepareSession(panelID: UUID, server: String, windowID: String) async -> [String]? {
+    /// - Returns: A prepared viewer attachment or a classified failure.
+    func prepareSession(
+        panelID: UUID,
+        server: String,
+        windowID: String
+    ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
         let sessionName = Self.sessionName(for: panelID)
 
-        let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+        let _ = await runTmux(server: server, args: Self.killSessionArgs(sessionName: sessionName))
 
         let createResult = await runTmux(server: server, args: Self.newIsolatedSessionArgs(sessionName: sessionName))
         guard createResult.success else {
             debugLog("PREPARE: failed to create view session \(sessionName) on server \(server): \(createResult.output)")
-            return nil
+            return .failure(Self.classifyPreparationFailure(
+                stage: .createViewSession,
+                output: createResult.output,
+                probeSucceeded: nil,
+                probeOutput: nil,
+                expectedWindowID: windowID
+            ))
         }
 
         let linkResult = await runTmux(server: server, args: Self.linkWindowArgs(windowID: windowID, sessionName: sessionName))
         guard linkResult.success else {
-            debugLog("PREPARE: window \(windowID) is dead on server \(server)")
-            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            return nil
+            return await failureAfterViewSessionCreation(
+                stage: .linkWindow,
+                output: linkResult.output,
+                server: server,
+                windowID: windowID,
+                sessionName: sessionName
+            )
         }
 
         let _ = await runTmux(server: server, args: Self.killInitialWindowArgs(sessionName: sessionName))
 
         let selectResult = await runTmux(server: server, args: Self.selectWindowArgs(windowID: windowID, sessionName: sessionName))
         guard selectResult.success else {
-            debugLog("PREPARE: failed to select window \(windowID) in session \(sessionName): \(selectResult.output)")
-            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            return nil
+            return await failureAfterViewSessionCreation(
+                stage: .selectWindow,
+                output: selectResult.output,
+                server: server,
+                windowID: windowID,
+                sessionName: sessionName
+            )
         }
 
         let remainOnExitResult = await runTmux(server: server, args: Self.remainOnExitArgs(windowID: windowID))
         guard remainOnExitResult.success else {
-            debugLog("PREPARE: failed to preserve exited output for window \(windowID): \(remainOnExitResult.output)")
-            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            return nil
+            return await failureAfterViewSessionCreation(
+                stage: .preserveExitedOutput,
+                output: remainOnExitResult.output,
+                server: server,
+                windowID: windowID,
+                sessionName: sessionName
+            )
         }
 
         let remainOnExitFormatResult = await runTmux(server: server, args: Self.remainOnExitFormatArgs(windowID: windowID))
         guard remainOnExitFormatResult.success else {
-            debugLog("PREPARE: failed to suppress exited pane marker for window \(windowID): \(remainOnExitFormatResult.output)")
-            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            return nil
+            return await failureAfterViewSessionCreation(
+                stage: .suppressExitedMarker,
+                output: remainOnExitFormatResult.output,
+                server: server,
+                windowID: windowID,
+                sessionName: sessionName
+            )
         }
 
         let activeResult = await runTmux(server: server, args: Self.activeWindowQueryArgs(sessionName: sessionName))
         guard activeResult.success, activeResult.output == windowID else {
-            debugLog("PREPARE: session \(sessionName) selected \(activeResult.output), expected \(windowID)")
-            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            return nil
+            return await failureAfterViewSessionCreation(
+                stage: .verifySelection,
+                output: activeResult.output,
+                server: server,
+                windowID: windowID,
+                sessionName: sessionName
+            )
         }
 
         lock.withLock {
@@ -157,8 +214,18 @@ final class TmuxBridge: @unchecked Sendable {
 
         debugLog("PREPARE: panelID=\(panelID.uuidString.prefix(8)) server=\(server) window=\(windowID) session=\(sessionName)")
 
-        // Return the tmux command args for SwiftTerm to attach
-        return Self.viewerAttachCommand(server: server, sessionName: sessionName)
+        return .success(Self.preparedSession(server: server, sessionName: sessionName))
+    }
+
+    /// Transitional compatibility for callers migrated in the next recovery step.
+    func prepareSession(panelID: UUID, server: String, windowID: String) async -> [String]? {
+        let result: Result<TmuxPreparedSession, TmuxPreparationFailure> = await prepareSession(
+            panelID: panelID,
+            server: server,
+            windowID: windowID
+        )
+        guard case let .success(prepared) = result else { return nil }
+        return [prepared.executablePath] + prepared.arguments
     }
 
     /// Clean up a view session when a panel is hidden.
@@ -175,7 +242,7 @@ final class TmuxBridge: @unchecked Sendable {
         lock.unlock()
 
         Task.detached { [self] in
-            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            let _ = await runTmux(server: server, args: Self.killSessionArgs(sessionName: sessionName))
             debugLog("CLEANUP: panelID=\(panelID.uuidString.prefix(8)) session=\(sessionName)")
         }
     }
@@ -189,7 +256,7 @@ final class TmuxBridge: @unchecked Sendable {
 
         Task.detached { [self] in
             for (_, sessionName) in sessions {
-                let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+                let _ = await runTmux(server: server, args: Self.killSessionArgs(sessionName: sessionName))
             }
             debugLog("CLEANUP ALL: server=\(server)")
         }
@@ -200,6 +267,59 @@ final class TmuxBridge: @unchecked Sendable {
     private struct TmuxResult {
         let success: Bool
         let output: String
+    }
+
+    static func preparedSession(server: String, sessionName: String) -> TmuxPreparedSession {
+        let viewerCommand = viewerAttachCommand(server: server, sessionName: sessionName)
+        return TmuxPreparedSession(
+            executablePath: viewerCommand[0],
+            arguments: Array(viewerCommand.dropFirst())
+        )
+    }
+
+    static func classifyPreparationFailure(
+        stage: TmuxPreparationStage,
+        output: String,
+        probeSucceeded: Bool?,
+        probeOutput: String?,
+        expectedWindowID: String
+    ) -> TmuxPreparationFailure {
+        guard stage != .createViewSession, let probeSucceeded else {
+            return .commandFailed(stage: stage, output: output)
+        }
+        if probeSucceeded, probeOutput == expectedWindowID {
+            return .commandFailed(stage: stage, output: output)
+        }
+        if probeSucceeded {
+            return .commandFailed(stage: stage, output: output)
+        }
+        return .windowMissing(failedStage: stage)
+    }
+
+    private func failureAfterViewSessionCreation(
+        stage: TmuxPreparationStage,
+        output: String,
+        server: String,
+        windowID: String,
+        sessionName: String
+    ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
+        let probeResult = await runTmux(
+            server: server,
+            args: Self.windowIdentityQueryArgs(windowID: windowID)
+        )
+        let failure = Self.classifyPreparationFailure(
+            stage: stage,
+            output: output,
+            probeSucceeded: probeResult.success,
+            probeOutput: probeResult.output,
+            expectedWindowID: windowID
+        )
+
+        bridgeLogger.debug(
+            "Preparation failed at \(stage.rawValue, privacy: .public): \(output, privacy: .public)"
+        )
+        let _ = await runTmux(server: server, args: Self.killSessionArgs(sessionName: sessionName))
+        return .failure(failure)
     }
 
     /// Run a tmux subprocess without blocking the calling thread.

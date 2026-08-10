@@ -39,5 +39,62 @@ struct TmuxBridgeTests {
         ) == [
             "tmux", "-u", "-L", "tbd-repo", "attach", "-t", sessionName,
         ])
+        #expect(TmuxBridge.windowIdentityQueryArgs(windowID: "@147") == [
+            "display-message", "-p", "-t", "@147", "#{window_id}",
+        ])
+        #expect(TmuxBridge.killSessionArgs(sessionName: sessionName) == [
+            "kill-session", "-t", sessionName,
+        ])
+    }
+
+    @Test func preparedSessionCarriesViewerCommand() {
+        let prepared = TmuxBridge.preparedSession(
+            server: "tbd-repo",
+            sessionName: "tbd-view-4c4f1a61"
+        )
+        #expect(prepared == TmuxPreparedSession(
+            executablePath: "tmux",
+            arguments: ["-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61"]
+        ))
+    }
+
+    @Test func viewSessionCreationFailureIsGenericWithoutWindowProbe() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .createViewSession,
+            output: "create failure",
+            probeSucceeded: nil,
+            probeOutput: nil,
+            expectedWindowID: "@147"
+        ) == .commandFailed(stage: .createViewSession, output: "create failure"))
+    }
+
+    @Test func failedWindowStageWithMatchingProbeRemainsGeneric() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .linkWindow,
+            output: "link failure",
+            probeSucceeded: true,
+            probeOutput: "@147",
+            expectedWindowID: "@147"
+        ) == .commandFailed(stage: .linkWindow, output: "link failure"))
+    }
+
+    @Test func failedWindowStageWithFailedProbeMeansWindowMissing() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .linkWindow,
+            output: "link failure",
+            probeSucceeded: false,
+            probeOutput: "",
+            expectedWindowID: "@147"
+        ) == .windowMissing(failedStage: .linkWindow))
+    }
+
+    @Test func failedWindowStageWithMismatchedProbeRemainsGeneric() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .linkWindow,
+            output: "link failure",
+            probeSucceeded: true,
+            probeOutput: "@999",
+            expectedWindowID: "@147"
+        ) == .commandFailed(stage: .linkWindow, output: "link failure"))
     }
 }
