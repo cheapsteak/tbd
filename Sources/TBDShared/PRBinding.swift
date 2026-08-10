@@ -49,12 +49,24 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
         self.boundAt = boundAt
     }
 
-    /// A copy carrying a freshly observed status. The poll refreshes bindings
-    /// into a `[bindingID: PRStatus]` map and has to fold that map back onto the
-    /// bindings before `worst(of:)` or `allResolved(_:)` can judge them.
-    public func withStatus(_ status: PRStatus?) -> PRBinding {
+    /// A copy carrying everything a refresh observed: the status plus the head
+    /// and base refs the PR reported. The poll folds its observations back onto
+    /// the bindings through this before `worst(of:)`, `allResolved(_:)` or
+    /// `mergedBindingIsOwnWork` can judge them.
+    ///
+    /// A **nil** ref means "not observed", never "cleared" — the stored value
+    /// survives, the same rule the persisted row follows, so a transient failure
+    /// cannot blank the branch the CLI renders.
+    ///
+    /// Status and refs move together deliberately, rather than through a
+    /// status-only sibling: the merge rule judges ownership on `headBranch`, so
+    /// a binding folded with this pass's status but the previous pass's head ref
+    /// would hold the gate shut for one poll on evidence it already had.
+    public func withObservation(status: PRStatus?, headBranch: String?,
+                                baseRef: String?) -> PRBinding {
         PRBinding(id: id, worktreeID: worktreeID, host: host, owner: owner, repo: repo,
-                  number: number, url: url, headBranch: headBranch, baseRef: baseRef,
+                  number: number, url: url, headBranch: headBranch ?? self.headBranch,
+                  baseRef: baseRef ?? self.baseRef,
                   status: status, source: source, detached: detached, boundAt: boundAt)
     }
 

@@ -14,6 +14,22 @@ struct MergedTransitionPrecedenceTests {
         let dispatcher: MergedTransitionDispatcher
         let archive: AutoArchiveOnMergeCoordinator
         let db: TBDDatabase
+        /// Where the archive rail's actuation rows land, so a test can count
+        /// what it actually did rather than only what it left behind.
+        let actuationLogPath: String
+    }
+
+    /// Rows the archive rail wrote, newest last. Request rows carry `kind`;
+    /// outcome rows carry `confirms`.
+    private func actuationRequests(at path: String) throws -> [[String: Any]] {
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return try contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+            .filter { $0["confirms"] == nil }
     }
 
     private func makeDeps() throws -> Deps {
@@ -26,15 +42,20 @@ struct MergedTransitionPrecedenceTests {
             hooks: HookResolver(),
             subscriptions: subs
         )
+        let logDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-actuation-mtp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        let logPath = logDirectory.appendingPathComponent("actuations.jsonl").path
         let archive = AutoArchiveOnMergeCoordinator(
             db: db, lifecycle: lifecycle, subscriptions: subs,
-            actuationLog: makeTestActuationLog())
+            actuationLog: ActuationLog(path: logPath))
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(), actuationLog: makeTestActuationLog())
         let hibernate = AutoHibernateOnMergeCoordinator(db: db, hibernation: hibernation, subscriptions: subs)
         let dispatcher = MergedTransitionDispatcher(archive: archive, hibernate: hibernate)
-        return Deps(dispatcher: dispatcher, archive: archive, db: db)
+        return Deps(dispatcher: dispatcher, archive: archive, db: db,
+                    actuationLogPath: logPath)
     }
 
     /// Create an active worktree with a single idle Claude terminal.
@@ -106,6 +127,65 @@ struct MergedTransitionPrecedenceTests {
 
         #expect(try await deps.db.worktrees.get(id: wtID)?.status == .archived)
         #expect(try await deps.db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+    }
+
+    // MARK: - Idempotency: two fan-outs in one pass
+
+    /// One poll pass CAN fan out twice for the same worktree, and this is what
+    /// makes that harmless.
+    ///
+    /// `PRStatusManager.apply` fires the un-bound fallback from inside
+    /// `fetchAll`, *before* the same pass creates the branch binding; the poll
+    /// then judges that fresh binding with `evaluate`. The two once-only sets
+    /// are deliberately independent, so neither suppresses the other, and both
+    /// fire on the first pass that ever sees an already-merged PR with nothing
+    /// bound yet — the ordinary upgrade path for any worktree whose PR merged
+    /// while the daemon was down.
+    ///
+    /// Safety therefore rests entirely on the coordinators being idempotent
+    /// rather than on the firing order. These two tests pin that; if either
+    /// coordinator ever starts acting twice, they are what catches it.
+    @Test("firing the fan-out twice archives once and notifies once")
+    func doubledFanOutArchivesOnce() async throws {
+        let deps = try makeDeps()
+        let (wtID, _) = try await makeWorktreeWithTerminal(deps.db)
+        try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
+        try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        await deps.dispatcher.handleMergedTransition(worktreeID: wtID, prNumber: 20)
+        await deps.dispatcher.handleMergedTransition(worktreeID: wtID, prNumber: 20)
+
+        // The `wt.status == .active` re-read is the guard: the second pass finds
+        // an archived worktree and does nothing at all.
+        #expect(try await deps.db.worktrees.get(id: wtID)?.status == .archived)
+        let requests = try actuationRequests(at: deps.actuationLogPath)
+        #expect(requests.count == 1)
+        #expect(requests.first?["kind"] as? String == "dispose")
+        #expect(try await deps.db.notifications.unread(worktreeID: wtID).count == 1)
+    }
+
+    @Test("firing the fan-out twice with archive blocked parks once and notifies once")
+    func doubledFanOutParksOnce() async throws {
+        // Archive armed but blocked by an active child, so BOTH fan-outs reach
+        // the hibernate arm — the harder half of the idempotency claim.
+        let deps = try makeDeps()
+        let (parentID, terminalID) = try await makeWorktreeWithTerminal(deps.db)
+        _ = try await makeWorktreeWithTerminal(deps.db, parentID: parentID)
+        try await deps.db.worktrees.setAutoArchiveOnMerge(id: parentID, value: true)
+        try await deps.db.worktrees.setAutoHibernateOnMerge(id: parentID, value: true)
+
+        await deps.dispatcher.handleMergedTransition(worktreeID: parentID, prNumber: 21)
+        let firstStamp = try await deps.db.terminals.get(id: terminalID)?.hibernatedAt
+        #expect(firstStamp != nil)
+
+        await deps.dispatcher.handleMergedTransition(worktreeID: parentID, prNumber: 21)
+
+        // The already-hibernated session is not re-parked, so `parked` is 0 and
+        // the second pass sends no notification.
+        #expect(try await deps.db.terminals.get(id: terminalID)?.hibernatedAt == firstStamp)
+        #expect(try await deps.db.notifications.unread(worktreeID: parentID).count == 1)
+        // Blocked before the act, so the archive rail wrote no row either time.
+        #expect(try actuationRequests(at: deps.actuationLogPath).isEmpty)
     }
 
     // MARK: - Direct Bool contract on the archive coordinator

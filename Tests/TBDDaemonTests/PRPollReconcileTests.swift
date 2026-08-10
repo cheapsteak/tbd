@@ -90,6 +90,9 @@ struct PRPollReconcileTests {
         let gh: ScriptedGH
         let prManager: PRStatusManager
         let repoID: UUID
+        /// The merged-transition fan-out, replaced by a recorder: these tests
+        /// assert *whether the poll fired*, never that anything was archived.
+        let fired: FiredTransitionRecorder
 
         init() async throws {
             let db = try TBDDatabase(inMemory: true)
@@ -120,6 +123,15 @@ struct PRPollReconcileTests {
                 prManager: manager,
                 prBindingRepoResolver: { _ in ("acme", "acme-prod") },
                 actuationLog: makeTestActuationLog())
+            // Production wires this in `Daemon.swift` too. Without it the poll
+            // judges no merge rule at all, and the two ordering findings below
+            // — when a re-attach re-arms, and which head ref the rule is judged
+            // on — are unreachable.
+            let recorder = FiredTransitionRecorder()
+            fired = recorder
+            router.mergeTrigger = AllResolvedMergeTrigger { worktreeID, prNumber in
+                await recorder.record(worktreeID: worktreeID, prNumber: prNumber)
+            }
         }
 
         /// A worktree plus the branch facts the poll would otherwise shell out
@@ -168,6 +180,19 @@ struct PRPollReconcileTests {
         func bindings(_ worktreeID: UUID) async throws -> [PRBinding] {
             try await db.prBindings.list(worktreeID: worktreeID, includeDetached: true)
         }
+
+        /// `tbd pr detach` / `tbd pr attach` — a tombstone written and cleared,
+        /// the way the CLI's RPC handlers do it.
+        func setDetached(_ number: Int, worktreeID: UUID, _ detached: Bool) async throws {
+            let key = PRBinding(
+                worktreeID: worktreeID, owner: "acme", repo: "acme-prod", number: number,
+                url: "https://github.com/acme/acme-prod/pull/\(number)",
+                source: .manual).identityKey
+            _ = try await db.prBindings.setDetached(
+                worktreeID: worktreeID, identityKey: key, detached: detached)
+        }
+
+        func firedWorktreeIDs() async -> [UUID] { await fired.fired.map(\.worktreeID) }
 
         func columnStatus(_ worktreeID: UUID) async throws -> PRStatus? {
             try await db.worktrees.get(id: worktreeID)?.prStatus
@@ -360,5 +385,56 @@ struct PRPollReconcileTests {
 
         #expect(try await harness.bindings(wt).first?.headBranch == "tbd/feature")
         #expect(try await harness.bindings(wt).first?.baseRef == "main")
+    }
+
+    // MARK: - Finding D: the merge rule judges the refs this pass observed
+
+    @Test("a head ref observed for the first time fires the merge rule in that same pass")
+    func firstObservedHeadRefFiresInTheSamePass() async throws {
+        // A hook binding carries no head ref until a refresh observes one, and
+        // the ownership arm holds the gate shut while it is unknown. So the
+        // pass that first resolves the PR observes BOTH the merge and the proof
+        // of ownership — and must fire on it. Folding only the status onto the
+        // in-memory binding would judge against the nil it just replaced and
+        // defer the fan-out by a whole poll.
+        let harness = try await Harness()
+        let wt = try await harness.newWorktree()
+        try await harness.seedBinding(1, worktreeID: wt, source: .hook)
+        #expect(try await harness.bindings(wt).first?.headBranch == nil)
+
+        await harness.gh.set(nodesByNumber: [
+            1: Self.nodeJSON(number: 1, head: "tbd/feature", state: "MERGED")
+        ])
+        #expect(await harness.poll())
+
+        #expect(await harness.firedWorktreeIDs() == [wt])
+    }
+
+    // MARK: - Finding E: a re-attach re-arms the once-only guard
+
+    @Test("re-attaching the only binding lets a later poll fire again")
+    func reattachAfterDetachFiresAgain() async throws {
+        // Detaching the only binding takes the worktree out of the poll's
+        // binding grouping, so `evaluate` is never called for it again and its
+        // own re-arm cannot run. The pass reports the whole polled population
+        // BEFORE the no-bindings early return, so an explicit `tbd pr attach`
+        // is a fresh rising edge — which is what a user retrying an archive
+        // that was blocked by active children is asking for.
+        let harness = try await Harness()
+        let wt = try await harness.newWorktree()
+        try await harness.seedBinding(1, worktreeID: wt, source: .hook)
+        await harness.gh.set(nodesByNumber: [
+            1: Self.nodeJSON(number: 1, head: "tbd/feature", state: "MERGED")
+        ])
+        #expect(await harness.poll())
+        #expect(await harness.firedWorktreeIDs() == [wt])
+
+        try await harness.setDetached(1, worktreeID: wt, true)
+        #expect(await harness.poll())
+        #expect(await harness.firedWorktreeIDs() == [wt])
+
+        try await harness.setDetached(1, worktreeID: wt, false)
+        #expect(await harness.poll())
+        #expect(await harness.firedWorktreeIDs() == [wt, wt])
     }
 }

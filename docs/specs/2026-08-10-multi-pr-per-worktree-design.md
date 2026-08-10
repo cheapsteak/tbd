@@ -100,9 +100,11 @@ value instead. This is the same reason `PRStatusManager` has never persisted
 
 **Hook binding** is the primary source, and the only one that can see a
 subagent's PR. `ClaudeHookOverlay` gains a `PostToolUse` entry matching `Bash`.
-The hook command greps its stdin for `gh pr create` and only then pipes the
-payload to `tbd pr bind --from-hook`; every other Bash call costs one `grep` and
-no process spawn. The CLI reads the hook JSON, confirms `tool_input.command`
+The hook command reads its stdin into a shell variable, greps it for
+`gh pr create`, and only then pipes the payload to `tbd pr bind --from-hook`;
+every other Bash call costs the hook's own shell, one `cat` command substitution
+and one `grep` — but no `tbd` spawn and no daemon round trip. The CLI reads the
+hook JSON, confirms `tool_input.command`
 matches `gh pr create`, and extracts PR URLs from `tool_response` with
 
 ```

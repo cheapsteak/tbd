@@ -108,11 +108,12 @@ public enum ClaudeHookOverlay {
     ///
     /// The `grep -qE` is a deliberate prefilter: this hook fires on EVERY Bash
     /// tool call across the whole fleet, and without it each one would spawn a
-    /// `tbd` process. With it, the cost of an unrelated Bash call is one grep
-    /// over the payload and nothing else. `-E` (extended regex) rather than a
-    /// GNU-only `\+` in basic regex — BSD/macOS grep is the one this hook
-    /// actually runs under. `|| true` guarantees the hook cannot fail the tool
-    /// call it observes.
+    /// `tbd` process — a daemon round trip. With it, an unrelated Bash call
+    /// costs the hook's own shell, the `$(cat)` command substitution that holds
+    /// the payload, and one `grep` over it; no `tbd` runs and nothing reaches
+    /// the daemon. `-E` (extended regex) rather than a GNU-only `\+` in basic
+    /// regex — BSD/macOS grep is the one this hook actually runs under.
+    /// `|| true` guarantees the hook cannot fail the tool call it observes.
     static let prBindCommand =
         #"payload=$(cat); printf '%s' "$payload" | grep -qE 'gh[[:space:]]+pr[[:space:]]+create' && printf '%s' "$payload" | tbd pr bind --from-hook || true"#
 
@@ -122,9 +123,10 @@ public enum ClaudeHookOverlay {
     /// tool: it fires on EVERY Bash call across the whole fleet, so Claude
     /// Code's 60 s default would turn one wedged daemon socket into a 60 s stall
     /// on every shell command every agent runs. Three seconds is far more than
-    /// the happy path needs — the common case is a `grep` that matches nothing
-    /// and spawns nothing — and the binding is re-derivable by branch matching
-    /// on the next poll, so a timeout costs at most a delayed binding.
+    /// the happy path needs — the common case is a `cat` and a `grep` that
+    /// matches nothing, so no `tbd` is spawned — and the binding is re-derivable
+    /// by branch matching on the next poll, so a timeout costs at most a
+    /// delayed binding.
     static let prBindTimeoutSeconds = 3
 
     /// Build the JSON-encoded overlay body.

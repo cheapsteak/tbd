@@ -696,29 +696,26 @@ public final class RPCRouter: Sendable {
         let polled = Set(entries.map(\.id))
         guard let live = try? await db.prBindings.listAll() else { return }
         let bindings = live.filter { polled.contains($0.worktreeID) }
+        // Report the whole polled population before the early return, not just
+        // the part with bindings. `evaluate` below only ever sees worktrees that
+        // HAVE live bindings, so a worktree whose last binding was detached
+        // could never re-arm itself — and a subsequent `tbd pr attach` would be
+        // judged against a fired-guard that still held it.
+        await mergeTrigger?.retainBound(
+            polled: polled, bound: Set(bindings.map(\.worktreeID)))
         guard !bindings.isEmpty else { return }
 
         let observations = await prManager.refreshBindings(bindings, repoPath: repoPath)
         var refreshed: [PRBinding] = []
         refreshed.reserveCapacity(bindings.count)
         for binding in bindings {
-            // Absent means "not observed this pass" — leave the stored row alone
-            // rather than clearing a status a transient failure hid.
-            guard let observed = observations[binding.id] else {
-                refreshed.append(binding)
-                continue
-            }
-            // A nil ref is likewise "not observed": keep what the row already
-            // holds rather than blanking the branch column the CLI renders.
-            let headBranch = observed.headBranch ?? binding.headBranch
-            let baseRef = observed.baseRef ?? binding.baseRef
-            if observed.status != binding.status
-                || headBranch != binding.headBranch || baseRef != binding.baseRef {
+            let updated = Self.folding(binding, onto: observations[binding.id])
+            if updated != binding {
                 try? await db.prBindings.updateObservation(
-                    bindingID: binding.id, status: observed.status,
-                    headBranch: headBranch, baseRef: baseRef)
+                    bindingID: binding.id, status: updated.status,
+                    headBranch: updated.headBranch, baseRef: updated.baseRef)
             }
-            refreshed.append(binding.withStatus(observed.status))
+            refreshed.append(updated)
         }
         // Compare against what the column holds NOW, not against the snapshot
         // read before this pass began. `fetchAll` → `apply` → `onStatusPersist`
@@ -752,6 +749,29 @@ public final class RPCRouter: Sendable {
                     provenancePRNumber: entry?.prNumber)
             }
         }
+    }
+
+    /// The binding a pass's observation implies — the row to persist AND the
+    /// value the merge rule is judged on, which must be the same thing.
+    ///
+    /// An absent observation means "not observed this pass": keep the binding
+    /// exactly as stored rather than clearing a status a transient failure hid.
+    /// A present one carries the freshly observed head and base refs as well as
+    /// the status, so the ownership arm of the merge rule judges against the
+    /// head branch this pass actually saw. Folding only the status would leave
+    /// the pass that FIRST observes a head ref judging against the nil it
+    /// replaced — the gate would stay shut for one poll for no reason, and the
+    /// in-memory binding would disagree with the row just written.
+    ///
+    /// Pure and static so a test can fold exactly what the poll folds, like
+    /// `worktreePRStatusUpdates`.
+    static func folding(
+        _ binding: PRBinding, onto observed: PRStatusManager.PRBindingObservation?
+    ) -> PRBinding {
+        guard let observed else { return binding }
+        return binding.withObservation(status: observed.status,
+                                       headBranch: observed.headBranch,
+                                       baseRef: observed.baseRef)
     }
 
     /// The `Worktree.prStatus` write implied by a worktree's bindings: the worst

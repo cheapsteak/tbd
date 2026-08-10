@@ -131,6 +131,43 @@ struct AllResolvedTriggerTests {
         #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
     }
 
+    /// Detaching the *only* binding takes the worktree out of the poll's
+    /// grouping entirely, so `evaluate` is never called for it and the re-arm
+    /// inside `evaluate` cannot run. The pass reports the whole population it
+    /// polled instead, and an explicit `tbd pr attach` therefore fires again —
+    /// which is what a user retrying an archive that was blocked by active
+    /// children is asking for. Distinct from `detachUnblocks`, which detaches a
+    /// different, still-OPEN binding and never leaves the bound population.
+    @Test("re-attaching the only binding after a detach fires again")
+    func reattachAfterDetachFiresAgain() async throws {
+        let harness = try await MergeTriggerHarness()
+        try await harness.bind(412, state: .merged)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+
+        try await harness.detach(412)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+
+        try await harness.attach(412)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID, harness.worktreeID])
+    }
+
+    @Test("a poll that still leaves a live binding does not re-arm the worktree")
+    func stillBoundWorktreeStaysFired() async throws {
+        // The re-arm keys off leaving the bound population, not off any poll:
+        // a worktree that keeps a binding must stay fired, or every poll would
+        // re-archive it.
+        let harness = try await MergeTriggerHarness()
+        try await harness.bind(412, state: .merged)
+        try await harness.bind(413, state: .closed)
+        await harness.poll()
+        try await harness.detach(413)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+    }
+
     @Test("the transition fires once, not on every subsequent poll")
     func firesOnce() async throws {
         let harness = try await MergeTriggerHarness()
@@ -265,21 +302,33 @@ final class MergeTriggerHarness {
     }
 
     func detach(_ number: Int) async throws {
+        try await setDetached(number, detached: true)
+    }
+
+    /// `tbd pr attach` on a tombstoned PR: clears the flag rather than
+    /// inserting a row.
+    func attach(_ number: Int) async throws {
+        try await setDetached(number, detached: false)
+    }
+
+    private func setDetached(_ number: Int, detached: Bool) async throws {
         let key = PRBinding(
             worktreeID: worktreeID, owner: "acme", repo: "acme-prod", number: number,
             url: "https://github.com/acme/acme-prod/pull/\(number)", source: .manual).identityKey
         _ = try await db.prBindings.setDetached(
-            worktreeID: worktreeID, identityKey: key, detached: true)
+            worktreeID: worktreeID, identityKey: key, detached: detached)
     }
 
-    /// One poll: read the worktree's live bindings and evaluate the trigger over
-    /// them, exactly as `RPCRouter.refreshBindingStatuses` does after a refresh
-    /// — including the early return. A worktree with no live bindings is not in
-    /// the poll's grouping at all, so `evaluate` is never called for it, which
-    /// is precisely why the fallback's once-only guard cannot be re-armed from
-    /// there.
+    /// One poll: report the polled population, then read the worktree's live
+    /// bindings and evaluate the trigger over them — exactly as
+    /// `RPCRouter.refreshBindingStatuses` does, including the early return. A
+    /// worktree with no live bindings is not in the poll's grouping at all, so
+    /// `evaluate` is never called for it; `retainBound` runs first, before that
+    /// early return, which is the only thing that can re-arm it.
     func poll() async {
         let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
+        await trigger.retainBound(polled: [worktreeID],
+                                  bound: bindings.isEmpty ? [] : [worktreeID])
         guard !bindings.isEmpty else { return }
         await trigger.evaluate(worktreeID: worktreeID, bindings: bindings,
                                branchCandidates: branchCandidates,

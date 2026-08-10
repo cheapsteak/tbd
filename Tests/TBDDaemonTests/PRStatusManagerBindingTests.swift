@@ -523,16 +523,42 @@ struct WorktreePRStatusFromBindingsTests {
         #expect(updates.first { $0.worktreeID == b }?.status.state == .blocked)
     }
 
-    @Test("withStatus replaces only the status")
-    func withStatusPreservesIdentity() {
+    @Test("withObservation carries the observed refs and never clears a stored one")
+    func withObservationCarriesRefs() {
         let wt = UUID()
         let original = binding(7, worktreeID: wt, state: nil)
-        let fresh = PRStatus(number: 7, url: original.url, state: .pending)
-        let updated = original.withStatus(fresh)
-        #expect(updated.id == original.id)
-        #expect(updated.identityKey == original.identityKey)
-        #expect(updated.source == original.source)
-        #expect(updated.boundAt == original.boundAt)
-        #expect(updated.status == fresh)
+        let fresh = PRStatus(number: 7, url: original.url, state: .merged)
+
+        let observed = original.withObservation(
+            status: fresh, headBranch: "tbd/feature", baseRef: "main")
+        #expect(observed.id == original.id)
+        #expect(observed.identityKey == original.identityKey)
+        #expect(observed.source == original.source)
+        #expect(observed.boundAt == original.boundAt)
+        #expect(observed.status == fresh)
+        #expect(observed.headBranch == "tbd/feature")
+        #expect(observed.baseRef == "main")
+
+        // A nil ref means "not observed this pass", never "cleared".
+        let unobserved = observed.withObservation(status: fresh, headBranch: nil, baseRef: nil)
+        #expect(unobserved.headBranch == "tbd/feature")
+        #expect(unobserved.baseRef == "main")
+    }
+
+    /// The fold the poll applies before judging the merge rule: an absent
+    /// observation leaves the binding exactly as stored, a present one carries
+    /// both the status and the refs.
+    @Test("folding an observation onto a binding is what the merge rule judges")
+    func foldingAppliesTheObservation() {
+        let wt = UUID()
+        let original = binding(7, worktreeID: wt, state: nil)
+        #expect(RPCRouter.folding(original, onto: nil) == original)
+
+        let fresh = PRStatus(number: 7, url: original.url, state: .merged)
+        let folded = RPCRouter.folding(original, onto: PRStatusManager.PRBindingObservation(
+            status: fresh, headBranch: "tbd/feature", baseRef: "main"))
+        #expect(folded.status == fresh)
+        #expect(folded.headBranch == "tbd/feature")
+        #expect(folded.baseRef == "main")
     }
 }

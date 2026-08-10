@@ -63,8 +63,12 @@ public struct MergedTransitionDispatcher: Sendable {
 /// **Edge-triggered, and this actor's state is the only once-only guard.** A
 /// poll runs every few seconds and would otherwise re-fire on every pass, so a
 /// worktree fires when `allResolved` goes false→true and not again until it goes
-/// back to false (a newly bound open PR, or a re-attached one). The memory is
-/// per daemon run and deliberately unpersisted, which is the same reason
+/// back to false — a newly bound open PR, or every binding detached, which
+/// `retainBound(polled:bound:)` reports because `evaluate` never sees a worktree
+/// that has left the bound population. A `tbd pr detach` followed by a
+/// `tbd pr attach` therefore re-arms and fires again, which is what an explicit
+/// attach should mean. The memory is per daemon run and deliberately
+/// unpersisted, which is the same reason
 /// `.merged` is never written to `Worktree.prStatus`: a merge observed while the
 /// daemon was down is re-observed as a transition after restart, so an
 /// auto-archive that failed is retried rather than lost.
@@ -77,13 +81,12 @@ public actor AllResolvedMergeTrigger {
     /// by `observedMerge`.
     ///
     /// **Two sets, not one.** The two entry points describe different worktree
-    /// populations — bound and un-bound — and a single set let either one
-    /// permanently suppress the other. Concretely: once `evaluate` fired for a
-    /// worktree, `observedMerge` could never fire for it again, because nothing
-    /// re-arms a worktree that has left the bound population (with every binding
-    /// detached the poll's grouping no longer contains it, so `evaluate` is not
-    /// called at all and its re-arm never runs). Each set is now cleared by the
-    /// path that owns it, on that path's own definition of "no longer resolved".
+    /// populations — bound and un-bound — and each clears its own set on its own
+    /// definition of "no longer resolved". One shared set could not: a fire
+    /// through either path would suppress the other path's first fire for the
+    /// same worktree, and the two paths are not alternative views of one event.
+    /// A worktree whose bindings are all detached is judged by `observedMerge`
+    /// from then on, on a merge `evaluate` never saw and cannot re-derive.
     private var unboundMergeFired: Set<UUID> = []
 
     private let onResolved: @Sendable (UUID, Int) async -> Void
@@ -128,6 +131,23 @@ public actor AllResolvedMergeTrigger {
         guard allResolvedFired.insert(worktreeID).inserted else { return }
         logger.info("all bound PRs resolved for \(worktreeID, privacy: .public) (\(live.count, privacy: .public) binding(s), attributing to PR #\(merged.number, privacy: .public))")
         await onResolved(worktreeID, merged.number)
+    }
+
+    /// Re-arm every polled worktree that no longer has a live binding.
+    ///
+    /// `evaluate` runs only over the worktrees the poll's grouping contains, and
+    /// that grouping is built from live bindings — so a worktree whose last
+    /// binding was detached leaves the bound population entirely and its own
+    /// re-arm inside `evaluate` never runs. Each pass therefore reports the
+    /// whole population it looked at, and anything that dropped out of it is
+    /// disarmed here: a later `tbd pr attach` that puts the worktree back in a
+    /// resolved state is a fresh rising edge rather than a silent no-op.
+    ///
+    /// Scoped to `polled` deliberately. A worktree this pass never examined has
+    /// said nothing about its bindings, and unremembering it on that silence
+    /// would let an unrelated poll re-fire an archive that already ran.
+    public func retainBound(polled: Set<UUID>, bound: Set<UUID>) {
+        allResolvedFired.subtract(polled.subtracting(bound))
     }
 
     /// The un-bound fallback: a merge observed on a worktree that has **no**
