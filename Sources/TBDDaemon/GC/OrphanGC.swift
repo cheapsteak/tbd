@@ -56,6 +56,7 @@ public actor OrphanGC {
     private let snapshot: ReapSnapshot
     private let agentCollector: AgentWorktreeCollector
     private let scratchpadCollector: ScratchpadCollector
+    private let deletionQueueCollector: DeletionQueueCollector
 
     /// Production seam: an injected `lsofProvider` returns a non-optional
     /// `[String]` — by definition authoritative, it can't signal
@@ -104,6 +105,7 @@ public actor OrphanGC {
         self.snapshot = snap
         self.agentCollector = AgentWorktreeCollector(git: git, snapshot: snap, now: resolvedNow)
         self.scratchpadCollector = ScratchpadCollector(base: resolvedScratchpadBase)
+        self.deletionQueueCollector = DeletionQueueCollector(git: git)
     }
 
     // MARK: - Sweep
@@ -161,6 +163,11 @@ public actor OrphanGC {
             }
         }
 
+        await reclaimDeletionQueue(
+            repos: repos, live: live, dryRun: dryRun,
+            planned: &planned, reaped: &reaped
+        )
+
         await reconcileScratchpads(repos: repos, dryRun: dryRun, planned: &planned, reaped: &reaped)
 
         // Snapshot retention never runs in dryRun; the outer guard already
@@ -171,6 +178,77 @@ public actor OrphanGC {
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
         return .init(planned: planned, reaped: reaped)
+    }
+
+    /// Reclaims worktree directories that outlived their archive: entries
+    /// already queued in a pool's `.deleting/`, plus archives that a
+    /// pre-queue release failed to remove.
+    ///
+    /// The archived-row scan is deliberately the mirror of
+    /// `reconcileScratchpads`, which reads the same rows and keeps the ones
+    /// whose directory is *gone*. The ones that remain are exactly this
+    /// method's input.
+    private func reclaimDeletionQueue(
+        repos: [Repo], live: [String], dryRun: Bool,
+        planned: inout [String], reaped: inout Int
+    ) async {
+        let layout = WorktreeLayout()
+        let scratchPrefix = TBDConstants.scratchDir.path
+        var repoPathByID: [UUID: String] = [:]
+        var prefixesByRepoID: [UUID: [String]] = [:]
+        var pools: Set<String> = []
+        for repo in repos {
+            repoPathByID[repo.id] = repo.path
+            let prefixes = layout.legacyAndCanonicalPrefixes(for: repo)
+            prefixesByRepoID[repo.id] = prefixes
+            pools.formUnion(prefixes)
+        }
+        pools.insert(scratchPrefix)
+
+        // 1. Entries already queued — unconditionally reclaimable.
+        for entry in deletionQueueCollector.pendingEntries(pools: Array(pools)) {
+            planned.append("REAP queued-deletion \(entry.path)")
+            guard !dryRun else { continue }
+            if deletionQueueCollector.drain(entry) {
+                reaped += 1
+                logger.info("gc: drained queued deletion \(entry.path, privacy: .public)")
+            }
+        }
+
+        // 2. Archives that never finished.
+        let allWorktrees = (try? await db.worktrees.list(status: .archived)) ?? []
+        let candidates = await deletionQueueCollector.interruptedArchives(
+            worktrees: allWorktrees,
+            repoPathByID: repoPathByID,
+            prefixesByRepoID: prefixesByRepoID,
+            scratchPrefix: scratchPrefix
+        )
+        for candidate in candidates {
+            switch await deletionQueueCollector.decide(candidate, liveCWDs: live) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.path)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP archived-worktree \(candidate.path)")
+                guard !dryRun else { continue }
+                guard let entry = await deletionQueueCollector.reap(candidate) else {
+                    planned.append("KEEP enqueue-failed \(candidate.path)")
+                    continue
+                }
+                deletionQueueCollector.drain(entry)
+                await insertReapRecord(ReapRecord(
+                    kind: .archivedWorktree,
+                    repoPath: candidate.repoPath ?? "",
+                    worktreePath: candidate.path
+                ))
+                reaped += 1
+                logger.info("""
+                gc: reclaimed archived worktree \(candidate.path, privacy: .public)
+                """)
+            }
+        }
     }
 
     /// Scratchpad reconciliation: archived TBD worktrees whose directory is
