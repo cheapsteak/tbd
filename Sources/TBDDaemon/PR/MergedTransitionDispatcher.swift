@@ -100,12 +100,15 @@ public actor AllResolvedMergeTrigger {
     /// The un-bound fallback: a merge observed on a worktree that has **no**
     /// bindings at all.
     ///
-    /// Binding discovery does not reach every worktree — a PR known only by
-    /// `Worktree.prNumber`, or one whose branch match the coordinator rejected,
-    /// leaves nothing to judge. There the observed merge is the whole story and
-    /// this behaves exactly as the single-PR path always did. A worktree that
-    /// *does* have bindings is judged only by `evaluate`, so an open sibling PR
-    /// cannot be archived out from under.
+    /// Binding discovery does not reach every worktree, and the worktree-keyed
+    /// status cache does not depend on it: a branch match the coordinator
+    /// rejected as wrong-repo, or a `Worktree.prNumber` whose seed deferred
+    /// because the worktree's own repo could not be named, still yields a cached
+    /// status and so still observes a merge — with nothing bound to judge. There
+    /// the observed merge is the whole story and this behaves exactly as the
+    /// single-PR path always did. A worktree that *does* have bindings is judged
+    /// only by `evaluate`, so an open sibling PR cannot be archived out from
+    /// under.
     public func observedMerge(worktreeID: UUID, prNumber: Int, bindings: [PRBinding]) async {
         guard bindings.filter({ !$0.detached }).isEmpty else { return }
         guard resolved.insert(worktreeID).inserted else { return }

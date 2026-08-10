@@ -628,10 +628,40 @@ public final class RPCRouter: Sendable {
             _ = await prBindingCoordinator.bind(worktreeID: match.worktreeID,
                                                 parsed: match.parsed, source: .branch)
         }
+        await seedProvenanceBindings(worktrees)
         await refreshBindingStatuses(worktrees: worktrees, repoPath: infos.first?.worktreePath)
         // Prune at the END so we never drop an entry this pass just populated.
         await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         return PRListResult(statuses: await prManager.allStatuses())
+    }
+
+    /// Bind the PR a worktree was *created from* — `Worktree.prNumber` — so a
+    /// PR-row worktree behaves like any other multi-PR worktree.
+    ///
+    /// This runs on the poll rather than at creation because both populations
+    /// need it: worktrees that predate bindings carry a number and no row, and
+    /// creation-time seeding would leave every one of them stranded. It also
+    /// costs a new worktree nothing in latency — its `Worktree.prStatus` is
+    /// populated by this same poll, so a binding that appears here appears
+    /// exactly when the PR does.
+    ///
+    /// Cheap in the steady state: the stored-number check is one indexed SELECT
+    /// per PR-row worktree, and only a genuinely unseeded number pays a repo
+    /// resolution. Detached numbers stay short-circuited here **and** are
+    /// refused by `seedProvenance`, so a `tbd pr detach` is not undone by the
+    /// next poll.
+    private func seedProvenanceBindings(_ worktrees: [Worktree]) async {
+        for worktree in worktrees {
+            guard let number = worktree.prNumber else { continue }
+            guard let recorded = try? await db.prBindings.list(worktreeID: worktree.id,
+                                                               includeDetached: true),
+                  !recorded.contains(where: { $0.number == number }) else { continue }
+            guard let parsed = await prRef(worktreeID: worktree.id, number: number) else {
+                continue
+            }
+            _ = await prBindingCoordinator.seedProvenance(worktreeID: worktree.id,
+                                                          parsed: parsed)
+        }
     }
 
     /// Refresh every binding of the polled worktrees and persist what came back.
@@ -842,7 +872,17 @@ public final class RPCRouter: Sendable {
             return PRBindingExtractor.parsePRURLs(in: url).first
         }
         guard let number = params.number, number > 0 else { return nil }
-        guard let own = await prBindingRepoResolver(params.worktreeID) else { return nil }
+        return await prRef(worktreeID: params.worktreeID, number: number)
+    }
+
+    /// A bare PR number as a `ParsedPRURL` in the worktree's own repo.
+    ///
+    /// Resolved through the same seam the coordinator validates with, so a
+    /// number can never synthesise a URL the policy would then reject as
+    /// wrong-repo. Returns nil when the worktree's repo cannot be named — the
+    /// caller defers rather than guessing an owner.
+    private func prRef(worktreeID: UUID, number: Int) async -> ParsedPRURL? {
+        guard let own = await prBindingRepoResolver(worktreeID) else { return nil }
         return ParsedPRURL(
             host: "github.com", owner: own.owner, repo: own.name, number: number,
             url: "https://github.com/\(own.owner)/\(own.name)/pull/\(number)")

@@ -9,9 +9,11 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "prBinding")
 /// an unresolvable repo defers rather than rejects.
 ///
 /// The tombstone rule is what makes a user's detach durable. Discovery is
-/// continuous — the branch matcher re-runs on every poll and the hook re-fires
-/// on every `gh pr create` — so a detach that only deleted the row would be
-/// undone within seconds. Only `.manual` may clear one.
+/// continuous — the branch matcher re-runs on every poll, the hook re-fires on
+/// every `gh pr create`, and `seedProvenance` reconciles `Worktree.prNumber` on
+/// every poll — so a detach that only deleted the row would be undone within
+/// seconds. Only an explicit attach may clear one, which is why `seedProvenance`
+/// writes with `.manual` yet is barred from reviving.
 public actor PRBindingCoordinator {
 
     public enum BindOutcome: Sendable, Equatable {
@@ -43,6 +45,34 @@ public actor PRBindingCoordinator {
 
     public func bind(worktreeID: UUID, parsed: ParsedPRURL,
                      source: PRBindingSource) async -> BindOutcome {
+        // Only an explicit attach clears a tombstone — that is the whole
+        // tombstone rule, and `.manual` is the source an attach carries.
+        await bind(worktreeID: worktreeID, parsed: parsed, source: source,
+                   mayReviveTombstone: source == .manual)
+    }
+
+    /// Seed the binding a worktree's `Worktree.prNumber` implies — the
+    /// provenance of a worktree created from a PR row.
+    ///
+    /// Without this such a worktree owns a number and no binding, so its PR is
+    /// invisible to `tbd pr list`, to the toolbar dropdown and to the status-bar
+    /// chips. Fork PRs are the sharpest case: a fork head never appears in the
+    /// viewer-authored batch, so branch matching is structurally unable to find
+    /// them and the stored number is the only handle that exists.
+    ///
+    /// The source is `.manual` — naming a PR row at creation is as explicit as
+    /// an attach — but seeding is **reconciled on every poll**, and `.manual` is
+    /// the one source permitted to clear a tombstone. A plain
+    /// `bind(source: .manual)` here would therefore undo a `tbd pr detach`
+    /// within seconds. Seeding only ever writes the FIRST row for an identity;
+    /// anything already on record, tombstone included, is left exactly as it is.
+    public func seedProvenance(worktreeID: UUID, parsed: ParsedPRURL) async -> BindOutcome {
+        await bind(worktreeID: worktreeID, parsed: parsed, source: .manual,
+                   mayReviveTombstone: false)
+    }
+
+    private func bind(worktreeID: UUID, parsed: ParsedPRURL, source: PRBindingSource,
+                      mayReviveTombstone: Bool) async -> BindOutcome {
         guard let own = await resolveRepo(worktreeID) else {
             logger.debug("deferring PR #\(parsed.number, privacy: .public): repo unresolved for worktree \(worktreeID.uuidString, privacy: .public)")
             return .deferredUnknownRepo
@@ -63,8 +93,8 @@ public actor PRBindingCoordinator {
                 .first { $0.identityKey == candidate.identityKey }
             if let existing {
                 guard existing.detached else { return .alreadyBound }
-                guard source == .manual else {
-                    logger.debug("refusing to revive detached PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public) from \(source.rawValue, privacy: .public)")
+                guard mayReviveTombstone else {
+                    logger.debug("refusing to revive detached PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): a \(source.rawValue, privacy: .public) bind is not an explicit attach")
                     return .tombstoned
                 }
                 try await store.setDetached(worktreeID: worktreeID,
