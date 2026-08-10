@@ -51,9 +51,46 @@ struct WorktreeDeletionQueueTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let queue = WorktreeDeletionQueue()
-        #expect(throws: WorktreeDeletionQueueError.self) {
-            try queue.enqueue(worktreePath: pool + "/does-not-exist")
+        let source = pool + "/does-not-exist"
+        #expect {
+            try queue.enqueue(worktreePath: source)
+        } throws: { error in
+            guard case let .renameFailed(from, to, code) = error as? WorktreeDeletionQueueError else {
+                return false
+            }
+            return from == source
+                && to.hasPrefix(pool + "/" + WorktreeDeletionQueue.dirName + "/")
+                && code == ENOENT
         }
+    }
+
+    /// Proves `enqueue` really calls the `rename(2)` syscall and not
+    /// `FileManager.moveItem`, which would silently succeed across
+    /// filesystems via copy-then-delete instead of surfacing `EXDEV`. The
+    /// injected stub simulates the destination being on a different
+    /// filesystem; a regression to `moveItem` would not exercise this seam at
+    /// all, since `moveItem` never calls it.
+    @Test func enqueueSurfacesEXDEVFromTheInjectedRenameSeam() throws {
+        let (tmp, pool, wt) = try makePool()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let queue = WorktreeDeletionQueue(renameItem: { _, _ in
+            errno = EXDEV
+            return -1
+        })
+
+        #expect {
+            try queue.enqueue(worktreePath: wt)
+        } throws: { error in
+            guard case let .renameFailed(from, to, code) = error as? WorktreeDeletionQueueError else {
+                return false
+            }
+            return from == wt
+                && to.hasPrefix(pool + "/" + WorktreeDeletionQueue.dirName + "/")
+                && code == EXDEV
+        }
+        // The stub never actually moved anything.
+        #expect(FileManager.default.fileExists(atPath: wt))
     }
 
     @Test func pendingEnumeratesEntriesLeftByAPreviousRun() throws {

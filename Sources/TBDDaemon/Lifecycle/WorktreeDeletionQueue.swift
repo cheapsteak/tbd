@@ -1,8 +1,18 @@
 import Foundation
 import os
-import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "deletionQueue")
+
+/// Thread-safe rendering of an errno value. `strerror(3)` returns a pointer
+/// into a shared static buffer and is not safe to call concurrently;
+/// `strerror_r(3)` fills a caller-owned buffer instead.
+private func describeErrno(_ code: Int32) -> String {
+    var buffer = [CChar](repeating: 0, count: 256)
+    if strerror_r(code, &buffer, buffer.count) == 0 {
+        return String(cString: buffer)
+    }
+    return "errno \(code)"
+}
 
 /// A worktree directory that has been renamed out of its pool slot and is
 /// waiting for its bytes to be reclaimed.
@@ -28,7 +38,7 @@ public enum WorktreeDeletionQueueError: Error, CustomStringConvertible, Equatabl
     public var description: String {
         switch self {
         case let .renameFailed(from, to, code):
-            return "rename(\(from) -> \(to)) failed: \(String(cString: strerror(code))) (errno \(code))"
+            return "rename(\(from) -> \(to)) failed: \(describeErrno(code)) (errno \(code))"
         }
     }
 }
@@ -54,7 +64,21 @@ public struct WorktreeDeletionQueue: Sendable {
     /// other dotfiles.
     public static let dirName = ".deleting"
 
-    public init() {}
+    /// The rename primitive `enqueue` calls. Defaults to the real `rename(2)`
+    /// syscall; tests substitute a stub to force specific `errno` values
+    /// (e.g. `EXDEV`) without needing two real filesystems, and to prove that
+    /// production really goes through the syscall rather than
+    /// `FileManager.moveItem`'s cross-filesystem copy-then-delete fallback.
+    private let renameItem: @Sendable (String, String) -> Int32
+
+    public init() {
+        self.renameItem = { rename($0, $1) }
+    }
+
+    /// Test seam: inject a stand-in for `rename(2)`.
+    init(renameItem: @escaping @Sendable (String, String) -> Int32) {
+        self.renameItem = renameItem
+    }
 
     public func queueDir(forPool pool: String) -> String {
         (pool as NSString).appendingPathComponent(Self.dirName)
@@ -75,7 +99,7 @@ public struct WorktreeDeletionQueue: Sendable {
         )
         let destination = (dir as NSString).appendingPathComponent(UUID().uuidString)
 
-        if rename(worktreePath, destination) != 0 {
+        if renameItem(worktreePath, destination) != 0 {
             let code = errno
             throw WorktreeDeletionQueueError.renameFailed(
                 from: worktreePath, to: destination, errno: code
