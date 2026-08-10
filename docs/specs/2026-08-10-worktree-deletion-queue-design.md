@@ -105,6 +105,14 @@ nothing else:
 
 No database access, no git, no timers. Testable on a temp directory.
 
+A sweep drains its entries one at a time. Deleting several at once raises
+aggregate throughput about fourfold (938 entries/s alone against 3,519 across
+six concurrent deletions), but a background sweep that saturates the disk
+competes with whatever the developer is doing, and nothing depends on the queue
+draining quickly — an entry that waits an hour costs only the disk it already
+occupies. Bounded concurrency stays available if serial draining proves too
+slow in practice.
+
 The queue is a per-pool sibling of the worktree directories rather than one
 global location, because `rename()` fails across filesystems (`EXDEV`) and pools
 can live outside `TBD_HOME` — `<repo>/.tbd/worktrees/` may sit on another
