@@ -167,10 +167,8 @@ extension WorktreeLifecycle {
         // row already read `.archived`. The rename is one syscall, so the
         // archive completes regardless of tree size and the bytes are reclaimed
         // afterwards with no clock attached.
-        var removed = false
         do {
             let queued = try deletionQueue.enqueue(worktreePath: worktree.path)
-            removed = true
 
             // The directory no longer sits at the registered path, so git's
             // administrative entry is stale — drop it. A failure here is
@@ -184,9 +182,26 @@ extension WorktreeLifecycle {
                 """)
             }
 
-            // Reclaim the bytes. `completeArchiveWorktree` is already invoked
-            // from a detached task, so this blocks nothing the caller awaits,
-            // and an interrupted drain leaves a queue entry the sweep finishes.
+            // The rename above is the commit point (design spec "The commit
+            // point"): the directory has already left its pool slot, so the
+            // callback's precondition — the path is gone — holds here, before
+            // the bytes are actually reclaimed by the drain below. Firing now
+            // rather than after drain matches the design's ordering and keeps
+            // the event-driven scratchpad cleanup this callback exists to
+            // trigger prompt even when the drain that follows is slow.
+            if let onWorktreeRemoved {
+                await onWorktreeRemoved(worktree.path, repo.path)
+            }
+
+            // Reclaim the bytes inline, with no deadline attached. Every
+            // production caller that reaches this method through an RPC —
+            // `worktree.archive`, `repo.remove`'s cascade, and auto-archive on
+            // merge — invokes it from a detached task, so draining here blocks
+            // nothing an RPC is waiting on. The synchronous
+            // `archiveWorktree(worktreeID:force:)` wrapper (tests, and any
+            // future CLI use) deliberately blocks until the drain finishes —
+            // archive completion is meant to mean "the bytes are gone" there.
+            // An interrupted drain leaves a queue entry the GC sweep finishes.
             deletionQueue.drain(queued)
         } catch {
             archiveLogger.error("""
@@ -199,21 +214,20 @@ extension WorktreeLifecycle {
                     worktreePath: worktree.path,
                     timeout: GitManager.worktreeRemoveFallbackTimeout
                 )
-                removed = !FileManager.default.fileExists(atPath: worktree.path)
+                // Only claim the directory is gone when it actually is. This
+                // callback drives scratchpad reclamation, whose consumer
+                // previously had to re-check the path itself because this
+                // fired unconditionally after a swallowed failure.
+                let removed = !FileManager.default.fileExists(atPath: worktree.path)
+                if removed, let onWorktreeRemoved {
+                    await onWorktreeRemoved(worktree.path, repo.path)
+                }
             } catch {
                 archiveLogger.error("""
                 archive: in-place removal of \(worktree.path, privacy: .public) \
                 also failed: \(error, privacy: .public) — the GC sweep will retry
                 """)
             }
-        }
-
-        // Only claim the directory is gone when it actually is. This callback
-        // drives scratchpad reclamation, whose consumer previously had to
-        // re-check the path itself because this fired unconditionally after a
-        // swallowed failure.
-        if removed, let onWorktreeRemoved {
-            await onWorktreeRemoved(worktree.path, repo.path)
         }
     }
 

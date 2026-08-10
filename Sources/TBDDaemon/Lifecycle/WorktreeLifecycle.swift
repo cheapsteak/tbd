@@ -91,10 +91,13 @@ public struct WorktreeLifecycle: Sendable {
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600
 
-    /// Fired immediately after a worktree's directory is actually removed
-    /// from disk (`completeArchiveWorktree`'s `git.worktreeRemove`), with the
-    /// removed worktree's path and its owning repo's path (the archive
-    /// caller has `repo` in scope). `nil` by default (tests, older callers).
+    /// Fired once a worktree's directory has genuinely left its pool slot —
+    /// on the success path, right after `completeArchiveWorktree` renames it
+    /// into `WorktreeDeletionQueue` (bytes may still be draining); on the
+    /// fallback leg, only once `git.worktreeRemove` is verified to have
+    /// actually removed it from disk. Carries the removed worktree's path and
+    /// its owning repo's path (the archive caller has `repo` in scope). `nil`
+    /// by default (tests, older callers).
     /// `Daemon` wires this to
     /// `OrphanGC.scratchpadCleanup(forRemovedWorktreePath:repoPath:)` so the
     /// worktree's Claude Code scratchpad is reclaimed event-driven instead of

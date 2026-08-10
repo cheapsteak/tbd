@@ -106,10 +106,20 @@ extension RPCRouter {
                         target: ActuationTarget(worktree: wt.id.uuidString)))
                 }
 
-                // Cascade-archive all active worktrees
+                // Cascade-archive all active worktrees. Two-phase, same split
+                // as `handleWorktreeArchive`: phase 1 (`beginArchiveWorktree`)
+                // is the throwing part — DB status flip, session capture,
+                // tmux teardown — and runs synchronously in this loop so the
+                // actuation bookkeeping below still applies to it. Phase 2
+                // (`completeArchiveWorktree` — hook + deletion-queue drain)
+                // never throws and can run for minutes on a large worktree,
+                // so it runs detached per worktree instead of being awaited
+                // here; otherwise this RPC would block on N unbounded drains.
                 for (index, wt) in activeWorktrees.enumerated() {
+                    let worktree: Worktree
+                    let wtRepo: Repo
                     do {
-                        try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+                        (worktree, wtRepo) = try await lifecycle.beginArchiveWorktree(worktreeID: wt.id, force: true)
                     } catch {
                         // The throw ends the cascade, so this row and every row
                         // behind it names a teardown that did not happen. They
@@ -122,6 +132,11 @@ extension RPCRouter {
                         throw error
                     }
                     await finishActuation(actuationIDs[index], .dispatched)
+
+                    let lifecycle = self.lifecycle
+                    Task.detached {
+                        await lifecycle.completeArchiveWorktree(worktree: worktree, repo: wtRepo, force: true)
+                    }
                 }
             } else {
                 return RPCResponse(

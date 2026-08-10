@@ -320,9 +320,13 @@ public actor OrphanGC {
     /// scope), stamped onto the resulting record; pass `""` when unknown.
     ///
     /// Verifies the worktree directory is actually gone before doing
-    /// anything else: `completeArchiveWorktree` fires this callback after a
-    /// `try?`-swallowed `git.worktreeRemove`, so a failed removal must not
-    /// orphan-classify (and delete) a scratchpad that's still in active use.
+    /// anything else. `completeArchiveWorktree` already fires this callback
+    /// only once it has confirmed the path is gone — queued out of its pool
+    /// slot on the success leg, or a verified `git.worktreeRemove` on the
+    /// fallback leg — so this is defense in depth against a future caller
+    /// that doesn't uphold that contract, not a workaround for a swallowed
+    /// failure: a failed removal must never orphan-classify (and delete) a
+    /// scratchpad that's still in active use.
     ///
     /// The `gcEnabled` master switch governs ALL GC deletion, including this
     /// event-driven path — one toggle covers both collectors. A config read

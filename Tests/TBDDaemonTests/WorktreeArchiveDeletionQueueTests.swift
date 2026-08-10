@@ -86,6 +86,46 @@ struct WorktreeArchiveDeletionQueueTests {
         let registered = try await harness.git.worktreeList(repoPath: harness.repoPath)
         #expect(!registered.contains { $0.path == harness.worktreePath })
     }
+
+    @Test func onWorktreeRemovedNeverFiresWhenBothEnqueueAndFallbackFail() async throws {
+        // The headline guarantee — the callback fires only when the directory
+        // is genuinely gone — has no coverage unless BOTH removal paths are
+        // made to fail. Otherwise a regression back to an unconditional
+        // `if let onWorktreeRemoved` would go undetected: every other test
+        // here has one path succeed, so the callback firing looks correct
+        // either way.
+        let observed = ObservedRemoval()
+        let harness = try await ArchiveHarness.make(onWorktreeRemoved: { path, _ in
+            await observed.record(
+                path: path,
+                existedAtCallTime: FileManager.default.fileExists(atPath: path)
+            )
+        })
+        defer { harness.cleanUp() }
+
+        // Force `enqueue` to fail: occupy the queue-dir name with a regular
+        // file, same technique as `enqueueFailureFallsBackToGitWorktreeRemove`.
+        let pool = (harness.worktreePath as NSString).deletingLastPathComponent
+        let queueDir = WorktreeDeletionQueue().queueDir(forPool: pool)
+        try "not a directory".write(toFile: queueDir, atomically: true, encoding: .utf8)
+
+        // Force the fallback `git worktree remove --force` to fail too: mark
+        // a file inside the worktree user-immutable (`chflags uchg`), which
+        // makes the recursive delete underneath `git worktree remove` return
+        // "Operation not permitted" and leave the directory in place —
+        // verified directly: exit code 255, directory and marker both
+        // survive. `--force` bypasses git's own dirty/locked-worktree
+        // refusals but has no effect on a filesystem-level EPERM.
+        let markerPath = (harness.worktreePath as NSString).appendingPathComponent("immutable-marker")
+        #expect(FileManager.default.createFile(atPath: markerPath, contents: Data("x".utf8)))
+        try #require(chflags(markerPath, UInt32(UF_IMMUTABLE)) == 0, "chflags must succeed for this test to force a real removal failure")
+        defer { chflags(markerPath, 0) } // clear before cleanUp()'s removeItem, else that fails too
+
+        try await harness.lifecycle.archiveWorktree(worktreeID: harness.worktreeID)
+
+        #expect(await observed.paths.isEmpty, "the callback must never fire when neither removal path succeeded")
+        #expect(FileManager.default.fileExists(atPath: harness.worktreePath), "nothing removed the worktree — it must still be there")
+    }
 }
 
 /// Records `onWorktreeRemoved` invocations and whether the path still existed
