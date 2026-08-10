@@ -25,6 +25,12 @@ public final class RPCRouter: Sendable {
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    /// Edge-triggered gate in front of the merged-PR fan-out (auto-archive,
+    /// auto-hibernate): it fires when every PR bound to a worktree has resolved.
+    /// Wired post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`);
+    /// `nil` in mock mode / unit tests, where a poll simply refreshes statuses
+    /// and judges nothing.
+    public nonisolated(unsafe) var mergeTrigger: AllResolvedMergeTrigger?
     /// Orphan-GC actor. `nil` in mock mode / unit tests that don't need it;
     /// set post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`).
     /// The `gc.*` handlers return an error response rather than crashing when
@@ -663,6 +669,15 @@ public final class RPCRouter: Sendable {
         for update in Self.worktreePRStatusUpdates(refreshed) {
             guard (stored[update.worktreeID] ?? nil) != update.status else { continue }
             try? await db.worktrees.setPRStatus(id: update.worktreeID, status: update.status)
+        }
+
+        // Judge the merge rule on the statuses this pass just observed — this is
+        // the only place they are all in hand at once. The trigger owns the
+        // edge, so calling it every poll costs a set lookup per worktree.
+        if let mergeTrigger {
+            for (worktreeID, group) in Dictionary(grouping: refreshed, by: \.worktreeID) {
+                await mergeTrigger.evaluate(worktreeID: worktreeID, bindings: group)
+            }
         }
     }
 
