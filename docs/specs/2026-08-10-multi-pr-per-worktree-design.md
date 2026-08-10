@@ -71,10 +71,25 @@ Per the repo's migration rule, the same commit adds the GRDB record type under
 existing rows and JSON still decode.
 
 `Worktree.prNumber` keeps its present meaning — provenance for a worktree
-created from a PR row — and additionally seeds a `manual`-source binding at
-creation. `Worktree.prStatus` continues to be written with the **worst-state**
-status among a worktree's bindings, so existing readers (`RemoteSectionView`,
-`MockSeeder`, the supervision surfaces) need no change.
+created from a PR row — and additionally seeds a `manual`-source binding, so
+that PR appears in the list like any other. Fork PRs make this load-bearing
+rather than tidy: their head branch never appears in the viewer-authored batch,
+so branch matching can never find them and the stored number is the only handle
+that exists. Seeding runs as a poll reconciliation rather than at creation,
+which covers worktrees that predate bindings and avoids the moment during
+creation when the checkout does not yet exist and its repo cannot be resolved.
+Because it re-runs every poll, the seed is explicitly barred from reviving a
+tombstone, which a `manual` source would otherwise do.
+
+`Worktree.prStatus` continues to be written with the **worst-state** status
+among a worktree's bindings, so existing readers (`RemoteSectionView`,
+`MockSeeder`, the supervision surfaces) need no change — with one exception. It
+is **not** written when that worst status is `.merged`, because `hydrate`
+reloads the column at daemon start as an already-merged baseline; a merge would
+then never be re-observed as a transition, and an auto-archive that failed on
+the first attempt could never retry. The worktree keeps its previous column
+value instead. This is the same reason `PRStatusManager` has never persisted
+`.merged`.
 
 ### Discovery: three sources
 
@@ -119,6 +134,11 @@ Bindings are capped at **20 non-detached rows per worktree**. On overflow, a
 terminal-state binding (merged or closed) is evicted to make room; if none is
 evictable the new binding is dropped and the daemon logs it. The cap bounds the
 per-poll GraphQL cost of a long-lived worktree.
+
+Reviving a tombstone by explicit attach bypasses the cap, because it clears a
+flag rather than inserting a row. That is the intended precedence: the cap
+exists to bound what automatic discovery may add, and an explicit user gesture
+outranks it.
 
 ### Status refresh
 
@@ -204,6 +224,13 @@ agent asked to tidy a worktree's PRs can do it without being told the commands.
 - **Force-push or branch rename** — bindings are keyed by PR number, not by
   branch, so neither affects them. `head_branch` is descriptive only.
 - **Worktree archived** — `ON DELETE CASCADE` removes bindings with the worktree.
+- **Every binding detached** — the live set is empty, so the worktree falls back
+  to the pre-binding single-PR merge path and can auto-archive on an observed
+  merge. That fallback is what still covers a worktree whose only PR was
+  rejected as wrong-repo or whose seed deferred on an unresolvable repo, so it
+  cannot simply be deleted. Detaching every PR to *suppress* auto-archive is
+  therefore not a supported gesture; turn auto-archive off for the worktree
+  instead. A known residual.
 - **Enterprise hosts** — the `host` column exists and defaults to `github.com`;
   the bind regex is `github.com`-only for now, so support is additive later.
 
