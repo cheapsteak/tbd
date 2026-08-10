@@ -114,13 +114,17 @@ struct ContentView: View {
                     ToolbarSpacer(.fixed, placement: .primaryAction)
                 }
 
-                // The PR control is gated on the worktree having at least one
-                // BINDING, not on the legacy single `prStatuses` entry: a
-                // worktree can own several PRs, and with none bound no control
-                // appears at all.
+                // The PR control is gated on `effectivePRBindings`: every
+                // binding the worktree has, or — with none — the legacy single
+                // `prStatuses` entry lifted into one synthetic binding, so a
+                // worktree whose PRs cannot be bound (`gh` offline or
+                // unauthenticated, or the first poll after upgrade still in
+                // flight) keeps the control it had before multi-PR. The sidebar
+                // row indicator reads the same accessor, so the two surfaces
+                // cannot disagree. With neither, no control appears at all.
                 if let worktreeID = appState.selectedWorktreeIDs.first,
                    appState.selectedWorktreeIDs.count == 1 {
-                    let bindings = appState.prBindings[worktreeID] ?? []
+                    let bindings = appState.effectivePRBindings(worktreeID: worktreeID)
                     if !bindings.isEmpty {
                         let worktree = appState.findWorktree(id: worktreeID)
                         let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
@@ -135,9 +139,9 @@ struct ContentView: View {
                         // + whether its row has loaded (gates the menu's
                         // items), armed + hibernateArmed + blocked (menu +
                         // help), the rendered fields of EVERY binding (number,
-                        // state, url, queue position, detached — not reason,
-                        // which presentation ignores), and colorScheme (baked
-                        // icon colors).
+                        // state, url, queue position, detached, and the reason
+                        // + head branch every menu row's title carries), and
+                        // colorScheme (baked icon colors).
                         let splitButtonID = PRButtonLabel.prSplitButtonID(
                             worktreeID: worktreeID,
                             worktreeFound: worktree != nil,
@@ -862,11 +866,12 @@ struct PRButtonLabel: View {
     /// reason), `url` (captured by the row's action and by `primaryAction`, so a
     /// re-pointed PR must recreate the item too), `mergeQueuePosition` (the bus
     /// glyph short-circuits on it and bakes the position into the icon, so a
-    /// 2→1 queue move with an unchanged `state` must still rebuild), and
-    /// `detached` (a tombstoned binding drops out of the label count).
-    /// `PRStatus.reason` is deliberately excluded — a reason-only change alters
-    /// no rendered value the presentation reads, and keying on it would force
-    /// spurious toolbar-item rebuilds for zero visual change.
+    /// 2→1 queue move with an unchanged `state` must still rebuild),
+    /// `detached` (a tombstoned binding drops out of the label count), and
+    /// `PRStatus.reason` + `headBranch` — `PRBindingPresentation.menuRows`
+    /// renders BOTH into every row title, so "1 check failing" → "3 checks
+    /// failing" under an unchanged `.checksFailed`, or a re-pushed head branch,
+    /// would otherwise leave the materialized menu showing the stale text.
     ///
     /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
     /// `.id` identity changes for String values here — a custom Hashable
@@ -887,6 +892,8 @@ struct PRButtonLabel: View {
             return "\(binding.number)-\(status?.state.rawValue ?? "nil")-\(binding.url)"
                 + "-\(status?.mergeQueuePosition.map(String.init) ?? "nil")"
                 + "-\(binding.detached)"
+                + "-\(status?.reason ?? "nil")"
+                + "-\(binding.headBranch ?? "nil")"
         }.joined(separator: "|")
         return "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
             + "-[\(rendered)]"

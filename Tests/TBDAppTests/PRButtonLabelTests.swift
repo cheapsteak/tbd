@@ -253,29 +253,30 @@ struct PRButtonLabelTests {
         )
         #expect(open != otherURL)
 
-        // reason is deliberately NOT keyed: nothing the split button renders
-        // reads it (PRStatusPresentation.make switches only on state), so a
-        // reason-only change must NOT force a spurious toolbar-item rebuild.
+        // reason IS keyed: `PRBindingPresentation.menuRows` renders
+        // `status.reason ?? state.displayReason` into every menu row title, so
+        // a reason-only change ("1 check failing" → "3 checks failing") under an
+        // unchanged state would leave the materialized NSMenu showing stale text.
         let withReason = Self.makeKey(
             worktreeID: worktreeID,
             prStatus: Self.makeStatus(reason: "review required")
         )
-        #expect(open == withReason)
+        #expect(open != withReason)
     }
 
     @Test("PRStatus field-count tripwire for prSplitButtonID")
     func prStatusFieldCountTripwire() {
         // If this fails, a PRStatus field was added. prSplitButtonID
         // hand-enumerates the fields the split button renders (number, state,
-        // url — reason deliberately excluded), so a new field is otherwise
+        // url, reason, mergeQueuePosition), so a new field is otherwise
         // silently unkeyed: decide whether the split button renders it and
         // update prSplitButtonID (and this count) accordingly.
-        // 8 = number, state, url, reason + the nightwatch gate metadata
-        // (files, commits, authorWorktreeID), which the split button does NOT
-        // render — deliberately excluded like reason, else every metadata
-        // fetch would force a spurious toolbar-item rebuild — plus
-        // mergeQueuePosition, which the split button DOES render (bus glyph +
-        // baked position badge) and which IS keyed.
+        // 8 = number, state, url, reason and mergeQueuePosition, all of which
+        // the split button DOES render and which are all keyed (reason via the
+        // menu row titles, mergeQueuePosition via the bus glyph's baked
+        // position badge), plus the nightwatch gate metadata (files, commits,
+        // authorWorktreeID), which it does NOT render — deliberately excluded,
+        // else every metadata fetch would force a spurious item rebuild.
         let status = Self.makeStatus()
         #expect(Mirror(reflecting: status).children.count == 8)
     }

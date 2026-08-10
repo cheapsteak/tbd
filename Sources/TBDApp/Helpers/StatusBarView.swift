@@ -171,7 +171,11 @@ struct StatusBarView: View {
             // nil for a multi-selection, matching the path/branch cluster and
             // the toolbar's PR control.
             if let selected {
-                let bindings = appState.prBindings[selected.id] ?? []
+                // Same accessor as the toolbar control and the sidebar
+                // indicator — bindings when there are any, else the legacy
+                // single status lifted into one synthetic binding — so the
+                // three surfaces cannot show different PRs for one worktree.
+                let bindings = appState.effectivePRBindings(worktreeID: selected.id)
                 if !bindings.isEmpty {
                     PRChipCluster(bindings: bindings, worktreeID: selected.id)
                         // Same reason as the path cluster: yield width to the

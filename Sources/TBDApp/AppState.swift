@@ -682,6 +682,20 @@ final class AppState: ObservableObject {
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
     @Published var prBindings: [UUID: [PRBinding]] = [:]
+    /// What every PR surface — toolbar split button, sidebar row indicator,
+    /// status-bar chips — must read, so they cannot disagree about a worktree.
+    /// Bindings when there are any; otherwise the legacy single `prStatuses`
+    /// entry lifted into one synthetic binding, which is what keeps the control
+    /// on screen when `gh` cannot resolve a repo (offline or unauthenticated)
+    /// or before the first successful poll after upgrade. See
+    /// `PRBindingPresentation.effectiveBindings`.
+    func effectivePRBindings(worktreeID: UUID) -> [PRBinding] {
+        PRBindingPresentation.effectiveBindings(
+            prBindings[worktreeID] ?? [],
+            legacyStatus: prStatuses[worktreeID],
+            worktreeID: worktreeID
+        )
+    }
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
     /// Ephemeral one-shot Codex account/usage snapshot loaded when the
@@ -2676,27 +2690,57 @@ final class AppState: ObservableObject {
         Set(statuses.keys).union(prBindings.keys).union(selectedWorktreeIDs)
     }
 
-    /// Fetch and publish bindings for the given worktrees. Each fetch is one
-    /// indexed SELECT in the daemon; a worktree that fails is left at its
-    /// previous value rather than being cleared, so a transient RPC error never
-    /// makes the toolbar control vanish.
+    /// Fetch and publish bindings for the given worktrees.
+    ///
+    /// `pr.bindings` is per-worktree — one indexed SELECT in the daemon — so a
+    /// poll of a 40-worktree fleet is 40 calls. They are issued CONCURRENTLY in
+    /// one task group and applied as a single batch: awaited in sequence they
+    /// were 40 serial round trips per tick, and publishing per worktree would
+    /// have thrashed `prBindings` (and every view observing it) up to 40 times
+    /// per poll. `DaemonClient` is an actor, so its own request pipelining is
+    /// what serializes the wire.
+    ///
+    /// Two per-worktree outcomes stay distinct, deliberately: a FAILED fetch
+    /// keeps the previous value (a `gh`/RPC hiccup must not blank the toolbar),
+    /// while an EMPTY result DOES drop the key — everything-detached, or
+    /// nothing ever bound, is a real answer.
     private func refreshPRBindings(worktreeIDs: Set<UUID>) async {
         guard !worktreeIDs.isEmpty else { return }
-        var merged = prBindings
-        for worktreeID in worktreeIDs {
-            do {
-                let bindings = try await daemonClient.listPRBindings(worktreeID: worktreeID)
-                // An empty result is a real answer (everything detached, or
-                // nothing ever bound) — drop the key so the control disappears.
-                if bindings.isEmpty {
-                    merged.removeValue(forKey: worktreeID)
-                } else {
-                    merged[worktreeID] = bindings
+        let client = daemonClient
+        // `nil` bindings = the fetch failed; the message is carried out as a
+        // String rather than an `Error` because `any Error` is not `Sendable`
+        // and this value crosses back to the main actor.
+        let results: [(worktreeID: UUID, bindings: [PRBinding]?, failure: String?)] =
+            await withTaskGroup(of: (UUID, [PRBinding]?, String?).self) { group in
+                for worktreeID in worktreeIDs {
+                    group.addTask {
+                        do {
+                            return (worktreeID, try await client.listPRBindings(worktreeID: worktreeID), nil)
+                        } catch {
+                            return (worktreeID, nil, "\(error)")
+                        }
+                    }
                 }
-            } catch {
+                var collected: [(UUID, [PRBinding]?, String?)] = []
+                for await result in group { collected.append(result) }
+                return collected
+            }
+
+        var merged = prBindings
+        for result in results {
+            guard let bindings = result.bindings else {
                 // Leave the previous value in place — a failed fetch is not
                 // evidence that the worktree lost its PRs.
-                logger.error("Failed to list PR bindings for \(worktreeID): \(error)")
+                logger.error("""
+                    Failed to list PR bindings for \(result.worktreeID, privacy: .public): \
+                    \(result.failure ?? "unknown", privacy: .public)
+                    """)
+                continue
+            }
+            if bindings.isEmpty {
+                merged.removeValue(forKey: result.worktreeID)
+            } else {
+                merged[result.worktreeID] = bindings
             }
         }
         if merged != prBindings {

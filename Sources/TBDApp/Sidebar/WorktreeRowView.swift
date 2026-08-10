@@ -37,12 +37,14 @@ struct WorktreeRowView: View {
     }
 
     /// The PR the row's leading indicator stands for: the worst-state binding,
-    /// chosen by the same helper the toolbar icon uses. Reading `prBindings`
-    /// rather than the legacy `prStatuses` map is what keeps the sidebar dot
-    /// and the toolbar icon from disagreeing about a worktree owning several
-    /// PRs — one indicator, one selection rule, one source.
+    /// chosen by the same helper the toolbar icon uses. Reading
+    /// `effectivePRBindings` (bindings when there are any, else the legacy
+    /// `prStatuses` entry lifted into one synthetic binding) rather than either
+    /// map directly is what keeps the sidebar dot and the toolbar icon from
+    /// disagreeing about a worktree — one indicator, one selection rule, one
+    /// source, including in the no-bindings-but-a-status case.
     private var indicatorBinding: PRBinding? {
-        PRBindingPresentation.iconBinding(appState.prBindings[worktree.id] ?? [])
+        PRBindingPresentation.iconBinding(appState.effectivePRBindings(worktreeID: worktree.id))
     }
 
     private var prStatus: PRStatus? {

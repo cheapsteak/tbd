@@ -26,6 +26,50 @@ struct MenuRow: Identifiable, Equatable {
 ///   under the user's cursor as CI states change underneath it.
 enum PRBindingPresentation {
 
+    /// The bindings every PR surface should render for one worktree.
+    ///
+    /// Bindings win whenever the worktree has any. With NONE, a persisted
+    /// single `PRStatus` is lifted into one synthetic binding so the control
+    /// keeps rendering exactly as it did before multi-PR. That fallback is not
+    /// hypothetical: with `gh` unavailable or unauthenticated the daemon still
+    /// hydrates `Worktree.prStatus`, but every bind attempt fails to resolve a
+    /// repo, so the bindings table stays permanently empty — and on first
+    /// launch after upgrade the same holds transiently until the first
+    /// successful poll. Without this, a user's last-known PR state simply
+    /// disappears from the toolbar and the sidebar.
+    ///
+    /// Neither bindings nor a status → empty, and no control renders.
+    ///
+    /// The synthetic binding is built to be VALUE-STABLE across body
+    /// evaluations, because it feeds `ForEach` identity in the menu/chip rows,
+    /// the split button's `.id` key, and SwiftUI's own view-value diffing. So
+    /// `id` is the worktree's own UUID and `boundAt` a fixed sentinel, rather
+    /// than the initializer's `UUID()` / `Date()` defaults, which would mint a
+    /// different value on every render. The sentinel is also the honest answer:
+    /// a lifted legacy status was never bound, so there is no bind time.
+    /// `owner`/`repo` are empty because the legacy status carries no repo
+    /// coordinates and no app-side surface reads them — only `number`, `url`
+    /// and `status` are rendered.
+    static func effectiveBindings(
+        _ bindings: [PRBinding],
+        legacyStatus: PRStatus?,
+        worktreeID: UUID
+    ) -> [PRBinding] {
+        guard bindings.isEmpty else { return bindings }
+        guard let status = legacyStatus else { return [] }
+        return [PRBinding(
+            id: worktreeID,
+            worktreeID: worktreeID,
+            owner: "",
+            repo: "",
+            number: status.number,
+            url: status.url,
+            status: status,
+            source: .manual,
+            boundAt: Date(timeIntervalSince1970: 0)
+        )]
+    }
+
     /// The toolbar split-button's label text. `nil` when there is nothing to
     /// show, `"#412"` for exactly one binding (matching the pre-multi-PR
     /// single-PR label), `"3 PRs"` for more.
