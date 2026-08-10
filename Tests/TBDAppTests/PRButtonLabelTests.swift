@@ -19,6 +19,17 @@ struct PRButtonLabelTests {
                  reason: reason, mergeQueuePosition: mergeQueuePosition)
     }
 
+    /// Wrap a `PRStatus` in the single binding that carries it. The split
+    /// button is binding-driven since multi-PR support landed; these tests
+    /// still reason one PR at a time, so they go through this adapter rather
+    /// than duplicating `PRSplitButtonIDTests`' multi-binding coverage.
+    private static func makeBinding(_ status: PRStatus) -> PRBinding {
+        PRBinding(
+            worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+            number: status.number, url: status.url, status: status, source: .hook
+        )
+    }
+
     private static func makeKey(
         worktreeID: UUID,
         worktreeFound: Bool = true,
@@ -34,7 +45,7 @@ struct PRButtonLabelTests {
             armed: armed,
             hibernateArmed: hibernateArmed,
             blocked: blocked,
-            prStatus: prStatus,
+            bindings: [makeBinding(prStatus)],
             colorScheme: colorScheme
         )
     }
@@ -45,7 +56,7 @@ struct PRButtonLabelTests {
         isAutoHibernateArmed: Bool = false
     ) -> PRButtonLabel {
         PRButtonLabel(
-            prStatus: prStatus ?? makeStatus(),
+            bindings: [makeBinding(prStatus ?? makeStatus())],
             isAutoArchiveArmed: isAutoArchiveArmed,
             isAutoHibernateArmed: isAutoHibernateArmed
         )
@@ -118,7 +129,7 @@ struct PRButtonLabelTests {
             isAutoArchiveArmed: true,
             isAutoHibernateArmed: true
         )
-        let presentation = try #require(PRStatusPresentation.make(for: label.prStatus))
+        let presentation = try #require(PRStatusPresentation.make(for: try #require(label.prStatus)))
         let icon = try #require(label.coloredIcon(presentation, colorScheme: .light))
         #expect(icon.size == NSSize(width: PRButtonLabel.iconSide, height: PRButtonLabel.iconSide))
         #expect(icon.isTemplate == false)

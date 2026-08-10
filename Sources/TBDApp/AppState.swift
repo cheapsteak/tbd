@@ -677,6 +677,11 @@ final class AppState: ObservableObject {
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]
+    /// Every live PR bound to each worktree, in bind order — the multi-PR
+    /// surface behind the toolbar dropdown. `prStatuses` remains the single
+    /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
+    /// full set, and the two are refreshed together.
+    @Published var prBindings: [UUID: [PRBinding]] = [:]
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
     /// Ephemeral one-shot Codex account/usage snapshot loaded when the
@@ -2653,9 +2658,49 @@ final class AppState: ObservableObject {
             if fetched != prStatuses {
                 prStatuses = fetched
             }
+            await refreshPRBindings(worktreeIDs: prBindingRefreshTargets(statuses: fetched))
         } catch {
             logger.error("Failed to list PR statuses: \(error)")
             handleConnectionError(error)
+        }
+    }
+
+    /// Which worktrees to re-fetch bindings for on a poll. `pr.bindings` is
+    /// per-worktree, so the set is deliberately narrow: the worktrees the
+    /// daemon just reported a PR status for (a bound worktree gets its
+    /// worst-of status written every pass), the ones already known to have
+    /// bindings (so a detach or an all-merged worktree is observed rather than
+    /// left stale forever), and the current selection (the only worktree whose
+    /// toolbar control is on screen).
+    private func prBindingRefreshTargets(statuses: [UUID: PRStatus]) -> Set<UUID> {
+        Set(statuses.keys).union(prBindings.keys).union(selectedWorktreeIDs)
+    }
+
+    /// Fetch and publish bindings for the given worktrees. Each fetch is one
+    /// indexed SELECT in the daemon; a worktree that fails is left at its
+    /// previous value rather than being cleared, so a transient RPC error never
+    /// makes the toolbar control vanish.
+    private func refreshPRBindings(worktreeIDs: Set<UUID>) async {
+        guard !worktreeIDs.isEmpty else { return }
+        var merged = prBindings
+        for worktreeID in worktreeIDs {
+            do {
+                let bindings = try await daemonClient.listPRBindings(worktreeID: worktreeID)
+                // An empty result is a real answer (everything detached, or
+                // nothing ever bound) — drop the key so the control disappears.
+                if bindings.isEmpty {
+                    merged.removeValue(forKey: worktreeID)
+                } else {
+                    merged[worktreeID] = bindings
+                }
+            } catch {
+                // Leave the previous value in place — a failed fetch is not
+                // evidence that the worktree lost its PRs.
+                logger.error("Failed to list PR bindings for \(worktreeID): \(error)")
+            }
+        }
+        if merged != prBindings {
+            prBindings = merged
         }
     }
 
@@ -2670,6 +2715,10 @@ final class AppState: ObservableObject {
             logger.error("Failed to refresh PR status for \(worktreeID): \(error)")
             handleConnectionError(error)
         }
+        // Bindings are fetched even when the status refresh failed: the two
+        // come from different daemon paths (a `gh` call versus one indexed
+        // SELECT), so a GitHub hiccup must not also blank the dropdown.
+        await refreshPRBindings(worktreeIDs: [worktreeID])
     }
 
     /// Refresh unread notifications from the daemon.

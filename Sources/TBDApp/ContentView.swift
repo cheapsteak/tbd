@@ -114,118 +114,94 @@ struct ContentView: View {
                     ToolbarSpacer(.fixed, placement: .primaryAction)
                 }
 
+                // The PR control is gated on the worktree having at least one
+                // BINDING, not on the legacy single `prStatuses` entry: a
+                // worktree can own several PRs, and with none bound no control
+                // appears at all.
                 if let worktreeID = appState.selectedWorktreeIDs.first,
-                   appState.selectedWorktreeIDs.count == 1,
-                   let prStatus = appState.prStatuses[worktreeID],
-                   let prURL = URL(string: prStatus.url) {
-                    let worktree = appState.findWorktree(id: worktreeID)
-                    let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
-                    let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
-                    let blocked = !appState.children(of: worktreeID).isEmpty
-                    ToolbarItem(placement: .primaryAction) {
-                        ControlGroup {
-                            // Split button: label = primary click (open PR); the
-                            // attached chevron opens the menu.
-                            Menu {
-                                if worktree != nil {
-                                    // `armed` is captured at materialization time; the .id
-                                    // rebuild below is what refreshes the checkmark (getter
-                                    // re-evaluations never reach the materialized NSMenu).
-                                    Toggle("Auto-archive worktree on PR merge", isOn: Binding(
-                                        get: { armed },
-                                        set: { newValue in
-                                            Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: newValue) }
-                                        }
-                                    ))
-                                    .disabled(blocked)
-                                    // Plain 2-state toggle bound to the EFFECTIVE
-                                    // value; the setter always writes explicit
-                                    // true/false (no UI path back to nil — the
-                                    // tri-state stays reachable via daemon/DB only,
-                                    // matching auto-archive). Deliberately NOT
-                                    // `.disabled(blocked)`: `blocked` is the
-                                    // archive-specific active-children rule, and the
-                                    // daemon's precedence lets an armed-but-blocked
-                                    // archive still hibernate.
-                                    Toggle("Auto-hibernate sessions on PR merge", isOn: Binding(
-                                        get: { hibernateArmed },
-                                        set: { newValue in
-                                            Task { await appState.setAutoHibernate(worktreeID: worktreeID, enabled: newValue) }
-                                        }
-                                    ))
-                                }
-                            } label: {
-                                PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
-                            } primaryAction: {
-                                // cmd+click opens the PR in the default browser instead of an in-app tab.
-                                if NSEvent.modifierFlags.contains(.command) {
-                                    NSWorkspace.shared.open(prURL)
-                                    return
-                                }
-                                let existingTabs = appState.tabs[worktreeID] ?? []
-                                if let existingIndex = existingTabs.firstIndex(where: {
-                                    if case .webview(_, let url) = $0.content { return url == prURL }
-                                    return false
-                                }) {
-                                    // Focus existing PR tab
-                                    appState.activeTabIndices[worktreeID] = existingIndex
-                                } else {
-                                    // Create and focus new PR tab
-                                    let webviewID = UUID()
-                                    let tab = TBDShared.Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
-                                    appState.tabs[worktreeID, default: []].append(tab)
-                                    appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
+                   appState.selectedWorktreeIDs.count == 1 {
+                    let bindings = appState.prBindings[worktreeID] ?? []
+                    if !bindings.isEmpty {
+                        let worktree = appState.findWorktree(id: worktreeID)
+                        let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
+                        let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
+                        let blocked = !appState.children(of: worktreeID).isEmpty
+                        // AppKit materializes this split button's NSMenu and
+                        // label ONCE; later SwiftUI re-evaluations of the
+                        // Toggle checkmark and armed badge never reach the
+                        // already-built NSMenuToolbarItem. Changing the id
+                        // forces the item to be recreated, so the key must
+                        // include EVERYTHING the label/menu render: worktree
+                        // + whether its row has loaded (gates the menu's
+                        // items), armed + hibernateArmed + blocked (menu +
+                        // help), the rendered fields of EVERY binding (number,
+                        // state, url, queue position, detached — not reason,
+                        // which presentation ignores), and colorScheme (baked
+                        // icon colors).
+                        let splitButtonID = PRButtonLabel.prSplitButtonID(
+                            worktreeID: worktreeID,
+                            worktreeFound: worktree != nil,
+                            armed: armed,
+                            hibernateArmed: hibernateArmed,
+                            blocked: blocked,
+                            bindings: bindings,
+                            colorScheme: colorScheme
+                        )
+                        let helpText = Self.prSplitButtonHelp(
+                            bindings: bindings, armed: armed,
+                            hibernateArmed: hibernateArmed, blocked: blocked)
+
+                        // Exactly one PR keeps the split button it has always
+                        // been: the label is the primary click (open the PR),
+                        // the chevron opens the menu. With several there is no
+                        // single PR a primary click could mean, so
+                        // `primaryAction:` is dropped and the whole button
+                        // opens the list. The two shapes are different `Menu`
+                        // initializers, so the branch is at toolbar-item level
+                        // — a conditional INSIDE the ControlGroup would risk
+                        // the NSMenuToolbarItem lowering the capsule depends on.
+                        if bindings.count == 1, let prURL = URL(string: bindings[0].url) {
+                            ToolbarItem(placement: .primaryAction) {
+                                ControlGroup {
+                                    Menu {
+                                        prSplitButtonMenu(
+                                            worktreeID: worktreeID, bindings: bindings,
+                                            worktreeFound: worktree != nil, armed: armed,
+                                            hibernateArmed: hibernateArmed, blocked: blocked)
+                                    } label: {
+                                        PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
+                                    } primaryAction: {
+                                        openPR(prURL, number: bindings[0].number, worktreeID: worktreeID)
+                                    }
+                                    // Keep "#123" neutral like the original plain Button (the
+                                    // split button otherwise accent-tints it); the icon keeps
+                                    // its baked status color via renderingMode(.original).
+                                    .tint(.primary)
+                                    .help(helpText)
+                                    .id(splitButtonID)
                                 }
                             }
-                            // Keep "#123" neutral like the original plain Button (the
-                            // split button otherwise accent-tints it); the icon keeps
-                            // its baked status color via renderingMode(.original).
-                            .tint(.primary)
-                            // Build the tooltip as an ordered clause list so
-                            // "more options" is structurally guaranteed to land
-                            // last, whatever combination of arm states applies.
-                            // The archive clause keeps its three-way wording:
-                            // while child worktrees exist the daemon's
-                            // AutoArchiveOnMergeCoordinator skips archiving (it
-                            // re-checks active children at merge time), so an
-                            // armed-but-blocked worktree must not promise
-                            // "auto-archives on merge".
-                            .help({
-                                var clauses = ["Open PR #\(prStatus.number)"]
-                                if armed && blocked {
-                                    clauses.append("auto-archive armed (paused while child worktrees exist)")
-                                } else if armed {
-                                    clauses.append("auto-archives on merge")
+                        } else {
+                            ToolbarItem(placement: .primaryAction) {
+                                ControlGroup {
+                                    Menu {
+                                        prSplitButtonMenu(
+                                            worktreeID: worktreeID, bindings: bindings,
+                                            worktreeFound: worktree != nil, armed: armed,
+                                            hibernateArmed: hibernateArmed, blocked: blocked)
+                                    } label: {
+                                        PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
+                                    }
+                                    .tint(.primary)
+                                    .help(helpText)
+                                    .id(splitButtonID)
                                 }
-                                if hibernateArmed { clauses.append("auto-hibernates on merge") }
-                                clauses.append("more options")
-                                return clauses.joined(separator: " · ")
-                            }())
-                            // AppKit materializes this split button's NSMenu and
-                            // label ONCE; later SwiftUI re-evaluations of the
-                            // Toggle checkmark and armed badge never reach the
-                            // already-built NSMenuToolbarItem. Changing the id
-                            // forces the item to be recreated, so the key must
-                            // include EVERYTHING the label/menu render: worktree
-                            // + whether its row has loaded (gates the menu's
-                            // items), armed + hibernateArmed + blocked (menu +
-                            // help), the rendered PRStatus fields (number, state,
-                            // url — not reason, which presentation ignores), and
-                            // colorScheme (baked icon colors).
-                            .id(PRButtonLabel.prSplitButtonID(
-                                worktreeID: worktreeID,
-                                worktreeFound: worktree != nil,
-                                armed: armed,
-                                hibernateArmed: hibernateArmed,
-                                blocked: blocked,
-                                prStatus: prStatus,
-                                colorScheme: colorScheme
-                            ))
+                            }
                         }
-                    }
 
-                    if #available(macOS 26.0, *) {
-                        ToolbarSpacer(.fixed, placement: .primaryAction)
+                        if #available(macOS 26.0, *) {
+                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        }
                     }
                 }
 
@@ -348,6 +324,117 @@ struct ContentView: View {
         appState.macNotificationManager.dismissDelivered(worktreeIDs: selection)
     }
 
+    // MARK: - PR split button
+
+    /// The split button's dropdown. With several PRs bound it opens with one
+    /// row per binding (bind order, so a row never moves under the cursor as CI
+    /// states change), a `Divider()`, then the auto-archive and auto-hibernate
+    /// toggles unchanged. With exactly one binding the rows are omitted — the
+    /// label already names that PR and the primary click opens it, so a single
+    /// row would be pure duplication.
+    @ViewBuilder
+    private func prSplitButtonMenu(
+        worktreeID: UUID,
+        bindings: [PRBinding],
+        worktreeFound: Bool,
+        armed: Bool,
+        hibernateArmed: Bool,
+        blocked: Bool
+    ) -> some View {
+        if bindings.count > 1 {
+            ForEach(PRBindingPresentation.menuRows(bindings)) { row in
+                Button(row.title) {
+                    guard let url = row.url else { return }
+                    openPR(url, number: row.number, worktreeID: worktreeID)
+                }
+                .disabled(row.url == nil)
+            }
+            Divider()
+        }
+        if worktreeFound {
+            // `armed` is captured at materialization time; the .id
+            // rebuild at the call site is what refreshes the checkmark
+            // (getter re-evaluations never reach the materialized NSMenu).
+            Toggle("Auto-archive worktree on PR merge", isOn: Binding(
+                get: { armed },
+                set: { newValue in
+                    Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: newValue) }
+                }
+            ))
+            .disabled(blocked)
+            // Plain 2-state toggle bound to the EFFECTIVE
+            // value; the setter always writes explicit
+            // true/false (no UI path back to nil — the
+            // tri-state stays reachable via daemon/DB only,
+            // matching auto-archive). Deliberately NOT
+            // `.disabled(blocked)`: `blocked` is the
+            // archive-specific active-children rule, and the
+            // daemon's precedence lets an armed-but-blocked
+            // archive still hibernate.
+            Toggle("Auto-hibernate sessions on PR merge", isOn: Binding(
+                get: { hibernateArmed },
+                set: { newValue in
+                    Task { await appState.setAutoHibernate(worktreeID: worktreeID, enabled: newValue) }
+                }
+            ))
+        }
+    }
+
+    /// Open one bound PR: a webview tab in the app, reusing an existing tab for
+    /// the same URL, or the default browser when ⌘ is held. Shared by the
+    /// single-PR primary action and every multi-PR menu row so the two behave
+    /// identically.
+    private func openPR(_ url: URL, number: Int, worktreeID: UUID) {
+        // cmd+click opens the PR in the default browser instead of an in-app tab.
+        if NSEvent.modifierFlags.contains(.command) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let existingTabs = appState.tabs[worktreeID] ?? []
+        if let existingIndex = existingTabs.firstIndex(where: {
+            if case .webview(_, let tabURL) = $0.content { return tabURL == url }
+            return false
+        }) {
+            // Focus existing PR tab
+            appState.activeTabIndices[worktreeID] = existingIndex
+        } else {
+            // Create and focus new PR tab
+            let webviewID = UUID()
+            let tab = TBDShared.Tab(id: UUID(), content: .webview(id: webviewID, url: url), label: "PR #\(number)")
+            appState.tabs[worktreeID, default: []].append(tab)
+            appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
+        }
+    }
+
+    /// The split button's tooltip, as an ordered clause list so "more options"
+    /// is structurally guaranteed to land last, whatever combination of arm
+    /// states applies. The archive clause keeps its three-way wording: while
+    /// child worktrees exist the daemon's `AutoArchiveOnMergeCoordinator` skips
+    /// archiving (it re-checks active children at merge time), so an
+    /// armed-but-blocked worktree must not promise "auto-archives on merge".
+    ///
+    /// Static and pure so the wording can be exercised without a toolbar.
+    static func prSplitButtonHelp(
+        bindings: [PRBinding],
+        armed: Bool,
+        hibernateArmed: Bool,
+        blocked: Bool
+    ) -> String {
+        var clauses: [String] = []
+        switch bindings.count {
+        case 0: break
+        case 1: clauses.append("Open PR #\(bindings[0].number)")
+        default: clauses.append("\(bindings.count) pull requests")
+        }
+        if armed && blocked {
+            clauses.append("auto-archive armed (paused while child worktrees exist)")
+        } else if armed {
+            clauses.append("auto-archives on merge")
+        }
+        if hibernateArmed { clauses.append("auto-hibernates on merge") }
+        clauses.append("more options")
+        return clauses.joined(separator: " · ")
+    }
 }
 
 // MARK: - DetailSectionHostPager
@@ -741,7 +828,11 @@ private func overlayFrameIsWindowRoot(
 // Internal (not private) so TBDAppTests can exercise the baked-image geometry
 // and the .id key computation.
 struct PRButtonLabel: View {
-    let prStatus: PRStatus
+    /// Every live PR bound to the worktree, in bind order. One binding renders
+    /// exactly as the pre-multi-PR label did (`#412`); several collapse to a
+    /// count (`3 PRs`), because the flattened toolbar label has room for only
+    /// one string and one image.
+    let bindings: [PRBinding]
     let isAutoArchiveArmed: Bool
     let isAutoHibernateArmed: Bool
     // Feeds the baked-icon cache key (and, at the ContentView level, the
@@ -758,10 +849,15 @@ struct PRButtonLabel: View {
     static let iconSide: CGFloat = 12
     static let badgeGap: CGFloat = 3
 
+    /// The status the single icon stands for: the binding needing the most
+    /// attention. nil when nothing is bound, or when the worst binding has
+    /// never been polled — either way there is no icon to bake.
+    var prStatus: PRStatus? { PRBindingPresentation.iconBinding(bindings)?.status }
+
     /// A queued PR renders the full-color bus (with its position baked in)
     /// instead of the status icon; BOTH armed badges are suppressed in that
     /// mode (the bus owns the label), so the baked image stays a single square.
-    var isMergeQueued: Bool { prStatus.mergeQueuePosition != nil }
+    var isMergeQueued: Bool { prStatus?.mergeQueuePosition != nil }
 
     /// Number of armed badges to composite. Zero when queued (the bus glyph
     /// supersedes both badges), otherwise one per armed flag.
@@ -782,16 +878,21 @@ struct PRButtonLabel: View {
     /// auto-hibernate Toggles) are gated on the worktree row having loaded: a
     /// menu materialized before the row appears would otherwise stay
     /// permanently empty. `hibernateArmed` mirrors `armed`: without it the
-    /// hibernate Toggle's checkmark would freeze at its first-render value. The key
-    /// contains exactly the `PRStatus` fields the label/menu/primaryAction
-    /// consume: `number` (label text/help), `state` (icon via
-    /// `PRStatusPresentation`), `url` (captured by `primaryAction`, so a
-    /// re-pointed PR must recreate the item too), and `mergeQueuePosition`
-    /// (the bus glyph short-circuits on it and bakes the position into the
-    /// icon, so a 2→1 queue move with an unchanged `state` must still rebuild).
-    /// `reason` is deliberately excluded — the split button's presentation
-    /// ignores it, and keying on it would force spurious toolbar-item rebuilds
-    /// for zero visual change.
+    /// hibernate Toggle's checkmark would freeze at its first-render value.
+    ///
+    /// EVERY binding contributes, not just the worst one that drives the icon:
+    /// with several PRs bound, the menu lists one row per binding, so a change
+    /// to any of them changes what is rendered. Per binding the key carries
+    /// exactly the fields the label/menu/primaryAction consume: `number` (label
+    /// text, help, menu row), `state` (icon via `PRStatusPresentation`, menu row
+    /// reason), `url` (captured by the row's action and by `primaryAction`, so a
+    /// re-pointed PR must recreate the item too), `mergeQueuePosition` (the bus
+    /// glyph short-circuits on it and bakes the position into the icon, so a
+    /// 2→1 queue move with an unchanged `state` must still rebuild), and
+    /// `detached` (a tombstoned binding drops out of the label count).
+    /// `PRStatus.reason` is deliberately excluded — a reason-only change alters
+    /// no rendered value the presentation reads, and keying on it would force
+    /// spurious toolbar-item rebuilds for zero visual change.
     ///
     /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
     /// `.id` identity changes for String values here — a custom Hashable
@@ -804,12 +905,17 @@ struct PRButtonLabel: View {
         armed: Bool,
         hibernateArmed: Bool,
         blocked: Bool,
-        prStatus: PRStatus,
+        bindings: [PRBinding],
         colorScheme: ColorScheme
     ) -> String {
-        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
-            + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
-            + "-\(prStatus.mergeQueuePosition.map(String.init) ?? "nil")"
+        let rendered = bindings.map { binding in
+            let status = binding.status
+            return "\(binding.number)-\(status?.state.rawValue ?? "nil")-\(binding.url)"
+                + "-\(status?.mergeQueuePosition.map(String.init) ?? "nil")"
+                + "-\(binding.detached)"
+        }.joined(separator: "|")
+        return "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
+            + "-[\(rendered)]"
             + "-\(colorScheme)"
     }
 
@@ -830,7 +936,8 @@ struct PRButtonLabel: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            if let presentation = PRStatusPresentation.make(for: prStatus),
+            if let prStatus,
+               let presentation = PRStatusPresentation.make(for: prStatus),
                let nsImage = coloredIcon(presentation, colorScheme: colorScheme) {
                 Image(nsImage: nsImage)
                     .renderingMode(.original)
@@ -843,8 +950,10 @@ struct PRButtonLabel: View {
             // dropped, and an inline Text(Image(...)) attachment is stripped
             // entirely. Any badge (like the auto-archive-armed archivebox or
             // the auto-hibernate-armed moon.zzz) must therefore be composited
-            // INTO the single baked NSImage.
-            Text(verbatim: "#\(prStatus.number)")
+            // INTO the single baked NSImage. The same flattening is why a
+            // several-PR count lives in this text ("3 PRs") rather than in a
+            // second image or badge glyph.
+            Text(verbatim: PRBindingPresentation.buttonLabel(bindings) ?? "")
                 .font(.caption)
                 .fontWeight(.medium)
         }
@@ -852,7 +961,12 @@ struct PRButtonLabel: View {
     }
 
     private var accessibilityLabel: String {
-        var clauses = ["PR #\(prStatus.number)"]
+        var clauses: [String] = []
+        switch bindings.count {
+        case 0: clauses.append("No pull requests")
+        case 1: clauses.append("PR #\(bindings[0].number)")
+        default: clauses.append("\(bindings.count) pull requests")
+        }
         if isAutoArchiveArmed { clauses.append("auto-archive on merge is on") }
         if isAutoHibernateArmed { clauses.append("auto-hibernate on merge is on") }
         return clauses.joined(separator: ", ")

@@ -784,6 +784,18 @@ actor DaemonClient {
         return result.statuses
     }
 
+    /// Fetch one worktree's live PR bindings (tombstoned ones are excluded by
+    /// the daemon). An unbound worktree returns an empty array rather than an
+    /// error, so callers can treat "no PRs" and "nothing bound yet" alike.
+    func listPRBindings(worktreeID: UUID) async throws -> [PRBinding] {
+        let result = try await callAsync(
+            method: RPCMethod.prBindings,
+            params: PRBindingsParams(worktreeID: worktreeID),
+            resultType: PRBindingsResult.self
+        )
+        return result.bindings
+    }
+
     /// Push the user's Claude spawn-env setting overrides to the daemon.
     func setClaudeSpawnPreferences(_ preferences: ClaudeSpawnPreferences) async throws {
         try await callVoidAsync(
