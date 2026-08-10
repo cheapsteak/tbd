@@ -121,6 +121,15 @@ public final class RPCRouter: Sendable {
     let branchTrackingCache = BranchTrackingCache()
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
+    /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
+    /// dedupe, tombstones, cap.
+    let prBindingCoordinator: PRBindingCoordinator
+    /// The worktree's own GitHub `owner`/`name`. The coordinator is built on
+    /// this same closure, so a caller that must name a repo before it can form a
+    /// PR reference (`pr.attach 412`) agrees with the policy that validates it.
+    /// Production resolves it via `PRStatusManager`'s `gh repo view` TTL cache;
+    /// tests inject a stub through the init parameter of the same name.
+    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String)?
     /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
@@ -154,6 +163,7 @@ public final class RPCRouter: Sendable {
         remoteManager: RemoteProviderManager? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String)?)? = nil,
         actuationLog: ActuationLog
     ) {
         self.actuationLog = actuationLog
@@ -176,6 +186,15 @@ public final class RPCRouter: Sendable {
             actuationLog: actuationLog
         )
         self.usageFetcher = usageFetcher
+        // Captures the `db` / `prManager` parameters rather than `self`, so the
+        // coordinator can be a `let` built during initialization.
+        let repoResolver = prBindingRepoResolver ?? { [db, prManager] worktreeID in
+            guard let worktree = try? await db.worktrees.get(id: worktreeID) else { return nil }
+            return await prManager.repoIdentity(repoPath: worktree.path)
+        }
+        self.prBindingRepoResolver = repoResolver
+        self.prBindingCoordinator = PRBindingCoordinator(
+            store: db.prBindings, resolveRepo: repoResolver)
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
@@ -300,6 +319,12 @@ public final class RPCRouter: Sendable {
                 return try await handlePRList()
             case RPCMethod.prRefresh:
                 return try await handlePRRefresh(request.paramsData)
+            case RPCMethod.prBindings:
+                return try await handlePRBindings(request.paramsData)
+            case RPCMethod.prAttach:
+                return try await handlePRAttach(request.paramsData)
+            case RPCMethod.prDetach:
+                return try await handlePRDetach(request.paramsData)
             case RPCMethod.claudeSetSpawnPreferences:
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
             case RPCMethod.claudeRateLimitDetected:
@@ -663,5 +688,80 @@ public final class RPCRouter: Sendable {
             prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))
+    }
+
+    // MARK: - PR bindings
+
+    private func handlePRBindings(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(PRBindingsParams.self, from: paramsData)
+        let bindings = try await db.prBindings.list(worktreeID: params.worktreeID)
+        return try RPCResponse(result: PRBindingsResult(bindings: bindings))
+    }
+
+    private func handlePRAttach(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(PRBindingRefParams.self, from: paramsData)
+        guard let parsed = await resolvePRRef(params) else {
+            return RPCResponse(error: PRBindingRefError.unresolvable.message)
+        }
+        // An unrecognised source reads as `manual`, which is the conservative
+        // choice for the wire: a hand-typed attach is the only thing that may
+        // revive a tombstone, and a garbled value should not silently acquire
+        // automatic-source semantics.
+        let source = params.source.flatMap(PRBindingSource.init(rawValue:)) ?? .manual
+        switch await prBindingCoordinator.bind(worktreeID: params.worktreeID,
+                                               parsed: parsed, source: source) {
+        case .bound(let binding):
+            return try RPCResponse(result: PRAttachResult(outcome: "bound", binding: binding))
+        case .alreadyBound:
+            return try RPCResponse(result: PRAttachResult(outcome: "alreadyBound"))
+        case .rejectedWrongRepo(let other):
+            return try RPCResponse(result: PRAttachResult(outcome: "rejectedWrongRepo",
+                                                          detail: other))
+        case .deferredUnknownRepo:
+            return try RPCResponse(result: PRAttachResult(outcome: "deferredUnknownRepo"))
+        case .tombstoned:
+            return try RPCResponse(result: PRAttachResult(outcome: "tombstoned"))
+        case .capFull:
+            return try RPCResponse(result: PRAttachResult(outcome: "capFull"))
+        }
+    }
+
+    private func handlePRDetach(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(PRBindingRefParams.self, from: paramsData)
+        guard let parsed = await resolvePRRef(params) else {
+            return RPCResponse(error: PRBindingRefError.unresolvable.message)
+        }
+        let detached = try await prBindingCoordinator.detach(worktreeID: params.worktreeID,
+                                                             parsed: parsed)
+        return try RPCResponse(result: PRDetachResult(detached: detached))
+    }
+
+    /// Why a `PRBindingRefParams` could not name one PR. One case today; named
+    /// rather than inlined so the message has a single definition across the two
+    /// handlers that report it.
+    private enum PRBindingRefError {
+        case unresolvable
+
+        var message: String {
+            "pr reference must be a github PR url or a number in the worktree's own repo"
+        }
+    }
+
+    /// Turn a URL-or-number reference into a concrete `ParsedPRURL`.
+    ///
+    /// The bare-number form is resolved against the worktree's own repo through
+    /// the same seam the coordinator validates with, so `pr.attach 412` cannot
+    /// synthesise a URL the policy would then reject as wrong-repo. Returns nil
+    /// when neither form is supplied, when the URL is not a GitHub PR URL, or
+    /// when a bare number's repo cannot be resolved.
+    private func resolvePRRef(_ params: PRBindingRefParams) async -> ParsedPRURL? {
+        if let url = params.url, !url.isEmpty {
+            return PRBindingExtractor.parsePRURLs(in: url).first
+        }
+        guard let number = params.number, number > 0 else { return nil }
+        guard let own = await prBindingRepoResolver(params.worktreeID) else { return nil }
+        return ParsedPRURL(
+            host: "github.com", owner: own.owner, repo: own.name, number: number,
+            url: "https://github.com/\(own.owner)/\(own.name)/pull/\(number)")
     }
 }

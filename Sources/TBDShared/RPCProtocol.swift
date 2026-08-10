@@ -146,8 +146,11 @@ public enum RPCMethod {
     public static let resolvePath = "resolve.path"
     public static let notificationsList = "notifications.list"
     public static let notificationsMarkRead = "notifications.markRead"
-    public static let prList    = "pr.list"
-    public static let prRefresh = "pr.refresh"
+    public static let prList     = "pr.list"
+    public static let prRefresh  = "pr.refresh"
+    public static let prBindings = "pr.bindings"
+    public static let prAttach   = "pr.attach"
+    public static let prDetach   = "pr.detach"
     public static let cleanup = "cleanup"
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
     public static let claudeRateLimitDetected = "claude.rateLimitDetected"
@@ -849,6 +852,59 @@ public struct PRRefreshParams: Codable, Sendable {
 public struct PRRefreshResult: Codable, Sendable {
     public let status: PRStatus?
     public init(status: PRStatus?) { self.status = status }
+}
+
+// MARK: - PR bindings (multi-PR per worktree)
+
+public struct PRBindingsParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct PRBindingsResult: Codable, Sendable {
+    /// Live bindings only — tombstoned ones are not reported.
+    public let bindings: [PRBinding]
+    public init(bindings: [PRBinding]) { self.bindings = bindings }
+}
+
+/// Identify a PR either by full URL or by number within the worktree's own repo.
+///
+/// `source` decides tombstone semantics, so it is part of the reference rather
+/// than a handler default: a `hook` attach must not revive a PR the user
+/// detached, while a `manual` one must.
+public struct PRBindingRefParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let url: String?
+    public let number: Int?
+    /// A `PRBindingSource` raw value. Absent or unrecognised means `manual` —
+    /// the safe reading for a hand-typed attach, and what older clients send.
+    public let source: String?
+    public init(worktreeID: UUID, url: String? = nil, number: Int? = nil,
+                source: String? = nil) {
+        self.worktreeID = worktreeID
+        self.url = url
+        self.number = number
+        self.source = source
+    }
+}
+
+public struct PRAttachResult: Codable, Sendable {
+    /// Mirrors `PRBindingCoordinator.BindOutcome`, flattened for the wire.
+    public let outcome: String
+    public let binding: PRBinding?
+    /// Populated for `rejectedWrongRepo` so the CLI can name the other repo.
+    public let detail: String?
+    public init(outcome: String, binding: PRBinding? = nil, detail: String? = nil) {
+        self.outcome = outcome
+        self.binding = binding
+        self.detail = detail
+    }
+}
+
+public struct PRDetachResult: Codable, Sendable {
+    /// False when this worktree had no such binding — not an error.
+    public let detached: Bool
+    public init(detached: Bool) { self.detached = detached }
 }
 
 // MARK: - Parameter Structs

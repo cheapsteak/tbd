@@ -1378,6 +1378,15 @@ public actor PRStatusManager {
         return resolved
     }
 
+    /// The checkout's own GitHub `owner`/`name`, through the same TTL cache the
+    /// poll and picker use. Exposed for PR *binding* validation, which has to
+    /// ask the same question on every hook fire and manual attach — resolving
+    /// it independently would both double the `gh repo view` subprocesses and
+    /// let the two answers disagree inside a TTL window.
+    public func repoIdentity(repoPath: String) async -> (owner: String, name: String)? {
+        await cachedNameWithOwner(repoPath: repoPath)
+    }
+
     /// Group by-number poll entries by their worktree's own repo. The daemon
     /// manages worktrees across multiple repos, so one repo's owner/name must
     /// never be applied to another worktree's PR number: the number usually
