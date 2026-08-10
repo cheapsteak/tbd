@@ -68,6 +68,58 @@ struct AllResolvedTriggerTests {
         await harness.poll()
         #expect(await harness.firedWorktreeIDs.count == 1)
     }
+
+    @Test("a merge observed after every binding is detached still fires")
+    func observedMergeSurvivesAnEarlierEvaluateFire() async throws {
+        // The two entry points used to share one once-only set, so an `evaluate`
+        // fire suppressed `observedMerge` forever. Nothing re-armed it: with
+        // every binding detached the poll's grouping no longer contains the
+        // worktree, so `evaluate` is never called and its re-arm never runs.
+        let harness = try await MergeTriggerHarness()
+        try await harness.bind(412, state: .merged)
+        await harness.poll()
+        #expect(await harness.firedPRNumbers == [412])
+
+        try await harness.detach(412)
+        await harness.poll()   // no live bindings: production skips evaluate entirely
+
+        await harness.observeMerge(500)
+        #expect(await harness.firedPRNumbers == [412, 500])
+    }
+
+    @Test("the un-bound fallback fires once per rising edge, not per observation")
+    func observedMergeFiresOnce() async throws {
+        let harness = try await MergeTriggerHarness()
+        await harness.observeMerge(412)
+        await harness.observeMerge(412)
+        #expect(await harness.firedPRNumbers == [412])
+    }
+
+    @Test("the un-bound fallback re-arms once the worktree is bound again")
+    func observedMergeReArmsWhenBound() async throws {
+        let harness = try await MergeTriggerHarness()
+        await harness.observeMerge(412)
+        #expect(await harness.firedPRNumbers == [412])
+
+        // A binding exists: `evaluate` owns the worktree now, so the fallback
+        // stands down — and is armed again for the day everything is detached.
+        try await harness.bind(413, state: .mergeable)
+        await harness.observeMerge(413)
+        #expect(await harness.firedPRNumbers == [412])
+
+        try await harness.detach(413)
+        await harness.observeMerge(414)
+        #expect(await harness.firedPRNumbers == [412, 414])
+    }
+
+    @Test("a worktree with live bindings is never fired by the un-bound fallback")
+    func observedMergeIgnoresBoundWorktrees() async throws {
+        let harness = try await MergeTriggerHarness()
+        try await harness.bind(412, state: .merged)
+        try await harness.bind(413, state: .mergeable)
+        await harness.observeMerge(412)
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
 }
 
 /// An in-memory database, one worktree, its binding store, and an
@@ -123,10 +175,24 @@ final class MergeTriggerHarness {
     }
 
     /// One poll: read the worktree's live bindings and evaluate the trigger over
-    /// them, exactly as `RPCRouter.refreshBindingStatuses` does after a refresh.
+    /// them, exactly as `RPCRouter.refreshBindingStatuses` does after a refresh
+    /// — including the early return. A worktree with no live bindings is not in
+    /// the poll's grouping at all, so `evaluate` is never called for it, which
+    /// is precisely why the fallback's once-only guard cannot be re-armed from
+    /// there.
     func poll() async {
         let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
+        guard !bindings.isEmpty else { return }
         await trigger.evaluate(worktreeID: worktreeID, bindings: bindings)
+    }
+
+    /// The un-bound fallback, driven the way `PRStatusManager.onMergedTransition`
+    /// drives it in `Daemon.swift`: the worktree's live bindings are read fresh
+    /// and handed along with the observed merge.
+    func observeMerge(_ prNumber: Int) async {
+        let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
+        await trigger.observedMerge(worktreeID: worktreeID, prNumber: prNumber,
+                                    bindings: bindings)
     }
 }
 

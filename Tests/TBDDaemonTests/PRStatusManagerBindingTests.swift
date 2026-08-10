@@ -107,13 +107,13 @@ struct PRStatusManagerBindingTests {
     /// mis-escaped fixture cannot silently exercise a parse-failure path.
     private static func nodeJSON(
         number: Int, owner: String = "acme", repo: String = "acme-prod",
-        head: String = "tbd/my-branch", state: String = "OPEN",
+        head: String = "tbd/my-branch", base: String = "main", state: String = "OPEN",
         mergeStateStatus: String = "CLEAN", rollup: String = "SUCCESS"
     ) -> String {
         """
         {"number": \(number), "url": "https://github.com/\(owner)/\(repo)/pull/\(number)",
          "state": "\(state)", "mergeStateStatus": "\(mergeStateStatus)",
-         "reviewDecision": "APPROVED", "headRefName": "\(head)",
+         "reviewDecision": "APPROVED", "headRefName": "\(head)", "baseRefName": "\(base)",
          "createdAt": "2026-08-01T00:00:00Z", "isDraft": false,
          "statusCheckRollup": {"state": "\(rollup)"}}
         """
@@ -163,13 +163,13 @@ struct PRStatusManagerBindingTests {
         let wt = UUID()
         let bindings = [Self.binding(412, worktreeID: wt), Self.binding(413, worktreeID: wt)]
 
-        let statuses = await manager.refreshBindings(bindings)
+        let observed = await manager.refreshBindings(bindings)
 
-        #expect(statuses.count == 2)
-        #expect(statuses[bindings[0].id]?.state == .mergeable)
-        #expect(statuses[bindings[0].id]?.number == 412)
-        #expect(statuses[bindings[0].id]?.url == "https://github.com/acme/acme-prod/pull/412")
-        #expect(statuses[bindings[1].id]?.state == .checksFailed)
+        #expect(observed.count == 2)
+        #expect(observed[bindings[0].id]?.status.state == .mergeable)
+        #expect(observed[bindings[0].id]?.status.number == 412)
+        #expect(observed[bindings[0].id]?.status.url == "https://github.com/acme/acme-prod/pull/412")
+        #expect(observed[bindings[1].id]?.status.state == .checksFailed)
         // One aliased query for the pair, not one call each.
         #expect(await gh.aliasedQueries.count == 1)
         #expect(await gh.aliasedQueries.first?.numbers.sorted() == [412, 413])
@@ -192,10 +192,10 @@ struct PRStatusManagerBindingTests {
             Self.binding(2, worktreeID: wt, repo: "other-repo")
         ]
 
-        let statuses = await manager.refreshBindings(bindings)
+        let observed = await manager.refreshBindings(bindings)
 
-        #expect(statuses[bindings[0].id]?.state == .mergeable)
-        #expect(statuses[bindings[1].id]?.state == .blocked)
+        #expect(observed[bindings[0].id]?.status.state == .mergeable)
+        #expect(observed[bindings[1].id]?.status.state == .blocked)
         let queries = await gh.aliasedQueries
         #expect(queries.count == 2)
         #expect(queries.map(\.name).sorted() == ["acme-prod", "other-repo"])
@@ -212,9 +212,9 @@ struct PRStatusManagerBindingTests {
         let manager = Self.manager(gh)
         let binding = Self.binding(412, worktreeID: UUID(), status: previous)
 
-        let statuses = await manager.refreshBindings([binding])
+        let observed = await manager.refreshBindings([binding])
 
-        #expect(statuses[binding.id] == previous)
+        #expect(observed[binding.id]?.status == previous)
     }
 
     @Test("a transient check-signal failure keeps the previous status")
@@ -229,9 +229,9 @@ struct PRStatusManagerBindingTests {
         let manager = Self.manager(gh)
         let binding = Self.binding(412, worktreeID: UUID(), status: previous)
 
-        let statuses = await manager.refreshBindings([binding])
+        let observed = await manager.refreshBindings([binding])
 
-        #expect(statuses[binding.id] == previous)
+        #expect(observed[binding.id]?.status == previous)
         #expect(await gh.checkQueries == [412])
     }
 
@@ -246,10 +246,10 @@ struct PRStatusManagerBindingTests {
         let kept = Self.binding(5, worktreeID: wt, status: previous)
         let fresh = Self.binding(6, worktreeID: wt)
 
-        let statuses = await manager.refreshBindings([kept, fresh])
+        let observed = await manager.refreshBindings([kept, fresh])
 
-        #expect(statuses[kept.id] == previous)
-        #expect(statuses[fresh.id] == nil)
+        #expect(observed[kept.id]?.status == previous)
+        #expect(observed[fresh.id] == nil)
     }
 
     @Test("a merged PR is reported as merged")
@@ -261,9 +261,9 @@ struct PRStatusManagerBindingTests {
         let manager = Self.manager(gh)
         let binding = Self.binding(412, worktreeID: UUID())
 
-        let statuses = await manager.refreshBindings([binding])
+        let observed = await manager.refreshBindings([binding])
 
-        #expect(statuses[binding.id]?.state == .merged)
+        #expect(observed[binding.id]?.status.state == .merged)
         // A non-OPEN PR never pays for a check query.
         #expect(await gh.checkQueries.isEmpty)
     }
@@ -286,6 +286,36 @@ struct PRStatusManagerBindingTests {
         // replacement: it must not write the cache, and — crucially — must not
         // fire the merged transition that drives auto-archive.
         #expect(await manager.allStatuses()[wt] == seeded)
+    }
+
+    @Test("a resolved binding reports the head and base branch the same response carried")
+    func reportsBranchRefs() async {
+        let gh = BindingGH(nodes: [
+            BindingGH.key(owner: "acme", repo: "acme-prod", number: 412):
+                Self.nodeJSON(number: 412, head: "tbd/fix-login-timeout", base: "release/2026-08")
+        ])
+        let manager = Self.manager(gh)
+        let binding = Self.binding(412, worktreeID: UUID())
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.headBranch == "tbd/fix-login-timeout")
+        #expect(observed[binding.id]?.baseRef == "release/2026-08")
+    }
+
+    @Test("an unresolved binding reports no refs, so the caller keeps what it has")
+    func unresolvedReportsNoRefs() async {
+        let previous = PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                                state: .pending)
+        let gh = BindingGH()   // the alias comes back null
+        let manager = Self.manager(gh)
+        let binding = Self.binding(412, worktreeID: UUID(), status: previous)
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status == previous)
+        #expect(observed[binding.id]?.headBranch == nil)
+        #expect(observed[binding.id]?.baseRef == nil)
     }
 
     @Test("no bindings means no gh calls at all")
@@ -321,7 +351,7 @@ struct PRStatusManagerBindingTests {
         let gh = BindingGH(viewerNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
         let manager = Self.manager(gh)
 
-        let emitted = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+        let emitted = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)]).discovered
 
         #expect(emitted.count == 1)
         #expect(emitted.first?.worktreeID == wt)
@@ -342,10 +372,75 @@ struct PRStatusManagerBindingTests {
         let gh = BindingGH(viewerNodes: [Self.nodeJSON(number: 90, head: "main")])
         let manager = Self.manager(gh)
 
-        let emitted = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
 
-        #expect(emitted.isEmpty)
+        #expect(outcome.discovered.isEmpty)
         #expect(await manager.allStatuses()[wt] == nil)
+    }
+
+    // MARK: - Heal emitter
+
+    @Test("the head-ref heal names the PR it disproved so the binding can go too")
+    func headRefHealEmitsDisproved() async {
+        // The shape the heal actually reaches: a PR a previous pass attached and
+        // cached, re-resolved by number this pass (the batch matches nothing),
+        // whose head turns out to be the branch this worktree merely tracks —
+        // and that branch is the repo default. Clearing the cache is not enough:
+        // a `.branch` binding written by that previous pass is re-queried by
+        // number and no heal can see it.
+        let wt = UUID()
+        let gh = BindingGH(nodes: [
+            BindingGH.key(owner: "acme", repo: "acme-prod", number: 90):
+                Self.nodeJSON(number: 90, head: "main", state: "MERGED")
+        ])
+        let manager = Self.manager(gh)
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 90, url: "https://github.com/acme/acme-prod/pull/90",
+                             state: .pending))
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(outcome.discovered.isEmpty)
+        #expect(outcome.disproved.map(\.parsed.number) == [90])
+        #expect(outcome.disproved.first?.worktreeID == wt)
+        #expect(outcome.disproved.first?.parsed.repo == "acme-prod")
+        // The existing invariant is untouched: the cache is cleared, and the
+        // mis-attached MERGED PR fires no transition.
+        #expect(await manager.allStatuses()[wt] == nil)
+    }
+
+    @Test("the cross-repo heal names the PR it disproved")
+    func crossRepoHealEmitsDisproved() async {
+        // A remote pointed at a different repo after the binding was written:
+        // the coordinator's bind-time repo check can no longer help, and a
+        // binding is re-queried by (owner, repo, number) without ever being
+        // re-validated.
+        let wt = UUID()
+        let gh = BindingGH()   // `repo view` answers acme/acme-prod
+        let manager = Self.manager(gh)
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 7, url: "https://github.com/acme/other-repo/pull/7",
+                             state: .mergeable))
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(outcome.disproved.map(\.parsed.number) == [7])
+        #expect(outcome.disproved.first?.parsed.repo == "other-repo")
+        #expect(await manager.allStatuses()[wt] == nil)
+    }
+
+    @Test("a poll that heals nothing disproves nothing")
+    func healthyPollDisprovesNothing() async {
+        let wt = UUID()
+        let gh = BindingGH(viewerNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
+        let manager = Self.manager(gh)
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(outcome.disproved.isEmpty)
+        #expect(outcome.discovered.map(\.parsed.number) == [89])
     }
 
     @Test("a numbered match is not emitted as a branch source")
@@ -361,7 +456,7 @@ struct PRStatusManagerBindingTests {
         var poll = Self.pollWorktree(wt)
         poll.prNumber = 77
 
-        let emitted = await manager.fetchAll(worktrees: [poll])
+        let emitted = await manager.fetchAll(worktrees: [poll]).discovered
 
         #expect(emitted.isEmpty)
         #expect(await manager.allStatuses()[wt]?.number == 77)

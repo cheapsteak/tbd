@@ -620,11 +620,22 @@ public final class RPCRouter: Sendable {
                 prNumber: wt.prNumber
             ))
         }
-        let branchMatches = await prManager.fetchAll(worktrees: infos)
+        let poll = await prManager.fetchAll(worktrees: infos)
+        // A heal ran: the worktree was positively shown NOT to own this PR (its
+        // head is a branch the worktree merely tracks, or the PR is in another
+        // repo). Clearing the cache is not enough — a `branch` binding written
+        // by an earlier pass is re-queried by number and no heal can see it, so
+        // it would keep driving the icon and, on merge, auto-archive. Run before
+        // the binds below so a pass that both disproves one PR and discovers
+        // another leaves the discovery standing.
+        for healed in poll.disproved {
+            await prBindingCoordinator.healBranchMatch(worktreeID: healed.worktreeID,
+                                                       parsed: healed.parsed)
+        }
         // The branch matcher is one of the three binding discovery sources; the
         // coordinator owns the policy (repo validation, tombstones, cap), so a
         // match it rejects is simply not bound.
-        for match in branchMatches {
+        for match in poll.discovered {
             _ = await prBindingCoordinator.bind(worktreeID: match.worktreeID,
                                                 parsed: match.parsed, source: .branch)
         }
@@ -680,24 +691,38 @@ public final class RPCRouter: Sendable {
         let bindings = live.filter { polled.contains($0.worktreeID) }
         guard !bindings.isEmpty else { return }
 
-        let statuses = await prManager.refreshBindings(bindings, repoPath: repoPath)
+        let observations = await prManager.refreshBindings(bindings, repoPath: repoPath)
         var refreshed: [PRBinding] = []
         refreshed.reserveCapacity(bindings.count)
         for binding in bindings {
             // Absent means "not observed this pass" — leave the stored row alone
             // rather than clearing a status a transient failure hid.
-            guard let status = statuses[binding.id] else {
+            guard let observed = observations[binding.id] else {
                 refreshed.append(binding)
                 continue
             }
-            if status != binding.status {
-                try? await db.prBindings.updateStatus(bindingID: binding.id, status: status)
+            // A nil ref is likewise "not observed": keep what the row already
+            // holds rather than blanking the branch column the CLI renders.
+            let headBranch = observed.headBranch ?? binding.headBranch
+            let baseRef = observed.baseRef ?? binding.baseRef
+            if observed.status != binding.status
+                || headBranch != binding.headBranch || baseRef != binding.baseRef {
+                try? await db.prBindings.updateObservation(
+                    bindingID: binding.id, status: observed.status,
+                    headBranch: headBranch, baseRef: baseRef)
             }
-            refreshed.append(binding.withStatus(status))
+            refreshed.append(binding.withStatus(observed.status))
         }
-        let stored = Dictionary(uniqueKeysWithValues: worktrees.map { ($0.id, $0.prStatus) })
+        // Compare against what the column holds NOW, not against the snapshot
+        // read before this pass began. `fetchAll` → `apply` → `onStatusPersist`
+        // writes this same column earlier in the pass, so a pre-poll snapshot
+        // can equal the value we computed while the column holds something else
+        // entirely — and the skip would then repeat on every poll, pinning a
+        // green icon over a bound PR whose checks are failing. One indexed
+        // SELECT per worktree that actually has bindings.
         for update in Self.worktreePRStatusUpdates(refreshed) {
-            guard (stored[update.worktreeID] ?? nil) != update.status else { continue }
+            guard let current = try? await db.worktrees.get(id: update.worktreeID),
+                  current.prStatus != update.status else { continue }
             try? await db.worktrees.setPRStatus(id: update.worktreeID, status: update.status)
         }
 
@@ -813,8 +838,18 @@ public final class RPCRouter: Sendable {
 
     private func handlePRAttach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRBindingRefParams.self, from: paramsData)
-        guard let parsed = await resolvePRRef(params) else {
+        let parsed: ParsedPRURL
+        switch await resolvePRRef(params) {
+        case .resolved(let value):
+            parsed = value
+        case .unresolvable:
             return RPCResponse(error: PRBindingRefError.unresolvable.message)
+        case .unknownRepo:
+            // The user's input was valid; we just cannot name their repo yet.
+            // Reported as the same deferral the coordinator uses, so the CLI
+            // says "try again shortly" instead of calling a good PR number
+            // malformed.
+            return try RPCResponse(result: PRAttachResult(outcome: "deferredUnknownRepo"))
         }
         // An unrecognised source reads as `manual`, which is the conservative
         // choice for the wire: a hand-typed attach is the only thing that may
@@ -841,38 +876,70 @@ public final class RPCRouter: Sendable {
 
     private func handlePRDetach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRBindingRefParams.self, from: paramsData)
-        guard let parsed = await resolvePRRef(params) else {
+        let parsed: ParsedPRURL
+        switch await resolvePRRef(params) {
+        case .resolved(let value):
+            parsed = value
+        case .unresolvable:
             return RPCResponse(error: PRBindingRefError.unresolvable.message)
+        case .unknownRepo:
+            return RPCResponse(error: PRBindingRefError.unknownRepo.message)
         }
         let detached = try await prBindingCoordinator.detach(worktreeID: params.worktreeID,
                                                              parsed: parsed)
         return try RPCResponse(result: PRDetachResult(detached: detached))
     }
 
-    /// Why a `PRBindingRefParams` could not name one PR. One case today; named
-    /// rather than inlined so the message has a single definition across the two
-    /// handlers that report it.
+    /// Why a `PRBindingRefParams` could not name one PR. Named rather than
+    /// inlined so each message has a single definition across the two handlers
+    /// that report it.
     private enum PRBindingRefError {
+        /// Neither a URL nor a positive number was supplied — the input itself
+        /// is unusable.
         case unresolvable
+        /// The input was fine; the worktree's own repo could not be named yet.
+        case unknownRepo
 
         var message: String {
-            "pr reference must be a github PR url or a number in the worktree's own repo"
+            switch self {
+            case .unresolvable:
+                return "pr reference must be a github PR url or a number in the worktree's own repo"
+            case .unknownRepo:
+                return "could not resolve this worktree's repo yet; try again shortly"
+            }
         }
+    }
+
+    /// What a `PRBindingRefParams` resolved to.
+    ///
+    /// The two failures are deliberately distinct. A bare number whose repo
+    /// cannot be named yet — the ordinary state of a worktree seconds after
+    /// creation — is not bad input, and collapsing it into `unresolvable` told
+    /// the user that `tbd pr attach 412` was "not a PR number or a GitHub PR
+    /// URL" while they were looking at the PR.
+    private enum PRRefResolution {
+        case resolved(ParsedPRURL)
+        case unresolvable
+        case unknownRepo
     }
 
     /// Turn a URL-or-number reference into a concrete `ParsedPRURL`.
     ///
     /// The bare-number form is resolved against the worktree's own repo through
     /// the same seam the coordinator validates with, so `pr.attach 412` cannot
-    /// synthesise a URL the policy would then reject as wrong-repo. Returns nil
-    /// when neither form is supplied, when the URL is not a GitHub PR URL, or
-    /// when a bare number's repo cannot be resolved.
-    private func resolvePRRef(_ params: PRBindingRefParams) async -> ParsedPRURL? {
+    /// synthesise a URL the policy would then reject as wrong-repo.
+    private func resolvePRRef(_ params: PRBindingRefParams) async -> PRRefResolution {
         if let url = params.url, !url.isEmpty {
-            return PRBindingExtractor.parsePRURLs(in: url).first
+            guard let parsed = PRBindingExtractor.parsePRURLs(in: url).first else {
+                return .unresolvable
+            }
+            return .resolved(parsed)
         }
-        guard let number = params.number, number > 0 else { return nil }
-        return await prRef(worktreeID: params.worktreeID, number: number)
+        guard let number = params.number, number > 0 else { return .unresolvable }
+        guard let parsed = await prRef(worktreeID: params.worktreeID, number: number) else {
+            return .unknownRepo
+        }
+        return .resolved(parsed)
     }
 
     /// A bare PR number as a `ParsedPRURL` in the worktree's own repo.

@@ -61,7 +61,22 @@ public struct MergedTransitionDispatcher: Sendable {
 /// auto-archive that failed is retried rather than lost.
 public actor AllResolvedMergeTrigger {
     /// Worktrees whose bindings were all-resolved at their last evaluation.
-    private var resolved: Set<UUID> = []
+    /// Owned exclusively by `evaluate`.
+    private var allResolvedFired: Set<UUID> = []
+
+    /// Worktrees the un-bound fallback has already fired for. Owned exclusively
+    /// by `observedMerge`.
+    ///
+    /// **Two sets, not one.** The two entry points describe different worktree
+    /// populations — bound and un-bound — and a single set let either one
+    /// permanently suppress the other. Concretely: once `evaluate` fired for a
+    /// worktree, `observedMerge` could never fire for it again, because nothing
+    /// re-arms a worktree that has left the bound population (with every binding
+    /// detached the poll's grouping no longer contains it, so `evaluate` is not
+    /// called at all and its re-arm never runs). Each set is now cleared by the
+    /// path that owns it, on that path's own definition of "no longer resolved".
+    private var unboundMergeFired: Set<UUID> = []
+
     private let onResolved: @Sendable (UUID, Int) async -> Void
 
     /// `onResolved` receives the worktree and the PR number to attribute the
@@ -78,7 +93,7 @@ public actor AllResolvedMergeTrigger {
         guard PRBinding.allResolved(live) else {
             // Not resolved (any more): re-arm, so a later resolution is a fresh
             // rising edge rather than a suppressed repeat.
-            resolved.remove(worktreeID)
+            allResolvedFired.remove(worktreeID)
             return
         }
         // Attribute the transition to the first merged binding in bind order —
@@ -89,10 +104,10 @@ public actor AllResolvedMergeTrigger {
         // loudly rather than inventing a number.
         guard let merged = live.first(where: { $0.status?.state == .merged }) else {
             logger.error("all-resolved with no merged binding for \(worktreeID, privacy: .public) — not firing")
-            resolved.remove(worktreeID)
+            allResolvedFired.remove(worktreeID)
             return
         }
-        guard resolved.insert(worktreeID).inserted else { return }
+        guard allResolvedFired.insert(worktreeID).inserted else { return }
         logger.info("all bound PRs resolved for \(worktreeID, privacy: .public) (\(live.count, privacy: .public) binding(s), attributing to PR #\(merged.number, privacy: .public))")
         await onResolved(worktreeID, merged.number)
     }
@@ -109,9 +124,17 @@ public actor AllResolvedMergeTrigger {
     /// single-PR path always did. A worktree that *does* have bindings is judged
     /// only by `evaluate`, so an open sibling PR cannot be archived out from
     /// under.
+    ///
+    /// Its own once-only guard re-arms on its own condition: the moment the
+    /// worktree has a live binding again, `evaluate` owns it and this fallback
+    /// is disarmed, so if every binding is later detached a fresh merge is a
+    /// fresh rising edge.
     public func observedMerge(worktreeID: UUID, prNumber: Int, bindings: [PRBinding]) async {
-        guard bindings.filter({ !$0.detached }).isEmpty else { return }
-        guard resolved.insert(worktreeID).inserted else { return }
+        guard bindings.filter({ !$0.detached }).isEmpty else {
+            unboundMergeFired.remove(worktreeID)
+            return
+        }
+        guard unboundMergeFired.insert(worktreeID).inserted else { return }
         await onResolved(worktreeID, prNumber)
     }
 }

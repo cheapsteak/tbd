@@ -145,4 +145,42 @@ struct PRBindingRPCTests {
             _ = try await harness.attachRaw(url: nil, number: nil)
         }
     }
+
+    @Test("a bare number whose repo is not resolvable yet defers instead of calling it invalid")
+    func attachByNumberDefersOnUnknownRepo() async throws {
+        // The state a worktree is in for the first seconds of its life. The
+        // user's input is perfectly valid, so telling them it "is not a PR
+        // number or a GitHub PR URL" sends them looking for a typo.
+        let harness = try await PRBindingRPCHarness(repo: nil)
+        let attach = try await harness.attach(number: 412)
+        #expect(attach.outcome == "deferredUnknownRepo")
+        #expect(attach.binding == nil)
+        #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
+    @Test("a malformed url is still reported as unusable input")
+    func attachRejectsMalformedURL() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        await #expect(throws: (any Error).self) {
+            _ = try await harness.attachRaw(url: "https://example.com/not/a/pr", number: nil)
+        }
+    }
+
+    @Test("pr.detach of a bare number whose repo is unresolvable says so rather than reporting not-bound")
+    func detachByNumberDefersOnUnknownRepo() async throws {
+        let harness = try await PRBindingRPCHarness(repo: nil)
+        await #expect(throws: (any Error).self) {
+            _ = try await harness.detach(number: 412)
+        }
+    }
+
+    @Test("pr.detach of an already-detached PR reports false")
+    func detachTwiceReportsFalse() async throws {
+        // `updateAll` counts matched rows, so the second detach used to print
+        // "Detached." for a no-op.
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        _ = try await harness.attach(number: 412)
+        #expect(try await harness.detach(number: 412))
+        #expect(try await harness.detach(number: 412) == false)
+    }
 }

@@ -130,4 +130,48 @@ struct PRBindingCoordinatorTests {
         #expect(revived.number == 412)
         #expect(try await fixture.store.list(worktreeID: wt).count == 1)
     }
+
+    // MARK: - Heal
+
+    @Test("a heal removes a branch binding and leaves hook and manual ones alone")
+    func healRemovesOnlyBranchBindings() async throws {
+        for source in PRBindingSource.allCases {
+            let fixture = try await Fixture()
+            let wt = try await fixture.newWorktree()
+            _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: source)
+
+            let removed = await fixture.coordinator.healBranchMatch(worktreeID: wt, parsed: parsed)
+
+            #expect(removed == (source == .branch), "source \(source.rawValue)")
+            let remaining = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+            // A hook binding is direct evidence this session created the PR and a
+            // manual one is the user's explicit statement; neither is undone by
+            // an inference drawn from branch names.
+            #expect(remaining.count == (source == .branch ? 0 : 1), "source \(source.rawValue)")
+        }
+    }
+
+    @Test("a heal deletes rather than tombstones, so a later correct match can re-bind")
+    func healDeletesRatherThanTombstoning() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .branch)
+        #expect(await fixture.coordinator.healBranchMatch(worktreeID: wt, parsed: parsed))
+        // Nothing on record at all — a tombstone here would permanently block
+        // re-binding if the heal's branch evidence was wrong.
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+
+        let rebound = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                     source: .branch)
+        guard case .bound = rebound else {
+            Issue.record("expected .bound, got \(rebound)"); return
+        }
+    }
+
+    @Test("healing a PR this worktree never bound is a no-op")
+    func healUnknownPRIsHarmless() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        #expect(await fixture.coordinator.healBranchMatch(worktreeID: wt, parsed: parsed) == false)
+    }
 }

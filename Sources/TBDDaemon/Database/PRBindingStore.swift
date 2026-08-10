@@ -134,36 +134,101 @@ public struct PRBindingStore: Sendable {
         }
     }
 
-    /// Set or clear a tombstone. Returns false when no such binding exists.
+    /// Set or clear a tombstone. Returns true only when a row's state actually
+    /// **changed** — false both when no such binding exists and when it was
+    /// already in the requested state.
+    ///
+    /// `updateAll` counts MATCHED rows, not modified ones, so the natural
+    /// `updated > 0` reported success for a no-op and `tbd pr detach` on an
+    /// already-detached PR printed "Detached." The predicate carries the
+    /// current-state check instead, which makes the count mean what the caller
+    /// reads it as.
     @discardableResult
     public func setDetached(worktreeID: UUID, identityKey: String,
                             detached: Bool) async throws -> Bool {
-        let parts = identityKey.split(separator: "\u{1}", omittingEmptySubsequences: false)
-        guard parts.count == 4, let number = Int(parts[3]) else { return false }
+        guard let identity = Self.identity(from: identityKey) else { return false }
         return try await writer.write { db in
-            let updated = try PRBindingRecord
-                .filter(Column("worktreeID") == worktreeID.uuidString)
-                .filter(Column("host") == String(parts[0]).lowercased())
-                .filter(Column("owner") == String(parts[1]).lowercased())
-                .filter(Column("repo") == String(parts[2]).lowercased())
-                .filter(Column("number") == number)
+            let updated = try Self.matching(worktreeID: worktreeID, identity: identity)
+                .filter(Column("detached") == !detached)
                 .updateAll(db, Column("detached").set(to: detached))
             return updated > 0
         }
     }
 
-    public func updateStatus(bindingID: UUID, status: PRStatus?) async throws {
+    /// Hard-delete a `branch`-sourced binding — the poll's heal path.
+    ///
+    /// A **delete, not a tombstone**, and only for `branch`. A tombstone records
+    /// a user's decision and nothing but an explicit `tbd pr attach` clears it;
+    /// a heal is an inference from branch facts that can themselves be wrong (a
+    /// stale `repo.defaultBranch`, a momentarily narrower candidate list, a
+    /// remote pointed away and back). Tombstoning a wrong heal would block the
+    /// correct binding forever, silently and with no user gesture behind it,
+    /// while deleting costs at most one poll — if the mis-attachment is still
+    /// real the next heal removes it again, and if it was not, the branch
+    /// matcher re-binds. Durability is also not needed here the way it is for a
+    /// detach: a detach must survive re-discovery, but a heal *is* re-discovery
+    /// and re-derives its verdict every pass.
+    ///
+    /// Returns true when a row went.
+    @discardableResult
+    public func deleteBranchBinding(worktreeID: UUID, identityKey: String) async throws -> Bool {
+        guard let identity = Self.identity(from: identityKey) else { return false }
+        return try await writer.write { db in
+            try Self.matching(worktreeID: worktreeID, identity: identity)
+                .filter(Column("source") == PRBindingSource.branch.rawValue)
+                .deleteAll(db) > 0
+        }
+    }
+
+    /// Persist what a refresh observed for one binding: its status, and the
+    /// descriptive `headBranch` / `baseRef` the same response carried. A nil ref
+    /// means "not observed this pass" and leaves that column alone — a `gh`
+    /// outage must not blank a branch name the CLI renders.
+    public func updateObservation(bindingID: UUID, status: PRStatus?,
+                                  headBranch: String? = nil,
+                                  baseRef: String? = nil) async throws {
         let encoded = status.flatMap { value in
             (try? JSONEncoder().encode(value)).flatMap { String(data: $0, encoding: .utf8) }
         }
+        // Built inside the write block: `ColumnAssignment` is not `Sendable`,
+        // so it cannot cross into the closure.
         _ = try await writer.write { db in
-            try PRBindingRecord
+            var assignments: [ColumnAssignment] = [Column("prStatus").set(to: encoded)]
+            if let headBranch { assignments.append(Column("headBranch").set(to: headBranch)) }
+            if let baseRef { assignments.append(Column("baseRef").set(to: baseRef)) }
+            return try PRBindingRecord
                 .filter(key: bindingID.uuidString)
-                .updateAll(db, Column("prStatus").set(to: encoded))
+                .updateAll(db, assignments)
         }
     }
 
     // MARK: - Helpers
+
+    /// Split a `PRBinding.identityKey` back into its four parts. Returns nil for
+    /// anything that isn't one, so a malformed key is a no-op rather than a
+    /// query matching everything.
+    private static func identity(
+        from identityKey: String
+    ) -> (host: String, owner: String, repo: String, number: Int)? {
+        let parts = identityKey.split(separator: "\u{1}", omittingEmptySubsequences: false)
+        guard parts.count == 4, let number = Int(parts[3]) else { return nil }
+        return (String(parts[0]).lowercased(), String(parts[1]).lowercased(),
+                String(parts[2]).lowercased(), number)
+    }
+
+    /// The rows one worktree's binding identity names — at most one, by the
+    /// table's UNIQUE constraint.
+    private static func matching(
+        worktreeID: UUID,
+        identity: (host: String, owner: String, repo: String, number: Int)
+    ) -> QueryInterfaceRequest<PRBindingRecord> {
+        PRBindingRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .filter(Column("host") == identity.host)
+            .filter(Column("owner") == identity.owner)
+            .filter(Column("repo") == identity.repo)
+            .filter(Column("number") == identity.number)
+    }
 
     private static func fetchIdentity(_ db: GRDB.Database,
                                       record: PRBindingRecord) throws -> PRBindingRecord? {

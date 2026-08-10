@@ -165,15 +165,80 @@ struct PRBindingStoreTests {
         #expect(try await fixture.store.list(worktreeID: wt).count == 20)
     }
 
-    @Test("updateStatus round-trips a PRStatus")
+    @Test("updateObservation round-trips a PRStatus")
     func updateStatus() async throws {
         let fixture = try await Fixture()
         let wt = try await fixture.newWorktree()
         let stored = try #require(try await fixture.store.upsert(binding(1, worktreeID: wt)))
         let status = PRStatus(number: 1, url: stored.url, state: .checksFailed,
                               reason: "Checks failing")
-        try await fixture.store.updateStatus(bindingID: stored.id, status: status)
+        try await fixture.store.updateObservation(bindingID: stored.id, status: status)
         #expect(try await fixture.store.list(worktreeID: wt).first?.status == status)
+    }
+
+    @Test("updateObservation persists the branch refs a refresh observed")
+    func updateObservationStoresRefs() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let stored = try #require(try await fixture.store.upsert(binding(1, worktreeID: wt)))
+        #expect(stored.headBranch == nil)
+
+        let status = PRStatus(number: 1, url: stored.url, state: .mergeable)
+        try await fixture.store.updateObservation(
+            bindingID: stored.id, status: status,
+            headBranch: "tbd/fix-login-timeout", baseRef: "main")
+        let listed = try await fixture.store.list(worktreeID: wt).first
+        #expect(listed?.headBranch == "tbd/fix-login-timeout")
+        #expect(listed?.baseRef == "main")
+
+        // A later pass that resolved no refs (transient failure) must not blank
+        // the columns the CLI renders.
+        try await fixture.store.updateObservation(bindingID: stored.id, status: status)
+        let kept = try await fixture.store.list(worktreeID: wt).first
+        #expect(kept?.headBranch == "tbd/fix-login-timeout")
+        #expect(kept?.baseRef == "main")
+    }
+
+    @Test("setDetached reports false when the state did not actually change")
+    func setDetachedReportsRealChange() async throws {
+        // `updateAll` counts MATCHED rows, so the naive `> 0` made `tbd pr
+        // detach` on an already-detached PR print "Detached."
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let b = binding(1, worktreeID: wt)
+        _ = try await fixture.store.upsert(b)
+
+        #expect(try await fixture.store.setDetached(worktreeID: wt, identityKey: b.identityKey,
+                                                    detached: true))
+        #expect(try await fixture.store.setDetached(worktreeID: wt, identityKey: b.identityKey,
+                                                    detached: true) == false)
+        // Attaching a live binding is likewise a no-op, and says so.
+        #expect(try await fixture.store.setDetached(worktreeID: wt, identityKey: b.identityKey,
+                                                    detached: false))
+        #expect(try await fixture.store.setDetached(worktreeID: wt, identityKey: b.identityKey,
+                                                    detached: false) == false)
+    }
+
+    @Test("deleteBranchBinding removes only a branch-sourced row")
+    func deleteBranchBindingIsSourceScoped() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let branch = binding(1, worktreeID: wt, source: .branch)
+        let hook = binding(2, worktreeID: wt, source: .hook)
+        let manual = binding(3, worktreeID: wt, source: .manual)
+        for candidate in [branch, hook, manual] { _ = try await fixture.store.upsert(candidate) }
+
+        #expect(try await fixture.store.deleteBranchBinding(
+            worktreeID: wt, identityKey: branch.identityKey))
+        #expect(try await fixture.store.deleteBranchBinding(
+            worktreeID: wt, identityKey: hook.identityKey) == false)
+        #expect(try await fixture.store.deleteBranchBinding(
+            worktreeID: wt, identityKey: manual.identityKey) == false)
+
+        // A hard delete, not a tombstone: nothing is left on record, so a later
+        // correct branch match can re-bind.
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true)
+            .map(\.number) == [2, 3])
     }
 
     @Test("bindings for two worktrees do not mix")

@@ -116,7 +116,41 @@ public actor PRBindingCoordinator {
         }
     }
 
-    /// Tombstone a binding. Returns false when this worktree has no such PR.
+    /// Undo a branch match the poll's heal just disproved.
+    ///
+    /// The heal clears the worktree's cached status and persists the clear, but
+    /// a binding is re-queried by `(host, owner, repo, number)` and never
+    /// re-validated against the worktree's branches or its repo — so without
+    /// this the row survives the heal, keeps driving the worktree's icon, and on
+    /// merge satisfies `allResolved` and auto-archives a worktree that was
+    /// merely tracking someone else's PR.
+    ///
+    /// **Only `branch` bindings.** A `hook` binding is direct evidence that this
+    /// session ran the `gh pr create` that made the PR, and a `manual` binding
+    /// is the user's explicit statement; neither is an inference from branch
+    /// names, so neither may be undone by one. The removal is a hard delete
+    /// rather than a tombstone — see `PRBindingStore.deleteBranchBinding` for
+    /// why.
+    ///
+    /// Returns true when a binding was actually removed.
+    @discardableResult
+    public func healBranchMatch(worktreeID: UUID, parsed: ParsedPRURL) async -> Bool {
+        let key = identityKey(worktreeID: worktreeID, parsed: parsed)
+        do {
+            let removed = try await store.deleteBranchBinding(worktreeID: worktreeID,
+                                                              identityKey: key)
+            if removed {
+                logger.debug("removed branch-matched PR #\(parsed.number, privacy: .public) from worktree \(worktreeID.uuidString, privacy: .public): a poll heal disproved the attachment")
+            }
+            return removed
+        } catch {
+            logger.warning("failed to remove healed PR #\(parsed.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// Tombstone a binding. Returns false when this worktree has no such PR, or
+    /// when it was already detached.
     @discardableResult
     public func detach(worktreeID: UUID, parsed: ParsedPRURL) async throws -> Bool {
         try await store.setDetached(worktreeID: worktreeID,
