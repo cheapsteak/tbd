@@ -4,6 +4,19 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Terminals")
 
+enum TerminalRecreationClaim: Equatable {
+    case alreadyInFlight
+    case claimed(automaticAttempt: Int?)
+    case budgetExhausted
+}
+
+enum AutomaticTerminalRecreationOutcome: Equatable {
+    case alreadyInFlight
+    case recreated(attempt: Int)
+    case failed(attempt: Int)
+    case budgetExhausted
+}
+
 extension AppState {
     /// Resolve a terminal only within its owning worktree bucket. Terminal IDs
     /// are globally unique in normal operation, but persisted split layouts can
@@ -106,6 +119,7 @@ extension AppState {
     func appendCreatedTerminal(_ terminal: Terminal) {
         let worktreeID = terminal.worktreeID
         guard !(terminals[worktreeID] ?? []).contains(where: { $0.id == terminal.id }) else { return }
+        terminalRecoveryBudget.reset(for: terminal.id)
         terminals[worktreeID, default: []].append(terminal)
 
         // Add a tab unless the terminal is already represented as a tab root
@@ -236,6 +250,7 @@ extension AppState {
             let size = mainAreaTerminalSize()
             let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
+            terminalRecoveryBudget.reset(for: terminal.id)
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
@@ -249,7 +264,7 @@ extension AppState {
     func deleteTerminal(terminalID: UUID, worktreeID: UUID) async {
         do {
             try await daemonClient.deleteTerminal(terminalID: terminalID)
-            terminals[worktreeID]?.removeAll { $0.id == terminalID }
+            removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
         } catch {
             logger.error("Failed to delete terminal: \(error)")
             handleConnectionError(error)
@@ -274,24 +289,84 @@ extension AppState {
         }
     }
 
-    /// Recreate a dead tmux window for an existing terminal.
-    /// The daemon creates a new tmux window and updates the terminal record.
-    /// A state refresh picks up the new tmuxWindowID, causing the view to rebuild.
-    func recreateTerminalWindow(terminalID: UUID) async {
-        guard !recreatingTerminalIDs.contains(terminalID) else { return }
+    func removeDeletedTerminalFromState(terminalID: UUID, worktreeID: UUID) {
+        terminals[worktreeID]?.removeAll { $0.id == terminalID }
+        recreatingTerminalIDs.remove(terminalID)
+        terminalRecoveryBudget.reset(for: terminalID)
+    }
+
+    func claimAutomaticTerminalRecreation(terminalID: UUID) -> TerminalRecreationClaim {
+        guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
+        guard let attempt = terminalRecoveryBudget.claimAttempt(for: terminalID) else {
+            logger.error("Automatic terminal recovery budget exhausted for \(terminalID, privacy: .public)")
+            return .budgetExhausted
+        }
         recreatingTerminalIDs.insert(terminalID)
-        defer { recreatingTerminalIDs.remove(terminalID) }
+        logger.info("Claimed automatic terminal recovery attempt \(attempt, privacy: .public) for \(terminalID, privacy: .public)")
+        return .claimed(automaticAttempt: attempt)
+    }
+
+    func claimManualTerminalRecreation(terminalID: UUID) -> TerminalRecreationClaim {
+        guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
+        recreatingTerminalIDs.insert(terminalID)
+        return .claimed(automaticAttempt: nil)
+    }
+
+    func finishTerminalRecreation(terminalID: UUID) {
+        recreatingTerminalIDs.remove(terminalID)
+    }
+
+    func terminalViewerDidStart(terminalID: UUID) {
+        terminalRecoveryBudget.reset(for: terminalID)
+        logger.info("Reset automatic terminal recovery budget after attachment for \(terminalID, privacy: .public)")
+    }
+
+    func requestAutomaticTerminalRecreation(
+        terminalID: UUID
+    ) async -> AutomaticTerminalRecreationOutcome {
+        switch claimAutomaticTerminalRecreation(terminalID: terminalID) {
+        case .alreadyInFlight:
+            return .alreadyInFlight
+        case .budgetExhausted:
+            return .budgetExhausted
+        case .claimed(let automaticAttempt):
+            guard let attempt = automaticAttempt else { return .alreadyInFlight }
+            defer { finishTerminalRecreation(terminalID: terminalID) }
+            do {
+                try await performTerminalRecreation(terminalID: terminalID)
+                return .recreated(attempt: attempt)
+            } catch {
+                logger.error("Automatic terminal recreation attempt \(attempt, privacy: .public) failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                handleConnectionError(error)
+                return .failed(attempt: attempt)
+            }
+        }
+    }
+
+    /// User-triggered recreation is independent of the automatic recovery budget.
+    func recreateTerminalWindow(terminalID: UUID) async {
+        guard claimManualTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: nil) else {
+            return
+        }
+        defer { finishTerminalRecreation(terminalID: terminalID) }
 
         do {
-            let size = mainAreaTerminalSize()
-            let updated = try await daemonClient.recreateTerminalWindow(terminalID: terminalID, cols: size.cols, rows: size.rows)
-            // Update local state so the view rebuilds with the new tmuxWindowID
-            if let idx = terminals[updated.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
-                terminals[updated.worktreeID]?[idx] = updated
-            }
+            try await performTerminalRecreation(terminalID: terminalID)
         } catch {
             logger.error("Failed to recreate terminal window: \(error)")
             handleConnectionError(error)
+        }
+    }
+
+    private func performTerminalRecreation(terminalID: UUID) async throws {
+        let size = mainAreaTerminalSize()
+        let updated = try await daemonClient.recreateTerminalWindow(
+            terminalID: terminalID,
+            cols: size.cols,
+            rows: size.rows
+        )
+        if let idx = terminals[updated.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
+            terminals[updated.worktreeID]?[idx] = updated
         }
     }
 
@@ -320,6 +395,7 @@ extension AppState {
                 rows: size.rows,
                 colorFgBg: colorFgBg
             )
+            terminalRecoveryBudget.reset(for: terminal.id)
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
@@ -347,6 +423,7 @@ extension AppState {
                 rows: size.rows,
                 colorFgBg: colorFgBg
             )
+            terminalRecoveryBudget.reset(for: terminal.id)
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)

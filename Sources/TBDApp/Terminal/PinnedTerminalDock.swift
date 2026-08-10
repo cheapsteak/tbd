@@ -150,7 +150,7 @@ private struct PinnedTerminalCell: View {
                     tmuxBridge: appState.tmuxBridge,
                     worktreePath: worktree.path,
                     onDeadWindow: {
-                        Task { await appState.recreateTerminalWindow(terminalID: terminal.id) }
+                        Task { await appState.requestAutomaticTerminalRecreation(terminalID: terminal.id) }
                     }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)")
