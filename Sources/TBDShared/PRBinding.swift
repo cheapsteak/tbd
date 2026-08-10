@@ -72,11 +72,16 @@ public extension PRMergeableState {
     /// How loudly this state asks for the user's attention; higher wins when
     /// one icon must stand for several PRs. Terminal states rank lowest —
     /// a merged PR needs nothing.
+    ///
+    /// The order is the design's: checks failing, blocked, changes requested,
+    /// pending, mergeable, draft. It is defined once here because the toolbar
+    /// icon, the sidebar dot and the `Worktree.prStatus` column all read it,
+    /// and they must not be able to disagree.
     var attentionSeverity: Int {
         switch self {
         case .checksFailed:     return 6
-        case .changesRequested: return 5
-        case .blocked:          return 4
+        case .blocked:          return 5
+        case .changesRequested: return 4
         case .pending:          return 3
         case .mergeable:        return 2
         case .draft:            return 1

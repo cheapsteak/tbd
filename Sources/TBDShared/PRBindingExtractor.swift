@@ -26,18 +26,112 @@ public struct ParsedPRURL: Sendable, Equatable, Hashable {
 /// not bind, or every `git log` that quotes a PR link would attach one.
 public enum PRBindingExtractor {
 
-    /// `gh` … `pr` … `create` as consecutive shell words, allowing any spacing
-    /// and any surrounding pipeline. Word boundaries keep `gh-pr-create` out.
-    private static let createPattern = #"\bgh\s+pr\s+create\b"#
-
     /// Host-locked to github.com for now; the binding's `host` column exists so
     /// enterprise support is a later additive change. The lookaheads reject `.`
     /// and `..` segments, which would otherwise parse as an owner or repo name.
     private static let urlPattern =
         #"https://github\.com/(?!\.{1,2}/)([\w.-]+)/(?!\.{1,2}/)([\w.-]+)/pull/(\d+)"#
 
+    /// Shell metacharacters that end one command and begin the next. Runs of
+    /// them collapse on their own, so `&&`, `||` and `|` need no special case.
+    private static let segmentSeparators: Set<Character> = [";", "&", "|", "\n"]
+
+    /// `gh` global flags that consume the word after them, so the subcommand
+    /// path of `gh --repo acme/acme-prod pr create` still reads `pr create`.
+    private static let valueTakingFlags: Set<String> = ["-R", "--repo", "--hostname"]
+
+    /// True when the command actually *runs* `gh pr create`, as opposed to
+    /// merely containing that phrase.
+    ///
+    /// Substring matching was wrong in both directions. It fired on
+    /// `git log --grep 'gh pr create'` — a false positive that can bind a
+    /// merged PR quoted in unrelated output and hand `allResolved` an
+    /// auto-archive the user never asked for — and it missed
+    /// `gh -R acme/acme-prod pr create`, the normal way to target another repo.
+    ///
+    /// So the command is tokenized instead: a quoted run stays one word, which
+    /// is what keeps a quoted phrase from ever looking like a command; the
+    /// string is cut into segments at shell separators; and a segment counts
+    /// only when its first word is `gh` and its subcommand path — flags and
+    /// their values skipped — is exactly `pr create`. This is a pragmatic
+    /// tokenizer, not a shell parser: an unusual construction fails closed.
     public static func isPRCreateCommand(_ command: String) -> Bool {
-        command.range(of: createPattern, options: .regularExpression) != nil
+        commandSegments(of: command).contains(where: isGHPRCreateSegment)
+    }
+
+    /// Split into per-command word lists, honoring quotes so that neither a
+    /// separator nor a space inside a quoted string breaks anything apart.
+    private static func commandSegments(of command: String) -> [[String]] {
+        var segments: [[String]] = []
+        var words: [String] = []
+        var word = ""
+        var wordStarted = false
+        var quote: Character?
+        var escaped = false
+
+        func endWord() {
+            guard wordStarted else { return }
+            words.append(word)
+            word = ""
+            wordStarted = false
+        }
+        func endSegment() {
+            endWord()
+            guard !words.isEmpty else { return }
+            segments.append(words)
+            words = []
+        }
+
+        for character in command {
+            if escaped {
+                word.append(character)
+                wordStarted = true
+                escaped = false
+            } else if let open = quote {
+                if character == open {
+                    quote = nil                       // the word stays open
+                } else if open == "\"" && character == "\\" {
+                    escaped = true
+                } else {
+                    word.append(character)
+                    wordStarted = true
+                }
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "'" || character == "\"" {
+                quote = character
+                wordStarted = true                    // `""` is an empty word
+            } else if segmentSeparators.contains(character) {
+                endSegment()
+            } else if character.isWhitespace {
+                endWord()
+            } else {
+                word.append(character)
+                wordStarted = true
+            }
+        }
+        endSegment()
+        return segments
+    }
+
+    /// One segment invokes `gh pr create`: `gh` (or a path ending in `/gh`) is
+    /// the command word, and the first two non-flag words after it are `pr`
+    /// then `create`.
+    private static func isGHPRCreateSegment(_ words: [String]) -> Bool {
+        guard let command = words.first,
+              command == "gh" || command.hasSuffix("/gh") else { return false }
+        var path: [String] = []
+        var index = 1
+        while index < words.count && path.count < 2 {
+            let word = words[index]
+            if word.count > 1 && word.hasPrefix("-") {
+                index += valueTakingFlags.contains(word) ? 2 : 1
+            } else {
+                path.append(word)
+                index += 1
+            }
+        }
+        return path == ["pr", "create"]
     }
 
     /// Every distinct PR URL in `text`, in first-seen order.

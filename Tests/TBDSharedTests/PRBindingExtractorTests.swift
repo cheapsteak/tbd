@@ -23,6 +23,46 @@ struct PRBindingExtractorTests {
         #expect(!PRBindingExtractor.isPRCreateCommand("echo gh-pr-create"))
     }
 
+    /// The false-positive guard. A quoted `gh pr create` is an argument, not a
+    /// command — and treating it as one binds any PR URL in that command's
+    /// output, which for an already-merged PR can hand `allResolved` an
+    /// auto-archive on a worktree that never opened a PR.
+    @Test("a quoted gh pr create inside another command is not a create")
+    func quotedPhraseIsNotACreate() {
+        #expect(!PRBindingExtractor.isPRCreateCommand("git log --grep 'gh pr create'"))
+        #expect(!PRBindingExtractor.isPRCreateCommand(#"grep -rn "gh pr create" docs/"#))
+        #expect(!PRBindingExtractor.isPRCreateCommand(#"echo "gh pr create""#))
+        // A separator inside the quotes must not manufacture a segment either.
+        #expect(!PRBindingExtractor.isPRCreateCommand(#"echo "x && gh pr create""#))
+    }
+
+    /// The false-negative half: `-R` / `--repo` between `gh` and its subcommand
+    /// is the normal way to target another repo, and used to match nothing.
+    @Test("repo-targeting flags before the subcommand still count as a create")
+    func repoFlagsBeforeSubcommand() {
+        #expect(PRBindingExtractor.isPRCreateCommand("gh --repo acme/acme-prod pr create"))
+        #expect(PRBindingExtractor.isPRCreateCommand("gh -R acme/acme-prod pr create --fill"))
+        #expect(PRBindingExtractor.isPRCreateCommand("gh --repo=acme/acme-prod pr create"))
+    }
+
+    /// A quoted phrase must not bind even when the surrounding command really
+    /// does print a PR URL — the end-to-end shape of the false positive.
+    @Test("a grep for the phrase binds nothing even when its output holds a PR URL")
+    func quotedPhrasePayloadBindsNothing() {
+        let found = PRBindingExtractor.extract(fromHookPayload: payload(
+            command: "git log --grep 'gh pr create'",
+            output: "https://github.com/acme/acme-prod/pull/412"))
+        #expect(found.isEmpty)
+    }
+
+    @Test("a repo-flagged create payload binds")
+    func repoFlaggedCreatePayloadBinds() {
+        let found = PRBindingExtractor.extract(fromHookPayload: payload(
+            command: "gh -R acme/acme-prod pr create --fill",
+            output: "https://github.com/acme/acme-prod/pull/412"))
+        #expect(found.map(\.number) == [412])
+    }
+
     @Test("parses one PR URL")
     func parsesOne() {
         let found = PRBindingExtractor.parsePRURLs(
