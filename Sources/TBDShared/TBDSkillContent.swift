@@ -163,6 +163,19 @@ tbd notify --type {response_complete|error|task_complete|attention_needed} --mes
 tbd link [<worktree>]   # no arg = current
 ```
 
+### Pull requests
+
+A worktree can own several PRs. TBD binds them automatically (from `gh pr create`
+and from branch matching); manage the list when that is wrong.
+
+- `tbd pr list` — PRs bound to this worktree
+- `tbd pr attach <number|url>` — bind a PR TBD did not find
+- `tbd pr detach <number|url>` — unbind a PR that no longer belongs
+
+A detached PR stays detached — automatic discovery will not re-add it. Detaching
+a stale PR is also how you unblock auto-archive, which waits for every bound PR
+to merge or close.
+
 ## Panels
 
 Each worktree tab has a **primary** anchor (its terminal, or a file/web/note/transcript) plus an optional layout tree of **viewer panels** beside it.

@@ -68,3 +68,15 @@ import Foundation
     #expect(body.contains("tbd scratch promote <dest-path>"))
     #expect(body.contains("--display-name"))
 }
+
+@Test func bodyDocumentsPRCommands() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("tbd pr list"))
+    #expect(body.contains("tbd pr attach"))
+    #expect(body.contains("tbd pr detach"))
+    // Non-obvious behaviours a caller would otherwise get wrong.
+    #expect(body.contains("A detached PR stays detached"))
+    #expect(body.contains("every bound PR"))
+    // The hook-only entry point must not be documented as a user command.
+    #expect(!body.contains("tbd pr bind"))
+}
