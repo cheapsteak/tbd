@@ -27,9 +27,11 @@ import Foundation
         let obj = try decode(data)
         let hooks = try #require(obj["hooks"] as? [String: Any])
         let post = try #require(hooks["PostToolUse"] as? [[String: Any]])
-        #expect(post.count == 1)
-        #expect(post[0]["matcher"] as? String == "AskUserQuestion")
-        let commands = try #require(post[0]["hooks"] as? [[String: Any]])
+        // AskUserQuestion is one of two PostToolUse entries — the other is the
+        // Bash/gh-pr-create binder added in ClaudeHookOverlayTests.
+        #expect(post.count == 2)
+        let askUserQuestion = try #require(post.first { $0["matcher"] as? String == "AskUserQuestion" })
+        let commands = try #require(askUserQuestion["hooks"] as? [[String: Any]])
         let cmd = try #require(commands[0]["command"] as? String)
         #expect(cmd.contains("tbd ask-user-question post"), "got: \(cmd)")
     }

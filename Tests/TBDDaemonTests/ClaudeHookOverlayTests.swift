@@ -38,6 +38,28 @@ extension TBDHomeSerialized {
         #expect(allStopCommands.contains(where: { $0.contains("stop-rename-check") }))
     }
 
+    @Test func postToolUseBashHookBindsPRsAndKeepsAskUserQuestion() throws {
+        let data = try ClaudeHookOverlay.generateBody()
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let hooks = parsed?["hooks"] as? [String: Any]
+        let postToolUse = try #require(hooks?["PostToolUse"] as? [[String: Any]])
+
+        let bash = postToolUse.first { $0["matcher"] as? String == "Bash" }
+        #expect(bash != nil)
+        let command = ((bash?["hooks"] as? [[String: Any]])?.first?["command"] as? String) ?? ""
+        // The grep prefilter is what keeps every other Bash call from spawning tbd.
+        #expect(command.contains("gh"))
+        #expect(command.contains("pr"))
+        #expect(command.contains("create"))
+        #expect(command.contains("pr bind --from-hook"))
+        // A hook must never fail the tool call it observes.
+        #expect(command.contains("|| true"))
+
+        // The pre-existing AskUserQuestion entry must survive alongside it.
+        #expect(postToolUse.contains { $0["matcher"] as? String == "AskUserQuestion" })
+        #expect(postToolUse.count == 2)
+    }
+
     @Test func registersStopFailureNotifyHook() throws {
         let data = try ClaudeHookOverlay.generateBody()
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]

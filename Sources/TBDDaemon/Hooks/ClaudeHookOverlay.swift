@@ -33,6 +33,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///   render the question before Claude flushes the assistant message
 ///   to the JSONL. Pre sets activity to waiting_for_user; post sets
 ///   it back to working (Claude continues processing after user answers).
+/// - `PostToolUse:Bash`: greps the payload for `gh pr create` and, only
+///   on a match, pipes it to `tbd pr bind --from-hook` to bind any PR
+///   the command reported. The grep prefilter keeps every other Bash
+///   call (the overwhelming majority) from spawning a `tbd` process.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -100,6 +104,18 @@ public enum ClaudeHookOverlay {
     static let waitingForUserCommand =
         #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
 
+    /// Binds any PR created by a `gh pr create` in this session.
+    ///
+    /// The `grep -qE` is a deliberate prefilter: this hook fires on EVERY Bash
+    /// tool call across the whole fleet, and without it each one would spawn a
+    /// `tbd` process. With it, the cost of an unrelated Bash call is one grep
+    /// over the payload and nothing else. `-E` (extended regex) rather than a
+    /// GNU-only `\+` in basic regex — BSD/macOS grep is the one this hook
+    /// actually runs under. `|| true` guarantees the hook cannot fail the tool
+    /// call it observes.
+    static let prBindCommand =
+        #"payload=$(cat); printf '%s' "$payload" | grep -qE 'gh[[:space:]]+pr[[:space:]]+create' && printf '%s' "$payload" | tbd pr bind --from-hook || true"#
+
     /// Build the JSON-encoded overlay body.
     ///
     /// When `fallbackModels` is non-nil and non-empty, a top-level
@@ -166,6 +182,12 @@ public enum ClaudeHookOverlay {
                         "matcher": "AskUserQuestion",
                         "hooks": [
                             ["type": "command", "command": askUserQuestionPostCommand]
+                        ]
+                    ],
+                    [
+                        "matcher": "Bash",
+                        "hooks": [
+                            ["type": "command", "command": prBindCommand]
                         ]
                     ]
                 ]
