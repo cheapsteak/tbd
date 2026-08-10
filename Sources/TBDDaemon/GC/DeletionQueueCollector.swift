@@ -117,9 +117,10 @@ public struct DeletionQueueCollector: Sendable {
         }
     }
 
-    /// Gate order mirrors `AgentWorktreeCollector.decide`: locked, then
-    /// namespace, then linkage, then live-cwd. Each check short-circuits the
-    /// rest, and every direction favors keeping.
+    /// Gates a candidate in order: locked, then namespace (`allowedPrefixes`),
+    /// then linkage (proof the directory is really this repo's worktree),
+    /// then live-cwd. Each check short-circuits the rest, and every
+    /// direction favors keeping.
     public func decide(
         _ candidate: InterruptedArchive, liveCWDs: [String]
     ) async -> DeletionQueueDecision {
@@ -146,7 +147,7 @@ public struct DeletionQueueCollector: Sendable {
             return .keep(reason: "no-repo")
         }
 
-        if liveCWDs.contains(where: { isUnder($0, prefix: candidate.path) || $0 == candidate.path }) {
+        if liveCWDs.contains(where: { isUnder($0, prefix: candidate.path) }) {
             return .keep(reason: "live-cwd")
         }
 
@@ -202,14 +203,22 @@ public struct DeletionQueueCollector: Sendable {
     /// to different prefixes — exactly the trap `GitManager.isLinkedWorktree`
     /// documents for `URL.resolvingSymlinksInPath()`.
     func resolvedPath(_ path: String) -> String {
+        let standardized = (path as NSString).standardizingPath
+        // Every caller here deals in absolute paths. Guard it explicitly:
+        // for a relative input, `deletingLastPathComponent` on `""` returns
+        // `""` forever, so the walk-up loop below would never reach `"/"`
+        // and never terminate — a hang inside a background sweep is a far
+        // worse failure mode than returning an unresolved path.
+        guard standardized.hasPrefix("/") else { return standardized }
+
         var suffix: [String] = []
-        var current = (path as NSString).standardizingPath
+        var current = standardized
         while !FileManager.default.fileExists(atPath: current), current != "/" {
             suffix.insert((current as NSString).lastPathComponent, at: 0)
             current = (current as NSString).deletingLastPathComponent
         }
         guard let real = realpath(current, nil) else {
-            return (path as NSString).standardizingPath
+            return standardized
         }
         defer { free(real) }
         let base = String(cString: real)

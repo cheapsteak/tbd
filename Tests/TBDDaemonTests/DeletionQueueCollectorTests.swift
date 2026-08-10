@@ -140,16 +140,36 @@ struct DeletionQueueCollectorTests {
 
         // `forgetWorktree` hard-deletes the row rather than flipping it to
         // `.archived`, precisely so a directory the user chose to keep cannot
-        // be reclaimed. With no row, the directory is invisible here however
-        // TBD-shaped its path looks.
+        // be reclaimed. `f.worktree` is TBD-shaped in every way this
+        // collector can check on disk — inside a TBD-owned prefix, a real
+        // linked worktree of `f.repo` — so if `interruptedArchives` ever
+        // stopped filtering on row presence (e.g. started enumerating the
+        // prefix directly instead of walking `worktrees:`), this directory
+        // is exactly what it would wrongly pick up. With no row for it, it
+        // must never appear, however TBD-shaped its path looks.
+        let repoID = UUID()
         let found = await makeCollector().interruptedArchives(
             worktrees: [],
-            repoPathByID: [UUID(): f.repo],
-            prefixesByRepoID: [:],
+            repoPathByID: [repoID: f.repo],
+            prefixesByRepoID: [repoID: [f.pool]],
             scratchPrefix: "/nonexistent-scratch"
         )
         #expect(found.isEmpty)
         #expect(FileManager.default.fileExists(atPath: f.worktree))
+    }
+
+    // MARK: - Path resolution
+
+    @Test func resolvedPathReturnsPromptlyForANonAbsolutePath() {
+        // The walk-up loop climbs `deletingLastPathComponent` until it hits
+        // `"/"`. For a relative path that never happens — `""` deletes its
+        // last component to `""` forever — so a non-absolute input must be
+        // rejected up front rather than fed into the loop. Without that
+        // guard this call hangs the calling thread indefinitely, which
+        // inside a background sweep means hanging the daemon; this test's
+        // whole point is that the call returns at all.
+        let result = makeCollector().resolvedPath("relative/path")
+        #expect(result == "relative/path")
     }
 
     // MARK: - Reap
