@@ -171,7 +171,7 @@ struct ContentView: View {
                                     } label: {
                                         PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
                                     } primaryAction: {
-                                        openPR(prURL, number: bindings[0].number, worktreeID: worktreeID)
+                                        appState.openPR(url: prURL, number: bindings[0].number, worktreeID: worktreeID)
                                     }
                                     // Keep "#123" neutral like the original plain Button (the
                                     // split button otherwise accent-tints it); the icon keeps
@@ -345,7 +345,7 @@ struct ContentView: View {
             ForEach(PRBindingPresentation.menuRows(bindings)) { row in
                 Button(row.title) {
                     guard let url = row.url else { return }
-                    openPR(url, number: row.number, worktreeID: worktreeID)
+                    appState.openPR(url: url, number: row.number, worktreeID: worktreeID)
                 }
                 .disabled(row.url == nil)
             }
@@ -377,32 +377,6 @@ struct ContentView: View {
                     Task { await appState.setAutoHibernate(worktreeID: worktreeID, enabled: newValue) }
                 }
             ))
-        }
-    }
-
-    /// Open one bound PR: a webview tab in the app, reusing an existing tab for
-    /// the same URL, or the default browser when ⌘ is held. Shared by the
-    /// single-PR primary action and every multi-PR menu row so the two behave
-    /// identically.
-    private func openPR(_ url: URL, number: Int, worktreeID: UUID) {
-        // cmd+click opens the PR in the default browser instead of an in-app tab.
-        if NSEvent.modifierFlags.contains(.command) {
-            NSWorkspace.shared.open(url)
-            return
-        }
-        let existingTabs = appState.tabs[worktreeID] ?? []
-        if let existingIndex = existingTabs.firstIndex(where: {
-            if case .webview(_, let tabURL) = $0.content { return tabURL == url }
-            return false
-        }) {
-            // Focus existing PR tab
-            appState.activeTabIndices[worktreeID] = existingIndex
-        } else {
-            // Create and focus new PR tab
-            let webviewID = UUID()
-            let tab = TBDShared.Tab(id: UUID(), content: .webview(id: webviewID, url: url), label: "PR #\(number)")
-            appState.tabs[worktreeID, default: []].append(tab)
-            appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
         }
     }
 
