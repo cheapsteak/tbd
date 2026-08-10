@@ -24,8 +24,9 @@ struct HistoryLimitIntegrationTests {
     /// One-shot tmux command via the same binary TmuxManager uses,
     /// capturing trimmed stdout (nil on nonzero exit).
     private func tmuxCapture(_ args: [String]) -> String? {
+        guard let tmuxPath = TmuxManager.tmuxPath() else { return nil }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: TmuxManager.tmuxPath())
+        process.executableURL = URL(fileURLWithPath: tmuxPath)
         process.arguments = args
         let pipe = Pipe()
         process.standardOutput = pipe

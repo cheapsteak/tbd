@@ -55,6 +55,7 @@ func debugLog(_ msg: String) {
 /// - The "main" session persists even when the app is closed
 final class TmuxBridge: @unchecked Sendable {
     private let lock = NSLock()
+    private let tmuxExecutablePath: String?
 
     /// Tracks active grouped sessions: maps panel UUID -> grouped session name
     private var activeSessions: [UUID: String] = [:]
@@ -64,6 +65,10 @@ final class TmuxBridge: @unchecked Sendable {
     /// the async `runTmux`, which uses `Process.terminationHandler` (no
     /// `waitUntilExit`) so it doesn't pump the main runloop.
     private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
+
+    init(tmuxExecutablePath: String?) {
+        self.tmuxExecutablePath = tmuxExecutablePath
+    }
 
     static func sessionName(for panelID: UUID) -> String {
         "tbd-view-\(panelID.uuidString.prefix(8).lowercased())"
@@ -108,14 +113,22 @@ final class TmuxBridge: @unchecked Sendable {
     static func killSessionArgs(sessionName: String) -> [String] {
         ["kill-session", "-t", sessionName]
     }
+
+    /// Complete command used for a tmux preparation subprocess.
+    func tmuxCommand(server: String, args: [String]) -> [String]? {
+        guard let tmuxExecutablePath else { return nil }
+        return [tmuxExecutablePath, "-L", server] + args
+    }
+
     /// Command used by the SwiftTerm PTY to attach its viewer client.
     ///
     /// `-u` is required even when the app environment normally has a UTF-8
     /// locale. tmux otherwise may classify this bare PTY client as non-UTF-8
     /// and substitute Unicode punctuation (notably curly apostrophes) with
     /// underscores when it redraws the pane.
-    static func viewerAttachCommand(server: String, sessionName: String) -> [String] {
-        ["tmux", "-u", "-L", server, "attach", "-t", sessionName]
+    func viewerAttachCommand(server: String, sessionName: String) -> [String]? {
+        guard let tmuxExecutablePath else { return nil }
+        return [tmuxExecutablePath, "-u", "-L", server, "attach", "-t", sessionName]
     }
 
     /// Prepare a tmux view session for a specific panel.
@@ -139,6 +152,12 @@ final class TmuxBridge: @unchecked Sendable {
         windowID: String
     ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
         let sessionName = Self.sessionName(for: panelID)
+        guard let preparedSession = preparedSession(server: server, sessionName: sessionName) else {
+            return .failure(.commandFailed(
+                stage: .createViewSession,
+                output: "tmux executable unavailable"
+            ))
+        }
 
         let _ = await runTmux(server: server, args: Self.killSessionArgs(sessionName: sessionName))
 
@@ -217,7 +236,7 @@ final class TmuxBridge: @unchecked Sendable {
 
         debugLog("PREPARE: panelID=\(panelID.uuidString.prefix(8)) server=\(server) window=\(windowID) session=\(sessionName)")
 
-        return .success(Self.preparedSession(server: server, sessionName: sessionName))
+        return .success(preparedSession)
     }
 
     /// Clean up a view session when a panel is hidden.
@@ -261,8 +280,9 @@ final class TmuxBridge: @unchecked Sendable {
         let output: String
     }
 
-    static func preparedSession(server: String, sessionName: String) -> TmuxPreparedSession {
+    func preparedSession(server: String, sessionName: String) -> TmuxPreparedSession? {
         let viewerCommand = viewerAttachCommand(server: server, sessionName: sessionName)
+        guard let viewerCommand else { return nil }
         return TmuxPreparedSession(
             executablePath: viewerCommand[0],
             arguments: Array(viewerCommand.dropFirst())
@@ -346,13 +366,17 @@ final class TmuxBridge: @unchecked Sendable {
     /// new-session/select-window), starving SwiftUI's render loop so newly
     /// inserted terminal panels never displayed content.
     private func runTmux(server: String, args: [String]) async -> TmuxResult {
-        await withCheckedContinuation { continuation in
+        guard let command = tmuxCommand(server: server, args: args) else {
+            return TmuxResult(success: false, output: "tmux executable unavailable")
+        }
+
+        return await withCheckedContinuation { continuation in
             let process = Process()
             let outPipe = Pipe()
             let errPipe = Pipe()
 
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["tmux", "-L", server] + args
+            process.executableURL = URL(fileURLWithPath: command[0])
+            process.arguments = Array(command.dropFirst())
             process.standardOutput = outPipe
             process.standardError = errPipe
 

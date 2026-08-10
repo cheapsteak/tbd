@@ -1048,20 +1048,41 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Private
 
-    /// Resolves the path to the tmux binary, checking common locations.
-    static func tmuxPath() -> String {
-        for candidate in ["/usr/bin/tmux", "/usr/local/bin/tmux", "/opt/homebrew/bin/tmux"] {
-            if FileManager.default.fileExists(atPath: candidate) {
+    /// Resolves tmux from the daemon's inherited PATH without adding fallback directories.
+    static func tmuxPath(
+        path: String? = ProcessInfo.processInfo.environment["PATH"]
+    ) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+
+        for entry in path.split(separator: ":", omittingEmptySubsequences: false) {
+            let directory = String(entry)
+            guard !directory.isEmpty, (directory as NSString).isAbsolutePath else {
+                continue
+            }
+
+            let candidate = URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent("tmux")
+                .standardizedFileURL
+                .path
+            if FileManager.default.isExecutableFile(atPath: candidate) {
                 return candidate
             }
         }
-        return "/usr/bin/tmux"
+
+        return nil
     }
 
     @discardableResult
     private func runTmux(_ arguments: [String]) async throws -> String {
-        try await Self.runExternalCommand(
-            executable: Self.tmuxPath(),
+        guard let executable = Self.tmuxPath() else {
+            throw TmuxError.commandFailed(
+                command: "tmux " + arguments.joined(separator: " "),
+                status: 127,
+                output: "tmux is unavailable on PATH"
+            )
+        }
+        return try await Self.runExternalCommand(
+            executable: executable,
             arguments: arguments,
             label: "tmux",
             timeout: subprocessTimeout

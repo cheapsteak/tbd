@@ -34,11 +34,6 @@ struct TmuxBridgeTests {
         #expect(TmuxBridge.activeWindowQueryArgs(sessionName: sessionName) == [
             "display-message", "-p", "-t", sessionName, "#{window_id}",
         ])
-        #expect(TmuxBridge.viewerAttachCommand(
-            server: "tbd-repo", sessionName: sessionName
-        ) == [
-            "tmux", "-u", "-L", "tbd-repo", "attach", "-t", sessionName,
-        ])
         #expect(TmuxBridge.windowInventoryQueryArgs() == [
             "list-windows", "-a", "-F", "#{window_id}",
         ])
@@ -48,6 +43,47 @@ struct TmuxBridgeTests {
         #expect(TmuxBridge.killSessionArgs(sessionName: sessionName) == [
             "kill-session", "-t", sessionName,
         ])
+    }
+
+    @Test func preparationAndViewerCommandsUseProvidedAbsoluteExecutable() throws {
+        let executablePath = "/nonstandard/tools/tmux"
+        let bridge = TmuxBridge(tmuxExecutablePath: executablePath)
+
+        let preparation = try #require(bridge.tmuxCommand(
+            server: "tbd-repo",
+            args: ["display-message", "-p", "#{window_id}"]
+        ))
+        let viewer = try #require(bridge.viewerAttachCommand(
+            server: "tbd-repo",
+            sessionName: "tbd-view-4c4f1a61"
+        ))
+
+        #expect(preparation == [
+            executablePath, "-L", "tbd-repo", "display-message", "-p", "#{window_id}",
+        ])
+        #expect(viewer == [
+            executablePath, "-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61",
+        ])
+        #expect(preparation.first == viewer.first)
+
+        let forbiddenExecutables = [
+            "/usr/bin/env",
+            "/opt/homebrew/bin/tmux",
+            "/usr/local/bin/tmux",
+            "/usr/bin/tmux",
+        ]
+        #expect(!forbiddenExecutables.contains(preparation[0]))
+        #expect(!forbiddenExecutables.contains(viewer[0]))
+    }
+
+    @Test func unresolvedExecutableProducesNoPreparationOrViewerCommand() {
+        let bridge = TmuxBridge(tmuxExecutablePath: nil)
+
+        #expect(bridge.tmuxCommand(server: "tbd-repo", args: ["list-windows"]) == nil)
+        #expect(bridge.viewerAttachCommand(
+            server: "tbd-repo",
+            sessionName: "tbd-view-4c4f1a61"
+        ) == nil)
     }
 
     @Test func clientInventoryConfirmsOnlyTheExpectedAttachedSession() {
@@ -68,13 +104,14 @@ struct TmuxBridgeTests {
         ))
     }
 
-    @Test func preparedSessionCarriesViewerCommand() {
-        let prepared = TmuxBridge.preparedSession(
+    @Test func preparedSessionCarriesViewerCommand() throws {
+        let bridge = TmuxBridge(tmuxExecutablePath: "/nonstandard/tools/tmux")
+        let prepared = try #require(bridge.preparedSession(
             server: "tbd-repo",
             sessionName: "tbd-view-4c4f1a61"
-        )
+        ))
         #expect(prepared == TmuxPreparedSession(
-            executablePath: "tmux",
+            executablePath: "/nonstandard/tools/tmux",
             arguments: ["-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61"]
         ))
     }

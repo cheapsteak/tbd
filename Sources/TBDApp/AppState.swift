@@ -1035,7 +1035,12 @@ final class AppState: ObservableObject {
     let themeStore = ThemeStore()
 
     let daemonClient = DaemonClient()
-    let tmuxBridge = TmuxBridge()
+    let tmuxBridge = TmuxBridge(
+        tmuxExecutablePath: ExecutableResolver.resolve(
+            "tmux",
+            path: ProcessInfo.processInfo.environment["PATH"]
+        )
+    )
     /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
     /// Lives here — not on any view — so SwiftUI view destruction cannot tear
     /// down an active reader. Keyed by `FDVendHeader.routingKey`.
