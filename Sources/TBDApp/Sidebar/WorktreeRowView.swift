@@ -36,8 +36,17 @@ struct WorktreeRowView: View {
         appState.unreadByWorktree[worktree.id]?.type
     }
 
+    /// The PR the row's leading indicator stands for: the worst-state binding,
+    /// chosen by the same helper the toolbar icon uses. Reading `prBindings`
+    /// rather than the legacy `prStatuses` map is what keeps the sidebar dot
+    /// and the toolbar icon from disagreeing about a worktree owning several
+    /// PRs — one indicator, one selection rule, one source.
+    private var indicatorBinding: PRBinding? {
+        PRBindingPresentation.iconBinding(appState.prBindings[worktree.id] ?? [])
+    }
+
     private var prStatus: PRStatus? {
-        appState.prStatuses[worktree.id]
+        indicatorBinding?.status
     }
 
     private var hasBoldNotification: Bool {
@@ -423,8 +432,11 @@ struct WorktreeRowView: View {
         return image
     }
 
+    /// Opens the PR the indicator is showing — the worst-state binding, so the
+    /// click lands on the PR the glyph is describing rather than on whichever
+    /// one happened to be bound first.
     private func openPR() {
-        guard let prStatus = prStatus, let url = URL(string: prStatus.url) else { return }
+        guard let binding = indicatorBinding, let url = URL(string: binding.url) else { return }
         NSWorkspace.shared.open(url)
     }
 
