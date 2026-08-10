@@ -27,8 +27,18 @@ struct WorktreeArchiveDeletionQueueTests {
         let pool = (harness.worktreePath as NSString).deletingLastPathComponent
         #expect(WorktreeDeletionQueue().pending(pool: pool).isEmpty)
         let queueDir = WorktreeDeletionQueue().queueDir(forPool: pool)
-        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: queueDir)) ?? []
-        #expect(leftovers.isEmpty)
+        // Assert existence explicitly rather than swallowing the lookup error
+        // with `try?` — a queue dir that was never created and one that was
+        // created-then-emptied both read as "no leftovers" under `try? … ?? []`,
+        // which made the old form pass whether or not the queue was ever used.
+        // Existence proves `enqueue` ran (only `enqueue` creates `.deleting/`);
+        // emptiness proves `drain` ran.
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: queueDir, isDirectory: &isDirectory)
+        #expect(exists, "the queue directory must exist — its absence means archive never went through the queue")
+        #expect(isDirectory.boolValue)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: queueDir)
+        #expect(leftovers.isEmpty, "drain must have removed the queued entry")
     }
 
     @Test func onWorktreeRemovedFiresOnceThePathIsGone() async throws {
@@ -61,6 +71,15 @@ struct WorktreeArchiveDeletionQueueTests {
         try "not a directory".write(toFile: queueDir, atomically: true, encoding: .utf8)
 
         try await harness.lifecycle.archiveWorktree(worktreeID: harness.worktreeID)
+
+        // The planted file is still there and still a plain file — proves
+        // `enqueue`'s `createDirectory` genuinely failed to turn `.deleting/`
+        // into a usable directory, i.e. the archive really took the fallback
+        // leg rather than the queue succeeding some other way.
+        var isDirectory: ObjCBool = false
+        let stillExists = FileManager.default.fileExists(atPath: queueDir, isDirectory: &isDirectory)
+        #expect(stillExists, "the planted file must still occupy the queue-dir path")
+        #expect(!isDirectory.boolValue, "the queue dir must never have become usable — proves enqueue failed")
 
         // Fallback still removed the worktree and its registration.
         #expect(!FileManager.default.fileExists(atPath: harness.worktreePath))
