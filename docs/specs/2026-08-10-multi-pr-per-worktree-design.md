@@ -45,30 +45,35 @@ Bindings live in a new table (migration `v70`):
 ```sql
 CREATE TABLE worktree_pull_request (
   id          TEXT PRIMARY KEY,
-  worktree_id TEXT NOT NULL REFERENCES worktree(id) ON DELETE CASCADE,
+  worktreeID  TEXT NOT NULL REFERENCES worktree(id) ON DELETE CASCADE,
   host        TEXT NOT NULL DEFAULT 'github.com',
   owner       TEXT NOT NULL,
   repo        TEXT NOT NULL,
   number      INTEGER NOT NULL,
   url         TEXT NOT NULL,
-  head_branch TEXT,
-  base_ref    TEXT,
-  pr_status   TEXT,            -- cached PRStatus JSON
+  headBranch  TEXT,
+  baseRef     TEXT,
+  prStatus    TEXT,            -- cached PRStatus JSON
   source      TEXT NOT NULL,   -- hook | branch | manual
   detached    INTEGER NOT NULL DEFAULT 0,
-  bound_at    DATETIME NOT NULL,
-  UNIQUE (worktree_id, host, owner, repo, number)
+  boundAt     DATETIME NOT NULL
 );
+-- plus a unique index on (worktreeID, host, owner, repo, number)
 ```
 
-The `UNIQUE` constraint is the deduplication mechanism: the three discovery
-sources below can all propose the same PR, and only the first insert wins. A row
-already present keeps its original `source` and `bound_at`.
+Column names are camelCase to match the sibling tables GRDB already maps, and
+the uniqueness constraint is a separate unique index rather than a table-level
+`UNIQUE`, because the migration goes through `addIndexIfMissing`. That index is
+the deduplication mechanism: the three discovery sources below can all propose
+the same PR, and only the first insert wins. A row already present keeps its
+original `source` and `boundAt`. Owner and repo are stored lowercased, so the
+index is effectively case-insensitive without a collation change.
 
 Per the repo's migration rule, the same commit adds the GRDB record type under
-`Sources/TBDDaemon/Database/` and a `PRBinding` Codable model in
-`Sources/TBDShared/Models.swift`, with every new field optional or defaulted so
-existing rows and JSON still decode.
+`Sources/TBDDaemon/Database/`. The `PRBinding` Codable model lives in its own
+`Sources/TBDShared/PRBinding.swift` rather than in `Models.swift`, which already
+carries most of the shared model surface; every new field is optional or
+defaulted so existing rows and JSON still decode.
 
 `Worktree.prNumber` keeps its present meaning — provenance for a worktree
 created from a PR row — and additionally seeds a `manual`-source binding, so
@@ -128,10 +133,23 @@ exactly what this is.
 
 **Branch matching** is the fallback, and covers what the hook cannot: Codex
 sessions, plain shell sessions, and PRs that predate this feature. The existing
-matcher is retained wholesale and rewritten to emit bindings with
-`source = branch` rather than writing `worktree.prStatus` directly. Because
-bindings are a list, a branch carrying two PRs now yields two bindings instead of
-discarding one.
+matcher is retained wholesale and additionally emits bindings with
+`source = branch`. It still resolves at most one PR per worktree — the
+`bestNodeByRepoBranch` tie-break (state priority, then newest) is unchanged — so
+two PRs sharing a head ref still yield one binding, and the loser is reachable
+only by manual attach. Widening that matcher is separable work and is not part
+of this design.
+
+A branch-matched binding is an inference, so a later poll must be able to undo
+it. When a head-ref or cross-repo heal clears a worktree's cached status, the
+corresponding `branch`-source binding is **deleted** — not tombstoned, and only
+that source. `hook` bindings are direct evidence a session created the PR and
+`manual` bindings are the user's explicit statement; neither may be undone by a
+branch inference. Delete rather than tombstone because a heal is itself an
+inference that re-derives every pass: a wrong delete costs one poll, while a
+wrong tombstone would silently block the correct binding forever with no user
+gesture behind it. Without this, a binding written before `@{push}` resolved
+would outlive the evidence against it and could auto-archive the worktree.
 
 **Manual binding** is the escape hatch, for a PR that neither source found and
 for removing one that no longer belongs. `attach` inserts a `manual` binding;
@@ -154,10 +172,17 @@ outranks it.
 
 ### Status refresh
 
-`PRStatusManager`'s cache becomes keyed by binding rather than by worktree. The
-existing `numberedPRQuery(aliases:)` already batches many PR numbers per repo
+`PRStatusManager` gains a binding-keyed refresh path **beside** its existing
+worktree-keyed cache rather than replacing it. The worktree-keyed path stays
+primary: it is what the branch matcher, the head-ref and cross-repo heals, and
+the legacy merged-transition fallback all run on, and its invariants are load
+bearing. The binding path is deliberately `nonisolated`, so it structurally
+cannot touch that cache, `lastDirectUpdate`, or the merged-transition callback.
+
+The existing `numberedPRQuery(aliases:)` already batches many PR numbers per repo
 into one aliased GraphQL round trip, so N bindings in a repo cost the same one
-call that N worktrees do today.
+call that N worktrees do today. A refresh also observes each PR's head and base
+ref; a ref that was not observed is left alone rather than clearing a stored one.
 
 The existing discipline carries over unchanged: a transient fetch failure keeps
 the previous cached status rather than guessing, direct refreshes are not
@@ -203,6 +228,14 @@ handled by number. A merged binding whose head branch has never been observed
 satisfies neither arm: unknown holds the gate shut, the same way a nil status
 already does.
 
+A worktree with **no** live bindings keeps the pre-binding behavior: a merge
+observed through the worktree-keyed cache fires the same fan-out directly. That
+fallback is not vestigial — it is the only path covering a worktree whose PR was
+rejected as belonging to another repo, or whose provenance seed deferred because
+the repo could not be resolved. Gating it on the empty binding set is what stops
+a worktree from firing through both paths for the same merge; the two paths keep
+separate once-only memories, so neither can suppress the other's first fire.
+
 `.merged` remains unpersisted, preserving the existing recovery guarantee: a
 merge observed while the daemon was down is re-observed as a transition after
 restart, so a failed archive is retried rather than lost.
@@ -235,7 +268,23 @@ toolbar cannot disagree.
 Dropdown and chip order is **bind order**, so a row does not move under the
 cursor as CI states change.
 
-With no bindings, no control appears anywhere — there is no empty-state chip.
+With no bindings and no previously observed status, no control appears anywhere —
+there is no empty-state chip.
+
+A worktree with no bindings but a persisted `Worktree.prStatus` still renders the
+single-PR control, from that status lifted into a display-only synthetic binding.
+This is what keeps the PR indicator alive when binding is impossible rather than
+merely absent — `gh` unauthenticated or offline resolves no repo, so every bind
+defers and the table stays empty while the hydrated status is still perfectly
+good. The synthetic binding never reaches the database, the merge rule, or any
+mutation path, and it is value-stable across renders so it cannot churn view
+identity.
+
+The fallback is suppressed once the worktree has any tombstone, which is how
+detaching the last PR actually clears the surfaces. Without that, "no live
+bindings" would read identically whether the user had removed them all or the
+daemon had never managed to bind one, and a detached PR would linger in the
+toolbar forever. The binding list therefore travels with a count of tombstones.
 
 ### CLI and skill
 
@@ -253,8 +302,8 @@ agent asked to tidy a worktree's PRs can do it without being told the commands.
 ## Error handling and edge cases
 
 - **Wrong repo** — a binding whose `owner`/`repo` does not match the worktree's
-  resolved repo is rejected at bind time, reusing the comparison in
-  `poisonedCacheEntries`. Owner and repo compare case-insensitively.
+  resolved repo is rejected at bind time, on the same case-insensitive
+  owner/name comparison `poisonedCacheEntries` applies to the legacy cache.
 - **Unresolvable repo** — if the worktree's own repo cannot be resolved, the
   binding is deferred rather than rejected. Absence of evidence is not evidence of
   mismatch.
