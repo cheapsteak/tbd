@@ -84,6 +84,9 @@ public struct WorktreeLifecycle: Sendable {
     /// so every copy of this struct shares one registry (same rationale as
     /// `conflictSweepCache`).
     public let preSessionRuns = PreSessionRunRegistry()
+    /// Where archived worktree directories go before their bytes are
+    /// reclaimed. See `WorktreeDeletionQueue`.
+    let deletionQueue = WorktreeDeletionQueue()
 
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600

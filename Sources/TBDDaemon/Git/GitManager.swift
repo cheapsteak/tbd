@@ -438,9 +438,28 @@ public struct GitManager: Sendable {
     }
 
     /// Removes a worktree at the given path.
-    public func worktreeRemove(repoPath: String, worktreePath: String) async throws {
-        _ = try await run(arguments: ["worktree", "remove", worktreePath, "--force"], at: repoPath)
+    ///
+    /// `timeout` overrides the instance default. The archive path passes a
+    /// raised value on its fallback leg: removal unlinks every file in the
+    /// worktree, which for a dependency-heavy repo runs for minutes, and the
+    /// default 120 s ceiling kills git partway through — leaving a
+    /// half-deleted directory that is still registered with git, because git
+    /// drops the administrative entry only after the working-tree removal
+    /// returns success.
+    public func worktreeRemove(
+        repoPath: String, worktreePath: String, timeout: Duration? = nil
+    ) async throws {
+        _ = try await run(
+            arguments: ["worktree", "remove", worktreePath, "--force"],
+            at: repoPath,
+            timeout: timeout
+        )
     }
+
+    /// Ceiling for the archive path's fallback removal. Generous rather than
+    /// unbounded — the queue's rename is the intended path, and this leg only
+    /// runs when the rename could not be performed at all.
+    public static let worktreeRemoveFallbackTimeout: Duration = .seconds(900)
 
     /// Prunes stale worktree tracking entries.
     public func worktreePrune(repoPath: String) async throws {
