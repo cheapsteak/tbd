@@ -44,6 +44,21 @@ struct OrphanGCDeletionQueueTests {
         return path
     }
 
+    /// A stray `.deleting/<uuid>` entry a previous daemon run queued but
+    /// never finished draining — the step-1 fixture shape, factored out so
+    /// the gated-behavior tests can prove step 1 respects the same gates as
+    /// step 2 without duplicating the queue-dir plumbing.
+    private func makeQueuedEntry(repo: URL) throws -> String {
+        let pool = repo.path + "/.tbd/worktrees"
+        let queueDir = WorktreeDeletionQueue().queueDir(forPool: pool)
+        let entry = queueDir + "/" + UUID().uuidString
+        try FileManager.default.createDirectory(
+            atPath: entry, withIntermediateDirectories: true)
+        try "junk".write(
+            toFile: entry + "/f.txt", atomically: true, encoding: .utf8)
+        return entry
+    }
+
     @Test func sweepDrainsLeftoverQueueEntries() async throws {
         let (tmp, repo) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -53,14 +68,7 @@ struct OrphanGCDeletionQueueTests {
         _ = try await db.repos.create(
             path: repo.path, displayName: "acme", defaultBranch: "main")
 
-        // An entry a previous daemon run queued but never finished draining.
-        let pool = repo.path + "/.tbd/worktrees"
-        let queueDir = WorktreeDeletionQueue().queueDir(forPool: pool)
-        let entry = queueDir + "/" + UUID().uuidString
-        try FileManager.default.createDirectory(
-            atPath: entry, withIntermediateDirectories: true)
-        try "junk".write(
-            toFile: entry + "/f.txt", atomically: true, encoding: .utf8)
+        let entry = try makeQueuedEntry(repo: repo)
 
         let result = await makeGC(db: db).sweep()
 
@@ -126,12 +134,19 @@ struct OrphanGCDeletionQueueTests {
             path: repo.path, displayName: "acme", defaultBranch: "main")
         let path = try await makeInterruptedArchive(
             db: db, repo: repo, repoID: repoRow.id, name: "zombie")
+        // Also cover step 1 (already-queued entries): without this fixture,
+        // nothing here proves `dryRun` suppresses `deletionQueueCollector
+        // .drain(entry)` in the queued-deletion loop — only that it
+        // suppresses step 2's archive reap.
+        let entry = try makeQueuedEntry(repo: repo)
 
         let result = await makeGC(db: db).sweep(dryRun: true)
 
         #expect(FileManager.default.fileExists(atPath: path))
+        #expect(FileManager.default.fileExists(atPath: entry))
         #expect(result.reaped == 0)
         #expect(result.planned.contains("REAP archived-worktree \(path)"))
+        #expect(result.planned.contains("REAP queued-deletion \(entry)"))
         let records = try await db.reapRecords.list(repoPath: nil)
         #expect(records.isEmpty)
     }
@@ -146,10 +161,15 @@ struct OrphanGCDeletionQueueTests {
             path: repo.path, displayName: "acme", defaultBranch: "main")
         let path = try await makeInterruptedArchive(
             db: db, repo: repo, repoID: repoRow.id, name: "zombie")
+        // Also cover step 1: without this fixture, nothing here proves
+        // `gcEnabled == false` suppresses `deletionQueueCollector.drain(entry)`
+        // in the queued-deletion loop — only that it suppresses step 2.
+        let entry = try makeQueuedEntry(repo: repo)
 
         let result = await makeGC(db: db).sweep()
 
         #expect(FileManager.default.fileExists(atPath: path))
+        #expect(FileManager.default.fileExists(atPath: entry))
         #expect(result.reaped == 0)
         let records = try await db.reapRecords.list(repoPath: nil)
         #expect(records.isEmpty)

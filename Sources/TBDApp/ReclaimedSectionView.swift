@@ -39,6 +39,9 @@ struct ReclaimedSectionView: View {
                     if let rollup = summary.scratchpadRollup {
                         scratchpadRow(rollup)
                     }
+                    if let rollup = summary.archivedWorktreeRollup {
+                        archivedWorktreeRow(rollup)
+                    }
                 }
             }
         }
@@ -78,6 +81,24 @@ struct ReclaimedSectionView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("\(rollup.count) scratchpad\(rollup.count == 1 ? "" : "s") cleaned · \(Self.byteString(rollup.bytes))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+    }
+
+    private func archivedWorktreeRow(_ rollup: (count: Int, bytes: Int64)) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: Self.glyph)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(
+                "\(rollup.count) interrupted archive\(rollup.count == 1 ? "" : "s") reclaimed · " +
+                "\(Self.byteString(rollup.bytes))"
+            )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

@@ -49,6 +49,19 @@ struct ReclaimedSummary {
         return (scratch.count, bytes)
     }
 
+    /// `.archivedWorktree` records rolled up into a single (count, bytes)
+    /// pair, same shape and same reason as `scratchpadRollup`: these are
+    /// directories the sweep reclaimed after an archive failed to remove
+    /// them (or drained from a pool's `.deleting/` queue), and like
+    /// scratchpads they aren't individually restorable — `OrphanGC.restore`
+    /// only accepts `.agentWorktree`. `nil` when there are none to summarize.
+    var archivedWorktreeRollup: (count: Int, bytes: Int64)? {
+        let archived = records.filter { $0.kind == .archivedWorktree }
+        guard !archived.isEmpty else { return nil }
+        let bytes = archived.reduce(Int64(0)) { $0 + ($1.apparentBytes ?? 0) }
+        return (archived.count, bytes)
+    }
+
     /// Subset excluding already-restored records — a restored agent worktree
     /// is no longer reclaimed disk. This is what the "Reclaimed (N · X GB)"
     /// header counts; the expanded row list still shows every `agentRecords`

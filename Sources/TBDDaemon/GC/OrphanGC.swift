@@ -237,6 +237,11 @@ public actor OrphanGC {
                     planned.append("KEEP enqueue-failed \(candidate.path)")
                     continue
                 }
+                // The count and the record reflect the commit point (queued +
+                // pruned from git), not confirmed byte removal — `drain`'s
+                // result is intentionally not gating either one. If this
+                // immediate drain doesn't finish, the entry stays in
+                // `.deleting/` and step 1 above reclaims it on a later sweep.
                 deletionQueueCollector.drain(entry)
                 await insertReapRecord(ReapRecord(
                     kind: .archivedWorktree,

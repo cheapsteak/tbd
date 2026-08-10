@@ -111,6 +111,40 @@ struct ReapRecordsStateTests {
         #expect(rollup?.bytes == 500)
     }
 
+    @Test func archivedWorktreeRollupNilWhenNoArchivedWorktrees() {
+        let summary = ReclaimedSummary(records: [record(kind: .agentWorktree, apparentBytes: 10)])
+        #expect(summary.archivedWorktreeRollup == nil)
+    }
+
+    @Test func archivedWorktreeRollupAggregatesCountAndBytes() {
+        let records = [
+            record(kind: .archivedWorktree, apparentBytes: 300),
+            record(kind: .archivedWorktree, apparentBytes: nil),
+            record(kind: .archivedWorktree, apparentBytes: 200),
+            record(kind: .agentWorktree, apparentBytes: 9_999),
+            record(kind: .scratchpad, apparentBytes: 1),
+        ]
+        let summary = ReclaimedSummary(records: records)
+        let rollup = summary.archivedWorktreeRollup
+        #expect(rollup?.count == 3)
+        #expect(rollup?.bytes == 500)
+    }
+
+    @Test func archivedWorktreeRecordsCountTowardHeaderTotalsButNotAgentRecords() {
+        // The gap the review caught: `.archivedWorktree` records must
+        // contribute to `count` / `totalApparentBytes` (the header) exactly
+        // like every other kind, but must NOT appear in `agentRecords` (the
+        // per-row restorable list) — they render via the rollup instead.
+        let records = [
+            record(kind: .archivedWorktree, apparentBytes: 700),
+            record(kind: .agentWorktree, worktreePath: "/tmp/agent", apparentBytes: 300),
+        ]
+        let summary = ReclaimedSummary(records: records)
+        #expect(summary.count == 2)
+        #expect(summary.totalApparentBytes == 1_000)
+        #expect(summary.agentRecords.map(\.worktreePath) == ["/tmp/agent"])
+    }
+
     @Test func unrestoredExcludesRestoredRecordsFromCountAndBytes() {
         let restored = record(kind: .agentWorktree, apparentBytes: 1_000, restoredAt: Date())
         let live = record(kind: .agentWorktree, apparentBytes: 500)
