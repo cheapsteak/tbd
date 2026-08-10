@@ -217,17 +217,6 @@ final class TmuxBridge: @unchecked Sendable {
         return .success(Self.preparedSession(server: server, sessionName: sessionName))
     }
 
-    /// Transitional compatibility for callers migrated in the next recovery step.
-    func prepareSession(panelID: UUID, server: String, windowID: String) async -> [String]? {
-        let result: Result<TmuxPreparedSession, TmuxPreparationFailure> = await prepareSession(
-            panelID: panelID,
-            server: server,
-            windowID: windowID
-        )
-        guard case let .success(prepared) = result else { return nil }
-        return [prepared.executablePath] + prepared.arguments
-    }
-
     /// Clean up a view session when a panel is hidden.
     ///
     /// Fire-and-forget: the kill-session call runs on a background queue so

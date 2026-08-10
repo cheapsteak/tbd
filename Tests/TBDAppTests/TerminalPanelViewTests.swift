@@ -5,6 +5,111 @@ import TBDShared
 
 @Suite("Terminal panel close context")
 struct TerminalPanelViewTests {
+    @Test("executable unavailable renders guidance without recovery")
+    func executableUnavailableRendersGuidanceWithoutRecovery() {
+        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
+            for: .failure(.executableUnavailable)
+        )
+
+        #expect(action == .showMessage(
+            "tmux is not available on TBD's PATH. Run scripts/restart.sh from a shell where tmux is available."
+        ))
+    }
+
+    @Test("generic command failure renders diagnostics guidance without recovery")
+    func commandFailureRendersGuidanceWithoutRecovery() {
+        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
+            for: .failure(.commandFailed(stage: .linkWindow, output: "failed"))
+        )
+
+        #expect(action == .showMessage(
+            "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics and retry."
+        ))
+    }
+
+    @Test("confirmed missing window requests automatic recovery")
+    func confirmedMissingWindowRequestsRecovery() {
+        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
+            for: .failure(.windowMissing(failedStage: .selectWindow))
+        )
+
+        #expect(action == .requestAutomaticRecovery(failedStage: .selectWindow))
+    }
+
+    @Test("prepared session starts the viewer")
+    func preparedSessionStartsViewer() {
+        let prepared = TmuxPreparedSession(
+            executablePath: "/opt/local/bin/tmux",
+            arguments: ["-u", "attach"]
+        )
+
+        #expect(TerminalPanelRepresentable.Coordinator.preparationAction(for: .success(prepared)) ==
+            .startViewer(prepared))
+    }
+
+    @MainActor
+    @Test("only a running viewer process resets the automatic recovery budget")
+    func onlyRunningViewerProcessResetsRecoveryBudget() {
+        let state = AppState()
+        let terminalID = UUID()
+        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+        coordinator.viewerProcessDidStart(processRunning: false)
+
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 2))
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        coordinator.viewerProcessDidStart(processRunning: true)
+
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 1))
+    }
+
+    @Test("budget exhaustion renders stable recovery guidance")
+    func budgetExhaustionRendersStableGuidance() {
+        #expect(TerminalPanelRepresentable.Coordinator.recoveryMessage(for: .budgetExhausted) ==
+            "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
+    }
+
+    @MainActor
+    @Test("stable preparation message is fed once per coordinator")
+    func stablePreparationMessageIsFedOnce() {
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        let message = "stable failure"
+
+        #expect(coordinator.shouldFeedPreparationMessage(message))
+        #expect(!coordinator.shouldFeedPreparationMessage(message))
+    }
+
+    @MainActor
+    @Test("diagnostic context resolves the terminal worktree")
+    func diagnosticContextResolvesTerminalWorktree() {
+        let state = AppState()
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        state.terminals[worktreeID] = [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Shell",
+                kind: .shell
+            )
+        ]
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+
+        #expect(coordinator.worktreeIDForDiagnostics() == worktreeID)
+    }
+
     @MainActor
     @Test("syncTabCloseContext refreshes coordinator and app state registration")
     func syncTabCloseContextRefreshesRegistration() {

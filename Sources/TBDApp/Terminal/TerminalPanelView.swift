@@ -6,6 +6,12 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
 
+enum TerminalPreparationAction: Equatable, Sendable {
+    case startViewer(TmuxPreparedSession)
+    case showMessage(String)
+    case requestAutomaticRecovery(failedStage: TmuxPreparationStage)
+}
+
 /// Sendable wrapper for a weak TerminalView reference, used to pass the
 /// reference into an `NSEvent` local monitor closure under strict concurrency.
 private final class WeakTerminalRef: @unchecked Sendable {
@@ -30,9 +36,9 @@ struct TerminalPanelView: View {
     var onTerminalNotification: ((String, String) -> Void)?
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var appearance: AppearanceSettings
-    /// Called when the tmux window is dead and needs recreation. The callback
-    /// should ask the daemon to recreate the window and trigger a state refresh.
-    var onDeadWindow: (() -> Void)?
+    /// Called only after tmux positively confirms the requested window is absent.
+    /// The callback owns the persistent automatic-recovery budget and recreation.
+    var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
     /// When set, this ANSI text is fed into the terminal buffer before the tmux
     /// client connects. The live tmux output overwrites it seamlessly.
     /// See docs/superpowers/specs/2026-03-31-snapshot-display-approaches.md for
@@ -122,7 +128,7 @@ struct TerminalPanelView: View {
                 remoteURL: remoteURL,
                 onFilePathClicked: onFilePathClicked,
                 onTerminalNotification: onTerminalNotification,
-                onDeadWindow: onDeadWindow,
+                onMissingWindow: onMissingWindow,
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
                 parkedNoticeMessage: parkedNoticeMessage,
@@ -204,7 +210,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var onTerminalNotification: ((String, String) -> Void)?
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var appearance: AppearanceSettings
-    var onDeadWindow: (() -> Void)?
+    var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
@@ -242,7 +248,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.panelID = terminalID
         context.coordinator.appState = appState
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
-        context.coordinator.onDeadWindow = onDeadWindow
+        context.coordinator.onMissingWindow = onMissingWindow
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
         // Feed snapshot before tmux connects so the user sees the last state
@@ -358,7 +364,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
         var tabCloseContext: TabCloseContext?
-        var onDeadWindow: (() -> Void)?
+        var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
         /// over this terminal and should receive scroll/click events instead of
         /// the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
@@ -366,8 +372,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
-        private var recreationAttempts = 0
-        private static let maxRecreationAttempts = 2
+        private var fedPreparationMessages: Set<String> = []
         /// Set while this panel renders through the control-mode path (Phase 2
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
         /// `pane.detach` RPC first (daemon EOFs the pipe), then flag the
@@ -403,6 +408,106 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appState?.registerTerminalCloseContext(context, for: terminalID)
         }
 
+        nonisolated static func preparationAction(
+            for result: Result<TmuxPreparedSession, TmuxPreparationFailure>
+        ) -> TerminalPreparationAction {
+            switch result {
+            case .success(let prepared):
+                return .startViewer(prepared)
+            case .failure(.executableUnavailable):
+                return .showMessage(
+                    "tmux is not available on TBD's PATH. Run scripts/restart.sh from a shell where tmux is available."
+                )
+            case .failure(.commandFailed):
+                return .showMessage(
+                    "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics and retry."
+                )
+            case .failure(.windowMissing(let failedStage)):
+                return .requestAutomaticRecovery(failedStage: failedStage)
+            }
+        }
+
+        nonisolated static func recoveryMessage(
+            for outcome: AutomaticTerminalRecreationOutcome
+        ) -> String? {
+            guard outcome == .budgetExhausted else { return nil }
+            return "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
+        }
+
+        @MainActor
+        func shouldFeedPreparationMessage(_ message: String) -> Bool {
+            fedPreparationMessages.insert(message).inserted
+        }
+
+        @MainActor
+        func viewerProcessDidStart(processRunning: Bool) {
+            guard processRunning else { return }
+            appState?.terminalViewerDidStart(terminalID: panelID)
+        }
+
+        @MainActor
+        func worktreeIDForDiagnostics() -> UUID? {
+            appState?.terminals.values
+                .lazy
+                .flatMap { $0 }
+                .first(where: { $0.id == panelID })?
+                .worktreeID
+        }
+
+        @MainActor
+        private func feedPreparationMessage(_ message: String, into terminalView: TerminalView) {
+            guard shouldFeedPreparationMessage(message) else { return }
+            terminalView.feed(text: "\r\n  \(message)\r\n")
+        }
+
+        @MainActor
+        private func logPreparationFailure(_ failure: TmuxPreparationFailure) {
+            let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
+            switch failure {
+            case .executableUnavailable:
+                logger.error(
+                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=resolveExecutable category=executableUnavailable"
+                )
+            case .windowMissing(let failedStage):
+                logger.error(
+                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=windowMissing"
+                )
+            case .commandFailed(let stage, let output):
+                logger.error(
+                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(stage.rawValue, privacy: .public) category=commandFailed"
+                )
+                logger.debug(
+                    "terminal preparation subprocess output terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(stage.rawValue, privacy: .public) output=\(output, privacy: .private)"
+                )
+            }
+        }
+
+        @MainActor
+        private func logAutomaticRecoveryOutcome(
+            _ outcome: AutomaticTerminalRecreationOutcome,
+            failedStage: TmuxPreparationStage
+        ) {
+            let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
+            switch outcome {
+            case .alreadyInFlight:
+                logger.info(
+                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=alreadyInFlight"
+                )
+            case .recreated(let attempt):
+                logger.info(
+                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=recreated attempt=\(attempt, privacy: .public)"
+                )
+            case .failed(let attempt):
+                logger.error(
+                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=failed attempt=\(attempt, privacy: .public)"
+                )
+            case .budgetExhausted:
+                logger.error(
+                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=budgetExhausted attempt=none"
+                )
+            }
+        }
+
         @MainActor
         func startTmuxClient(
             terminalView: TerminalView,
@@ -421,33 +526,41 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `prepareSession` is non-isolated and awaits tmux subprocesses
             // off the main actor — Swift releases main while we suspend here,
             // so SwiftUI's render loop is no longer blocked while tmux runs.
-            guard let args = await bridge.prepareSession(
+            let result: Result<TmuxPreparedSession, TmuxPreparationFailure> = await bridge.prepareSession(
                 panelID: panelID,
                 server: server,
                 windowID: windowID
-            ) else {
-                recreationAttempts += 1
-                if recreationAttempts <= Self.maxRecreationAttempts {
-                    debugLog("PANEL: Window \(windowID) is dead — requesting recreation (attempt \(recreationAttempts))")
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onDeadWindow?()
-                    }
-                } else {
-                    debugLog("PANEL: Window \(windowID) is dead — max recreation attempts reached")
-                    DispatchQueue.main.async {
-                        terminalView.feed(text: "\r\n  Terminal session expired.\r\n  Close this tab and create a new terminal.\r\n")
-                    }
-                }
-                return
-            }
-            recreationAttempts = 0 // Reset on successful connect
+            )
 
-            // Teardown landed while prepareSession was in flight — stop
-            // before spawning the PTY / installing the monitors (review H2).
+            // Teardown may land while preparation is in flight. Do not render,
+            // recover, or start a viewer for a coordinator that is no longer live.
             guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
 
-            let tmuxPath = findExecutable(args[0])
-            let processArgs = Array(args.dropFirst())
+            let prepared: TmuxPreparedSession
+            switch Self.preparationAction(for: result) {
+            case .showMessage(let message):
+                if case .failure(let failure) = result {
+                    logPreparationFailure(failure)
+                }
+                feedPreparationMessage(message, into: terminalView)
+                return
+            case .requestAutomaticRecovery(let failedStage):
+                if case .failure(let failure) = result {
+                    logPreparationFailure(failure)
+                }
+                guard let onMissingWindow else { return }
+                let outcome = await onMissingWindow()
+                logAutomaticRecoveryOutcome(outcome, failedStage: failedStage)
+                if let message = Self.recoveryMessage(for: outcome) {
+                    feedPreparationMessage(message, into: terminalView)
+                }
+                return
+            case .startViewer(let value):
+                prepared = value
+            }
+
+            let tmuxPath = findExecutable(prepared.executablePath)
+            let processArgs = prepared.arguments
 
             debugLog("PANEL: Starting: \(tmuxPath) \(processArgs.joined(separator: " "))")
 
@@ -464,6 +577,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 environment: envPairs,
                 execName: nil
             )
+            viewerProcessDidStart(processRunning: process.running)
 
             // Send correct initial size from SwiftTerm's own computed dimensions
             // (accounts for scroller width and actual cell metrics).
