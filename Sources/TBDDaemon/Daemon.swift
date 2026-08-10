@@ -536,8 +536,9 @@ public final class Daemon: Sendable {
             archive: autoArchiveCoordinator, hibernate: autoHibernateCoordinator)
         // One worktree may own several PRs, so the fan-out runs behind the
         // all-resolved gate: every non-detached binding terminal, at least one
-        // merged. The gate is also the once-only guard, so both entry points
-        // below must share ONE trigger instance.
+        // merged, and at least one merged binding the worktree's own work. The
+        // gate is also the once-only guard, so both entry points below must
+        // share ONE trigger instance.
         let allResolvedTrigger = mergedTransitionDispatcher.makeAllResolvedTrigger()
         rpcRouter.mergeTrigger = allResolvedTrigger
         // The worktree-keyed cache still observes merges for worktrees nothing

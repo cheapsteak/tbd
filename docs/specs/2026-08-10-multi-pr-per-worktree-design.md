@@ -109,6 +109,18 @@ an owner or repo name. Gating on the command and reading the result is what
 keeps the rule narrow: a PR URL merely *mentioned* in unrelated output does not
 bind.
 
+The command gate tokenizes rather than substring-matches, and it fails **closed**
+in every ambiguous case, because the two errors cost different amounts: a missed
+real bind costs one `tbd pr attach`, while a false bind can auto-archive a
+worktree. A quoted `'gh pr create'` is an argument, not a command; `gh -R
+owner/repo pr create` is one; and a **heredoc body** is data the command writes,
+not commands it runs, so bodies are skipped up to their terminator — quoted or
+unquoted delimiter, and `<<-` with a tab-indented one. Without that, a
+`cat <<'EOF' | tee -a CONTRIBUTING.md` whose body documents `gh pr create` would
+open the gate and bind whatever PR URL the output happened to carry. An
+unterminated heredoc swallows the rest of the command, and a `<<` that is not a
+heredoc at all is read as one; both lose binds rather than inventing them.
+
 This reads the hook's structured `tool_input` / `tool_response` JSON. It is not
 TUI screen-scraping — that rule bans inferring state from a rendered terminal
 screen and directs us to machine interfaces such as hook payloads, which is
@@ -154,15 +166,42 @@ clear persisted so startup hydration cannot resurrect it.
 
 ### Merge semantics
 
-Auto-archive and auto-hibernate fire when **every non-detached binding is
-terminal (merged or closed) and at least one is merged**.
+Auto-archive and auto-hibernate fire when all three hold:
+
+- every non-detached binding is terminal (merged or closed);
+- at least one is merged; and
+- at least one **merged** binding is the worktree's **own work** — its head
+  branch is one of the worktree's branch candidates
+  (`PRStatusManager.branchCandidates`, the same derivation the matcher and the
+  head-ref heal share), or its number is the worktree's `Worktree.prNumber`.
 
 This is the one place multi-PR support changes behavior rather than display, so
 it is stated as a rule rather than left to fall out of the implementation. With a
-single binding it is identical to today. With several, it will not archive a
-worktree that still has an open PR on it — the failure mode is a worktree that
-outlives its usefulness, which a `tbd pr detach` corrects, rather than a worktree
-archived out from under live work, which loses state.
+single binding on the worktree's own branch it is identical to today. With
+several, it will not archive a worktree that still has an open PR on it — the
+failure mode is a worktree that outlives its usefulness, which a `tbd pr detach`
+corrects, rather than a worktree archived out from under live work, which loses
+state.
+
+The ownership condition is what keeps the rule *strictly* stronger than the one
+it replaces, and it is not redundant with the first two. Hook binding attributes
+a PR to whichever worktree the `gh pr create` ran in, which is not necessarily
+the worktree whose branch the PR is on: a subagent opens one on its own branch, and
+a `cd ../other-worktree && gh pr create` opens one that belongs to a sibling
+checkout of the same repo. A `hook` binding is deliberately spared the head-ref
+heal, and refresh re-queries it by number, so nothing else ever re-examines the
+attribution. Without this condition a worktree whose own branch has no PR at all
+would tear itself down the moment a subagent's PR merged — something branch
+matching could never do, because no branch matched and no status ever moved.
+
+Both arms of the ownership test are load-bearing. Branch candidates cover the
+ordinary case, including a rename-push whose target differs from the local branch
+name. The stored number covers a worktree created from a **fork** PR row, whose
+head branch belongs to the fork and matches nothing local — dropping that arm
+would regress auto-archive for exactly the PR-row worktrees the single-PR path
+handled by number. A merged binding whose head branch has never been observed
+satisfies neither arm: unknown holds the gate shut, the same way a nil status
+already does.
 
 `.merged` remains unpersisted, preserving the existing recovery guarantee: a
 merge observed while the daemon was down is re-observed as a transition after
@@ -245,9 +284,12 @@ agent asked to tidy a worktree's PRs can do it without being told the commands.
   and `attach` clears it.
 - Cap — the 21st binding evicts a terminal one; with none evictable the new
   binding is dropped and logged.
-- Merge rule — one binding merged (fires); three bindings, one merged (does not);
-  three, all terminal with one merged (fires); three, all closed and none merged
-  (does not).
+- Merge rule — one binding on the worktree's own branch merged (fires); three
+  bindings, one merged (does not); three, all terminal with one merged (fires);
+  three, all closed and none merged (does not); a merged binding on a branch the
+  worktree never had, with no provenance number (does not); a merged fork PR
+  whose number is the worktree's provenance (fires); a merged binding whose head
+  branch was never observed (does not).
 - Cross-repo rejection, and deferral when the repo cannot be resolved.
 - Pure presentation helpers — worst-state selection across each state combination,
   label text at N of 0, 1, and many, and the status-bar chip cap.
@@ -258,8 +300,12 @@ The repo convention is that behavior which acts without a user gesture ships
 behind a default-off flag. This change ships unflagged deliberately.
 
 The hazardous direction for auto-archive is firing **too eagerly** — that is what
-destroys state. The all-resolved rule is strictly more conservative than the rule
-it replaces: identical at one binding, and strictly less likely to fire at more.
+destroys state. The merge rule is strictly more conservative than the rule it
+replaces, and that claim rests on the ownership condition as much as on
+all-resolved: firing still requires the worktree's own merged PR, exactly as
+before, and now additionally requires every other PR bound to it to have
+finished. Identical at one own-branch binding, and strictly less likely to fire
+at any other shape.
 Its failure mode is a worktree that lingers, which one command corrects. The
 cautionary precedent that motivates the convention, `auto_hibernate_enabled`,
 failed the other way: it shipped default-on and could eat typed input, and

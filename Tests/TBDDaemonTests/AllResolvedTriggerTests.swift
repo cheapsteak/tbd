@@ -4,17 +4,88 @@ import Testing
 @testable import TBDShared
 
 /// The multi-PR merge rule: auto-archive and auto-hibernate fire when EVERY
-/// non-detached binding is terminal and at least one is merged, once per
-/// false→true transition.
+/// non-detached binding is terminal, at least one is merged, and at least one
+/// merged binding is the worktree's OWN work — once per false→true transition.
 ///
 /// Tier 1 — in-memory DB, no git, no `gh`, no tmux, no clock.
 @Suite("All-resolved merge trigger")
 struct AllResolvedTriggerTests {
 
-    @Test("one binding merged fires the transition")
+    @Test("one binding on the worktree's own branch, merged, fires the transition")
     func singleMergedFires() async throws {
         let harness = try await MergeTriggerHarness()
         try await harness.bind(412, state: .merged)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+    }
+
+    /// The H1 scenario. A subagent runs `gh pr create` on its own branch, the
+    /// hook binds the PR to this worktree, and that PR merges — while the
+    /// worktree's own branch has no PR at all and an agent is still working in
+    /// it. The single-PR path could never archive here (no branch match, so no
+    /// status ever moved), and neither may this one.
+    @Test("a merged subagent PR on a foreign branch does not fire")
+    func foreignBranchMergeDoesNotFire() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "work-2")
+        try await harness.bind(412, state: .merged, headBranch: "sub-1")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
+
+    @Test("the worktree's own PR merged alongside a merged subagent PR fires")
+    func ownPlusMergedSubagentFires() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "work-2")
+        try await harness.bind(412, state: .merged, headBranch: "work-2")
+        try await harness.bind(413, state: .merged, headBranch: "sub-1")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+    }
+
+    @Test("the worktree's own PR merged with a subagent PR still open does not fire")
+    func ownMergedWithOpenSubagentDoesNotFire() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "work-2")
+        try await harness.bind(412, state: .merged, headBranch: "work-2")
+        try await harness.bind(413, state: .mergeable, headBranch: "sub-1")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
+
+    @Test("the worktree's own PR merged with a subagent PR closed unmerged fires")
+    func ownMergedWithClosedSubagentFires() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "work-2")
+        try await harness.bind(412, state: .merged, headBranch: "work-2")
+        try await harness.bind(413, state: .closed, headBranch: "sub-1")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+    }
+
+    /// Provenance: a worktree created from a FORK PR row. The PR's head branch
+    /// belongs to the fork and matches nothing local, so `Worktree.prNumber` is
+    /// the only handle that says this PR is the worktree's own.
+    @Test("a fork PR whose number is the worktree's provenance fires")
+    func provenanceNumberFires() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "work-2",
+                                                    provenancePRNumber: 412)
+        try await harness.bind(412, state: .merged, headBranch: "contributor-fork-branch")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+    }
+
+    @Test("a merged binding whose head branch was never observed does not fire")
+    func unobservedHeadBranchDoesNotFire() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "work-2")
+        try await harness.bindWithUnobservedHeadBranch(412, state: .merged)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
+
+    /// Ownership is judged against the matcher's whole candidate list, not just
+    /// the local branch name — a rename-push target counts as own work.
+    @Test("a merged PR on a push-branch candidate fires")
+    func pushBranchCandidateFires() async throws {
+        let harness = try await MergeTriggerHarness(
+            worktreeBranch: "work-2", branchCandidates: ["work-2", "renamed-on-remote"])
+        try await harness.bind(412, state: .merged, headBranch: "renamed-on-remote")
         await harness.poll()
         #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
     }
@@ -131,18 +202,30 @@ final class MergeTriggerHarness {
     let db: TBDDatabase
     let worktreeID: UUID
     let trigger: AllResolvedMergeTrigger
+    /// What the poll would derive from this worktree's branch facts
+    /// (`PRStatusManager.candidatesFor`) and its `Worktree.prNumber` — the only
+    /// two pieces of evidence the ownership arm of the rule has.
+    let branchCandidates: [String]
+    let provenancePRNumber: Int?
+    private let worktreeBranch: String
     private let recorder: FiredTransitionRecorder
 
-    init() async throws {
+    /// `branchCandidates` defaults to the worktree's own branch, the ordinary
+    /// case; pass a longer list to stand in for a tracked or push branch.
+    init(worktreeBranch: String = "b", branchCandidates: [String]? = nil,
+         provenancePRNumber: Int? = nil) async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: "/tmp/repoART-\(UUID().uuidString)", displayName: "repoART", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
-            repoID: repo.id, name: "w", branch: "b",
+            repoID: repo.id, name: "w", branch: worktreeBranch,
             path: "/tmp/repoART/w-\(UUID().uuidString)", tmuxServer: "s")
         let recorder = FiredTransitionRecorder()
         self.db = db
         self.worktreeID = worktree.id
+        self.worktreeBranch = worktreeBranch
+        self.branchCandidates = branchCandidates ?? [worktreeBranch]
+        self.provenancePRNumber = provenancePRNumber
         self.recorder = recorder
         self.trigger = AllResolvedMergeTrigger { worktreeID, prNumber in
             await recorder.record(worktreeID: worktreeID, prNumber: prNumber)
@@ -157,11 +240,26 @@ final class MergeTriggerHarness {
         get async { await recorder.fired.map(\.prNumber) }
     }
 
-    func bind(_ number: Int, state: PRMergeableState) async throws {
+    /// Bind a PR whose head branch defaults to the worktree's own — the ordinary
+    /// case, and the one every pre-multi-PR test implicitly described.
+    func bind(_ number: Int, state: PRMergeableState,
+              headBranch: String? = nil) async throws {
+        try await insert(number, state: state, headBranch: headBranch ?? worktreeBranch)
+    }
+
+    /// A binding the poll has never seen a head ref for. Distinct from `bind`
+    /// because "not yet observed" must hold the ownership gate shut, and a
+    /// defaulted `nil` could not say it.
+    func bindWithUnobservedHeadBranch(_ number: Int, state: PRMergeableState) async throws {
+        try await insert(number, state: state, headBranch: nil)
+    }
+
+    private func insert(_ number: Int, state: PRMergeableState,
+                        headBranch: String?) async throws {
         let url = "https://github.com/acme/acme-prod/pull/\(number)"
         _ = try await db.prBindings.upsert(PRBinding(
             worktreeID: worktreeID, owner: "acme", repo: "acme-prod",
-            number: number, url: url,
+            number: number, url: url, headBranch: headBranch,
             status: PRStatus(number: number, url: url, state: state),
             source: .hook))
     }
@@ -183,7 +281,9 @@ final class MergeTriggerHarness {
     func poll() async {
         let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
         guard !bindings.isEmpty else { return }
-        await trigger.evaluate(worktreeID: worktreeID, bindings: bindings)
+        await trigger.evaluate(worktreeID: worktreeID, bindings: bindings,
+                               branchCandidates: branchCandidates,
+                               provenancePRNumber: provenancePRNumber)
     }
 
     /// The un-bound fallback, driven the way `PRStatusManager.onMergedTransition`

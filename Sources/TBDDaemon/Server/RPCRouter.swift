@@ -640,7 +640,7 @@ public final class RPCRouter: Sendable {
                                                 parsed: match.parsed, source: .branch)
         }
         await seedProvenanceBindings(worktrees)
-        await refreshBindingStatuses(worktrees: worktrees, repoPath: infos.first?.worktreePath)
+        await refreshBindingStatuses(polled: infos, repoPath: infos.first?.worktreePath)
         // Prune at the END so we never drop an entry this pass just populated.
         await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         return PRListResult(statuses: await prManager.allStatuses())
@@ -685,8 +685,15 @@ public final class RPCRouter: Sendable {
     /// the worktree's single `prStatus` column gets the worst of them so every
     /// existing single-status reader keeps working while the multi-PR surfaces
     /// are built.
-    private func refreshBindingStatuses(worktrees: [Worktree], repoPath: String?) async {
-        let polled = Set(worktrees.map(\.id))
+    ///
+    /// Takes the poll entries rather than the worktree rows because the merge
+    /// rule below needs each worktree's branch candidates and provenance PR
+    /// number, and `PollWorktree` is where the branch facts this pass gathered
+    /// already live.
+    private func refreshBindingStatuses(
+        polled entries: [PRStatusManager.PollWorktree], repoPath: String?
+    ) async {
+        let polled = Set(entries.map(\.id))
         guard let live = try? await db.prBindings.listAll() else { return }
         let bindings = live.filter { polled.contains($0.worktreeID) }
         guard !bindings.isEmpty else { return }
@@ -729,9 +736,20 @@ public final class RPCRouter: Sendable {
         // Judge the merge rule on the statuses this pass just observed — this is
         // the only place they are all in hand at once. The trigger owns the
         // edge, so calling it every poll costs a set lookup per worktree.
+        //
+        // Each worktree's own branch candidates and provenance number travel with
+        // it: the rule fires only when a MERGED binding is the worktree's own
+        // work, and those two facts are the only evidence of ownership there is.
+        // An entry that somehow has no poll row is judged against no candidates
+        // and no number, which fails the ownership arm closed.
         if let mergeTrigger {
+            let entryByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
             for (worktreeID, group) in Dictionary(grouping: refreshed, by: \.worktreeID) {
-                await mergeTrigger.evaluate(worktreeID: worktreeID, bindings: group)
+                let entry = entryByID[worktreeID]
+                await mergeTrigger.evaluate(
+                    worktreeID: worktreeID, bindings: group,
+                    branchCandidates: entry.map { PRStatusManager.candidatesFor($0) } ?? [],
+                    provenancePRNumber: entry?.prNumber)
             }
         }
     }

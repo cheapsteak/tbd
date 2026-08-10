@@ -49,14 +49,104 @@ public enum PRBindingExtractor {
     /// auto-archive the user never asked for — and it missed
     /// `gh -R acme/acme-prod pr create`, the normal way to target another repo.
     ///
-    /// So the command is tokenized instead: a quoted run stays one word, which
-    /// is what keeps a quoted phrase from ever looking like a command; the
-    /// string is cut into segments at shell separators; and a segment counts
-    /// only when its first word is `gh` and its subcommand path — flags and
-    /// their values skipped — is exactly `pr create`. This is a pragmatic
-    /// tokenizer, not a shell parser: an unusual construction fails closed.
+    /// So the command is tokenized instead: heredoc bodies are dropped, because
+    /// they are data the command writes rather than commands it runs; a quoted
+    /// run stays one word, which is what keeps a quoted phrase from ever looking
+    /// like a command; the string is cut into segments at shell separators; and a
+    /// segment counts only when its first word is `gh` and its subcommand path —
+    /// flags and their values skipped — is exactly `pr create`. This is a
+    /// pragmatic tokenizer, not a shell parser: an unusual construction fails
+    /// closed.
     public static func isPRCreateCommand(_ command: String) -> Bool {
-        commandSegments(of: command).contains(where: isGHPRCreateSegment)
+        commandSegments(of: withoutHeredocBodies(command)).contains(where: isGHPRCreateSegment)
+    }
+
+    /// Drop every heredoc *body* from a command, keeping the lines that really
+    /// are commands.
+    ///
+    /// Segments are cut at newlines, so without this a documentation line inside
+    /// a heredoc reads as a command:
+    /// `cat <<'EOF' | tee -a CONTRIBUTING.md` whose body explains how to run
+    /// `gh pr create …` would gate open, and any PR URL in that command's output
+    /// would bind a PR the worktree never opened. That is the expensive
+    /// direction — a false bind can auto-archive a worktree, while a missed real
+    /// bind costs one `tbd pr attach`.
+    ///
+    /// So the rule fails **closed** wherever it is unsure. A heredoc that is
+    /// never terminated swallows the rest of the command, and a `<<` that is not
+    /// a heredoc at all (a shift inside `$(( … ))`) is read as one — both lose
+    /// binds rather than inventing them. `<<<` is a here-string: one word of
+    /// data on the same line, no body, nothing to skip.
+    private static func withoutHeredocBodies(_ command: String) -> String {
+        var lines: [String] = []
+        var pending: [(delimiter: String, stripTabs: Bool)] = []
+        for line in command.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(line)
+            if let open = pending.first {
+                // Body, including the terminator itself — never a command.
+                let candidate = open.stripTabs ? String(line.drop { $0 == "\t" }) : line
+                if candidate == open.delimiter { pending.removeFirst() }
+                continue
+            }
+            lines.append(line)
+            pending.append(contentsOf: heredocOpeners(in: line))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The heredoc delimiters a command line opens, in the order their bodies
+    /// will arrive (`cmd <<A <<B` reads A's body first). Quoting is tracked so a
+    /// `<<` inside a string opens nothing, and the delimiter word is unquoted the
+    /// way the shell unquotes it — `<<'EOF'`, `<<"EOF"` and `<<EOF` all end at a
+    /// line reading `EOF`.
+    private static func heredocOpeners(in line: String) -> [(delimiter: String, stripTabs: Bool)] {
+        var openers: [(delimiter: String, stripTabs: Bool)] = []
+        let chars = Array(line)
+        var index = 0
+        var quote: Character?
+
+        while index < chars.count {
+            let character = chars[index]
+            if let open = quote {
+                if character == "\\" && open == "\"" { index += 2; continue }
+                if character == open { quote = nil }
+                index += 1
+                continue
+            }
+            if character == "\\" { index += 2; continue }
+            if character == "'" || character == "\"" { quote = character; index += 1; continue }
+            guard character == "<", index + 1 < chars.count, chars[index + 1] == "<" else {
+                index += 1
+                continue
+            }
+            index += 2
+            if index < chars.count && chars[index] == "<" { index += 1; continue }  // here-string
+            var stripTabs = false
+            if index < chars.count && chars[index] == "-" { stripTabs = true; index += 1 }
+            while index < chars.count && (chars[index] == " " || chars[index] == "\t") { index += 1 }
+            var delimiter = ""
+            var delimiterQuote: Character?
+            while index < chars.count {
+                let word = chars[index]
+                if let open = delimiterQuote {
+                    if word == open { delimiterQuote = nil } else { delimiter.append(word) }
+                    index += 1
+                    continue
+                }
+                if word == "'" || word == "\"" { delimiterQuote = word; index += 1; continue }
+                if word == "\\" {
+                    index += 1
+                    if index < chars.count { delimiter.append(chars[index]); index += 1 }
+                    continue
+                }
+                if word.isWhitespace || segmentSeparators.contains(word)
+                    || word == "<" || word == ">" || word == ")" { break }
+                delimiter.append(word)
+                index += 1
+            }
+            if !delimiter.isEmpty { openers.append((delimiter, stripTabs)) }
+        }
+        return openers
     }
 
     /// Split into per-command word lists, honoring quotes so that neither a

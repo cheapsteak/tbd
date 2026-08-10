@@ -45,11 +45,20 @@ public struct MergedTransitionDispatcher: Sendable {
 /// fan-out once when they do.
 ///
 /// The rule (design `2026-08-10-multi-pr-per-worktree`, "Merge semantics"):
-/// **every non-detached binding is terminal and at least one is merged** —
-/// `PRBinding.allResolved(_:)`. With one binding this is identical to the
-/// single-PR behavior it replaces; with several it refuses to archive a worktree
-/// that still has an open PR on it. A binding whose status has never been
-/// observed is not terminal, so an unpolled PR holds the gate shut.
+/// **every non-detached binding is terminal, at least one is merged, and at
+/// least one merged binding is the worktree's own work** —
+/// `PRBinding.allResolved(_:)` and
+/// `PRBinding.mergedBindingIsOwnWork(_:branchCandidates:provenancePRNumber:)`.
+/// A binding whose status has never been observed is not terminal, so an
+/// unpolled PR holds the gate shut.
+///
+/// Both halves are required, and together they make this **strictly stronger**
+/// than the single-PR rule it replaces: the old rule fired when the worktree's
+/// own PR merged, this one fires when the worktree's own PR merged AND every
+/// other PR it opened has finished too. Ownership is not implied by the set —
+/// a subagent's `gh pr create`, or one run from a sibling checkout in the same
+/// repo, binds to the current worktree, is spared the head-ref heal, and is
+/// re-queried only by number, so nothing else would ever disprove it.
 ///
 /// **Edge-triggered, and this actor's state is the only once-only guard.** A
 /// poll runs every few seconds and would otherwise re-fire on every pass, so a
@@ -88,11 +97,20 @@ public actor AllResolvedMergeTrigger {
 
     /// Judge one worktree against its current bindings. Call after each poll has
     /// folded fresh statuses onto them.
-    public func evaluate(worktreeID: UUID, bindings: [PRBinding]) async {
+    ///
+    /// `branchCandidates` is the worktree's own branch list as the matcher
+    /// derives it (`PRStatusManager.candidatesFor`) and `provenancePRNumber` its
+    /// `Worktree.prNumber`; both are passed in rather than looked up here so the
+    /// rule stays a pure function of facts the poll already holds.
+    public func evaluate(worktreeID: UUID, bindings: [PRBinding],
+                         branchCandidates: [String], provenancePRNumber: Int?) async {
         let live = bindings.filter { !$0.detached }
-        guard PRBinding.allResolved(live) else {
-            // Not resolved (any more): re-arm, so a later resolution is a fresh
-            // rising edge rather than a suppressed repeat.
+        let ownWorkMerged = PRBinding.mergedBindingIsOwnWork(
+            live, branchCandidates: branchCandidates, provenancePRNumber: provenancePRNumber)
+        guard PRBinding.allResolved(live), ownWorkMerged else {
+            // Not resolved (any more), or nothing merged here is this worktree's
+            // own: re-arm, so a later resolution is a fresh rising edge rather
+            // than a suppressed repeat.
             allResolvedFired.remove(worktreeID)
             return
         }

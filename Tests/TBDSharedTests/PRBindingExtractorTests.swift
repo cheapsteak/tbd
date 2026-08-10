@@ -36,6 +36,90 @@ struct PRBindingExtractorTests {
         #expect(!PRBindingExtractor.isPRCreateCommand(#"echo "x && gh pr create""#))
     }
 
+    /// Heredoc bodies are data, not commands. Segments are cut at newlines, so a
+    /// body line that merely *documents* `gh pr create` used to read as a run of
+    /// it — and any PR URL in that command's output would then bind a PR the
+    /// worktree never opened.
+    @Test("a gh pr create inside a heredoc body is not a create")
+    func heredocBodyIsNotACreate() {
+        let quoted = """
+        cat <<'EOF' | tee -a CONTRIBUTING.md
+        To open a pull request, run:
+        gh pr create --fill
+        EOF
+        """
+        #expect(!PRBindingExtractor.isPRCreateCommand(quoted))
+
+        let unquoted = """
+        cat <<EOF > docs/howto.md
+        gh pr create --fill
+        EOF
+        """
+        #expect(!PRBindingExtractor.isPRCreateCommand(unquoted))
+
+        let doubleQuoted = """
+        cat <<"EOF" > docs/howto.md
+        gh pr create --fill
+        EOF
+        """
+        #expect(!PRBindingExtractor.isPRCreateCommand(doubleQuoted))
+    }
+
+    /// `<<-` strips leading TABS from the body and from the terminator, so the
+    /// terminator here is `\tEOF` and the body must still be skipped.
+    @Test("a tab-indented heredoc terminator still closes the body")
+    func dashHeredocWithIndentedTerminator() {
+        let command = "cat <<-EOF > docs/howto.md\n\tgh pr create --fill\n\tEOF"
+        #expect(!PRBindingExtractor.isPRCreateCommand(command))
+    }
+
+    /// The other direction: skipping must stop at the terminator. A real create
+    /// after a heredoc is still a create.
+    @Test("a real gh pr create after a heredoc terminator is a create")
+    func createAfterHeredocTerminator() {
+        let command = """
+        cat <<'EOF' > /tmp/body.md
+        Some body text mentioning gh pr create
+        EOF
+        gh pr create --body-file /tmp/body.md
+        """
+        #expect(PRBindingExtractor.isPRCreateCommand(command))
+    }
+
+    /// A heredoc that FEEDS a create is still a create — the opener line is a
+    /// command line like any other.
+    @Test("a create fed by a heredoc is a create")
+    func createFedByHeredoc() {
+        let command = """
+        gh pr create --fill --body-file - <<'EOF'
+        body text
+        EOF
+        """
+        #expect(PRBindingExtractor.isPRCreateCommand(command))
+    }
+
+    /// `<<<` is a here-string: one word of data on the same line and no body, so
+    /// nothing after it may be swallowed.
+    @Test("a here-string does not swallow the following command")
+    func hereStringDoesNotSwallow() {
+        #expect(PRBindingExtractor.isPRCreateCommand("cat <<<x\ngh pr create --fill"))
+    }
+
+    /// End to end: the heredoc's own output carries a PR URL, and it must bind
+    /// nothing.
+    @Test("a heredoc payload whose output holds a PR URL binds nothing")
+    func heredocPayloadBindsNothing() {
+        let command = """
+        cat <<'EOF' | tee -a CONTRIBUTING.md
+        gh pr create --fill
+        EOF
+        """
+        let found = PRBindingExtractor.extract(fromHookPayload: payload(
+            command: command,
+            output: "https://github.com/acme/acme-prod/pull/412"))
+        #expect(found.isEmpty)
+    }
+
     /// The false-negative half: `-R` / `--repo` between `gh` and its subcommand
     /// is the normal way to target another repo, and used to match nothing.
     @Test("repo-targeting flags before the subcommand still count as a create")
