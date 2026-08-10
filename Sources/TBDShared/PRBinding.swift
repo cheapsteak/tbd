@@ -49,6 +49,15 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
         self.boundAt = boundAt
     }
 
+    /// A copy carrying a freshly observed status. The poll refreshes bindings
+    /// into a `[bindingID: PRStatus]` map and has to fold that map back onto the
+    /// bindings before `worst(of:)` or `allResolved(_:)` can judge them.
+    public func withStatus(_ status: PRStatus?) -> PRBinding {
+        PRBinding(id: id, worktreeID: worktreeID, host: host, owner: owner, repo: repo,
+                  number: number, url: url, headBranch: headBranch, baseRef: baseRef,
+                  status: status, source: source, detached: detached, boundAt: boundAt)
+    }
+
     /// Identity for deduplication — matches the table's UNIQUE constraint.
     /// Owner and repo compare case-insensitively because GitHub treats them so.
     public var identityKey: String {

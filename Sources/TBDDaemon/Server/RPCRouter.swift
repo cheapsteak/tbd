@@ -614,10 +614,78 @@ public final class RPCRouter: Sendable {
                 prNumber: wt.prNumber
             ))
         }
-        await prManager.fetchAll(worktrees: infos)
+        let branchMatches = await prManager.fetchAll(worktrees: infos)
+        // The branch matcher is one of the three binding discovery sources; the
+        // coordinator owns the policy (repo validation, tombstones, cap), so a
+        // match it rejects is simply not bound.
+        for match in branchMatches {
+            _ = await prBindingCoordinator.bind(worktreeID: match.worktreeID,
+                                                parsed: match.parsed, source: .branch)
+        }
+        await refreshBindingStatuses(worktrees: worktrees, repoPath: infos.first?.worktreePath)
         // Prune at the END so we never drop an entry this pass just populated.
         await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         return PRListResult(statuses: await prManager.allStatuses())
+    }
+
+    /// Refresh every binding of the polled worktrees and persist what came back.
+    ///
+    /// Costs nothing until something binds: with no bindings this is one indexed
+    /// SELECT and no `gh` call at all.
+    ///
+    /// Two kinds of write, both skipped when the value is unchanged so an idle
+    /// poll costs no UPDATE. Each binding's own row gets its fresh status, and
+    /// the worktree's single `prStatus` column gets the worst of them so every
+    /// existing single-status reader keeps working while the multi-PR surfaces
+    /// are built.
+    private func refreshBindingStatuses(worktrees: [Worktree], repoPath: String?) async {
+        let polled = Set(worktrees.map(\.id))
+        guard let live = try? await db.prBindings.listAll() else { return }
+        let bindings = live.filter { polled.contains($0.worktreeID) }
+        guard !bindings.isEmpty else { return }
+
+        let statuses = await prManager.refreshBindings(bindings, repoPath: repoPath)
+        var refreshed: [PRBinding] = []
+        refreshed.reserveCapacity(bindings.count)
+        for binding in bindings {
+            // Absent means "not observed this pass" — leave the stored row alone
+            // rather than clearing a status a transient failure hid.
+            guard let status = statuses[binding.id] else {
+                refreshed.append(binding)
+                continue
+            }
+            if status != binding.status {
+                try? await db.prBindings.updateStatus(bindingID: binding.id, status: status)
+            }
+            refreshed.append(binding.withStatus(status))
+        }
+        let stored = Dictionary(uniqueKeysWithValues: worktrees.map { ($0.id, $0.prStatus) })
+        for update in Self.worktreePRStatusUpdates(refreshed) {
+            guard (stored[update.worktreeID] ?? nil) != update.status else { continue }
+            try? await db.worktrees.setPRStatus(id: update.worktreeID, status: update.status)
+        }
+    }
+
+    /// The `Worktree.prStatus` write implied by a worktree's bindings: the worst
+    /// of them, so one icon can stand for several PRs.
+    ///
+    /// `.merged` is deliberately never written, mirroring `PRStatusManager.apply`
+    /// — it is the auto-archive trigger, and a persisted `.merged` would be
+    /// hydrated at the next daemon start as an already-merged baseline, so a
+    /// merge whose archive failed would never re-fire. A worktree whose worst
+    /// binding is merged simply keeps its previous column value.
+    ///
+    /// Pure and static so the rule is unit-testable without git/gh machinery,
+    /// like `pollableWorktrees`.
+    static func worktreePRStatusUpdates(
+        _ bindings: [PRBinding]
+    ) -> [(worktreeID: UUID, status: PRStatus)] {
+        Dictionary(grouping: bindings, by: \.worktreeID)
+            .compactMap { worktreeID, group in
+                guard let status = PRBinding.worst(of: group)?.status,
+                      status.state != .merged else { return nil }
+                return (worktreeID, status)
+            }
     }
 
     /// The per-branch git facts PR matching needs: the branch this one tracks,

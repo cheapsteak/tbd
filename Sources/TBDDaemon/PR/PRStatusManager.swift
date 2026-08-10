@@ -186,9 +186,19 @@ public actor PRStatusManager {
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
     /// worktrees: one `PollWorktree` per active non-main worktree.
-    public func fetchAll(worktrees: [PollWorktree]) async {
-        guard !worktrees.isEmpty else { return }
-        guard !fetchAllInProgress else { return }   // a previous poll is still running; skip to avoid interleaved generations
+    ///
+    /// Returns the branch-matched PRs as `ParsedPRURL`s — the branch-match
+    /// emitter, for the poll to hand to `PRBindingCoordinator.bind(…, source:
+    /// .branch)`. Only matches produced by `matchUnnumbered` are emitted, and
+    /// only those that survived the head-ref heal: a match the heal cleared is
+    /// one this worktree was positively shown to be mis-attached to, and binding
+    /// it would make that mis-attachment durable in a way the heal cannot reach.
+    /// A worktree resolved by number was bound by whatever supplied the number,
+    /// so it is not a branch discovery and is never emitted.
+    @discardableResult
+    public func fetchAll(worktrees: [PollWorktree]) async -> [(worktreeID: UUID, parsed: ParsedPRURL)] {
+        guard !worktrees.isEmpty else { return [] }
+        guard !fetchAllInProgress else { return [] }   // a previous poll is still running; skip to avoid interleaved generations
         fetchAllInProgress = true
         defer { fetchAllInProgress = false }
         let batchStartedAt = Date()
@@ -207,6 +217,12 @@ public actor PRStatusManager {
         // limited to 100 PRs across all repos, so older PRs may not appear.
         // Those entries may have been populated by a targeted `refresh` call.
         var matches: [(worktreeID: UUID, node: PRNode)] = []
+
+        // Which of `matches` came from the branch matcher, so the emitter can
+        // tell a branch discovery from a by-number resolution. The two sets are
+        // disjoint by construction (the fallback only re-queries worktrees the
+        // batch left unmatched).
+        var branchMatchedIDs: Set<UUID> = []
 
         // Numbered path: one aliased by-number query (skipped when none stored).
         if !numbered.isEmpty {
@@ -256,8 +272,10 @@ public actor PRStatusManager {
             if let jsonData = await runGHGraphQL(repoPath: repoPath) {
                 if let nodes = try? Self.parsePRNodes(from: jsonData) {
                     batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
-                    matches += Self.matchUnnumbered(unnumbered, nodes: nodes,
-                                                    resolveRepo: { unnumberedRepos[$0] })
+                    let branchMatches = Self.matchUnnumbered(unnumbered, nodes: nodes,
+                                                             resolveRepo: { unnumberedRepos[$0] })
+                    branchMatchedIDs.formUnion(branchMatches.map(\.worktreeID))
+                    matches += branchMatches
                 } else {
                     logger.warning("Failed to parse GraphQL response")
                 }
@@ -366,6 +384,197 @@ public actor PRStatusManager {
                                   mergeQueuePosition: match.node.mergeQueuePosition)
             await apply(status, for: match.worktreeID)
         }
+
+        // The branch-match emitter. Derived from the post-heal `matches`, so a
+        // cleared mis-attachment is absent here too. Deliberately NOT filtered
+        // by `lastDirectUpdate`: that guard protects the *cache* from stale
+        // batch data, while a binding records that a PR belongs to a worktree —
+        // a fact a fresher status for the same worktree does not contradict.
+        return Self.branchMatchedPRURLs(matches.filter { branchMatchedIDs.contains($0.worktreeID) })
+    }
+
+    /// Render matched PR nodes as `ParsedPRURL`s for `PRBindingCoordinator`.
+    ///
+    /// Parsing goes through `PRBindingExtractor.parsePRURLs` rather than a local
+    /// split so the poll's discovery obeys exactly the host lock and path-segment
+    /// rules the hook and manual-attach paths do; a URL that fails them yields no
+    /// binding rather than a half-parsed one.
+    static func branchMatchedPRURLs(
+        _ matches: [(worktreeID: UUID, node: PRNode)]
+    ) -> [(worktreeID: UUID, parsed: ParsedPRURL)] {
+        matches.compactMap { match in
+            guard let parsed = PRBindingExtractor.parsePRURLs(in: match.node.url).first else {
+                logger.debug("fetchAll: branch-matched PR URL \(match.node.url, privacy: .public) is not a bindable GitHub PR URL")
+                return nil
+            }
+            return (match.worktreeID, parsed)
+        }
+    }
+
+    // MARK: - Per-binding refresh
+
+    /// Refresh the status of a set of PR bindings, keyed by **binding id**.
+    ///
+    /// The binding-keyed sibling of `fetchAll`'s worktree-keyed path, and
+    /// deliberately not a replacement for it: one worktree may own several PRs,
+    /// so its answer cannot be a `[worktreeID: PRStatus]`. Bindings already
+    /// carry their own `owner`/`repo`, so this needs neither the viewer batch
+    /// nor `gh repo view` — one aliased `pullRequest(number:)` query per
+    /// (host, owner, repo) group, through the same `numberedPRQuery` /
+    /// `parseNumberedPRNodes` / `mapStateAndReason` / `fetchCheckSignals` path
+    /// the by-number poll uses.
+    ///
+    /// `nonisolated` on purpose: this path must not touch `cache`,
+    /// `lastDirectUpdate`, `headRefVerifiedIDs`, `onStatusPersist` or
+    /// `onMergedTransition`. Persisting a binding's status — and deciding what a
+    /// merge means across several of them — belongs to the caller.
+    ///
+    /// A transient failure at any stage (gh did not launch, no data, the number
+    /// did not resolve, the check query failed) yields the binding's PREVIOUS
+    /// status rather than a guess, exactly as `fetchAll` keeps its cached value.
+    /// A binding with no previous status and no fresh data is simply absent from
+    /// the result, so a caller writing the map back cannot clear a row it failed
+    /// to observe.
+    ///
+    /// `repoPath` is only `gh`'s working directory; owner and name are bound as
+    /// GraphQL variables and `gh` auth is host-scoped, so any checkout — or the
+    /// daemon's own cwd — answers identically.
+    public nonisolated func refreshBindings(
+        _ bindings: [PRBinding],
+        repoPath: String? = nil
+    ) async -> [UUID: PRStatus] {
+        guard !bindings.isEmpty else { return [:] }
+        let cwd = repoPath ?? FileManager.default.currentDirectoryPath
+        var result: [UUID: PRStatus] = [:]
+        for group in Self.groupBindingsByRepo(bindings) {
+            result.merge(await refreshBindingGroup(group, repoPath: cwd)) { _, fresh in fresh }
+        }
+        return result
+    }
+
+    /// Group bindings by their own `(host, owner, repo)` so each group needs one
+    /// aliased query. Owner and repo are compared lowercased (GitHub treats them
+    /// case-insensitively) and the group carries the lowercased pair, matching
+    /// what `PRBindingStore` persists. Group order follows first appearance so
+    /// the query sequence is deterministic.
+    static func groupBindingsByRepo(
+        _ bindings: [PRBinding]
+    ) -> [(host: String, owner: String, name: String, bindings: [PRBinding])] {
+        var order: [String] = []
+        var groups: [String: (host: String, owner: String, name: String, bindings: [PRBinding])] = [:]
+        for binding in bindings {
+            let host = binding.host.lowercased()
+            let owner = binding.owner.lowercased()
+            let name = binding.repo.lowercased()
+            let key = "\(host)\u{1}\(owner)\u{1}\(name)"
+            if groups[key] == nil {
+                groups[key] = (host, owner, name, [])
+                order.append(key)
+            }
+            groups[key]?.bindings.append(binding)
+        }
+        return order.compactMap { groups[$0] }
+    }
+
+    /// One repo group's aliased round trip plus its per-PR check queries.
+    ///
+    /// The alias table reuses `parseNumberedPRNodes`, whose tuple slot is named
+    /// `worktreeID`; here it carries a BINDING id. That is the whole point of
+    /// this path — several bindings of one worktree must stay distinguishable.
+    ///
+    /// `group.host` is not passed to `gh`: binding creation is host-locked to
+    /// github.com today (`PRBindingExtractor`), so every group resolves against
+    /// gh's default host. It still keys the grouping, so the day an enterprise
+    /// host can be bound, two hosts' repos cannot land in one query.
+    private nonisolated func refreshBindingGroup(
+        _ group: (host: String, owner: String, name: String, bindings: [PRBinding]),
+        repoPath: String
+    ) async -> [UUID: PRStatus] {
+        let aliased = group.bindings.enumerated().map {
+            (alias: "pr\($0.offset)", bindingID: $0.element.id, number: $0.element.number)
+        }
+        let query = Self.numberedPRQuery(aliases: aliased.map { ($0.alias, $0.number) })
+        let args = [
+            "api", "graphql",
+            "-f", "query=\(query)",
+            "-f", "owner=\(group.owner)",
+            "-f", "name=\(group.name)"
+        ]
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            logger.debug("refreshBindings: by-number query produced no data for \(group.owner, privacy: .public)/\(group.name, privacy: .public); keeping previous statuses")
+            return Self.previousStatuses(group.bindings)
+        }
+        // `gh api graphql` exits non-zero when ONE aliased PR errors while still
+        // emitting usable `data` for the others — parse whatever came back
+        // (same tolerance as `fetchNumberedMatches`, regression guard PR #208).
+        if result.exitStatus != 0 {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("refreshBindings: by-number query exited \(result.exitStatus, privacy: .public) with partial data for \(group.owner, privacy: .public)/\(group.name, privacy: .public): \(errSuffix, privacy: .public)")
+        }
+        let nodesByBindingID = Dictionary(
+            Self.parseNumberedPRNodes(from: data, aliases: aliased.map { ($0.alias, $0.bindingID) })
+                .map { ($0.worktreeID, $0.node) },
+            uniquingKeysWith: { first, _ in first })
+
+        // Only non-green OPEN PRs need the per-check query; run those together.
+        let signalsByBindingID = await withTaskGroup(of: (UUID, (failing: Bool, pending: Bool)?).self,
+                                                     returning: [UUID: (failing: Bool, pending: Bool)?].self) { taskGroup in
+            for (bindingID, node) in nodesByBindingID {
+                if node.state != "OPEN" || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
+                    taskGroup.addTask { (bindingID, (failing: false, pending: false)) }
+                } else {
+                    taskGroup.addTask {
+                        (bindingID, await self.fetchCheckSignals(url: node.url, number: node.number,
+                                                                 repoPath: repoPath))
+                    }
+                }
+            }
+            var out: [UUID: (failing: Bool, pending: Bool)?] = [:]
+            for await (bindingID, signals) in taskGroup { out[bindingID] = signals }
+            return out
+        }
+
+        var statuses: [UUID: PRStatus] = [:]
+        for binding in group.bindings {
+            guard let node = nodesByBindingID[binding.id] else {
+                // Deleted, inaccessible, or a sibling alias's error swallowed it.
+                logger.debug("refreshBindings: PR #\(binding.number, privacy: .public) did not resolve by number; keeping previous status")
+                statuses[binding.id] = binding.status
+                continue
+            }
+            let signals: (failing: Bool, pending: Bool)
+            if let fetched = signalsByBindingID[binding.id] ?? nil {
+                signals = fetched
+            } else if let previous = binding.status {
+                statuses[binding.id] = previous   // transient failure: keep the previous status rather than guessing
+                continue
+            } else {
+                signals = Self.aggregateFallbackSignals(node.statusCheckRollupState)
+            }
+            let (state, reason) = Self.mapStateAndReason(
+                ghState: node.state,
+                mergeStateStatus: node.mergeStateStatus,
+                reviewDecision: node.reviewDecision,
+                isDraft: node.isDraft,
+                requiredChecksFailing: signals.failing,
+                requiredChecksPending: signals.pending
+            )
+            statuses[binding.id] = PRStatus(number: node.number, url: node.url, state: state,
+                                            reason: reason,
+                                            mergeQueuePosition: node.mergeQueuePosition)
+        }
+        return statuses
+    }
+
+    /// Each binding's last observed status, for the failure paths that keep it.
+    /// A binding that never resolved contributes nothing rather than a nil entry.
+    private static func previousStatuses(_ bindings: [PRBinding]) -> [UUID: PRStatus] {
+        var out: [UUID: PRStatus] = [:]
+        for binding in bindings {
+            out[binding.id] = binding.status
+        }
+        return out
     }
 
     /// The aggregate rollup classifies a per-check query as worthwhile when it is NOT a settled
