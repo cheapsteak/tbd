@@ -172,9 +172,11 @@ and from branch matching); manage the list when that is wrong.
 - `tbd pr attach <number|url>` — bind a PR TBD did not find
 - `tbd pr detach <number|url>` — unbind a PR that no longer belongs
 
-A detached PR stays detached — automatic discovery will not re-add it. Detaching
-a stale PR is also how you unblock auto-archive, which waits for every bound PR
-to merge or close.
+A detached PR stays detached — automatic discovery will not re-add it. Auto-archive
+waits for every bound PR to merge or close, so detaching one stale PR is how you
+unblock it. Do **not** detach every PR to *suppress* auto-archive: a worktree with
+no bound PRs falls back to archiving on the next merge it observes. Turn
+auto-archive off for the worktree instead.
 
 ## Panels
 

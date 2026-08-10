@@ -55,6 +55,13 @@ extension TBDHomeSerialized {
         // A hook must never fail the tool call it observes.
         #expect(command.contains("|| true"))
 
+        // A short, explicit timeout. This is the first TBD hook matching a
+        // universally-used tool, so Claude Code's 60 s default would let one
+        // wedged socket stall every Bash call across the whole fleet.
+        let timeout = (bash?["hooks"] as? [[String: Any]])?.first?["timeout"] as? Int
+        #expect(timeout != nil)
+        #expect((timeout ?? 60) <= 5)
+
         // The pre-existing AskUserQuestion entry must survive alongside it.
         #expect(postToolUse.contains { $0["matcher"] as? String == "AskUserQuestion" })
         #expect(postToolUse.count == 2)

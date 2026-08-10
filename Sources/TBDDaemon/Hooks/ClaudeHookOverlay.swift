@@ -116,6 +116,17 @@ public enum ClaudeHookOverlay {
     static let prBindCommand =
         #"payload=$(cat); printf '%s' "$payload" | grep -qE 'gh[[:space:]]+pr[[:space:]]+create' && printf '%s' "$payload" | tbd pr bind --from-hook || true"#
 
+    /// Seconds Claude Code will wait for `prBindCommand` before killing it.
+    ///
+    /// Explicit because this is the first TBD hook matching a universally-used
+    /// tool: it fires on EVERY Bash call across the whole fleet, so Claude
+    /// Code's 60 s default would turn one wedged daemon socket into a 60 s stall
+    /// on every shell command every agent runs. Three seconds is far more than
+    /// the happy path needs — the common case is a `grep` that matches nothing
+    /// and spawns nothing — and the binding is re-derivable by branch matching
+    /// on the next poll, so a timeout costs at most a delayed binding.
+    static let prBindTimeoutSeconds = 3
+
     /// Build the JSON-encoded overlay body.
     ///
     /// When `fallbackModels` is non-nil and non-empty, a top-level
@@ -187,7 +198,8 @@ public enum ClaudeHookOverlay {
                     [
                         "matcher": "Bash",
                         "hooks": [
-                            ["type": "command", "command": prBindCommand]
+                            ["type": "command", "command": prBindCommand,
+                             "timeout": prBindTimeoutSeconds] as [String: Any]
                         ]
                     ]
                 ]
