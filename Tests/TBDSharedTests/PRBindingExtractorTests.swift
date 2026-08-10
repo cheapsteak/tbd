@@ -1,0 +1,105 @@
+import Foundation
+import Testing
+@testable import TBDShared
+
+@Suite("PR binding extraction")
+struct PRBindingExtractorTests {
+
+    private func payload(command: String, output: String) -> Data {
+        let obj: [String: Any] = [
+            "tool_name": "Bash",
+            "tool_input": ["command": command],
+            "tool_response": ["stdout": output, "stderr": "", "interrupted": false]
+        ]
+        return try! JSONSerialization.data(withJSONObject: obj)
+    }
+
+    @Test("recognizes gh pr create with flags and surrounding pipeline")
+    func recognizesCreate() {
+        #expect(PRBindingExtractor.isPRCreateCommand("gh pr create --fill"))
+        #expect(PRBindingExtractor.isPRCreateCommand("cd /tmp && gh  pr   create -t x"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("gh pr view 12"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("gh pr list"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("echo gh-pr-create"))
+    }
+
+    @Test("parses one PR URL")
+    func parsesOne() {
+        let found = PRBindingExtractor.parsePRURLs(
+            in: "https://github.com/acme/acme-prod/pull/412\n")
+        #expect(found.count == 1)
+        #expect(found[0].owner == "acme")
+        #expect(found[0].repo == "acme-prod")
+        #expect(found[0].number == 412)
+        #expect(found[0].host == "github.com")
+    }
+
+    @Test("parses several URLs and de-duplicates")
+    func parsesMany() {
+        let text = """
+        created https://github.com/acme/acme-prod/pull/412
+        also https://github.com/acme/other-repo/pull/7
+        again https://github.com/acme/acme-prod/pull/412
+        """
+        let found = PRBindingExtractor.parsePRURLs(in: text)
+        #expect(found.count == 2)
+        #expect(found.map(\.number).sorted() == [7, 412])
+    }
+
+    @Test("rejects dot path segments")
+    func rejectsDotSegments() {
+        #expect(PRBindingExtractor.parsePRURLs(
+            in: "https://github.com/../acme-prod/pull/1").isEmpty)
+        #expect(PRBindingExtractor.parsePRURLs(
+            in: "https://github.com/acme/./pull/1").isEmpty)
+    }
+
+    @Test("ignores non-github and non-pull URLs")
+    func ignoresOthers() {
+        #expect(PRBindingExtractor.parsePRURLs(
+            in: "https://gitlab.com/acme/acme-prod/pull/1").isEmpty)
+        #expect(PRBindingExtractor.parsePRURLs(
+            in: "https://github.com/acme/acme-prod/issues/1").isEmpty)
+    }
+
+    @Test("extracts from a create payload")
+    func extractsFromCreate() {
+        let found = PRBindingExtractor.extract(fromHookPayload: payload(
+            command: "gh pr create --fill",
+            output: "https://github.com/acme/acme-prod/pull/412"))
+        #expect(found.count == 1)
+        #expect(found[0].number == 412)
+    }
+
+    @Test("a non-create command mentioning a PR URL binds nothing")
+    func nonCreateBindsNothing() {
+        let found = PRBindingExtractor.extract(fromHookPayload: payload(
+            command: "echo https://github.com/acme/acme-prod/pull/412",
+            output: "https://github.com/acme/acme-prod/pull/412"))
+        #expect(found.isEmpty)
+    }
+
+    @Test("a create command with no URL in output binds nothing")
+    func createWithNoURL() {
+        let found = PRBindingExtractor.extract(fromHookPayload: payload(
+            command: "gh pr create --fill", output: "error: no commits"))
+        #expect(found.isEmpty)
+    }
+
+    @Test("malformed JSON yields nothing rather than throwing")
+    func malformedJSON() {
+        #expect(PRBindingExtractor.extract(
+            fromHookPayload: Data("not json".utf8)).isEmpty)
+    }
+
+    @Test("scans a string tool_response as well as an object one")
+    func stringToolResponse() {
+        let obj: [String: Any] = [
+            "tool_name": "Bash",
+            "tool_input": ["command": "gh pr create"],
+            "tool_response": "https://github.com/acme/acme-prod/pull/9"
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: obj)
+        #expect(PRBindingExtractor.extract(fromHookPayload: data).first?.number == 9)
+    }
+}
