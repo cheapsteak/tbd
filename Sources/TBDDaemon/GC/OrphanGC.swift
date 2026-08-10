@@ -105,7 +105,7 @@ public actor OrphanGC {
         self.snapshot = snap
         self.agentCollector = AgentWorktreeCollector(git: git, snapshot: snap, now: resolvedNow)
         self.scratchpadCollector = ScratchpadCollector(base: resolvedScratchpadBase)
-        self.deletionQueueCollector = DeletionQueueCollector(git: git)
+        self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
     }
 
     // MARK: - Sweep
@@ -163,12 +163,21 @@ public actor OrphanGC {
             }
         }
 
+        // One read of the archived rows for both consumers below: the deletion
+        // queue wants the ones whose directory survives, scratchpad
+        // reconciliation the ones whose directory is gone.
+        let archived = (try? await db.worktrees.list(status: .archived)) ?? []
+
         await reclaimDeletionQueue(
-            repos: repos, live: live, dryRun: dryRun,
+            repos: repos, archived: archived, live: live,
+            graceSeconds: config.gcGraceSeconds, dryRun: dryRun,
             planned: &planned, reaped: &reaped
         )
 
-        await reconcileScratchpads(repos: repos, dryRun: dryRun, planned: &planned, reaped: &reaped)
+        await reconcileScratchpads(
+            repos: repos, archived: archived, dryRun: dryRun,
+            planned: &planned, reaped: &reaped
+        )
 
         // Snapshot retention never runs in dryRun; the outer guard already
         // establishes gcEnabled for any non-dry run.
@@ -181,15 +190,16 @@ public actor OrphanGC {
     }
 
     /// Reclaims worktree directories that outlived their archive: entries
-    /// already queued in a pool's `.deleting/`, plus archives that a
-    /// pre-queue release failed to remove.
+    /// already queued in a pool's `.deleting/`, archives that a pre-queue
+    /// release failed to remove, and git registrations that outlived the
+    /// directory they point at.
     ///
     /// The archived-row scan is deliberately the mirror of
     /// `reconcileScratchpads`, which reads the same rows and keeps the ones
     /// whose directory is *gone*. The ones that remain are exactly this
-    /// method's input.
+    /// method's step-2 input; the ones it keeps are step 3's.
     private func reclaimDeletionQueue(
-        repos: [Repo], live: [String], dryRun: Bool,
+        repos: [Repo], archived: [Worktree], live: [String], graceSeconds: Int, dryRun: Bool,
         planned: inout [String], reaped: inout Int
     ) async {
         let layout = WorktreeLayout()
@@ -204,6 +214,20 @@ public actor OrphanGC {
             pools.formUnion(prefixes)
         }
         pools.insert(scratchPrefix)
+        // `WorktreeDeletionQueue.enqueue` derives the pool from the worktree's
+        // own parent directory, and an adopted worktree can live anywhere — so
+        // archiving one creates a `.deleting/` queue outside every layout
+        // prefix, which an interrupted drain would otherwise leave in the
+        // user's own directory forever. Every archived row's parent is
+        // therefore a pool worth draining. This widens only what gets
+        // DRAINED, never what step 2 may reclaim: an entry sitting in
+        // `.deleting/<uuid>` is there because TBD renamed it there, so it
+        // needs no provenance gate.
+        for row in archived {
+            let parent = (row.path as NSString).deletingLastPathComponent
+            guard parent.hasPrefix("/"), parent != "/" else { continue }
+            pools.insert(parent)
+        }
 
         // 1. Entries already queued — unconditionally reclaimable.
         for entry in deletionQueueCollector.pendingEntries(pools: Array(pools)) {
@@ -216,15 +240,16 @@ public actor OrphanGC {
         }
 
         // 2. Archives that never finished.
-        let allWorktrees = (try? await db.worktrees.list(status: .archived)) ?? []
         let candidates = await deletionQueueCollector.interruptedArchives(
-            worktrees: allWorktrees,
+            worktrees: archived,
             repoPathByID: repoPathByID,
             prefixesByRepoID: prefixesByRepoID,
             scratchPrefix: scratchPrefix
         )
         for candidate in candidates {
-            switch await deletionQueueCollector.decide(candidate, liveCWDs: live) {
+            switch await deletionQueueCollector.decide(
+                candidate, liveCWDs: live, graceSeconds: graceSeconds
+            ) {
             case .keep(let reason):
                 planned.append("KEEP \(reason) \(candidate.path)")
                 logger.debug("""
@@ -233,6 +258,14 @@ public actor OrphanGC {
             case .reap:
                 planned.append("REAP archived-worktree \(candidate.path)")
                 guard !dryRun else { continue }
+                // Measure BEFORE the reap, the same order
+                // `ScratchpadCollector.cleanUp` and
+                // `AgentWorktreeCollector.reap` use: `reap` renames the
+                // directory into the queue and the drain below unlinks it, so
+                // this is the last moment its size can be read. A `nil` here
+                // (du failed or timed out) is the unmeasured record we would
+                // have written anyway.
+                let bytes = await GCDiskUsage.apparentBytes(path: candidate.path)
                 guard let entry = await deletionQueueCollector.reap(candidate) else {
                     planned.append("KEEP enqueue-failed \(candidate.path)")
                     continue
@@ -246,11 +279,80 @@ public actor OrphanGC {
                 await insertReapRecord(ReapRecord(
                     kind: .archivedWorktree,
                     repoPath: candidate.repoPath ?? "",
-                    worktreePath: candidate.path
+                    worktreePath: candidate.path,
+                    apparentBytes: bytes,
+                    reapedAt: now()
                 ))
                 reaped += 1
                 logger.info("""
                 gc: reclaimed archived worktree \(candidate.path, privacy: .public)
+                """)
+            }
+        }
+
+        // 3. Registrations that outlived their directory.
+        await pruneStaleRegistrations(
+            repoPathByID: repoPathByID, archived: archived,
+            dryRun: dryRun, planned: &planned
+        )
+    }
+
+    /// Prunes repos where an archived row's directory is gone but git still
+    /// lists a worktree at that path.
+    ///
+    /// This is the exact failure the deletion queue exists to end, arriving
+    /// through a narrower door: the archive renames the directory and then
+    /// prunes, so a prune that throws — or a daemon killed between the two —
+    /// leaves a registration with no directory. Nothing else recovers it.
+    /// Step 1 only drains bytes, step 2 only sees candidates whose directory
+    /// still *exists*, and revive's preflight throws `worktreeAlreadyRegistered`
+    /// forever, so the worktree is permanently unrevivable until someone
+    /// prunes by hand.
+    ///
+    /// `git worktree prune` is the right instrument rather than a blunt one:
+    /// it drops administrative entries only for worktrees whose directory is
+    /// missing, and skips locked ones outright, so it can never remove a
+    /// registration that still has a directory behind it. The scan is still
+    /// scoped to repos with a matching archived row, so a repo with no
+    /// evidence of this failure is never touched.
+    private func pruneStaleRegistrations(
+        repoPathByID: [UUID: String], archived: [Worktree],
+        dryRun: Bool, planned: inout [String]
+    ) async {
+        var goneByRepo: [String: [String]] = [:]
+        for row in archived where !FileManager.default.fileExists(atPath: row.path) {
+            guard let repoID = row.repoID, let repoPath = repoPathByID[repoID] else { continue }
+            goneByRepo[repoPath, default: []].append(row.path)
+        }
+
+        for (repoPath, paths) in goneByRepo.sorted(by: { $0.key < $1.key }) {
+            guard let entries = try? await git.worktreeListDetailed(repoPath: repoPath) else {
+                logger.warning("""
+                gc: worktree listing failed for \(repoPath, privacy: .public) — \
+                cannot check for stale registrations this sweep
+                """)
+                continue
+            }
+            // Both sides through `resolvedPath`: git's listing is canonical,
+            // while the row's path names a directory that no longer exists,
+            // so a plain `realpath` on it would resolve nothing.
+            let registered = Set(entries.map { deletionQueueCollector.resolvedPath($0.path) })
+            let stale = paths.filter { registered.contains(deletionQueueCollector.resolvedPath($0)) }
+            guard !stale.isEmpty else { continue }
+
+            for path in stale {
+                planned.append("PRUNE stale-registration \(path)")
+            }
+            guard !dryRun else { continue }
+            do {
+                try await git.worktreePrune(repoPath: repoPath)
+                logger.info("""
+                gc: pruned \(stale.count, privacy: .public) stale registration(s) \
+                in \(repoPath, privacy: .public)
+                """)
+            } catch {
+                logger.error("""
+                gc: prune failed for \(repoPath, privacy: .public): \(error, privacy: .public)
                 """)
             }
         }
@@ -259,7 +361,9 @@ public actor OrphanGC {
     /// Scratchpad reconciliation: archived TBD worktrees whose directory is
     /// already gone but whose Claude Code scratchpad survives. Mirrors the
     /// same keep-biased `dryRun`/`gcEnabled` gate as the agent-worktree loop.
-    /// `repos` is the sweep's own already-loaded repo list, reused here to
+    /// `archived` is the sweep's single read of the archived rows, shared with
+    /// `reclaimDeletionQueue`, which wants the complementary half of the same
+    /// list. `repos` is the sweep's own already-loaded repo list, reused here to
     /// resolve each archived row's `repoID` to a `repo.path` without a second
     /// DB round trip; a row with no resolvable repo (deleted repo, no
     /// `repoID`) stamps `""` — fails toward the previous behavior rather than
@@ -272,10 +376,10 @@ public actor OrphanGC {
     /// `reconcile` always mutates, so dry-run planning recomputes the
     /// candidate list read-only instead.
     private func reconcileScratchpads(
-        repos: [Repo], dryRun: Bool, planned: inout [String], reaped: inout Int
+        repos: [Repo], archived: [Worktree], dryRun: Bool,
+        planned: inout [String], reaped: inout Int
     ) async {
         let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
-        let archived = (try? await db.worktrees.list(status: .archived)) ?? []
         let gone = archived
             .filter { !FileManager.default.fileExists(atPath: $0.path) }
             .map { (worktreePath: $0.path, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }

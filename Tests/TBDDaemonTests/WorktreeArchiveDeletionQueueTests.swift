@@ -87,6 +87,50 @@ struct WorktreeArchiveDeletionQueueTests {
         #expect(!registered.contains { $0.path == harness.worktreePath })
     }
 
+    @Test func theFallbackRemovalArmsItsOwnRaisedTimeout() async throws {
+        let harness = try await ArchiveHarness.make()
+        defer { harness.cleanUp() }
+
+        // The entire bug was a removal killed by a deadline, so dropping the
+        // `timeout:` argument at the fallback call site — or shrinking the
+        // constant — must go red. This gives the archive a `GitManager` whose
+        // INSTANCE deadline no real subprocess can meet: if the fallback leg
+        // stopped passing its own raised timeout, `git worktree remove` would
+        // be killed and the directory would survive.
+        //
+        // `runBoundedProcess` makes that discriminating rather than racy —
+        // its completion path compares real elapsed time against the armed
+        // deadline and reports `.timedOut` even when every armer was late, so
+        // a 1 ms deadline cannot accidentally pass.
+        let impatient = GitManager(subprocessTimeout: .milliseconds(1))
+
+        // Control: prove that deadline really is fatal, on a throwaway
+        // worktree of the same repo. Without this, a fallback that silently
+        // did nothing would look identical to one that succeeded.
+        let control = (harness.tempDir.path as NSString).appendingPathComponent("control-wt")
+        try await shell(
+            "git worktree add \(control) -b control-branch",
+            at: URL(fileURLWithPath: harness.repoPath))
+        await #expect(throws: GitTimeoutError.self) {
+            try await impatient.worktreeRemove(
+                repoPath: harness.repoPath, worktreePath: control)
+        }
+        #expect(FileManager.default.fileExists(atPath: control))
+
+        // Force the archive onto the fallback leg: occupy the queue-dir name
+        // with a regular file so `enqueue` cannot create `.deleting/`.
+        let pool = (harness.worktreePath as NSString).deletingLastPathComponent
+        let queueDir = WorktreeDeletionQueue().queueDir(forPool: pool)
+        try "not a directory".write(toFile: queueDir, atomically: true, encoding: .utf8)
+
+        let lifecycle = WorktreeLifecycle(
+            db: harness.db, git: impatient,
+            tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        try await lifecycle.archiveWorktree(worktreeID: harness.worktreeID)
+
+        #expect(!FileManager.default.fileExists(atPath: harness.worktreePath))
+    }
+
     @Test func onWorktreeRemovedNeverFiresWhenBothEnqueueAndFallbackFail() async throws {
         // The headline guarantee — the callback fires only when the directory
         // is genuinely gone — has no coverage unless BOTH removal paths are
@@ -144,6 +188,7 @@ private actor ObservedRemoval {
 /// `ArchiveScratchpadCleanupTests`'s database/repo/worktree construction.
 struct ArchiveHarness {
     let lifecycle: WorktreeLifecycle
+    let db: TBDDatabase
     let git: GitManager
     let repoPath: String
     let worktreePath: String
@@ -168,6 +213,7 @@ struct ArchiveHarness {
 
         return ArchiveHarness(
             lifecycle: lifecycle,
+            db: db,
             git: lifecycle.git,
             repoPath: repo.path,
             worktreePath: worktree.path,

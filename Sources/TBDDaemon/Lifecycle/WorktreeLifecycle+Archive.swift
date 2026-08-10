@@ -172,7 +172,12 @@ extension WorktreeLifecycle {
 
             // The directory no longer sits at the registered path, so git's
             // administrative entry is stale — drop it. A failure here is
-            // logged, not fatal: the next GC sweep prunes.
+            // logged, not fatal: the next GC sweep prunes, because
+            // `OrphanGC.pruneStaleRegistrations` looks for exactly this
+            // wreckage — an archived row whose directory is gone while git
+            // still lists a worktree at its path. Without that, a registration
+            // outliving its directory would be permanent, since revive's
+            // preflight refuses a path git still has registered.
             do {
                 try await git.worktreePrune(repoPath: repo.path)
             } catch {

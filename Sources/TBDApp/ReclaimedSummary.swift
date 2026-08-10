@@ -52,9 +52,9 @@ struct ReclaimedSummary {
     /// `.archivedWorktree` records rolled up into a single (count, bytes)
     /// pair, same shape and same reason as `scratchpadRollup`: these are
     /// directories the sweep reclaimed after an archive failed to remove
-    /// them (or drained from a pool's `.deleting/` queue), and like
-    /// scratchpads they aren't individually restorable — `OrphanGC.restore`
-    /// only accepts `.agentWorktree`. `nil` when there are none to summarize.
+    /// them, and like scratchpads they aren't individually restorable —
+    /// `OrphanGC.restore` only accepts `.agentWorktree`. `nil` when there are
+    /// none to summarize.
     var archivedWorktreeRollup: (count: Int, bytes: Int64)? {
         let archived = records.filter { $0.kind == .archivedWorktree }
         guard !archived.isEmpty else { return nil }

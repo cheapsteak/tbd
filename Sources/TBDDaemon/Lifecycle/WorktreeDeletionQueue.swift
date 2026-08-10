@@ -130,8 +130,23 @@ public struct WorktreeDeletionQueue: Sendable {
     /// including when it was already gone, so a repeated sweep is a no-op
     /// rather than a reported failure. A partially deleted entry is resumed on
     /// the next call.
+    ///
+    /// Refuses any path that is not inside a `.deleting/` directory. Entries
+    /// normally come from `enqueue` or `pending`, both of which can only
+    /// produce queue paths — but `QueuedDeletion.init` is public, so this is a
+    /// recursive delete of a caller-supplied path, and the anchor check is the
+    /// same defense `ScratchpadCollector.cleanUp` puts in front of its own
+    /// `removeItem`. Returning `false` (not `true`) keeps the failure visible:
+    /// nothing was reclaimed.
     @discardableResult
     public func drain(_ entry: QueuedDeletion) -> Bool {
+        guard (entry.path as NSString).pathComponents.contains(Self.dirName) else {
+            logger.error("""
+            deletionQueue: refusing to drain \(entry.path, privacy: .public) — \
+            not inside a \(Self.dirName, privacy: .public) queue directory
+            """)
+            return false
+        }
         guard FileManager.default.fileExists(atPath: entry.path) else { return true }
         do {
             try FileManager.default.removeItem(atPath: entry.path)

@@ -16,22 +16,28 @@ public struct InterruptedArchive: Sendable, Equatable {
     /// As reported by `git worktree list --porcelain`. A locked worktree is
     /// one the user pinned deliberately, and that outranks every other signal.
     public let locked: Bool
+    /// When the row was flipped to `.archived`, straight off `Worktree`.
+    /// `nil` for a row whose status was set by something other than the
+    /// archive transaction, which stamps this field and the status together.
+    public let archivedAt: Date?
 
     public init(
         worktreeID: UUID, path: String, repoPath: String?,
-        allowedPrefixes: [String], locked: Bool
+        allowedPrefixes: [String], locked: Bool, archivedAt: Date? = nil
     ) {
         self.worktreeID = worktreeID
         self.path = path
         self.repoPath = repoPath
         self.allowedPrefixes = allowedPrefixes
         self.locked = locked
+        self.archivedAt = archivedAt
     }
 }
 
 public enum DeletionQueueDecision: Sendable, Equatable {
-    /// `reason` is one of `"locked"`, `"not-tbd-prefix"`, `"not-linked"`,
-    /// `"no-repo"`, `"live-cwd"`. Each is a spec invariant with its own test.
+    /// `reason` is one of `"locked"`, `"grace"`, `"not-tbd-prefix"`,
+    /// `"not-linked"`, `"no-repo"`, `"live-cwd"`. Each is a spec invariant
+    /// with its own test.
     case keep(reason: String)
     case reap
 }
@@ -52,10 +58,18 @@ public enum DeletionQueueDecision: Sendable, Equatable {
 public struct DeletionQueueCollector: Sendable {
     let git: GitManager
     let queue: WorktreeDeletionQueue
+    /// Date seam (`Tests/CLAUDE.md`, "Clock and date seams"): the grace gate
+    /// compares a persisted `Date`, so this is the date source, not a clock.
+    let now: @Sendable () -> Date
 
-    public init(git: GitManager, queue: WorktreeDeletionQueue = WorktreeDeletionQueue()) {
+    public init(
+        git: GitManager,
+        queue: WorktreeDeletionQueue = WorktreeDeletionQueue(),
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
         self.git = git
         self.queue = queue
+        self.now = now
     }
 
     // MARK: - Queued entries
@@ -112,19 +126,47 @@ public struct DeletionQueueCollector: Sendable {
             }
             return InterruptedArchive(
                 worktreeID: wt.id, path: wt.path,
-                repoPath: repoPath, allowedPrefixes: prefixes, locked: locked
+                repoPath: repoPath, allowedPrefixes: prefixes, locked: locked,
+                archivedAt: wt.archivedAt
             )
         }
     }
 
-    /// Gates a candidate in order: locked, then namespace (`allowedPrefixes`),
+    /// Gates a candidate in order: locked, then grace (the archive that owns
+    /// this row may still be running), then namespace (`allowedPrefixes`),
     /// then linkage (proof the directory is really this repo's worktree),
     /// then live-cwd. Each check short-circuits the rest, and every
     /// direction favors keeping.
+    ///
+    /// `locked` and `grace` come first because they are pure row/listing data
+    /// and answer "is this directory anyone else's business right now?" — no
+    /// point proving provenance for a directory we may not touch either way.
+    ///
+    /// `graceSeconds` is the sweep's `config.gcGraceSeconds`, the same knob
+    /// `AgentWorktreeCollector.decide` gates on. Archiving flips the row to
+    /// `.archived` in phase 1 and only renames the directory in phase 2,
+    /// after an archive hook that may run for a minute — so between those two
+    /// points a *healthy* archive presents exactly this collector's candidate
+    /// shape, and reaping it would rename the directory out from under the
+    /// running hook. `repo.remove`'s cascade puts many such archives in
+    /// flight at once. Waiting costs nothing: a genuinely interrupted archive
+    /// is reclaimed by the next hourly sweep instead of this one.
     public func decide(
-        _ candidate: InterruptedArchive, liveCWDs: [String]
+        _ candidate: InterruptedArchive, liveCWDs: [String], graceSeconds: Int
     ) async -> DeletionQueueDecision {
         if candidate.locked { return .keep(reason: "locked") }
+
+        // A row with no `archivedAt` is NOT held. Both archive entry points
+        // (`WorktreeStore.archive`, reached from `worktree.archive` and from
+        // `scratch.archive`) stamp the timestamp in the same transaction that
+        // sets the status, so an unstamped archived row cannot be an archive
+        // that is running right now — holding it would just make pre-stamp
+        // leftovers permanently unreclaimable, which is the state this
+        // collector exists to end.
+        if let archivedAt = candidate.archivedAt,
+           now().timeIntervalSince(archivedAt) < Double(graceSeconds) {
+            return .keep(reason: "grace")
+        }
 
         guard candidate.allowedPrefixes.contains(where: { isUnder(candidate.path, prefix: $0) })
         else {
@@ -140,10 +182,24 @@ public struct DeletionQueueCollector: Sendable {
                 return .keep(reason: "not-linked")
             }
         } else {
-            // A scratch space is not a linked worktree of any repo, so linkage
-            // cannot apply and the namespace is the available proof. The
-            // prefix check above already established it; a repoless candidate
-            // reaching here with a non-scratch prefix is unprovable.
+            // A repoless candidate is a scratch space, and a scratch space is
+            // NEVER reclaimable — including the ordinary case of one sitting
+            // squarely inside `~/tbd/scratch/`, which is why this returns
+            // unconditionally rather than re-checking the namespace.
+            //
+            // `scratch.archive` deliberately leaves the folder on disk (it
+            // flips the row to `.archived` and moves nothing; only
+            // `scratch.delete` sends anything to Trash), and `scratch.revive`
+            // needs that folder to bring the space back. So "archived row
+            // whose directory exists" is the normal, supported, user-chosen
+            // state of an archived scratch space — not the signature of an
+            // interrupted archive. Reaping on that signature would delete
+            // every archived scratch space on the machine.
+            //
+            // This is not over-conservatism to be tightened later: there is
+            // no repo to prove linkage against, and the namespace proves only
+            // that TBD owns the directory, never that the user is done with
+            // it.
             return .keep(reason: "no-repo")
         }
 

@@ -77,7 +77,16 @@ needs.
    survives, so revive still works.
 4. Fire `onWorktreeRemoved`. This callback is finally truthful; today it fires
    even when removal failed, which is why its consumer had to re-check.
-5. Detached, with no deadline: drain the queued entry.
+5. Drain the queued entry inline, with no deadline attached.
+
+Step 5 runs inline rather than in a task of its own because
+`completeArchiveWorktree` is already the detached half of archiving: every
+production caller — `worktree.archive`, `repo.remove`'s cascade, auto-archive
+on merge — invokes it from a detached task, so a drain that takes minutes
+blocks nothing an RPC waits on. Detaching again would only add a second
+untracked task, and it would break the one caller that wants the wait: the
+synchronous `archiveWorktree(worktreeID:force:)` wrapper, where archive
+completion is meant to mean the bytes are gone.
 
 This also unblocks revive. Today a surviving directory trips the
 `worktreePathAlreadyExists` preflight, so a failed archive poisons the path
@@ -130,10 +139,29 @@ direction favors keeping. It produces two kinds of work:
   reclaimable; TBD put it there.
 - **Interrupted archives** — worktree rows with status `.archived` whose
   directory still exists, subject to the provenance gate below.
+- **Stale registrations** — the mirror image: an archived row whose directory
+  is gone while `git worktree list` still names it. That is what a prune
+  failure (or a daemon killed between the rename and the prune) leaves behind,
+  and it is the failure class this design exists to remove, so the sweep
+  prunes the owning repo rather than letting the registration outlive its
+  directory forever. Left in place it is permanent: revive's preflight refuses
+  a path git still has registered.
 
 An interrupted archive is reclaimed by the same mechanism as a fresh one:
-enqueue, prune, drain. Adoption is finishing an archive that stopped early, not
-a second way to delete things.
+measure, enqueue, prune, drain. Adoption is finishing an archive that stopped
+early, not a second way to delete things. The measurement is `du -sk` before
+the rename, exactly as the other two collectors measure before their removal,
+so the reclaim shows up in the History UI as the gigabytes it actually was
+rather than as zero.
+
+Which pools get drained is a wider question than which directories may be
+*reclaimed*. An adopted worktree can live anywhere, and archiving it puts a
+`.deleting/` queue beside it, outside every layout prefix; a queue left there
+by an interrupted drain would otherwise sit in the user's own directory
+forever. So the sweep enumerates the layout prefixes, the scratch dir, and the
+parent directory of every archived row's path. Draining needs no provenance
+gate — a `.deleting/<uuid>` entry is there because TBD renamed it there — so
+widening the pool list costs nothing in safety.
 
 `OrphanGC.sweep` gains a section for this collector, inheriting its hourly
 cadence, its `gcEnabled` master switch, and its `ReapRecord` persistence, which
@@ -157,15 +185,42 @@ anywhere on disk. Reclaiming an interrupted archive therefore requires all of:
 - For a repo-backed worktree, `git.isLinkedWorktree(candidatePath:repoPath:)`
   passes — the directory's `.git` file resolves into `<repo>/.git/worktrees/`,
   proving it is a linked worktree of the repo the row names.
-- For a scratch space, `repoID` is nil and the path is under `~/tbd/scratch/`.
-  Scratch spaces are not linked worktrees of any repo, so linkage cannot apply;
-  the namespace is TBD's own and is the available proof.
+- The row names a repo. A repoless candidate — a scratch space, `repoID` nil —
+  is **never** reclaimed, whatever namespace it sits in. Archiving a scratch
+  space deliberately leaves its folder on disk (`scratch.archive` flips the row
+  to `.archived` and moves nothing; unlike `scratch.delete`, nothing goes to
+  Trash), and `scratch.revive` needs that folder to bring the space back. So
+  "archived row whose directory exists" is the *normal, supported* state of an
+  archived scratch space, not the signature of an interrupted archive, and a
+  sweep that reclaimed on that signature would delete every archived scratch
+  space on the machine. Linkage cannot substitute for the row either: a scratch
+  space is not a linked worktree of any repo, so there is nothing to prove
+  against.
 - The existing `locked` and live-cwd (`lsof`) gates pass, so a directory a live
   process is sitting in is never reclaimed.
 
 Anything failing the gate is logged and skipped permanently. Measuring the
 directories present when this was written, every repo-backed one satisfied the
 linkage check.
+
+### Not stealing a directory from a running archive
+
+Archiving flips the row to `.archived` in phase 1 and only reaches the rename
+in phase 2, which can spend a minute in the archive hook first. In that window
+an archive that is proceeding normally is indistinguishable, by row and
+directory alone, from one that was interrupted — and a sweep landing there
+would rename the directory out from under the running hook. `repo.remove`'s
+cascade puts many such archives in flight at once, so the window is not
+theoretical.
+
+Interrupted archives therefore also pass an age gate on the row's persisted
+`archivedAt`: a candidate archived within the sweep's grace window
+(`gcGraceSeconds`, the same knob `AgentWorktreeCollector` uses) is kept, with
+keep-reason `grace`. Nothing is lost by waiting — a genuinely interrupted
+archive is reclaimed by the next hourly sweep instead of this one. A row with
+no `archivedAt` is not held: both archive paths stamp it in the same
+transaction that sets the status, so an unstamped row cannot be an archive
+that is running right now.
 
 `forgetWorktree` needs no special handling. It hard-deletes the row rather than
 flipping it to `.archived`, so a directory the user deliberately kept can never
@@ -176,7 +231,8 @@ match "archived row whose directory exists."
 - Enqueue fails (`EXDEV`, permissions) — fall back to `git worktree remove`
   with a raised timeout, and log at error level. The row stays archived; the
   sweep retries later.
-- Prune fails — log; the next sweep prunes.
+- Prune fails — log; the next sweep prunes, because it looks for archived rows
+  whose directory is gone and whose path git still lists.
 - Drain interrupted — the entry stays in `.deleting/`; the next sweep resumes.
 - Provenance gate fails — log once per path; never reclaim.
 
@@ -209,17 +265,33 @@ resumable after interruption; `pending` enumerates what a previous run left.
 `DeletionQueueCollector`: one test per keep-reason, matching the existing
 collectors' style of a test per spec invariant — a worktree outside every
 TBD-owned prefix, a repo-backed directory failing linkage, a locked worktree, a
-directory with a live cwd. Plus the reclaim case, and a test that a forgotten
-worktree's directory is never a candidate.
+directory with a live cwd, an archived scratch space whose folder must survive,
+and a row archived inside the grace window (with its counterpart old enough to
+pass). Plus the reclaim case, a test that a forgotten worktree's directory is
+never a candidate, and a symlink planted inside a pool pointing outside it —
+the gate's authorization boundary, where a path that merely *reads* as
+TBD-owned must still be refused.
+
+Lock state is derived, not asserted by hand: one test locks a real worktree
+with `git worktree lock` and expects the candidate to read as locked, and one
+points a repo at a path git cannot list and expects that repo's candidates to
+read as locked too, since a listing failure must never read as "nothing is
+locked".
 
 Archive path: enqueue is used on the success path; the `git worktree remove`
 fallback is used when enqueue throws; `onWorktreeRemoved` fires only once the
-path is actually gone.
+path is actually gone; the fallback's raised timeout is really the one armed —
+asserted by giving the `GitManager` an instance deadline so short that a
+removal which fell back to it could not possibly complete.
 
 Integration: archive a worktree and assert the pool slot is empty, `.deleting/`
 drains, and `git worktree list` no longer registers it. Then assert an
 interrupted archive — a directory restored into a pool slot under an archived
-row — is reclaimed by one sweep.
+row — is reclaimed by one sweep, with a non-zero byte count on its reap record.
+Assert too that the inverse — a registration whose directory is gone — is
+pruned by one sweep and that the worktree revives afterwards, and that a
+`.deleting/` entry beside an adopted worktree, outside every layout prefix, is
+drained.
 
 Tests run under `scripts/test.sh` so `TBD_HOME` and the host stores stay
 fenced. Any retry or poll takes an injected clock, per CLAUDE.md.
@@ -245,8 +317,10 @@ indistinguishable from a real worktree without consulting the database, so
 every reconciliation decision has to be made on inference. The rename converts
 that inference into a fact about where the directory is.
 
-**A grace period before reclaiming bytes.** Hold interrupted archives in
+**A quarantine period before reclaiming bytes.** Hold queued entries in
 `.deleting/` for some days so a mistake could be noticed. Rejected because
 archiving already promises the directory will be deleted; content that survived
-did so only because of this bug, and a grace period would defer the disk
-reclamation that motivates the work.
+did so only because of this bug, and quarantine would defer the disk
+reclamation that motivates the work. This is a different question from the age
+gate above: that one refuses to touch a directory whose archive may still be
+running, and holds nothing back once the archive is provably over.

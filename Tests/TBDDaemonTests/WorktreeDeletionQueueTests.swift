@@ -146,4 +146,18 @@ struct WorktreeDeletionQueueTests {
         #expect(queue.drain(entry) == true)
         #expect(queue.pending(pool: pool).isEmpty)
     }
+
+    @Test func drainRefusesAPathOutsideAQueueDirectory() throws {
+        let (tmp, _, wt) = try makePool()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // `QueuedDeletion.init` is public and `drain` is a recursive delete of
+        // whatever path it is handed, so it carries an anchor check the same
+        // way `ScratchpadCollector.cleanUp` does before its own `removeItem`.
+        // Here the "entry" names a live worktree directory rather than
+        // anything TBD renamed into `.deleting/`.
+        let queue = WorktreeDeletionQueue()
+        #expect(queue.drain(QueuedDeletion(path: wt, originalPath: wt)) == false)
+        #expect(FileManager.default.fileExists(atPath: wt + "/file.txt"))
+    }
 }
