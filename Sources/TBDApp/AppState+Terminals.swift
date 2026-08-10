@@ -163,7 +163,7 @@ extension AppState {
            let activeID = activeTabTerminalID(worktreeID: worktreeID),
            activeID != terminal.id,
            self.terminal(id: activeID, in: worktreeID)?.label == Self.preSessionTerminalLabel,
-           let newIdx = tabs[worktreeID]?.firstIndex(where: { $0.id == terminal.id }) {
+           let newIdx = tabIndexRepresentingTerminal(terminal.id, worktreeID: worktreeID) {
             // The daemon already persisted the primary as the active tab
             // (setActiveTabID in spawnPrimaryTerminals) — only the in-memory
             // index needs to move, so skip setActiveTab's re-persist RPC.
@@ -183,6 +183,26 @@ extension AppState {
             Task { [weak self] in
                 await self?.refreshStoredTabOrder(worktreeID: worktreeID)
             }
+        }
+    }
+
+    /// Merge a terminal returned by an explicit creation action and select
+    /// whichever root tab currently represents it, including a split root.
+    func mergeCreatedTerminalAndSelect(_ terminal: Terminal) {
+        mergeCreatedTerminal(terminal)
+        if let index = tabIndexRepresentingTerminal(
+            terminal.id, worktreeID: terminal.worktreeID
+        ) {
+            setActiveTab(worktreeID: terminal.worktreeID, tabIndex: index)
+        }
+    }
+
+    private func tabIndexRepresentingTerminal(
+        _ terminalID: UUID, worktreeID: UUID
+    ) -> Int? {
+        tabs[worktreeID]?.firstIndex { tab in
+            (layouts[tab.id] ?? .pane(tab.content))
+                .allTerminalIDs().contains(terminalID)
         }
     }
 

@@ -114,6 +114,37 @@ struct PreSessionAppStateTests {
         }
     }
 
+    /// Tier 1: deterministic in-process state only.
+    @Test func mergeCreatedTerminalAndSelectPreservesExplicitCreationSelection() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let existing = makeTerminal(
+                worktreeID: worktreeID, label: "shell", kind: .shell)
+            let terminalID = UUID()
+            let eventSnapshot = makeTerminal(
+                id: terminalID, worktreeID: worktreeID,
+                label: "Starting Claude Code", kind: .claude)
+            let directSnapshot = makeTerminal(
+                id: terminalID, worktreeID: worktreeID,
+                label: "Claude Code", kind: .claude)
+            state.terminals[worktreeID] = [existing]
+            state.tabs[worktreeID] = [
+                Tab(
+                    id: existing.id,
+                    content: .terminal(terminalID: existing.id),
+                    label: nil),
+            ]
+            state.activeTabIndices[worktreeID] = 0
+
+            state.mergeCreatedTerminal(eventSnapshot)
+            state.mergeCreatedTerminalAndSelect(directSnapshot)
+
+            #expect(state.terminals[worktreeID] == [existing, directSnapshot])
+            #expect(state.tabs[worktreeID]?.map(\.id) == [existing.id, terminalID])
+            #expect(state.explicitActiveTabID(worktreeID: worktreeID) == terminalID)
+        }
+    }
+
     @Test func terminalCreatedDeltaForKnownTerminalIsSynchronousNoOp() {
         withAppState { state in
             let worktreeID = UUID()
@@ -231,6 +262,36 @@ struct PreSessionAppStateTests {
 
             #expect(state.activeTabIndices[worktreeID] == 1)
             #expect(state.tabs[worktreeID]?[1].id == claude.id)
+        }
+    }
+
+    /// Tier 1: deterministic in-process state only.
+    @Test func selectionSwitchesToSplitRootContainingNewPrimaryTerminal() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            let splitRoot = makeTerminal(
+                worktreeID: worktreeID, label: "shell", kind: .shell)
+            let claude = makeTerminal(
+                worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            state.terminals[worktreeID]?.append(splitRoot)
+            state.tabs[worktreeID]?.append(Tab(
+                id: splitRoot.id,
+                content: .terminal(terminalID: splitRoot.id),
+                label: nil))
+            state.layouts[splitRoot.id] = .split(
+                id: UUID(), direction: .horizontal,
+                children: [
+                    .pane(.terminal(terminalID: splitRoot.id)),
+                    .pane(.terminal(terminalID: claude.id)),
+                ],
+                ratios: [0.5, 0.5])
+            state.activeTabIndices[worktreeID] = 0
+
+            state.mergeCreatedTerminal(claude)
+
+            #expect(state.tabs[worktreeID]?.map(\.id) == [pre.id, splitRoot.id])
+            #expect(state.explicitActiveTabID(worktreeID: worktreeID) == splitRoot.id)
         }
     }
 
