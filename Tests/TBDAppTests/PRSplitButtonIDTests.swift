@@ -146,6 +146,58 @@ struct PRSplitButtonIDTests {
                 != Self.key(worktreeID: wt, bindings: [before, other]))
     }
 
+    // MARK: - Separator forgery
+
+    /// The key joins fields with `-` and bindings with `|`, and both characters
+    /// are legal in the values it interpolates — git permits `|` in a branch
+    /// name. Unescaped, one binding could spell out what two bindings render,
+    /// and because AppKit materializes the menu ONCE per key the collision
+    /// freezes the menu on the stale set for as long as the two agree.
+    @Test("a branch name containing the binding separator cannot forge another binding's key")
+    func branchCannotForgeARecordSeparator() {
+        let wt = UUID()
+        // One binding whose branch spells out a second record, versus the two
+        // records it imitates.
+        let forged = Self.binding(
+            412, .mergeable, worktreeID: wt,
+            headBranch: "x|413-mergeable-https://github.com/acme/acme-prod/pull/413-nil-false-nil-nil")
+        let real = [
+            Self.binding(412, .mergeable, worktreeID: wt, headBranch: "x"),
+            Self.binding(413, .mergeable, worktreeID: wt, headBranch: nil)
+        ]
+        #expect(Self.key(worktreeID: wt, bindings: [forged])
+                != Self.key(worktreeID: wt, bindings: real))
+    }
+
+    @Test("a field separator inside a reason cannot forge the next field")
+    func reasonCannotForgeAFieldSeparator() {
+        let wt = UUID()
+        let a = Self.binding(412, .checksFailed, worktreeID: wt,
+                             reason: "1 check failing-main", headBranch: nil)
+        let b = Self.binding(412, .checksFailed, worktreeID: wt,
+                             reason: "1 check failing", headBranch: "main")
+        #expect(Self.key(worktreeID: wt, bindings: [a]) != Self.key(worktreeID: wt, bindings: [b]))
+    }
+
+    /// A literal `"nil"` must not read as an absent value either — the escape
+    /// scheme's `\0` sentinel is unreachable from escaping any real string.
+    @Test("a literal \"nil\" reason is distinct from an absent one")
+    func literalNilIsDistinctFromAbsent() {
+        let wt = UUID()
+        let literal = Self.binding(412, .mergeable, worktreeID: wt, reason: "nil")
+        let absent = Self.binding(412, .mergeable, worktreeID: wt, reason: nil)
+        #expect(Self.key(worktreeID: wt, bindings: [literal])
+                != Self.key(worktreeID: wt, bindings: [absent]))
+    }
+
+    @Test("escaping is injective, so distinct field values stay distinct")
+    func escapingIsInjective() {
+        let values: [String?] = [nil, "", "nil", "-", "|", "\\", "\\-", "\\|", "a-b", "a|b",
+                                 #"\0"#, "a\\-b", "a-\\b"]
+        let escaped = values.map { PRButtonLabel.escapedIDField($0) }
+        #expect(Set(escaped).count == values.count)
+    }
+
     @Test("PRBinding field-count tripwire for prSplitButtonID")
     func prBindingFieldCountTripwire() {
         // If this fails, a PRBinding field was added. prSplitButtonID

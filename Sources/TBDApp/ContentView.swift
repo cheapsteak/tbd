@@ -155,27 +155,31 @@ struct ContentView: View {
                             bindings: bindings, armed: armed,
                             hibernateArmed: hibernateArmed, blocked: blocked)
 
-                        // Exactly one PR keeps the split button it has always
-                        // been: the label is the primary click (open the PR),
-                        // the chevron opens the menu. With several there is no
-                        // single PR a primary click could mean, so
-                        // `primaryAction:` is dropped and the whole button
-                        // opens the list. The two shapes are different `Menu`
-                        // initializers, so the branch is at toolbar-item level
-                        // — a conditional INSIDE the ControlGroup would risk
-                        // the NSMenuToolbarItem lowering the capsule depends on.
-                        if bindings.count == 1, let prURL = URL(string: bindings[0].url) {
+                        // Exactly one PR whose URL parses keeps the split button
+                        // it has always been: the label is the primary click
+                        // (open the PR), the chevron opens the menu. Otherwise
+                        // there is no single PR a primary click could mean — a
+                        // several-PR worktree, or a lone binding whose stored
+                        // URL will not parse — so `primaryAction:` is dropped
+                        // and the whole button opens the list. The two shapes
+                        // are different `Menu` initializers, so the branch is at
+                        // toolbar-item level: a conditional INSIDE the
+                        // ControlGroup would risk the NSMenuToolbarItem lowering
+                        // the capsule depends on.
+                        let primaryURL = Self.prPrimaryActionURL(bindings)
+                        if let primaryURL {
                             ToolbarItem(placement: .primaryAction) {
                                 ControlGroup {
                                     Menu {
                                         prSplitButtonMenu(
                                             worktreeID: worktreeID, bindings: bindings,
+                                            showsBindingRows: false,
                                             worktreeFound: worktree != nil, armed: armed,
                                             hibernateArmed: hibernateArmed, blocked: blocked)
                                     } label: {
                                         PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
                                     } primaryAction: {
-                                        appState.openPR(url: prURL, number: bindings[0].number, worktreeID: worktreeID)
+                                        appState.openPR(url: primaryURL, number: bindings[0].number, worktreeID: worktreeID)
                                     }
                                     // Keep "#123" neutral like the original plain Button (the
                                     // split button otherwise accent-tints it); the icon keeps
@@ -191,6 +195,7 @@ struct ContentView: View {
                                     Menu {
                                         prSplitButtonMenu(
                                             worktreeID: worktreeID, bindings: bindings,
+                                            showsBindingRows: true,
                                             worktreeFound: worktree != nil, armed: armed,
                                             hibernateArmed: hibernateArmed, blocked: blocked)
                                     } label: {
@@ -330,22 +335,40 @@ struct ContentView: View {
 
     // MARK: - PR split button
 
-    /// The split button's dropdown. With several PRs bound it opens with one
+    /// The URL a primary click on the split button should open, or `nil` when
+    /// the button has no single meaning and must open its menu instead.
+    ///
+    /// Exactly one binding whose stored URL parses is the only case that has
+    /// one. A lone binding with an unparseable URL used to fall into the
+    /// several-PR shape while the menu still gated its rows on `count > 1`, so
+    /// the label read `#412` and neither the click nor the menu offered that PR
+    /// anywhere — a dead control. It now routes through the menu shape, which
+    /// renders the PR as a (disabled) row, so the button never promises an
+    /// action it cannot perform.
+    ///
+    /// Static and pure so the branch can be exercised without a toolbar.
+    static func prPrimaryActionURL(_ bindings: [PRBinding]) -> URL? {
+        guard bindings.count == 1 else { return nil }
+        return URL(string: bindings[0].url)
+    }
+
+    /// The split button's dropdown. When `showsBindingRows` it opens with one
     /// row per binding (bind order, so a row never moves under the cursor as CI
     /// states change), a `Divider()`, then the auto-archive and auto-hibernate
-    /// toggles unchanged. With exactly one binding the rows are omitted — the
-    /// label already names that PR and the primary click opens it, so a single
-    /// row would be pure duplication.
+    /// toggles unchanged. The rows are omitted only when the label's own primary
+    /// click already opens the single bound PR, where a lone row would be pure
+    /// duplication — the caller decides via `prPrimaryActionURL`.
     @ViewBuilder
     private func prSplitButtonMenu(
         worktreeID: UUID,
         bindings: [PRBinding],
+        showsBindingRows: Bool,
         worktreeFound: Bool,
         armed: Bool,
         hibernateArmed: Bool,
         blocked: Bool
     ) -> some View {
-        if bindings.count > 1 {
+        if showsBindingRows && !bindings.isEmpty {
             ForEach(PRBindingPresentation.menuRows(bindings)) { row in
                 Button(row.title) {
                     guard let url = row.url else { return }
@@ -401,7 +424,13 @@ struct ContentView: View {
         var clauses: [String] = []
         switch bindings.count {
         case 0: break
-        case 1: clauses.append("Open PR #\(bindings[0].number)")
+        case 1:
+            // "Open" is a promise about the primary click, so it is made only
+            // when there IS one — a lone binding whose URL will not parse gets
+            // named, not offered.
+            clauses.append(prPrimaryActionURL(bindings) == nil
+                           ? "PR #\(bindings[0].number)"
+                           : "Open PR #\(bindings[0].number)")
         default: clauses.append("\(bindings.count) pull requests")
         }
         if armed && blocked {
@@ -889,15 +918,38 @@ struct PRButtonLabel: View {
     ) -> String {
         let rendered = bindings.map { binding in
             let status = binding.status
-            return "\(binding.number)-\(status?.state.rawValue ?? "nil")-\(binding.url)"
+            return "\(binding.number)-\(status?.state.rawValue ?? "nil")-\(escapedIDField(binding.url))"
                 + "-\(status?.mergeQueuePosition.map(String.init) ?? "nil")"
                 + "-\(binding.detached)"
-                + "-\(status?.reason ?? "nil")"
-                + "-\(binding.headBranch ?? "nil")"
+                + "-\(escapedIDField(status?.reason))"
+                + "-\(escapedIDField(binding.headBranch))"
         }.joined(separator: "|")
         return "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
             + "-[\(rendered)]"
             + "-\(colorScheme)"
+    }
+
+    /// Escapes one free-text component of `prSplitButtonID` so no value can
+    /// forge the key's own separators.
+    ///
+    /// The key joins fields with `-` and bindings with `|`, and both characters
+    /// are legal in the values it interpolates: git permits `|` in a branch
+    /// name, and a PR status `reason` is whatever GitHub wrote. Unescaped, two
+    /// different binding sets could render the same key — and because AppKit
+    /// materializes the split button's menu ONCE per key, the collision is not
+    /// cosmetic: the menu would stay frozen on the previous set for as long as
+    /// the two agree.
+    ///
+    /// Escaping `\` first makes the mapping injective, so distinct inputs stay
+    /// distinct. `nil` maps to `\0`, which escaping can never produce (its only
+    /// outputs are `\\`, `\-` and `\|`), so a literal `"nil"` reason no longer
+    /// reads as an absent one either.
+    static func escapedIDField(_ value: String?) -> String {
+        guard let value else { return #"\0"# }
+        return value
+            .replacingOccurrences(of: #"\"#, with: #"\\"#)
+            .replacingOccurrences(of: "-", with: #"\-"#)
+            .replacingOccurrences(of: "|", with: #"\|"#)
     }
 
     /// Aspect-fits `size` into `slot`, centered. Used to draw the archivebox

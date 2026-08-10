@@ -864,7 +864,24 @@ public struct PRBindingsParams: Codable, Sendable {
 public struct PRBindingsResult: Codable, Sendable {
     /// Live bindings only — tombstoned ones are not reported.
     public let bindings: [PRBinding]
-    public init(bindings: [PRBinding]) { self.bindings = bindings }
+    /// How many of this worktree's bindings are tombstoned (detached).
+    ///
+    /// This is what separates the two ways `bindings` comes back empty. The app
+    /// falls back to the worktree's cached single `prStatus` when a worktree has
+    /// no bindings, because a worktree whose repo `gh` cannot resolve never gets
+    /// one and would otherwise lose its PR control entirely. But a user who ran
+    /// `tbd pr detach` on their last PR reaches the same empty list, and there
+    /// the fallback resurrects exactly what they asked to remove. A non-zero
+    /// count says the emptiness is a decision, not an absence.
+    ///
+    /// Optional so a response from an older daemon still decodes; `nil` reads as
+    /// "unknown", which every caller treats as zero — the pre-existing
+    /// behaviour.
+    public let detachedCount: Int?
+    public init(bindings: [PRBinding], detachedCount: Int? = nil) {
+        self.bindings = bindings
+        self.detachedCount = detachedCount
+    }
 }
 
 /// Identify a PR either by full URL or by number within the worktree's own repo.

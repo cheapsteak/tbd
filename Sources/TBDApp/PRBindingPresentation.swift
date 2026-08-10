@@ -38,6 +38,15 @@ enum PRBindingPresentation {
     /// successful poll. Without this, a user's last-known PR state simply
     /// disappears from the toolbar and the sidebar.
     ///
+    /// `detachedCount` is what keeps that fallback from overriding the user.
+    /// `tbd pr detach` tombstones a binding rather than deleting it, and
+    /// tombstones are excluded from `bindings` — so detaching a worktree's last
+    /// PR lands in the same empty list as never having bound one, while nothing
+    /// ever clears `Worktree.prStatus`. Without this the toolbar, sidebar dot
+    /// and status-bar chip would keep showing the detached PR forever. A
+    /// non-zero count means the user has expressed an opinion about this
+    /// worktree's PRs, and it outranks a stale cached status.
+    ///
     /// Neither bindings nor a status → empty, and no control renders.
     ///
     /// The synthetic binding is built to be VALUE-STABLE across body
@@ -53,9 +62,11 @@ enum PRBindingPresentation {
     static func effectiveBindings(
         _ bindings: [PRBinding],
         legacyStatus: PRStatus?,
-        worktreeID: UUID
+        worktreeID: UUID,
+        detachedCount: Int = 0
     ) -> [PRBinding] {
         guard bindings.isEmpty else { return bindings }
+        guard detachedCount == 0 else { return [] }
         guard let status = legacyStatus else { return [] }
         return [PRBinding(
             id: worktreeID,
@@ -121,5 +132,23 @@ enum PRBindingPresentation {
                 state: binding.status?.state
             )
         }
+    }
+
+    /// Tooltip for the status bar's `+N` overflow chip.
+    ///
+    /// The chip is labelled by how many PRs did NOT fit, but its menu lists
+    /// EVERY binding — the same rows the toolbar dropdown shows, deliberately,
+    /// so the two surfaces cannot describe one worktree differently. The wording
+    /// therefore has to lead with the whole list and mention the overflow count
+    /// second; "\(overflow) more pull requests" described a menu this one has
+    /// never shown.
+    static func overflowChipTooltip(total: Int, overflow: Int) -> String {
+        "Show all \(total) pull request\(total == 1 ? "" : "s") (\(overflow) not shown here)"
+    }
+
+    /// Accessibility label for the `+N` overflow chip. Same correction as
+    /// `overflowChipTooltip`: the control opens the full list, not the remainder.
+    static func overflowChipAccessibilityLabel(total: Int, overflow: Int) -> String {
+        "Show all \(total) pull request\(total == 1 ? "" : "s"), \(overflow) not shown here"
     }
 }

@@ -14,6 +14,81 @@ struct PRBindingPresentationTests {
                          source: .hook)
     }
 
+    private func binding(_ n: Int, url: String) -> PRBinding {
+        PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                  number: n, url: url,
+                  status: PRStatus(number: n, url: url, state: .mergeable),
+                  source: .hook)
+    }
+
+    // MARK: - The `+N` overflow chip's wording
+
+    /// The chip is labelled by how many PRs did NOT fit, but its menu lists
+    /// EVERY binding — deliberately, so the status bar and the toolbar dropdown
+    /// cannot describe one worktree differently. The wording has to match the
+    /// menu, not the label.
+    @Test("the overflow chip's wording describes the full list it opens")
+    func overflowWordingNamesTheWholeList() {
+        let tooltip = PRBindingPresentation.overflowChipTooltip(total: 7, overflow: 3)
+        #expect(tooltip.contains("all 7 pull requests"))
+        #expect(tooltip.contains("3 not shown here"))
+        // The old wording claimed the menu held only the remainder.
+        #expect(tooltip != "3 more pull requests")
+
+        let label = PRBindingPresentation.overflowChipAccessibilityLabel(total: 7, overflow: 3)
+        #expect(label.contains("all 7 pull requests"))
+        #expect(label != "3 more pull requests")
+    }
+
+    @Test("the overflow wording singularises a one-PR total")
+    func overflowWordingSingular() {
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 1, overflow: 1)
+                    .contains("all 1 pull request ("))
+    }
+
+    // MARK: - The toolbar's primary-action branch
+
+    /// A lone binding with an unparseable URL used to fall into the several-PR
+    /// shape while the menu still gated its rows on `count > 1` — the label read
+    /// `#412` and nothing anywhere offered that PR. It now has no primary
+    /// action, which routes it through the menu shape and drops the "Open"
+    /// promise from the tooltip.
+    @Test("one binding with a usable url gets a primary action")
+    func primaryActionForOneUsableURL() {
+        let bindings = [binding(412, url: "https://github.com/acme/acme-prod/pull/412")]
+        #expect(ContentView.prPrimaryActionURL(bindings)?.absoluteString
+                    == "https://github.com/acme/acme-prod/pull/412")
+        #expect(ContentView.prSplitButtonHelp(
+            bindings: bindings, armed: false, hibernateArmed: false, blocked: false)
+            .hasPrefix("Open PR #412"))
+    }
+
+    /// `URL(string:)` is lenient — it percent-encodes almost anything — so the
+    /// reachable failure is an EMPTY url string, which is what a legacy
+    /// `PRStatus` lifted by `effectiveBindings` carries when the daemon never
+    /// recorded one.
+    @Test("one binding with an unparseable url gets no primary action and no Open promise")
+    func noPrimaryActionForUnparseableURL() {
+        let bindings = [binding(412, url: "")]
+        #expect(ContentView.prPrimaryActionURL(bindings) == nil)
+        let help = ContentView.prSplitButtonHelp(
+            bindings: bindings, armed: false, hibernateArmed: false, blocked: false)
+        #expect(help.hasPrefix("PR #412"))
+        #expect(!help.contains("Open"))
+        // It still renders as one PR — the fix changes the click target, not
+        // the label.
+        #expect(PRBindingPresentation.buttonLabel(bindings) == "#412")
+        // And the menu shape it now takes lists that PR as a row.
+        #expect(PRBindingPresentation.menuRows(bindings).map(\.number) == [412])
+    }
+
+    @Test("several bindings never get a primary action")
+    func noPrimaryActionForSeveral() {
+        let bindings = [binding(412, url: "https://github.com/acme/acme-prod/pull/412"),
+                        binding(413, url: "https://github.com/acme/acme-prod/pull/413")]
+        #expect(ContentView.prPrimaryActionURL(bindings) == nil)
+    }
+
     @Test("no bindings renders no control")
     func zero() {
         #expect(PRBindingPresentation.buttonLabel([]) == nil)

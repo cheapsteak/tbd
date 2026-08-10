@@ -132,6 +132,40 @@ struct PRBindingRPCTests {
         #expect(try await harness.bindings().bindings.isEmpty)
     }
 
+    /// The app cannot otherwise tell "nothing is bound" from "the user unbound
+    /// everything", and the two need opposite treatment: the first keeps the
+    /// worktree's cached single `prStatus` on screen (the offline-`gh` case),
+    /// the second must drop it.
+    @Test("pr.bindings reports how many bindings are tombstoned")
+    func bindingsReportDetachedCount() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        #expect(try await harness.bindings().detachedCount == 0)
+
+        _ = try await harness.attach(number: 412)
+        _ = try await harness.attach(number: 413)
+        var listed = try await harness.bindings()
+        #expect(listed.bindings.map(\.number) == [412, 413])
+        #expect(listed.detachedCount == 0)
+
+        #expect(try await harness.detach(number: 412))
+        listed = try await harness.bindings()
+        #expect(listed.bindings.map(\.number) == [413])
+        #expect(listed.detachedCount == 1)
+
+        // Detaching the LAST one is the regression case: an empty list with a
+        // non-zero count.
+        #expect(try await harness.detach(number: 413))
+        listed = try await harness.bindings()
+        #expect(listed.bindings.isEmpty)
+        #expect(listed.detachedCount == 2)
+
+        // A manual attach revives the tombstone, and the count follows.
+        _ = try await harness.attach(number: 413)
+        listed = try await harness.bindings()
+        #expect(listed.bindings.map(\.number) == [413])
+        #expect(listed.detachedCount == 1)
+    }
+
     @Test("pr.detach of an unbound PR reports false rather than erroring")
     func detachUnknown() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))

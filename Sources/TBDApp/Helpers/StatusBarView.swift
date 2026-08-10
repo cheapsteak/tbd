@@ -344,9 +344,13 @@ private struct PRChipOverflowMenu: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("\(overflow) more pull request\(overflow == 1 ? "" : "s")")
+        // The label counts what didn't fit; the menu lists everything. The
+        // wording says so — see `PRBindingPresentation.overflowChipTooltip`.
+        .help(PRBindingPresentation.overflowChipTooltip(
+            total: bindings.count, overflow: overflow))
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
-        .accessibilityLabel("\(overflow) more pull requests")
+        .accessibilityLabel(PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: bindings.count, overflow: overflow))
     }
 }
 

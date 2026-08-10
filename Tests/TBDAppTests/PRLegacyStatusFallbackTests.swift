@@ -83,6 +83,73 @@ struct PRLegacyStatusFallbackTests {
         #expect(PRBindingPresentation.buttonLabel(effective) == "2 PRs")
     }
 
+    // MARK: - Tombstones outrank the fallback
+
+    /// `tbd pr detach` tombstones rather than deletes, and tombstones are
+    /// excluded from `pr.bindings` — so detaching a worktree's LAST PR reaches
+    /// the same empty list as never having bound one, while nothing ever clears
+    /// `Worktree.prStatus`. Without the detached count, the fallback resurrects
+    /// exactly the PR the user removed, forever.
+    @Test("no bindings, a legacy status, and no tombstones: the fallback still renders")
+    func fallbackSurvivesWithoutTombstones() {
+        let wt = UUID()
+        let effective = PRBindingPresentation.effectiveBindings(
+            [], legacyStatus: status(99), worktreeID: wt, detachedCount: 0)
+        #expect(effective.map(\.number) == [99])
+    }
+
+    @Test("no bindings, a legacy status, but tombstones exist: nothing renders")
+    func tombstonesSuppressTheFallback() {
+        let wt = UUID()
+        let effective = PRBindingPresentation.effectiveBindings(
+            [], legacyStatus: status(412), worktreeID: wt, detachedCount: 1)
+        #expect(effective.isEmpty)
+        #expect(PRBindingPresentation.buttonLabel(effective) == nil)
+        #expect(PRBindingPresentation.iconBinding(effective) == nil)
+    }
+
+    @Test("real bindings win regardless of the detached count")
+    func bindingsOutrankTombstones() {
+        let wt = UUID()
+        let live = [binding(412, .mergeable, worktreeID: wt)]
+        for detachedCount in [0, 1, 7] {
+            let effective = PRBindingPresentation.effectiveBindings(
+                live, legacyStatus: status(99), worktreeID: wt, detachedCount: detachedCount)
+            #expect(effective.map(\.number) == [412])
+        }
+    }
+
+    @Test("neither a binding nor a status: tombstones change nothing")
+    func neitherWithTombstones() {
+        let effective = PRBindingPresentation.effectiveBindings(
+            [], legacyStatus: nil, worktreeID: UUID(), detachedCount: 3)
+        #expect(effective.isEmpty)
+    }
+
+    @MainActor
+    @Test("AppState drops the control once the last PR is detached")
+    func appStateHonoursDetach() {
+        withAppState { state in
+            let wt = UUID()
+            // A bound worktree: the daemon also caches its worst-of status.
+            state.prStatuses[wt] = status(412)
+            state.prBindings[wt] = [binding(412, .mergeable, worktreeID: wt)]
+            #expect(state.effectivePRBindings(worktreeID: wt).map(\.number) == [412])
+
+            // `tbd pr detach 412`: the live list empties and one tombstone
+            // appears. `prStatuses` is untouched — nothing clears that column.
+            state.prBindings.removeValue(forKey: wt)
+            state.prDetachedCounts[wt] = 1
+            #expect(state.effectivePRBindings(worktreeID: wt).isEmpty)
+
+            // `tbd pr attach 412` revives it: the tombstone clears and the
+            // control comes back.
+            state.prBindings[wt] = [binding(412, .mergeable, worktreeID: wt)]
+            state.prDetachedCounts.removeValue(forKey: wt)
+            #expect(state.effectivePRBindings(worktreeID: wt).map(\.number) == [412])
+        }
+    }
+
     @Test("neither: no control")
     func neither() {
         let effective = PRBindingPresentation.effectiveBindings([], legacyStatus: nil, worktreeID: UUID())

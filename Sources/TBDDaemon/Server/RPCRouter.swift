@@ -850,8 +850,15 @@ public final class RPCRouter: Sendable {
 
     private func handlePRBindings(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRBindingsParams.self, from: paramsData)
-        let bindings = try await db.prBindings.list(worktreeID: params.worktreeID)
-        return try RPCResponse(result: PRBindingsResult(bindings: bindings))
+        // Read live and tombstoned rows in ONE query and partition here, so the
+        // reported counts cannot disagree with each other the way two separate
+        // SELECTs racing a concurrent detach could. `detachedCount` is what lets
+        // the app tell "nothing is bound" from "the user unbound everything" —
+        // see `PRBindingsResult.detachedCount`.
+        let all = try await db.prBindings.list(worktreeID: params.worktreeID, includeDetached: true)
+        let live = all.filter { !$0.detached }
+        return try RPCResponse(result: PRBindingsResult(
+            bindings: live, detachedCount: all.count - live.count))
     }
 
     private func handlePRAttach(_ paramsData: Data) async throws -> RPCResponse {
