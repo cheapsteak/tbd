@@ -266,8 +266,12 @@ and become a contract that migration and future change must respect.
   *This story splits along the Built/Enabled line. Holding is **Built** for the desks TBD
   runs (design §11). For the wake program it is **Enabled** — the per-profile usage and
   rate-limit facts the daemon already holds must be exposed on a public, machine-readable
-  surface so a program can hold on its own. That surface does not exist today; it is the
-  first concrete API request the Enabled conformance test has produced.*
+  surface so a program can hold on its own. That surface is `tbd profile list --json`: it
+  carries each profile's usage buckets with their provenance — when the numbers were last
+  successfully fetched, and how the last attempt classified — under a top-level
+  `schemaVersion` whose promise is additive-only. Contract in
+  [`../capacity-facts.md`](../capacity-facts.md), which also pins the terminal-to-profile
+  join and what an absent `profileID` may not be resolved against.*
 - **P1-2 [A]** As an operator, I want *whether* to wake a parked session decided from cheap
   facts derived entirely outside it — branch, commits not yet on main, whether a pull request
   exists and its state, whether checks fail — so that the supervisor never has to hold the arc
