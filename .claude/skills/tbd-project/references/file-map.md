@@ -51,6 +51,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart
+- `ArchiveSafetyClassifier.swift` — provenance-based archive/cleanup preflight that distinguishes exact bootstrap runtime residue from reviewable or unique dirty work
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
 - `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`

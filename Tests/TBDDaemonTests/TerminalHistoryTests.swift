@@ -165,9 +165,14 @@ import Testing
         let captured = "agent output before archive\nsecond line\n"
         let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in captured })
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            archiveSafetyEvaluator: nil, worktreeRemover: { _, _ in })
 
-        _ = try await lifecycle.beginArchiveWorktree(worktreeID: fx.worktree.id)
+        // This fixture has no remote; force keeps this test focused on
+        // capture-before-teardown rather than archive publication eligibility.
+        let (worktree, repo) = try await lifecycle.beginArchiveWorktree(
+            worktreeID: fx.worktree.id, force: true)
+        try await lifecycle.completeArchiveWorktree(worktree: worktree, repo: repo, force: true)
 
         // Terminal row torn down, but the worktree row survives as archived.
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)

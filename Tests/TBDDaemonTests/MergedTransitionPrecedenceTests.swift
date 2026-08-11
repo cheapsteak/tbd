@@ -24,7 +24,11 @@ struct MergedTransitionPrecedenceTests {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            subscriptions: subs
+            subscriptions: subs,
+            archiveSafetyEvaluator: { _, _ in
+                ArchiveSafetyReport(findings: [], headIsPublished: true)
+            },
+            worktreeRemover: { _, _ in }
         )
         let archive = AutoArchiveOnMergeCoordinator(
             db: db, lifecycle: lifecycle, subscriptions: subs,

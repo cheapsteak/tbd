@@ -177,6 +177,10 @@ public struct AgentWorktreeCollector: Sendable {
             logger.debug("gc: kept \(c.path, privacy: .public) — re-check live-cwd")
             return nil
         }
+        guard let beforeStatus = try? await git.worktreeStatusEntries(worktreePath: c.path) else {
+            logger.debug("gc: kept \(c.path, privacy: .public) — status unavailable")
+            return nil
+        }
 
         let name = (c.path as NSString).lastPathComponent
         let ref: String?
@@ -191,8 +195,33 @@ public struct AgentWorktreeCollector: Sendable {
             return nil
         }
 
+        // Snapshotting uses a scratch index, so any status change here came
+        // from another actor. Recheck registration/lock/HEAD, liveness, and
+        // byte-visible status after the snapshot and immediately before rm.
+        guard let afterEntries = try? await git.worktreeListDetailed(repoPath: c.repoPath) else {
+            return nil
+        }
+        let afterByPath = Dictionary(
+            afterEntries.map { (Self.canon($0.path), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        guard let afterEntry = afterByPath[c.path], !afterEntry.locked,
+              afterEntry.headSHA == c.headSHA,
+              let afterLive = await freshLiveCWDs(),
+              !Self.liveCWDsContain(afterLive, path: c.path),
+              let afterStatus = try? await git.worktreeStatusEntries(worktreePath: c.path),
+              afterStatus == beforeStatus else {
+            logger.debug("gc: kept \(c.path, privacy: .public) — post-snapshot state changed")
+            return nil
+        }
+
         let bytes = await GCDiskUsage.apparentBytes(path: c.path)
-        try? FileManager.default.removeItem(atPath: c.path)
+        do {
+            try FileManager.default.removeItem(atPath: c.path)
+        } catch {
+            logger.warning("gc: rm failed for \(c.path, privacy: .public): \(error, privacy: .public)")
+            return nil
+        }
 
         // Verify the removal actually took BEFORE pruning: if the directory
         // is still there, git's worktree registration must stay intact too,

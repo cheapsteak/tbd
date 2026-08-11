@@ -36,7 +36,9 @@ actor FiredBox {
 }
 
 @Suite struct AutoArchiveCoordinatorTests {
-    private func makeDeps() throws -> (AutoArchiveOnMergeCoordinator, TBDDatabase) {
+    private func makeDeps(
+        archiveSafetyEvaluator: (@Sendable (String, Bool) async -> ArchiveSafetyReport)? = nil
+    ) throws -> (AutoArchiveOnMergeCoordinator, TBDDatabase) {
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
         let lifecycle = WorktreeLifecycle(
@@ -44,7 +46,11 @@ actor FiredBox {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            subscriptions: subs
+            subscriptions: subs,
+            archiveSafetyEvaluator: archiveSafetyEvaluator ?? { _, _ in
+                ArchiveSafetyReport(findings: [], headIsPublished: true)
+            },
+            worktreeRemover: { _, _ in }
         )
         let coord = AutoArchiveOnMergeCoordinator(
             db: db, lifecycle: lifecycle, subscriptions: subs,
@@ -108,5 +114,145 @@ actor FiredBox {
         // override stays nil → follows global default (on)
         await coord.handleMergedTransition(worktreeID: wt.id, prNumber: 9)
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
+    }
+
+    @Test func mergedTransitionDoesNotWaivePublicationChecks() async throws {
+        let recorder = KnownPublishedRecorder()
+        let (coord, db) = try makeDeps(archiveSafetyEvaluator: { _, knownPublished in
+            await recorder.record(knownPublished)
+            return ArchiveSafetyReport(findings: [], headIsPublished: true)
+        })
+        let repo = try await db.repos.create(
+            path: "/tmp/repo-known-\(UUID().uuidString)",
+            displayName: "repo-known", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/repo-known/w-\(UUID().uuidString)", tmuxServer: "s")
+        try await db.worktrees.setAutoArchiveOnMerge(id: wt.id, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wt.id, prNumber: 42)
+
+        #expect(await recorder.values == [false, false])
+    }
+
+    @Test func mergedTransitionBlocksPostMergeUnpushedCommit() async throws {
+        let (temp, repoPath) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let remote = temp.appendingPathComponent("remote.git")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try await shell("git init --bare -b main", at: remote)
+        try await shell(
+            "git remote add origin '\(remote.path)' && git push -u origin main",
+            at: repoPath)
+        let worktreePath = temp.appendingPathComponent("feature")
+        try await shell(
+            "git worktree add -b feature '\(worktreePath.path)' main",
+            at: repoPath)
+        try await shell("git push -u origin feature", at: worktreePath)
+        try await shell(
+            "echo local-only > local.txt && git add local.txt && git commit -m local-only",
+            at: worktreePath)
+
+        let db = try TBDDatabase(inMemory: true)
+        let subscriptions = StateSubscriptionManager()
+        let repo = try await db.repos.create(
+            path: repoPath.path, displayName: "published", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "feature", branch: "feature",
+            path: worktreePath.path, tmuxServer: "s")
+        try await db.worktrees.setAutoArchiveOnMerge(id: worktree.id, value: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(), subscriptions: subscriptions)
+        let coordinator = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog())
+
+        let archived = await coordinator.handleMergedTransition(
+            worktreeID: worktree.id, prNumber: 42)
+
+        #expect(!archived)
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+        #expect(FileManager.default.fileExists(atPath: worktreePath.path + "/local.txt"))
+    }
+
+    @Test func failedAutoArchivePersistsAndBroadcastsError() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auto-archive-failure-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let db = try TBDDatabase(inMemory: true)
+        let subscriptions = StateSubscriptionManager()
+        let deltas = AutoArchiveDeltaLog()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let repo = try await db.repos.create(
+            path: root.deletingLastPathComponent().path,
+            displayName: "repo-failure", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "failure", branch: "feature/failure",
+            path: root.path, tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        try await db.worktrees.setAutoArchiveOnMerge(id: worktree.id, value: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(),
+            subscriptions: subscriptions,
+            archiveSafetyEvaluator: { _, _ in
+                ArchiveSafetyReport(findings: [], headIsPublished: true)
+            },
+            worktreeRemover: { _, _ in }
+        )
+        let coordinator = AutoArchiveOnMergeCoordinator(
+            db: db, lifecycle: lifecycle, subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog())
+
+        let archived = await coordinator.handleMergedTransition(
+            worktreeID: worktree.id, prNumber: 77)
+
+        #expect(!archived)
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let notifications = try await db.notifications.unread(worktreeID: worktree.id)
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.type == .error)
+        #expect(notifications.first?.message?.contains("terminals were stopped") == true)
+        let notificationBroadcasts = deltas.snapshot().compactMap { delta -> NotificationDelta? in
+            guard case .notificationReceived(let notification) = delta else { return nil }
+            return notification
+        }
+        #expect(notificationBroadcasts.count == 1)
+        #expect(notificationBroadcasts.first?.type == .error)
+        #expect(notificationBroadcasts.first?.activate == false)
+    }
+}
+
+private actor KnownPublishedRecorder {
+    private(set) var values: [Bool] = []
+    func record(_ value: Bool) { values.append(value) }
+}
+
+private final class AutoArchiveDeltaLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    func append(_ delta: StateDelta) {
+        lock.lock()
+        defer { lock.unlock() }
+        deltas.append(delta)
+    }
+
+    func snapshot() -> [StateDelta] {
+        lock.lock()
+        defer { lock.unlock() }
+        return deltas
     }
 }
