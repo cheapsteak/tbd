@@ -541,9 +541,14 @@ def main() -> int:
             f"{len(discussion)} chars rendered"
         )
     else:
+        # A workflow annotation, not a plain log line: the description is the
+        # premise the correctness lens audits, so losing it silently guts the
+        # premise audit. Still fail-toward-review — the direction is unchanged,
+        # only the visibility.
         print(
-            "discussion: fetch FAILED — no PR description or discussion context "
-            "available"
+            "::warning::PR description/discussion fetch FAILED — the review "
+            "runs without the PR description, so the premise audit loses its "
+            "reference point. Failing toward a full review, never a skip."
         )
     return 0
 

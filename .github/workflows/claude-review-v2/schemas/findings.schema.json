@@ -16,6 +16,11 @@
   },
   "required": ["specialist", "findings"],
   "additionalProperties": false,
+  "if": { "required": ["infrastructure_failure"] },
+  "then": {
+    "properties": { "findings": { "maxItems": 0 } },
+    "$comment": "infrastructure_failure means 'I could not review', so findings alongside it are a self-contradiction — either the review happened or it didn't. Enforcing the scope here keeps the channel from discarding a run over a subordinate failure the specialist reviewed through: a file carrying both is rejected by schema with a message naming the contradiction, instead of being read as an infra abort."
+  },
   "$defs": {
     "finding": {
       "type": "object",

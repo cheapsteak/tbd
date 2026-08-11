@@ -1244,3 +1244,62 @@ def test_the_schema_accepts_the_specialist_infra_field(tmp_path: Path) -> None:
         },
     )
     assert validate_findings_file(path)["infrastructure_failure"] == "diff errored"
+
+
+def test_the_schema_rejects_findings_alongside_the_infra_field(
+    tmp_path: Path,
+) -> None:
+    # infrastructure_failure means "I could not review"; findings mean the
+    # review happened. A file claiming both is self-contradictory, and reading
+    # it as an infra abort would discard a run over a subordinate failure the
+    # specialist reviewed through — so the schema rejects the combination and
+    # the rejected-file diagnostics take over.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding()],
+            "infrastructure_failure": "a subordinate git blame was denied",
+        },
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_findings_file(path)
+
+
+def test_specialist_infra_failure_is_the_decisive_last_error_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The workflow annotates the LAST `error:` line. A result file with an
+    # uncovered disposition would otherwise print after the specialist's infra
+    # report and send the operator after the wrong problem.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "infrastructure_failure": "pinned diff errored",
+        },
+    )
+    _write_specialist_file(tmp_path, "conventions")
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": [],
+            "disposition": [
+                {"id": "ghost-1", "action": "kept"}
+            ],
+            "comment_body": "## Review",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    error_lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("error: ")
+    ]
+    assert error_lines
+    assert "review-infrastructure failure" in error_lines[-1]
+    assert "disposition" not in error_lines[-1]

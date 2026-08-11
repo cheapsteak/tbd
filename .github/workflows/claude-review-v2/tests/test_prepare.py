@@ -719,3 +719,42 @@ def test_main_aborts_when_there_is_no_merge_base(
 
     assert not (repo / "skip-decision.json").exists()
     assert not (repo / "discussion-context.txt").exists()
+
+
+def test_main_annotates_a_failed_discussion_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The description is the premise the correctness lens audits; losing it in
+    # a plain log line is the same collapsed-prose channel this branch removes
+    # elsewhere. The run still exits 0 — the direction stays fail-toward-review.
+    repo, _ = _make_repo(tmp_path)
+
+    def boom(args: list[str]) -> str:
+        raise RuntimeError("gh exploded")
+
+    body_file = repo.parent / "prior-review-body.txt"
+    body_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(_gh, "run_gh", boom)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setattr(
+        prepare.sys,
+        "argv",
+        [
+            "prepare.py",
+            "--pr", "7",
+            "--repo", "acme/acme-app",
+            "--prior-review-body-file", str(body_file),
+            "--base-ref", "main",
+        ],
+    )
+    monkeypatch.chdir(repo)
+    assert prepare.main() == 0
+
+    out = capsys.readouterr().out
+    assert "::warning::" in out
+    assert "premise audit" in out
+    # The context file exists and is empty — the "fetch failed" signal.
+    assert (repo / "discussion-context.txt").read_text(encoding="utf-8") == ""

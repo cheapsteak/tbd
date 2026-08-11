@@ -372,6 +372,7 @@ def main() -> int:
     specialist_ids: list[str] = []
     seen_specialists: list[str] = []
     rejected_specialists: list[str] = []
+    infra_reports: list[tuple[str, str]] = []
     for path in specialist_paths:
         try:
             data = validate_findings_file(path)
@@ -389,24 +390,32 @@ def main() -> int:
         # is machine-read rather than prose in a subagent summary the
         # orchestrator may not relay. Without it, a specialist whose pinned
         # diff errored has only an empty findings array to offer — which
-        # computes as APPROVE.
+        # computes as APPROVE. The schema scopes the field: findings alongside
+        # it are a self-contradiction it rejects, so a file that reaches here
+        # with the field is a lens that reviewed nothing.
         specialist_infra = infrastructure_failure_message(data)
         if specialist_infra is not None:
-            # Still counted as SEEN: this lens did report, and the completeness
-            # check calling it "never ran" would bury this precise error line
-            # under a misleading one.
-            print(
-                f"error: specialist {data['specialist']!r} reported a "
-                f"review-infrastructure failure and reviewed nothing: "
-                f"{specialist_infra} — this is NOT a verdict on the PR; "
-                "re-run the check",
-                file=sys.stderr,
-            )
-            failed = True
+            infra_reports.append((str(data["specialist"]), specialist_infra))
         seen_specialists.append(data["specialist"])
         specialist_ids.extend(finding["id"] for finding in data["findings"])
         if specialist_infra is None:
             print(f"ok: {path} ({len(data['findings'])} finding(s))")
+
+    # Specialist infrastructure reports preempt every later check, exactly like
+    # the result-level channel: the run is an infrastructure failure, and the
+    # disposition/schema errors that would otherwise print afterwards would
+    # displace this as the LAST error line — the one the workflow annotates —
+    # sending an operator after the wrong problem.
+    if infra_reports:
+        for name, message in infra_reports:
+            print(
+                f"error: specialist {name!r} reported a review-infrastructure "
+                f"failure and reviewed nothing: {message} — this is NOT a "
+                "verdict on the PR; re-run the check",
+                file=sys.stderr,
+            )
+        print("validation FAILED — no verdict written (gate fails closed)")
+        return 1
 
     # PRESENCE, decided before validity: a result file that exists but fails
     # the schema is a session that reached its merge and got it wrong, not a
