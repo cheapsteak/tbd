@@ -1,0 +1,93 @@
+# THROWAWAY — delete before merging. Proves the claude-review-v2 Stop hook holds
+# a headless session open while its specialists run, which the review gate itself
+# cannot demonstrate: it restores the pipeline directory from the base branch, so
+# a branch's hook never runs during its own review.
+#
+# The job name is deliberately NOT `claude-review`: branch protection matches the
+# required check by job name, and a second job carrying it would make the gate a
+# race.
+#
+# This run also answers two empirical questions the design rests on, which no unit
+# test can reach:
+#   1. How many model turns does one hold cost? The sleep's arithmetic assumes
+#      exactly one. At two, the turn budget buys half the wall clock the design
+#      claims. Read `num_turns` against the number of holds in the poller log.
+#   2. Do specialist findings files advance DURING a hold, or only just after an
+#      orchestrator turn? The poller timeline below answers it without touching
+#      the hook.
+name: Verify review hook (throwaway)
+
+on:
+  push:
+    branches: ["tbd/review-orchestrator-stall"]
+
+jobs:
+  verify-hook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      REVIEW_SPECIALISTS: correctness,conventions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Timeline of when each findings file appears, sampled independently of the
+      # model. If files only ever appear immediately after an orchestrator turn,
+      # the sleep buys no specialist progress and the turn-economy argument is the
+      # only thing it buys.
+      - name: Start the findings-file poller
+        run: |
+          set -euo pipefail
+          nohup bash -c '
+            while true; do
+              printf "%s " "$(date -Ins)"
+              ls -l --time-style=full-iso findings-*.json review-result.json 2>/dev/null \
+                | awk "{print \$6, \$7, \$9}" | tr "\n" " "
+              printf "\n"
+              sleep 5
+            done
+          ' > findings-timeline.log 2>&1 &
+          echo "poller pid $!"
+
+      - name: Run a fan-out session against this branch's hook
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          show_full_output: true
+          settings: ${{ github.workspace }}/.github/workflows/claude-review-v2/hooks/settings.json
+          prompt: |
+            Spawn EXACTLY two specialists via the Task tool in one message, requesting FOREGROUND execution for each.
+
+            Specialist (a) — `correctness`: read README.md and CLAUDE.md in full, then read every file under Sources/TBDShared/ one at a time, then write the file `findings-correctness.json` in the repository root with the Write tool, containing exactly {"specialist": "correctness", "findings": []}. Do the reading BEFORE writing the file; it should take you several minutes of real work.
+
+            Specialist (b) — `conventions`: read CLAUDE.md and docs/pr-review-gate.md in full, then read every file under docs/specs/ one at a time, then write the file `findings-conventions.json` in the repository root with the Write tool, containing exactly {"specialist": "conventions", "findings": []}. Do the reading BEFORE writing the file; it should take you several minutes of real work.
+
+            CRITICAL — DO NOT END YOUR TURN while either findings file is missing. This session is headless: ending your turn ends the session and kills the specialists. Your stopping condition is a FILE, never a message.
+
+            Once both files exist, write `review-result.json` in the repository root containing exactly {"findings": [], "disposition": [], "comment_body": "verification run"}.
+          claude_args: |
+            --max-turns 100
+            --allowedTools "Read,Write,Glob,Grep,Task"
+
+      - name: Assert the session outlived its specialists
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "=== findings-file timeline (independent of the model) ==="
+          cat findings-timeline.log 2>/dev/null || echo "(no timeline captured)"
+          echo
+          echo "=== final state ==="
+          missing=0
+          for f in findings-correctness.json findings-conventions.json review-result.json; do
+            if [ -f "$f" ]; then
+              echo "present: $f"
+            else
+              echo "::error::MISSING $f — the session did not outlive its specialists"
+              missing=1
+            fi
+          done
+          exit "$missing"
