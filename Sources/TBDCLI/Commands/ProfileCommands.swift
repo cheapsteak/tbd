@@ -104,19 +104,37 @@ func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
 /// note `tbd profile list --refresh` writes to stderr before listing anyway.
 /// Ends in a newline; callers write it verbatim.
 ///
-/// Only a `CLIError.rpcError` is tolerable: the daemon answered and refused —
-/// its OAuth usage poller is not constructed yet during the startup window, or
-/// it is a mock daemon. The persisted snapshots are still there to list, and
-/// the note names where their staleness shows.
+/// The dividing line is **whether the daemon answered the refresh attempt**,
+/// because that is what predicts the list call a line later:
 ///
-/// Every other error means the daemon never answered. Returning nil rethrows
-/// it, so `--refresh` fails fast exactly as a plain `profile list` would —
-/// promising "listing persisted snapshots" on stderr and then exiting nonzero
-/// with empty stdout would be a lie told one line before it was broken.
+/// - **It answered and refused** (`CLIError.rpcError`) — its OAuth usage poller
+///   is not constructed yet during the startup window, or it is a mock daemon.
+/// - **It answered unintelligibly** (`DecodingError`) — the response arrived but
+///   the refresh result's shape did not match, as under daemon/CLI version
+///   skew. The refresh outcome is unreadable; the listing may still decode.
+///
+/// Both leave the persisted snapshots there to list, and the note names where
+/// their staleness shows.
+///
+/// Anything else means the daemon is unreachable. Returning nil rethrows it, so
+/// `--refresh` fails fast exactly as a plain `profile list` would — promising
+/// "listing persisted snapshots" on stderr and then exiting nonzero with empty
+/// stdout would be a lie told one line before it was broken.
 func refreshFailureNote(for error: Error) -> String? {
-    // CLIError.rpcError already prefixes "Error: "; strip it so the note reads
-    // as one sentence rather than two stacked prefixes.
-    guard case CLIError.rpcError(let detail) = error else { return nil }
+    let detail: String
+    switch error {
+    // Bind the associated value rather than rendering the error: CLIError's
+    // `description` prefixes "Error: ", which would stack a second prefix onto
+    // a note that already says "warning:".
+    case CLIError.rpcError(let message):
+        detail = message
+    // DecodingError's own description is long and multi-line; the note is one
+    // line by contract, and the cause is the same whichever key mismatched.
+    case is DecodingError:
+        detail = "daemon answered with an unreadable refresh result (version skew?)"
+    default:
+        return nil
+    }
     return "warning: usage refresh failed (\(detail)); listing persisted snapshots — "
         + "read each profile's fetchedAt and statusKind for staleness\n"
 }
@@ -260,9 +278,20 @@ struct ProfileList: AsyncParsableCommand {
         if json {
             // Versioned contract surface — composed by profileListJSONOutput,
             // printed verbatim. See docs/capacity-facts.md.
-            if let output = profileListJSONOutput(result) {
-                print(output)
+            //
+            // A nil here means the envelope did not encode. Printing nothing
+            // and exiting 0 would tell a scripted consumer "zero profiles",
+            // which is a different fact entirely; fail loudly instead. The
+            // diagnostic is written here rather than carried on a thrown
+            // CLIError because that type's `description` adds its own "Error: "
+            // prefix, which ArgumentParser would then print a second time.
+            guard let output = profileListJSONOutput(result) else {
+                FileHandle.standardError.write(Data(
+                    ("Error: could not encode the profile list as JSON "
+                        + "(schemaVersion \(profileListSchemaVersion))\n").utf8))
+                throw ExitCode.failure
             }
+            print(output)
             return
         }
         if result.profiles.isEmpty {

@@ -206,32 +206,44 @@ Each element of `buckets` is one rate-limit window as the usage API names it:
 `tbd terminal list --json <worktree>` emits a bare array of terminal rows. The
 field that matters here:
 
-- **`profileID` PRESENT** – the UUID of the profile this session is actually
-  running under. It is the **already-resolved** answer: the daemon runs the
-  full precedence chain at spawn time — explicit per-spawn override, then the
-  repo's override, then the scratch override for repo-less spawns, then the
-  global default — and stamps the result. Waking a hibernated session pins to
-  this stamped profile and refuses to wake if it no longer resolves, so the
-  value stays true across a park/wake cycle. (Reviving a *closed* terminal
-  re-runs the chain, so it may come back stamped differently.) Join it to
-  `profiles[].profile.id` to get that session's capacity facts.
-- **`profileID` ABSENT** – the honest reading is **"no capacity facts exist
-  for this terminal."** Either it is not a Claude session at all (shell and
-  codex kinds carry no profile), or resolution produced nothing at spawn — no
-  override and no global default configured — and the session is running on
-  the machine's ambient credentials, an account TBD's usage poller does not
-  track.
+The field has three states, not two — the join can fail as well as be absent:
 
-**A consumer MUST NOT resolve an absent `profileID` against `defaultID`.** The
-default is what the *next* session would get, not what this one got; a session
-spawned before a default was configured, or under credentials TBD never sees,
-would be attributed to an account whose numbers describe a different quota
-entirely. Synthesizing an effective profile also erases the ambient-versus-
-profile distinction that the wake-refusal path depends on.
+- **`profileID` PRESENT and it joins** – the UUID of the profile this session
+  is actually running under. It is the **already-resolved** answer: the daemon
+  runs the full precedence chain at spawn time — explicit per-spawn override,
+  then the repo's override, then the scratch override for repo-less spawns,
+  then the global default — and stamps the result. Waking a hibernated session
+  pins to this stamped profile, and ordinarily refuses to wake at all if it no
+  longer resolves, so the value survives a park/wake cycle. (Reviving a
+  *closed* terminal re-runs the chain, so it may come back stamped
+  differently.) Join it to `profiles[].profile.id` for that session's capacity
+  facts.
+- **`profileID` PRESENT but it joins to nothing** – the pin is dangling: no
+  entry in `profiles[]` carries that id. An operator can delete a profile a
+  parked session was pinned to and then wake it through the explicit
+  fallback that overrides the refusal, which resumes the session on the
+  machine's ambient credentials while the row keeps its original stamp. Read
+  this exactly like the absent case — no capacity facts exist for this
+  terminal — and never as an error or a corrupt payload. It is a normal state
+  with a normal cause.
+- **`profileID` ABSENT** – the honest reading is again **"no capacity facts
+  exist for this terminal."** Either it is not a Claude session at all (shell
+  and codex kinds carry no profile), or resolution produced nothing at spawn —
+  no override and no global default configured — and the session is running on
+  ambient credentials, an account TBD's usage poller does not track.
 
-A holding program should treat an absent `profileID` as **unknown**, which is
-neither "exhausted" nor "free" — and choose which way to fail from its own
-conduct, not from a guess TBD made for it.
+**A consumer MUST NOT resolve an absent or dangling `profileID` against
+`defaultID`.** The default is what the *next* session would get, not what this
+one got; a session spawned before a default was configured, or under
+credentials TBD never sees, would be attributed to an account whose numbers
+describe a different quota entirely. Synthesizing an effective profile also
+erases the ambient-versus-profile distinction that the wake-refusal path
+depends on.
+
+A holding program should treat both as **unknown**, which is neither
+"exhausted" nor "free" — and choose which way to fail from its own conduct,
+not from a guess TBD made for it. Practically: look the id up, and take a
+miss as unknown rather than retrying or reporting a fault.
 
 ## Worked example
 
@@ -315,5 +327,6 @@ Read this the way a holding program should:
   `oauth`, so it is durably untracked rather than merely not fetched yet. TBD
   tracks no capacity for it; sessions joined to it are unknown, not free.
 
-A terminal whose row carries no `profileID` is in that same unknown category,
-regardless of what `defaultID` says.
+A terminal whose row carries no `profileID` — or one that matches none of these
+three ids — is in that same unknown category, regardless of what `defaultID`
+says.

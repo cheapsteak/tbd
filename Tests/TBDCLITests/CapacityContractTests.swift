@@ -272,9 +272,22 @@ struct CapacityContractTests {
         #expect(note.contains("listing persisted snapshots"))
         #expect(note.contains("fetchedAt"))
         #expect(note.contains("statusKind"))
-        // CLIError.rpcError's own "Error: " prefix is stripped, so the note
-        // reads as one sentence.
-        #expect(!note.contains("Error: "))
+        // The whole note is one line, so a caller's stderr stays line-oriented.
+        #expect(note.filter { $0 == "\n" }.count == 1)
+    }
+
+    @Test func refreshFailureNote_toleratesAnUnreadableRefreshResult() throws {
+        // The daemon answered; only the refresh result's shape did not match
+        // (daemon/CLI version skew). The listing may still decode, so this is
+        // tolerable — and the note stays one line rather than carrying
+        // DecodingError's multi-line description.
+        let context = DecodingError.Context(
+            codingPath: [], debugDescription: "refresh result shape did not match")
+        let note = try #require(refreshFailureNote(for: DecodingError.dataCorrupted(context)))
+        #expect(note.hasPrefix("warning: usage refresh failed ("))
+        #expect(note.contains("version skew"))
+        #expect(note.contains("listing persisted snapshots"))
+        #expect(note.filter { $0 == "\n" }.count == 1)
     }
 
     @Test func refreshFailureNote_rethrowsWhenTheDaemonNeverAnswered() {
