@@ -23,6 +23,13 @@ name: Verify review hook (throwaway)
 # this branch instead — the workflow and the hook both come from the ref.
 on:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: "foreground = primary leg; background = exercise the Stop-hook hold"
+        required: true
+        default: foreground
+        type: choice
+        options: [foreground, background]
 
 jobs:
   verify-hook:
@@ -55,7 +62,37 @@ jobs:
           ' > findings-timeline.log 2>&1 &
           echo "poller pid $!"
 
+      # Exercises the FALLBACK leg. The orchestrator is told to background its
+      # specialists and stop immediately — the exact shape of the observed
+      # failure. Nothing but the Stop hook's uncounted hold can keep the process
+      # alive long enough for the findings files to land, so a pass here is a
+      # pass for the hold, the sleep, and the deadline. Read the hold count in
+      # the assert step against `num_turns` to get turns-per-hold, which the
+      # sleep's arithmetic assumes is 1.
+      - name: Run a fan-out session that tries to stop early
+        if: inputs.scenario == 'background'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          show_full_output: true
+          settings: ${{ github.workspace }}/.github/workflows/claude-review-v2/hooks/settings.json
+          prompt: |
+            Spawn EXACTLY two specialists via the Task tool in one message, running them in the BACKGROUND so the Task calls return launch acknowledgments immediately.
+
+            Specialist (a) — `correctness`: read README.md and CLAUDE.md in full, then read every file under Sources/TBDShared/ one at a time, then write `findings-correctness.json` in the repository root with the Write tool, containing exactly {"specialist": "correctness", "findings": []}. Do the reading BEFORE writing the file.
+
+            Specialist (b) — `conventions`: read CLAUDE.md and docs/pr-review-gate.md in full, then read every file under docs/specs/ one at a time, then write `findings-conventions.json` in the repository root with the Write tool, containing exactly {"specialist": "conventions", "findings": []}. Do the reading BEFORE writing the file.
+
+            As soon as both Task calls have returned their launch acknowledgments, END YOUR TURN immediately and wait to be notified. Do not poll, do not read files, do not check on them.
+
+            If something tells you the specialists are still running and asks you to keep waiting, acknowledge it in one short sentence and end your turn again. Only once both findings files exist, write `review-result.json` in the repository root containing exactly {"findings": [], "disposition": [], "comment_body": "verification run"}.
+          claude_args: |
+            --max-turns 100
+            --allowedTools "Read,Write,Glob,Grep,Task"
+
       - name: Run a fan-out session against this branch's hook
+        if: inputs.scenario == 'foreground'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -82,6 +119,10 @@ jobs:
           set -uo pipefail
           echo "=== findings-file timeline (independent of the model) ==="
           cat findings-timeline.log 2>/dev/null || echo "(no timeline captured)"
+          echo
+          echo "=== scenario: ${{ inputs.scenario }} ==="
+          echo "A 'background' run that records ZERO holds has NOT exercised the"
+          echo "hold path, whatever the file check below says."
           echo
           echo "=== final state ==="
           missing=0
