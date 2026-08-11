@@ -39,8 +39,21 @@ SESSION_STEP = "Run Claude Code Review v2 (fan-out session)"
 VALIDATE_STEP = "Validate review result (schemas, disposition coverage, verdict)"
 POST_STEP = "Post review comment and enforce verdict"
 PREPARE_STEP = "Prepare (skip decision + discussion context)"
+COMPOSE_STEP = "Compose the review session prompt"
 
 PIPELINE_DIR = ".github/workflows/claude-review-v2"
+
+
+def _prompt_template() -> str:
+    """The review prompt template, read from the compose step that owns it.
+
+    The prompt reaches the session step as a step OUTPUT — its `prompt:` input
+    is one small expression — because an inline ${{ }}-bearing scalar of this
+    size trips GitHub's 21000-character expression-source cap and turns the
+    whole file into "Invalid workflow file", bricking the required check.
+    Dynamic values appear as __PLACEHOLDER__ tokens in the template.
+    """
+    return run_block(read_workflow(), COMPOSE_STEP)
 
 
 def _condition(step_name: str) -> str:
@@ -163,9 +176,9 @@ def test_the_prompt_pins_the_merge_base_instead_of_naming_the_base_ref() -> None
     damage — a SHA-addressed diff walks no ancestry and cannot be corrupted by
     a graft.
     """
-    prompt = step_source(read_workflow(), SESSION_STEP)
-    pinned = "git diff ${{ steps.prepare.outputs.merge_base }} HEAD"
-    by_ref = "git diff origin/${{ github.event.pull_request.base.ref }}...HEAD"
+    prompt = _prompt_template()
+    pinned = "git diff __MERGE_BASE__ HEAD"
+    by_ref = "git diff origin/__BASE_REF__...HEAD"
 
     assert by_ref not in prompt
     # `git diff origin/…` in ANY form: the two-dot fallback was the harmful one.
@@ -189,7 +202,7 @@ def test_the_prompt_tells_the_session_what_an_empty_context_file_means() -> None
     # discussion-context.txt now leads with the PR description, so an empty file
     # means the fetch FAILED. Read as "no description exists", it would silently
     # gut the correctness lens's premise audit.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     assert "EMPTY file means the fetch FAILED" in prompt
     assert "title and description" in prompt
 
@@ -200,7 +213,7 @@ def test_the_specialist_handoff_carries_the_context_file() -> None:
     # prompts from the STEP 1 checklist alone reproduces that exactly, so the
     # checklist itself — not just the earlier context paragraph — must name the
     # file.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     _, _, fanout = prompt.partition("STEP 1 — FAN OUT")
     assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
     assert "discussion-context.txt" in fanout
@@ -213,7 +226,7 @@ def test_the_description_cannot_clear_findings() -> None:
     # The rule must reach every reader: the orchestrator's context paragraph,
     # the STEP 1 checklist the specialists are composed from, and STEP 2 where
     # the merge happens.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     assert "NEVER clear, downgrade, or pre-empt a finding" in prompt
     _, _, fanout = prompt.partition("STEP 1 — FAN OUT")
     assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
@@ -230,7 +243,7 @@ def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
     # green on the required check. The prompt must instead route the failure to
     # the infrastructure_failure key that validate.py fails closed on, and the
     # specialists must escalate rather than silently review something else.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
     assert '{"infrastructure_failure":' in environment
     assert "empty findings array computes as APPROVE" in environment
@@ -251,7 +264,7 @@ def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:
     # appear in BOTH instruction positions: the specialists hold git log/blame
     # and run the premise audit one level down, where the orchestrator cannot
     # see a wrong conclusion form.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
     assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
     assert "cat .git/shallow" in environment
@@ -266,7 +279,7 @@ def test_the_session_prompt_explains_the_restored_directory() -> None:
     # Without this the reviewer reads BASE content for those paths and reviews
     # code that is not in the PR — silently, on exactly the PRs that change the
     # review pipeline.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     assert PIPELINE_DIR in prompt
     assert "restores `.github/workflows/claude-review-v2/` from the base branch" in prompt
     assert "git show HEAD:<path>" in prompt
@@ -444,7 +457,7 @@ def test_the_session_prompt_expects_exactly_the_declared_specialist_set() -> Non
     literals to the declaration. (`findings-<name>.json`, the template spelling,
     carries no lens name and is deliberately not matched.)
     """
-    names = set(_PROMPT_FINDINGS_RE.findall(step_source(read_workflow(), SESSION_STEP)))
+    names = set(_PROMPT_FINDINGS_RE.findall(_prompt_template()))
     assert names, "the fan-out prompt names no findings-<lens>.json file at all"
     declared = set(_review_job()["env"]["REVIEW_SPECIALISTS"].split(","))
     assert names == declared
@@ -567,3 +580,73 @@ def test_a_passing_validate_annotates_nothing_and_succeeds(tmp_path: Path) -> No
     proc = _run_validate_step(tmp_path, "", 0)
     assert proc.returncode == 0
     assert _annotations(proc) == []
+
+
+# --- the prompt must never become a capped expression again ------------------
+#
+# GitHub compiles any ${{ }}-bearing YAML scalar into a single format()
+# expression whose SOURCE text is capped at 21000 characters. The review prompt
+# blew through that cap once, and the failure shape is vicious: the whole file
+# reports "Invalid workflow file", the required check never runs, and — because
+# pull_request_target reads the workflow from the base branch — merging the
+# oversized prompt would brick the gate for every PR until an admin merge. The
+# prompt therefore travels as a step OUTPUT (runtime values are uncapped), and
+# these tests keep both halves of that arrangement honest.
+
+
+def test_the_session_prompt_input_is_the_composed_output() -> None:
+    source = step_source(read_workflow(), SESSION_STEP)
+    assert "prompt: ${{ steps.compose-prompt.outputs.prompt }}" in source
+    assert "id: compose-prompt" in step_source(read_workflow(), COMPOSE_STEP)
+
+
+def test_the_compose_step_sits_between_prepare_and_the_session() -> None:
+    text = read_workflow()
+    assert (
+        step_index(text, PREPARE_STEP)
+        < step_index(text, COMPOSE_STEP)
+        < step_index(text, SESSION_STEP)
+    )
+    assert _condition(COMPOSE_STEP) == _condition(SESSION_STEP)
+
+
+def test_the_template_carries_no_inline_expressions() -> None:
+    # Dynamic values enter the template as __PLACEHOLDER__ tokens substituted at
+    # run time. A ${{ }} smuggled back into the template would be inert text to
+    # GitHub (it is inside a quoted heredoc) — shipped to the model verbatim as
+    # a confusing literal — or, worse, a sign someone is migrating the prompt
+    # back toward the capped inline form.
+    assert "${{" not in _prompt_template()
+
+
+def test_no_expression_bearing_scalar_approaches_the_cap() -> None:
+    """Sweep every workflow file for the failure class itself.
+
+    21000 is GitHub's hard limit on an expression's source text; the sweep
+    fails at 19000 so the gate breaks in CI with this named reason rather than
+    on push with "Invalid workflow file"."""
+
+    def scalars(node: object) -> list[str]:
+        if isinstance(node, str):
+            return [node]
+        if isinstance(node, dict):
+            return [s for child in node.values() for s in scalars(child)]
+        if isinstance(node, list):
+            return [s for child in node for s in scalars(child)]
+        return []
+
+    workflows = sorted(
+        path
+        for suffix in ("*.yml", "*.yaml")
+        for path in _WORKFLOWS_DIR.glob(suffix)
+    )
+    assert len(workflows) > 1
+    for path in workflows:
+        for scalar in scalars(_load(path)):
+            if "${{" in scalar:
+                assert len(scalar) < 19000, (
+                    f"{path.name}: an expression-bearing scalar is "
+                    f"{len(scalar)} chars — within sight of GitHub's 21000 "
+                    "expression cap. Move the text into a compose step output "
+                    "(see COMPOSE_STEP) instead of growing the inline scalar."
+                )
