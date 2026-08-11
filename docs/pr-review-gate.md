@@ -131,7 +131,12 @@ distinguishing error line in the job log is what an operator reads:
 - **A findings file the schema rejected** — a lens named as having produced a file
   that failed validation, printed directly beneath the schema error itself. That
   lens *did* run; its output was discarded, and the schema error above is the thing
-  to act on.
+  to act on. The key set is enforced softly, so this is not what an extra key alone
+  produces: an unknown key holding a scalar is stripped with a logged `warning:` and
+  the file validates on its known fields. An unknown key holding an object or an
+  array still lands here, because it may be the findings under a wrong name — where
+  stripping would fabricate an APPROVE — and so does any malformed value in a known
+  field.
 - **A broken invocation** — `--expected-specialists` supplied while naming no lens,
   which is what an unset or blank `REVIEW_SPECIALISTS` expands to. Nothing can be
   checked, so nothing is trusted.

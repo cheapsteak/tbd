@@ -5,11 +5,14 @@ Deterministic bookend that runs AFTER the model review session
 (docs/specs/2026-08-03-pr-review-fanout-design.md §3.2, §3.4, §3.5). It:
 
 - schema-validates every specialist findings file and the merged review-result,
-  stripping keys the schema does not know with a logged warning rather than
+  stripping unknown SCALAR-valued keys with a logged warning rather than
   failing the gate on them (a lens that ran must never contribute zero findings
-  because the model borrowed a key name from another finding format). Value
-  validation of the KNOWN keys stays strict, so everything the verdict and the
-  disposition check are computed from still fails closed,
+  because the model borrowed a key name from another finding format). An
+  unknown key holding an object or an array is NOT stripped — it may be the
+  findings under a wrong name, and deleting it would turn a rejection into a
+  silent APPROVE. Value validation of the KNOWN keys stays strict too, so
+  everything the verdict and the disposition check are computed from still
+  fails closed,
 - with `--expected-specialists`, checks that every named specialist actually
   produced a VALID findings file (a partial fan-out must never read as a clean
   run), reporting separately whether a lens produced nothing at all, produced a
@@ -218,7 +221,7 @@ def is_session_stall(
 
 
 def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]]]:
-    """Delete keys the schema does not declare, in place; report what was cut.
+    """Delete unknown SCALAR-valued keys, in place; report what was cut.
 
     Returns `(path, removed_keys)` pairs — path as a `/`-joined instance
     pointer, `"<root>"` for the document itself — sorted by path so the log line
@@ -241,6 +244,19 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
     after this still rejects those. Stripping answers "this key is not in the
     vocabulary" and nothing else.
 
+    **The boundary is the value's type, and it is what keeps the gate closed.**
+    Only a scalar value (string, number, boolean, null) is dropped. An unknown
+    key holding an object or an array is left exactly where it is, so the strict
+    pass still rejects the file. The asymmetry is not fastidiousness: a scalar
+    under a wrong name is cosmetic vocabulary drift, but a CONTAINER under a
+    wrong name can be the findings themselves — `{"findings": [], "results":
+    [<a HIGH finding>]}` is a lens that reported and misnamed its list, and
+    silently deleting `results` leaves an empty `findings` that computes to
+    APPROVE. A rejected file costs a re-run; a fabricated APPROVE merges unread
+    code. An empty array is left too, by the same rule read on TYPE rather than
+    on content: judging emptiness would make the gate's behavior depend on how
+    much the model happened to write.
+
     Tolerates any JSON type. A document that decoded to a list or a scalar has
     no object to strip from, and diagnosing that is the strict validation's job:
     raising here would replace a precise schema error with a traceback.
@@ -253,6 +269,19 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
     for err in errors:
         if err.validator != "additionalProperties":
             continue
+        # Only the plain `additionalProperties: false` form declares its whole
+        # key set in `properties`. A schema-valued `additionalProperties` or a
+        # `patternProperties` sibling makes keys legal that `properties` never
+        # names, so reading `properties` as "everything known" would delete
+        # legal data; leave those subschemas to the strict pass, which fails
+        # closed rather than guessing.
+        if not isinstance(err.schema, dict):
+            continue
+        if err.schema.get("additionalProperties") is not False:
+            continue
+        if "patternProperties" in err.schema:
+            continue
+
         target = data
         for part in err.absolute_path:
             try:
@@ -263,7 +292,11 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
         if not isinstance(target, dict):
             continue
         known = set(err.schema.get("properties", {}))
-        extras = sorted(key for key in target if key not in known)
+        extras = sorted(
+            key
+            for key, value in target.items()
+            if key not in known and not isinstance(value, (dict, list))
+        )
         if not extras:
             continue
         for key in extras:

@@ -1387,3 +1387,152 @@ def test_strip_tolerates_any_json_type(data: object) -> None:
     # raise and replace a precise schema error with a traceback.
     schema, validator_cls = _findings_validator()
     assert strip_unknown_keys(data, schema, validator_cls) == []
+
+
+# --- a misnamed CONTAINER must still fail the gate closed -------------------
+#
+# The limit of the soft key set, and the reason it is drawn by TYPE. Stripping
+# an unknown key is safe exactly when the key carries nothing a reader would
+# have seen. A scalar under a wrong name qualifies. A container does not: the
+# most likely reason a lens writes `{"findings": [], "results": [...]}` is that
+# it reported real findings and misnamed the list, and deleting `results`
+# converts a fail-closed schema rejection into a silent APPROVE over unread
+# code. So an unknown key holding an object or an array is left where it is and
+# the strict pass rejects the file exactly as it always did — a rejection costs
+# a re-run, a fabricated APPROVE merges the diff.
+
+
+def _high_finding(finding_id: str = "correctness-1") -> dict:
+    return {
+        "id": finding_id,
+        "file": "Sources/TBDDaemon/Example.swift",
+        "line": 12,
+        "severity": "HIGH",
+        "title": "the finding that must never be silently deleted",
+    }
+
+
+def test_main_findings_smuggled_under_a_wrong_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The regression this boundary exists for: the correctness lens reports a
+    # HIGH finding under `results` and leaves `findings` empty. Stripping
+    # `results` would report "0 finding(s)" and write APPROVE.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "results": [_high_finding()],
+        },
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": []},
+    )
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "results" in err
+    assert "Additional properties are not allowed" in err
+
+
+def test_main_merged_findings_smuggled_under_a_wrong_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The same shape one layer up, where the damage is worse: the specialist
+    # file is legitimate and reports a HIGH, and the MERGE misnames the list.
+    # Stripping `results` there would leave `findings: []` — an APPROVE over a
+    # finding the lens actually reported.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [_high_finding()]},
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": []},
+    )
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": [],
+            "results": [_high_finding()],
+            "disposition": [{"id": "correctness-1", "action": "kept"}],
+            "comment_body": "## Review\nOne finding.",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "results" in err
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [{"id": "x"}],
+        [1, 2, 3],
+        {"nested": "object"},
+        {},
+        # An EMPTY array is left alone too. The rule reads the value's TYPE, not
+        # its content: judging emptiness would make the gate's behavior depend
+        # on how much the model happened to write, and failing closed is the
+        # deliberately conservative direction when the two cannot be told apart.
+        [],
+    ],
+)
+def test_strip_leaves_container_valued_unknown_keys_alone(value: object) -> None:
+    schema, validator_cls = _findings_validator()
+    data = {"specialist": "correctness", "findings": [], "results": value}
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+    assert data["results"] == value
+
+
+def test_strip_takes_the_scalars_and_leaves_the_container_in_one_object() -> None:
+    # Mixed: the cosmetic key goes, the suspicious one stays, and what stays is
+    # enough to keep the strict pass rejecting the file.
+    schema, validator_cls = _findings_validator()
+    data = {
+        "specialist": "correctness",
+        "findings": [],
+        "summary": "all clear",
+        "results": [_high_finding()],
+    }
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("<root>", ["summary"])
+    ]
+    assert "summary" not in data
+    assert data["results"] == [_high_finding()]
+
+
+@pytest.mark.parametrize(
+    "additional",
+    [
+        # Schema-valued `additionalProperties` and a `patternProperties` sibling
+        # both make keys legal that `properties` never names, so `properties`
+        # is not the key set and stripping by it would delete legal data.
+        {"additionalProperties": {"type": "string"}},
+        {"additionalProperties": False, "patternProperties": {"^x-": {}}},
+    ],
+)
+def test_strip_declines_schemas_whose_key_set_properties_does_not_state(
+    additional: dict,
+) -> None:
+    import jsonschema
+
+    schema = {
+        "type": "object",
+        "properties": {"known": {"type": "string"}},
+        **additional,
+    }
+    validator_cls = jsonschema.validators.validator_for(schema)
+    data = {"known": "a", "extra": 42}
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+    assert data["extra"] == 42
