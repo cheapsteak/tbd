@@ -207,12 +207,44 @@ at the CLI the model this design unifies in the database.
 
 ### Creation flow
 
-The daemon resolves parameters, calls `remote.create` with an idempotency key
-(existing machinery, including the retry-once-on-timeout path), and writes a
-`worktree` row bound to `(provider, session.id)` carrying the parent stamp, sort
-order, and display name. If the row write fails after a successful create, the
-next snapshot adopts the session: creation and adoption converge on the same
-row, so neither path can orphan a session.
+The daemon mints the worktree UUID first and writes a `.creating` row carrying
+the parent stamp, sort order, and display name. It then calls `remote.create`
+with an idempotency key (existing machinery, including the
+retry-once-on-timeout path), and on success flips the row to `.active`, bound
+to `(provider, session.id)`. A failed create marks the row `.failed` rather
+than deleting it: reconcile is fenced from remote rows, so a remote row needs
+an explicit terminal state, and a row that silently vanishes cannot be told
+apart from a create that never ran.
+
+Writing the row first is what lets the session know its own identity, below.
+
+### A remote lane knows its own worktree UUID
+
+TBD sets `TBD_WORKTREE_ID` in shells it spawns, and it never spawns a remote
+one. Without that variable, nothing running inside a remote lane can use a
+`tbd` verb keyed on ambient identity — `tbd link`, `tbd terminal send`, or any
+hook that reads it. An orchestrator's remote children would be reachable from
+the laptop but unable to act as lanes themselves.
+
+So the minted UUID travels three ways:
+
+- **Out**, on `create`'s stdin as a sibling of `params`:
+  `{"params": {…}, "idempotency_key": "…", "tbd": {"worktree_id": "…"}}`. This
+  is TBD metadata rather than a create param — it never appears in
+  `create_params`, never renders in the create sheet, and `--param` cannot set
+  or override it.
+- **Into the session**, as `TBD_WORKTREE_ID` in the agent's environment. The
+  provider's job.
+- **Back**, echoed as `meta["tbd_worktree_id"]` on the Session object.
+
+The echo is what makes the binding self-healing. If the row write fails after a
+successful create, adoption reads the echo and recreates the same row id, so
+the variable already exported on the box still resolves. Without it, adoption
+would mint a second UUID and the box would hold a dangling one.
+
+Both this and the dirty-checkout key are additive within contract v1, and a
+provider that implements neither behaves exactly as it does today: no echo
+means adoption mints a UUID as usual, and the lane simply is not self-aware.
 
 ## Default resolution
 
