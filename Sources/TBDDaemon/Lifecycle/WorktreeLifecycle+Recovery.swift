@@ -43,7 +43,7 @@ extension WorktreeLifecycle {
     /// ignores them.
     @discardableResult
     public func recoverCreatingWorktrees() async -> [Task<Void, Never>] {
-        let creating = (try? await db.worktrees.list(status: .creating)) ?? []
+        let creating = (try? await db.worktrees.listLocal(status: .creating)) ?? []
         var resumed: [Task<Void, Never>] = []
         for worktree in creating {
             let terminals = (try? await db.terminals.list(worktreeID: worktree.id)) ?? []
@@ -146,7 +146,7 @@ extension WorktreeLifecycle {
             let task = Task.detached { [self] in
                 await runPreSessionPhase3(
                     preSession: spawn,
-                    worktree: worktree, repo: repo,
+                    worktree: worktree.worktree, repo: repo,
                     worktreePath: worktree.path,
                     skipClaude: false,
                     archivedClaudeSessions: isMidRevive ? archivedSessions : nil,
