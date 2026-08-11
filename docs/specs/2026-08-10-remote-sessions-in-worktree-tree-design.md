@@ -111,7 +111,10 @@ every sweep. A second loop in the same function rewrites the `tmuxServer` of any
 row whose value differs from the repo's canonical name, which a remote row's
 empty string always does.
 
-#### What a remote row stores in the local-only columns
+No one would think to hand-write a guard in reconcile. The boundary therefore
+has to be one the compiler enforces.
+
+### What a remote row stores in the local-only columns
 
 `worktree.path` is `NOT NULL UNIQUE`, so a remote row cannot leave it empty:
 the empty string admits exactly one remote row per install, and the second lane
@@ -127,9 +130,6 @@ on the current directory.
 `tmuxServer` stays empty on a remote row: there is no tmux server, the column
 is not unique, and reconcile's canonicalization loop is fenced from remote rows
 anyway.
-
-No one would think to hand-write a guard in reconcile. The boundary therefore
-has to be one the compiler enforces.
 
 ### Readers break; writers do not
 
@@ -171,10 +171,16 @@ outward ripple.
 Measured against the tree at the time of writing. Fetch sites, which are what
 the change edits:
 
-- 46 of the 57 `get(` sites are local-only and move to `getLocal`
-- 11 stay location-neutral: parent resolver, notes, worktree handlers, adopt,
-  revive-fresh
-- 10 of the 31 `list(` sites live in reconcile alone
+- 45 of the 57 `get(` sites are local-only and move to `getLocal`
+- 12 `get(` sites stay location-neutral: the parent resolver, notes, worktree
+  handlers, adopt, revive-fresh, the pre-session row-existence check, and the
+  two merge coordinators
+- 18 of the 31 `list(` sites move to `listLocal`, 10 of them in reconcile alone
+- 13 `list(` sites stay location-neutral, including the two whose sets must
+  span every row on the table whatever its location — the path-reservation set
+  in create and the `.creating` path set in reconcile — and the `.creating`
+  recovery sweep, which is the only thing that resolves such a row and so must
+  see remote ones to give them an outcome
 
 Dereferences of a worktree's `path`, which are what the change mostly leaves
 alone — 161 in total:
@@ -444,10 +450,12 @@ Boundary, the tests that would have caught the hazard:
 
 - Reconcile leaves remote rows alone: no archive, no terminal teardown, no
   `tmuxServer` rewrite.
-- `getLocal`/`listLocal` exclude remote rows; the 11 neutral fetches still
+- `getLocal`/`listLocal` exclude remote rows; the 25 neutral fetches still
   return them.
 - Two remote rows for the same repo both persist — the synthetic path keeps
   `worktree.path`'s UNIQUE constraint from admitting only one remote lane.
+- A remote `.creating` row left behind by a daemon restart reaches `.failed`
+  rather than spinning.
 - An orphan-GC sweep leaves a remote row intact.
 
 Behavior:

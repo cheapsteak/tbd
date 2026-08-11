@@ -191,17 +191,21 @@ extension WorktreeLifecycle {
         // its path would violate the UNIQUE path constraint and abort this
         // repo's reconcile.
         //
-        // This one set deliberately stays on the location-neutral `list(...)`
-        // and states its two exclusions itself. What it must contain is "every
-        // path a live creating row already claims", and a path missing from it
-        // is not a harmless omission: the re-adopt pass would treat that path
-        // as unknown, create a second row on it, and abort this repo's whole
-        // reconcile on the UNIQUE path constraint. `LocalWorktree.init?` is a
-        // predicate about a worktree TBD may act on right now, which is a
-        // different question — it already rejects the empty path, and any
-        // later tightening of it (say, requiring the directory to exist, which
-        // a creating row's does not yet) would silently shrink this set. So
-        // the exclusions live here, where breaking them is visible.
+        // This one set deliberately fetches through the location-neutral
+        // `list(...)` and then states its two exclusions here, in the open,
+        // rather than borrowing `LocalWorktree.init?`. What it must contain is
+        // "every path a live creating row already claims", and a path missing
+        // from it is not a harmless omission: the re-adopt pass would treat
+        // that path as unknown, create a second row on it, and abort this
+        // repo's whole reconcile on the UNIQUE path constraint.
+        // `LocalWorktree.init?` is a predicate about a worktree TBD may act on
+        // right now, which is a different question — and any later tightening
+        // of it (say, requiring the directory to exist, which a creating row's
+        // does not yet) would silently shrink this set.
+        //
+        // Both exclusions are safe because neither kind of row can claim a
+        // path `git worktree list` will ever report back: a remote row's
+        // `remote://` path is synthetic, and an empty path is no path at all.
         let creatingPaths = Set(
             (try await db.worktrees.list(repoID: repoID, status: .creating))
                 .filter { $0.location.isLocal }
