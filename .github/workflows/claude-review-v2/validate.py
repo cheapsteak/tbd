@@ -246,13 +246,15 @@ def _sanitize_log_text(text: str) -> str:
     moment an interpolated newline splits it. Escaping keeps each diagnostic on
     one line and leaves any forged directive as inert text inside it.
 
-    Applied at every diagnostic print rather than only the ones that carry model
-    text today, so the rule needs no per-site argument to stay true. Two sites
-    are currently no-ops and are wrapped anyway: `ok: <result file>` prints the
-    workflow's own `--result-file` literal, and the missing-specialist report
-    prints only names from `--expected-specialists` (a rejected file's name
-    decides which clause a lens lands in, never the text). Both would become
-    live the moment either input started carrying a session-chosen name.
+    EVERY dynamic diagnostic print goes through here — including the ones whose
+    inputs are workflow literals today, such as the paths and globs that arrive
+    as CLI arguments, and including messages already quoted with `!r`. Applying
+    it uniformly is the point: an exception list is a claim that has to be
+    re-audited every time a caller changes what it interpolates, and the first
+    time one goes stale the invariant is gone with it. Wrapping unconditionally
+    costs a function call on lines that print at most once per run, and it makes
+    the rule checkable by looking at a single print rather than by reasoning
+    about where each of its inputs came from.
     """
     return text.replace("\r", "\\r").replace("\n", "\\n")
 
@@ -500,7 +502,7 @@ def main() -> int:
     try:
         expected = parse_expected_specialists(args.expected_specialists)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(_sanitize_log_text(f"error: {exc}"), file=sys.stderr)
         print("validation FAILED — no verdict written (gate fails closed)")
         return 1
 
@@ -565,7 +567,10 @@ def main() -> int:
             # Fail closed: specialists that never wrote files is
             # indistinguishable from a session that died mid-fan-out.
             print(
-                f"error: no specialist findings files match {args.specialist_files!r}",
+                _sanitize_log_text(
+                    "error: no specialist findings files match "
+                    f"{args.specialist_files!r}"
+                ),
                 file=sys.stderr,
             )
             failed = True

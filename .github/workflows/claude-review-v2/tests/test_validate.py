@@ -1939,3 +1939,63 @@ def test_a_forged_verdict_error_cannot_split_its_line(
 
     lines = _forged_lines(capsys.readouterr().err)
     _assert_one_line_and_inert(lines, "unknown severity")
+
+
+def test_a_forged_expected_specialists_error_cannot_split_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The `--expected-specialists` error site, reached by injecting the raise.
+
+    No CLI value reaches it carrying forged text. The raise fires only when the
+    value names NO specialist — whitespace or bare separators — so a value with
+    `::error::forged` in it parses to a lens name and never raises at all; and
+    the message quotes the value with `!r`, which escapes the newline before
+    this line is composed. The wrapper is uniform policy rather than a live
+    defense here, and it is pinned so that policy cannot quietly lapse at this
+    site.
+    """
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+
+    def _raise(_raw: str | None) -> list[str]:
+        raise ValueError(f"--expected-specialists was supplied as{_FORGED}")
+
+    monkeypatch.setattr(validate, "parse_expected_specialists", _raise)
+    assert _run_main(monkeypatch, tmp_path, "correctness") == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "--expected-specialists")
+
+
+def test_a_forged_glob_cannot_split_the_empty_glob_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The empty-glob line cannot be split — by either of two mechanisms.
+
+    A PROPERTY test rather than a per-site one, and deliberately so. This line
+    is defended twice over: `!r` escapes the newline as it quotes the glob, and
+    the sanitize wrapper escapes whatever `!r` did not. Removing either alone
+    leaves the property intact, so this fails only when BOTH are gone — which is
+    the honest shape of the guarantee. What it pins is the thing that matters
+    (an operator-supplied glob can never forge an annotation), not which of the
+    two redundant mechanisms happens to be carrying it.
+    """
+    _write_empty_result(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--specialist-files",
+            f"findings-a{_FORGED}-*.json",
+            "--result-file",
+            str(tmp_path / "review-result.json"),
+        ],
+    )
+    assert validate.main() == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "no specialist findings files match")

@@ -417,6 +417,9 @@ def test_a_passing_validate_annotates_nothing_and_succeeds(tmp_path: Path) -> No
 FINDINGS_SCHEMA_PATH = (
     _WORKFLOWS_DIR / "claude-review-v2" / "schemas" / "findings.schema.json"
 )
+RESULT_SCHEMA_PATH = (
+    _WORKFLOWS_DIR / "claude-review-v2" / "schemas" / "review-result.schema.json"
+)
 
 _PROMPT_KEY_LIST_RE = re.compile(
     r"Those (?P<count>\w+) keys — (?P<keys>.+?) — are the ONLY keys a finding "
@@ -482,3 +485,28 @@ def test_the_prompt_names_exactly_the_schema_s_finding_keys() -> None:
     # sentence is not the only place a specialist reads the name.
     for key in schema_keys:
         assert f"`{key}`" in prompt
+
+
+def test_the_two_schemas_declare_the_same_finding_keys() -> None:
+    """`$defs/finding` is maintained twice, and the copies must agree.
+
+    The orchestrator does not re-author findings for the merged result: it
+    copies specialist findings forward, so review-result.schema.json has to
+    accept every key findings.schema.json does. Let the two drift and the
+    failure lands at the worst moment — the specialist files all validate, the
+    lenses all report, and the merge is rejected for a key its own inputs were
+    told to write, which reads as a model error rather than a schema one.
+
+    Key sets only. The two `finding` definitions are not required to be
+    identical in every respect, but a key legal in one and unknown in the other
+    is always a defect.
+    """
+    findings_keys = _schema_finding_keys()
+    result_schema = json.loads(RESULT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    result_keys = set(result_schema["$defs"]["finding"]["properties"])
+    assert findings_keys == result_keys, (
+        "findings.schema.json and review-result.schema.json declare different "
+        f"finding keys ({sorted(findings_keys ^ result_keys)} differ) — the "
+        "merge copies specialist findings forward, so the result schema must "
+        "accept every key the findings schema does"
+    )
