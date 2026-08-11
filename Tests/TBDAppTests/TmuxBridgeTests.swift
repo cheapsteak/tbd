@@ -39,5 +39,83 @@ struct TmuxBridgeTests {
         ) == [
             "tmux", "-u", "-L", "tbd-repo", "attach", "-t", sessionName,
         ])
+        #expect(TmuxBridge.windowInventoryQueryArgs() == [
+            "list-windows", "-a", "-F", "#{window_id}",
+        ])
+        #expect(TmuxBridge.clientSessionQueryArgs() == [
+            "list-clients", "-F", "#{client_session}",
+        ])
+        #expect(TmuxBridge.killSessionArgs(sessionName: sessionName) == [
+            "kill-session", "-t", sessionName,
+        ])
+    }
+
+    @Test func clientInventoryConfirmsOnlyTheExpectedAttachedSession() {
+        #expect(TmuxBridge.clientInventoryConfirmsAttachment(
+            querySucceeded: true,
+            output: "main\ntbd-view-4c4f1a61",
+            expectedSessionName: "tbd-view-4c4f1a61"
+        ))
+        #expect(!TmuxBridge.clientInventoryConfirmsAttachment(
+            querySucceeded: true,
+            output: "main",
+            expectedSessionName: "tbd-view-4c4f1a61"
+        ))
+        #expect(!TmuxBridge.clientInventoryConfirmsAttachment(
+            querySucceeded: false,
+            output: "tbd-view-4c4f1a61",
+            expectedSessionName: "tbd-view-4c4f1a61"
+        ))
+    }
+
+    @Test func preparedSessionCarriesViewerCommand() {
+        let prepared = TmuxBridge.preparedSession(
+            server: "tbd-repo",
+            sessionName: "tbd-view-4c4f1a61"
+        )
+        #expect(prepared == TmuxPreparedSession(
+            executablePath: "tmux",
+            arguments: ["-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61"]
+        ))
+    }
+
+    @Test func viewSessionCreationFailureIsGenericWithoutWindowProbe() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .createViewSession,
+            output: "create failure",
+            probeSucceeded: nil,
+            probeOutput: nil,
+            expectedWindowID: "@147"
+        ) == .commandFailed(stage: .createViewSession, output: "create failure"))
+    }
+
+    @Test func failedWindowStageWithInventoryContainingWindowRemainsGeneric() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .linkWindow,
+            output: "link failure",
+            probeSucceeded: true,
+            probeOutput: "@999\n@147",
+            expectedWindowID: "@147"
+        ) == .commandFailed(stage: .linkWindow, output: "link failure"))
+    }
+
+    @Test func failedWindowStageWithFailedInventoryProbeRemainsGeneric() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .linkWindow,
+            output: "link failure",
+            probeSucceeded: false,
+            probeOutput: "",
+            expectedWindowID: "@147"
+        ) == .commandFailed(stage: .linkWindow, output: "link failure"))
+    }
+
+    @Test func failedWindowStageWithInventoryOmittingWindowMeansMissing() {
+        #expect(TmuxBridge.classifyPreparationFailure(
+            stage: .linkWindow,
+            output: "link failure",
+            probeSucceeded: true,
+            probeOutput: "@999",
+            expectedWindowID: "@147"
+        ) == .windowMissing(failedStage: .linkWindow))
     }
 }

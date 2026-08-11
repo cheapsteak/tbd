@@ -83,7 +83,7 @@ actor DaemonClient {
     /// preSession hook (e.g. `npm install`) that legitimately exceeds 2 minutes,
     /// so a shorter bound risks failing real work. The frequent poll path
     /// returns in milliseconds and never approaches this ceiling.
-    private static let rpcRecvDeadlineSeconds: TimeInterval = 300
+    nonisolated static let rpcRecvDeadlineSeconds: TimeInterval = 300
 
     init(socketPath: String? = nil) {
         // See HookResolver — resolve here, not at the caller's site.

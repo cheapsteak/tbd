@@ -1015,6 +1015,19 @@ final class AppState: ObservableObject {
     /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
     var recreatingTerminalIDs: Set<UUID> = []
 
+    /// Terminal deletions waiting for an already-dispatched recreation RPC to
+    /// finish. This set is bounded by `recreatingTerminalIDs` and is cleared
+    /// when the matching recreation completes.
+    var terminalDeletionsAwaitingRecreationCompletion: Set<UUID> = []
+
+    /// Short-lived guard against daemon responses that were already in flight
+    /// when a terminal was deleted. Pruned on every mutation and adoption.
+    var recentlyDeletedTerminalIDs: [UUID: Date] = [:]
+
+    /// App-lifetime automatic recovery attempts, keyed by stable terminal UUID.
+    /// View/coordinator reconstruction must not reset this budget.
+    var terminalRecoveryBudget = TerminalRecoveryBudget()
+
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
@@ -1697,6 +1710,8 @@ final class AppState: ObservableObject {
             applyTerminalSessionDelta(d)
         case .terminalCreated(let d):
             applyTerminalCreatedDelta(d)
+        case .terminalRemoved(let d):
+            applyTerminalRemovedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
         case .terminalProfileChanged(let d):
@@ -2397,12 +2412,10 @@ final class AppState: ObservableObject {
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
             for wtID in visibleWorktreeIDs {
-                let fetched = terminalsByWorktree[wtID] ?? []
-                let existing = terminals[wtID] ?? []
-                if fetched != existing {
-                    terminals[wtID] = fetched
-                    reconcileTabs(worktreeID: wtID, terminals: fetched)
-                }
+                adoptTerminalSnapshot(
+                    terminalsByWorktree[wtID] ?? [],
+                    worktreeID: wtID
+                )
             }
 
             // Fetch all notes, group client-side
@@ -2434,11 +2447,7 @@ final class AppState: ObservableObject {
     func refreshTerminals(worktreeID: UUID) async {
         do {
             let fetched = try await daemonClient.listTerminals(worktreeID: worktreeID)
-            let existing = terminals[worktreeID] ?? []
-            if fetched != existing {
-                terminals[worktreeID] = fetched
-                reconcileTabs(worktreeID: worktreeID, terminals: fetched)
-            }
+            adoptTerminalSnapshot(fetched, worktreeID: worktreeID)
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)

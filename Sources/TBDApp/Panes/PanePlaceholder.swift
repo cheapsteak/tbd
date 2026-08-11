@@ -421,8 +421,8 @@ struct PanePlaceholder: View {
                     onTerminalNotification: { title, body in
                         debugLog("OSC 777: \(title) — \(body)")
                     },
-                    onDeadWindow: {
-                        Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
+                    onMissingWindow: {
+                        await appState.requestAutomaticTerminalRecreation(terminalID: terminalID)
                     },
                     initialSnapshot: terminal.suspendedSnapshot,
                     // Show the frozen snapshot backdrop while PARKED — hibernated
