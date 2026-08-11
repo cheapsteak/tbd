@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import validate
 from validate import (
     SchemaValidationError,
     check_disposition,
@@ -861,3 +862,97 @@ def test_main_mixed_causes_are_reported_separately(
     err = capsys.readouterr().err
     assert _NEVER_RAN in err and "correctness" in err
     assert _WAS_REJECTED in err and "conventions" in err
+
+
+# --- session-stall class ----------------------------------------------------
+
+from validate import STALL_REPORT, is_session_stall  # noqa: E402
+
+
+def test_stall_is_everything_absent() -> None:
+    assert is_session_stall(["correctness", "conventions"], [], [], False)
+
+
+def test_a_valid_result_is_never_a_stall() -> None:
+    assert not is_session_stall(["correctness", "conventions"], [], [], True)
+
+
+def test_one_lens_reporting_is_not_a_stall() -> None:
+    assert not is_session_stall(
+        ["correctness", "conventions"], ["correctness"], [], False
+    )
+
+
+def test_a_rejected_file_is_not_a_stall() -> None:
+    """A schema-rejected file proves the session ran and the lens produced
+    output — the operator must be sent to the schema error, not to a stall."""
+    assert not is_session_stall(
+        ["correctness", "conventions"], [], ["conventions"], False
+    )
+
+
+def test_no_expected_set_means_no_stall_claim() -> None:
+    assert not is_session_stall([], [], [], False)
+
+
+def test_stall_report_names_infrastructure_not_verdict() -> None:
+    assert "INFRASTRUCTURE" in STALL_REPORT
+    assert "not a review verdict" in STALL_REPORT
+
+
+def test_main_on_a_stall_prints_only_the_stall_diagnosis(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--specialist-files",
+            "findings-*.json",
+            "--expected-specialists",
+            "correctness,conventions",
+            "--result-file",
+            "review-result.json",
+        ],
+    )
+    assert validate.main() == 1
+    err = capsys.readouterr().err
+    assert "INFRASTRUCTURE" in err
+    # The three misleading lines are suppressed in favour of the one that names
+    # the cause; the middle one is worse than noise, because "merged before all
+    # specialists completed" describes a merge that never happened.
+    assert "no specialist findings files match" not in err
+    assert "that review lens never ran" not in err
+
+
+def test_main_still_reports_a_partial_fan_out_per_lens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One lens missing is NOT a stall — the per-lens diagnostic must survive."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "findings-correctness.json").write_text(
+        json.dumps({"specialist": "correctness", "findings": []})
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--specialist-files",
+            "findings-*.json",
+            "--expected-specialists",
+            "correctness,conventions",
+            "--result-file",
+            "review-result.json",
+        ],
+    )
+    assert validate.main() == 1
+    err = capsys.readouterr().err
+    assert "that review lens never ran" in err
+    assert "INFRASTRUCTURE" not in err
