@@ -438,9 +438,37 @@ public struct GitManager: Sendable {
     }
 
     /// Removes a worktree at the given path.
-    public func worktreeRemove(repoPath: String, worktreePath: String) async throws {
-        _ = try await run(arguments: ["worktree", "remove", worktreePath, "--force"], at: repoPath)
+    ///
+    /// `timeout` overrides the instance default. The archive path passes a
+    /// raised value on its fallback leg: removal unlinks every file in the
+    /// worktree, which for a dependency-heavy repo runs for minutes, and the
+    /// default 120 s ceiling kills git partway through — leaving a
+    /// half-deleted directory that is still registered with git, because git
+    /// drops the administrative entry only after the working-tree removal
+    /// returns success.
+    public func worktreeRemove(
+        repoPath: String, worktreePath: String, timeout: Duration? = nil
+    ) async throws {
+        _ = try await run(
+            arguments: ["worktree", "remove", worktreePath, "--force"],
+            at: repoPath,
+            timeout: timeout
+        )
     }
+
+    /// Ceiling for the archive path's fallback removal. Generous rather than
+    /// unbounded — the queue's rename is the intended path, and this leg only
+    /// runs when the rename could not be performed at all.
+    ///
+    /// Derived from the throughput measured for the deletion-queue design
+    /// (`docs/specs/2026-08-10-worktree-deletion-queue-design.md`): worktrees
+    /// of 200,000–235,000 filesystem entries, unlinked at between 587
+    /// entries/s (six concurrent removals) and 3,100 entries/s (one removal on
+    /// a quiet machine). The largest tree at the slowest measured rate is
+    /// ~400 s, so 900 s clears the slow end of that range by better than 2x —
+    /// enough margin for a machine worse than the one measured, while still
+    /// bounding a genuinely wedged subprocess.
+    public static let worktreeRemoveFallbackTimeout: Duration = .seconds(900)
 
     /// Prunes stale worktree tracking entries.
     public func worktreePrune(repoPath: String) async throws {

@@ -246,12 +246,26 @@ def test_findings_bad_severity_names_it(tmp_path: Path) -> None:
     assert "severity" in message
 
 
-def test_findings_rejects_unknown_top_level_key(tmp_path: Path) -> None:
+def test_findings_smuggled_top_level_verdict_is_stripped_not_fatal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A model must not smuggle a verdict into a findings file — and it cannot:
+    # the verdict is COMPUTED by verdict_from_findings from the merged
+    # severities and is never read from any findings file, so the smuggled key
+    # is inert wherever it lands. That makes stripping-with-a-warning the right
+    # response rather than the fatal rejection this test used to pin: killing
+    # the file would discard the lens's real findings to punish a key nothing
+    # reads. See "unknown keys are stripped, not fatal" below for the rationale
+    # in full.
     data = _valid_findings()
-    data["verdict"] = "APPROVE"  # the model must not smuggle a verdict in
+    data["verdict"] = "APPROVE"
     path = _write(tmp_path / "findings-correctness.json", data)
-    with pytest.raises(SchemaValidationError, match="verdict"):
-        validate_findings_file(path)
+    parsed = validate_findings_file(path)
+    assert "verdict" not in parsed
+    assert len(parsed["findings"]) == 2
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "verdict" in out
 
 
 # --- `line` may be null: findings with no line anchor ----------------------
@@ -1121,6 +1135,870 @@ def test_main_still_reports_a_partial_fan_out_per_lens(
     err = capsys.readouterr().err
     assert "that review lens never ran" in err
     assert "INFRASTRUCTURE" not in err
+
+
+# --- unknown keys are stripped, not fatal -----------------------------------
+#
+# The observed failure: the correctness lens reported two real findings, each
+# carrying one extra key — `failure_scenario`, vocabulary borrowed from a
+# different finding format the model knows. `additionalProperties: false`
+# rejected the file, BOTH findings were discarded, and the gate failed closed
+# with no verdict. Nothing in the pipeline reads that key; the review was lost
+# to a typo in a vocabulary.
+#
+# The invariant these fixtures pin: a lens that RAN never contributes zero
+# findings over a cosmetic key. An unknown key carries no meaning to any
+# consumer, so the safe reading is to drop it — loudly, so the prompt drift that
+# produced it is visible in the log — and validate what remains.
+#
+# Value strictness is retained, and the distinction is the point. Stripping
+# answers only "this key is not in the vocabulary". It says nothing about
+# whether the KNOWN fields are well-formed, so a bad severity, an out-of-range
+# confidence, or a missing title is still a malformed finding that fails the
+# gate closed. Softening the key set must not soften the values the verdict and
+# the disposition check are computed from.
+
+
+def _finding_with_failure_scenario(**overrides: object) -> dict:
+    """The real shape from the observed run: a well-formed finding plus one
+    borrowed key."""
+    finding = {
+        "id": "correctness-1",
+        "file": "Sources/TBDDaemon/Example.swift",
+        "line": 128,
+        "severity": "HIGH",
+        "title": "retry loop drops the last attempt",
+        "body": "The loop exits one iteration early.",
+        "confidence": 0.8,
+        "failure_scenario": "3 retries configured, only 2 are attempted",
+    }
+    finding.update(overrides)
+    return finding
+
+
+def test_findings_file_with_a_borrowed_key_passes_and_strips_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [_finding_with_failure_scenario()]},
+    )
+    parsed = validate_findings_file(path)
+    finding = parsed["findings"][0]
+    assert "failure_scenario" not in finding
+    # Everything the pipeline reads survived intact.
+    assert finding["id"] == "correctness-1"
+    assert finding["severity"] == "HIGH"
+    assert finding["title"] == "retry loop drops the last attempt"
+
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "failure_scenario" in out
+    assert "findings/0" in out
+    assert "findings-correctness.json" in out
+
+
+def test_main_a_borrowed_key_does_not_cost_the_lens_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The whole-run reproduction: the correctness lens reports two real
+    # findings, each carrying `failure_scenario`; the conventions lens is clean.
+    # Before the fix this discarded both findings, reported the correctness lens
+    # as "FAILED validation", and exited 1 with no verdict.
+    high = _finding_with_failure_scenario()
+    medium = _finding_with_failure_scenario(
+        id="correctness-2",
+        file="Sources/TBDDaemon/Other.swift",
+        line=44,
+        severity="MEDIUM",
+        title="timeout is not honored on the retry path",
+    )
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [high, medium]},
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": []},
+    )
+    merged = [
+        {key: value for key, value in finding.items() if key != "failure_scenario"}
+        for finding in (_finding_with_failure_scenario(), medium)
+    ]
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": merged,
+            "disposition": [
+                {"id": "correctness-1", "action": "kept"},
+                {"id": "correctness-2", "action": "kept"},
+            ],
+            "comment_body": "## Review\nTwo findings.",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    # The findings SURVIVED and drove the verdict — the whole point of the fix.
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "REJECT"
+
+
+def test_stripping_does_not_soften_a_bad_severity(tmp_path: Path) -> None:
+    # Same finding, one unknown key AND one invalid value: the value still
+    # fails the gate closed.
+    finding = _finding_with_failure_scenario(severity="CRITICAL")
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError) as excinfo:
+        validate_findings_file(path)
+    message = str(excinfo.value)
+    assert "CRITICAL" in message
+    assert "severity" in message
+
+
+def test_stripping_does_not_soften_a_missing_required_field(tmp_path: Path) -> None:
+    finding = _finding_with_failure_scenario()
+    del finding["title"]
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match="title"):
+        validate_findings_file(path)
+
+
+def test_result_finding_with_a_borrowed_key_passes_and_strips_it(
+    tmp_path: Path,
+) -> None:
+    # The merged result carries the same vocabulary risk: the orchestrator
+    # copies specialist findings forward, borrowed keys and all.
+    data = _valid_result()
+    data["findings"] = [_finding_with_failure_scenario()]
+    data["disposition"] = [{"id": "correctness-1", "action": "kept"}]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert "failure_scenario" not in parsed["findings"][0]
+    assert parsed["findings"][0]["severity"] == "HIGH"
+
+
+def test_result_disposition_entry_with_a_borrowed_key_passes_and_strips_it(
+    tmp_path: Path,
+) -> None:
+    data = _valid_result()
+    data["disposition"] = [
+        {"id": "correctness-1", "action": "kept", "category": "correctness"}
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert "category" not in parsed["disposition"][0]
+    assert parsed["disposition"][0]["action"] == "kept"
+
+
+def test_a_clean_file_prints_no_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The warning must mean something: a file with nothing to strip is silent.
+    path = _write(tmp_path / "findings-correctness.json", _valid_findings())
+    validate_findings_file(path)
+    assert "warning:" not in capsys.readouterr().out
+
+
+# --- strip_unknown_keys as a pure function ----------------------------------
+
+from validate import strip_unknown_keys  # noqa: E402
+
+
+def _findings_validator() -> tuple[dict, type]:
+    """The real findings schema plus its validator class — the same pair
+    _validate_file builds, so these unit tests exercise production key sets."""
+    import jsonschema
+
+    with open(
+        validate._SCHEMAS_DIR / "findings.schema.json", encoding="utf-8"
+    ) as handle:
+        schema = json.load(handle)
+    return schema, jsonschema.validators.validator_for(schema)
+
+
+def test_strip_reports_and_removes_a_nested_unknown_key() -> None:
+    schema, validator_cls = _findings_validator()
+    data = {
+        "specialist": "correctness",
+        "findings": [_finding_with_failure_scenario()],
+    }
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("findings/0", ["failure_scenario"])
+    ]
+    assert "failure_scenario" not in data["findings"][0]
+    assert data["findings"][0]["id"] == "correctness-1"
+
+
+def test_strip_reports_the_root_as_root() -> None:
+    schema, validator_cls = _findings_validator()
+    data = _valid_findings()
+    data["verdict"] = "APPROVE"
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("<root>", ["verdict"])
+    ]
+    assert "verdict" not in data
+
+
+def test_strip_sorts_several_extras_within_one_object() -> None:
+    schema, validator_cls = _findings_validator()
+    finding = _finding_with_failure_scenario(short_summary="s", category="c")
+    data = {"specialist": "correctness", "findings": [finding]}
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("findings/0", ["category", "failure_scenario", "short_summary"])
+    ]
+
+
+def test_strip_output_is_ordered_by_path() -> None:
+    schema, validator_cls = _findings_validator()
+    data = {
+        "specialist": "correctness",
+        "findings": [
+            _finding_with_failure_scenario(id="correctness-1"),
+            _finding_with_failure_scenario(id="correctness-2"),
+        ],
+        "verdict": "APPROVE",
+    }
+    reported = strip_unknown_keys(data, schema, validator_cls)
+    assert [path for path, _ in reported] == sorted(path for path, _ in reported)
+    assert set(path for path, _ in reported) == {
+        "<root>",
+        "findings/0",
+        "findings/1",
+    }
+
+
+def test_strip_finds_nothing_in_a_clean_document() -> None:
+    schema, validator_cls = _findings_validator()
+    data = _valid_findings()
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+    assert data == _valid_findings()
+
+
+@pytest.mark.parametrize("data", [[], ["a"], "nope", 42, None, True])
+def test_strip_tolerates_any_json_type(data: object) -> None:
+    # A findings file that decoded to a scalar or a list has no object to strip
+    # from. Stripping is not the place that diagnoses that — the strict
+    # validation immediately after is — so this must return quietly rather than
+    # raise and replace a precise schema error with a traceback.
+    schema, validator_cls = _findings_validator()
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+
+
+# --- a misnamed ROOT container must still fail the gate closed --------------
+#
+# The limit of the soft key set. Stripping an unknown key is safe exactly when
+# the key carries nothing a reader would have seen, and at the document ROOT a
+# container can carry the review itself: the most likely reason a lens writes
+# `{"findings": [], "results": [...]}` is that it reported real findings and
+# misnamed the list, and deleting `results` converts a fail-closed schema
+# rejection into a silent APPROVE over unread code. `findings` and
+# `disposition` are root keys, so the root is the only depth where that
+# substitution is possible — the section after this one pins the other side,
+# where an unknown key can hold anything and still reach nothing.
+
+
+def _high_finding(finding_id: str = "correctness-1") -> dict:
+    return {
+        "id": finding_id,
+        "file": "Sources/TBDDaemon/Example.swift",
+        "line": 12,
+        "severity": "HIGH",
+        "title": "the finding that must never be silently deleted",
+    }
+
+
+def test_main_findings_smuggled_under_a_wrong_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The regression this boundary exists for: the correctness lens reports a
+    # HIGH finding under `results` and leaves `findings` empty. Stripping
+    # `results` would report "0 finding(s)" and write APPROVE.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "results": [_high_finding()],
+        },
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": []},
+    )
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "results" in err
+    assert "Additional properties are not allowed" in err
+
+
+def test_main_merged_findings_smuggled_under_a_wrong_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The same shape one layer up, where the damage is worse: the specialist
+    # file is legitimate and reports a HIGH, and the MERGE misnames the list.
+    # Stripping `results` there would leave `findings: []` — an APPROVE over a
+    # finding the lens actually reported.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [_high_finding()]},
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": []},
+    )
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": [],
+            "results": [_high_finding()],
+            "disposition": [{"id": "correctness-1", "action": "kept"}],
+            "comment_body": "## Review\nOne finding.",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "results" in err
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [{"id": "x"}],
+        [1, 2, 3],
+        {"nested": "object"},
+        {},
+        # An EMPTY array is left alone too. The rule reads the value's TYPE, not
+        # its content: judging emptiness would make the gate's behavior depend
+        # on how much the model happened to write, and failing closed is the
+        # deliberately conservative direction when the two cannot be told apart.
+        [],
+    ],
+)
+def test_strip_leaves_container_valued_unknown_root_keys_alone(
+    value: object,
+) -> None:
+    schema, validator_cls = _findings_validator()
+    data = {"specialist": "correctness", "findings": [], "results": value}
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+    assert data["results"] == value
+
+
+def test_strip_takes_the_scalars_and_leaves_the_container_in_one_object() -> None:
+    # Mixed: the cosmetic key goes, the suspicious one stays, and what stays is
+    # enough to keep the strict pass rejecting the file.
+    schema, validator_cls = _findings_validator()
+    data = {
+        "specialist": "correctness",
+        "findings": [],
+        "summary": "all clear",
+        "results": [_high_finding()],
+    }
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("<root>", ["summary"])
+    ]
+    assert "summary" not in data
+    assert data["results"] == [_high_finding()]
+
+
+def test_strip_declines_a_schema_whose_key_set_properties_does_not_state() -> None:
+    # `patternProperties` makes keys legal that `properties` never names, so
+    # `properties` is not the key set and stripping by it would delete legal
+    # data. (The schema-valued `additionalProperties` form needs no guard: it
+    # validates each extra key against its subschema and reports under that
+    # subschema's keyword, never under `additionalProperties`.)
+    import jsonschema
+
+    schema = {
+        "type": "object",
+        "properties": {"known": {"type": "string"}},
+        "additionalProperties": False,
+        "patternProperties": {"^x-": {}},
+    }
+    validator_cls = jsonschema.validators.validator_for(schema)
+    data = {"known": "a", "extra": 42}
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+    assert data["extra"] == 42
+
+
+# --- the container carve-out is a ROOT rule, not a depth-free one ------------
+#
+# The carve-out above exists because a misnamed container at the document root
+# can BE the verdict's input: `findings`, `disposition`, and the severities
+# inside them are root-anchored, so deleting `results` there fabricates an
+# APPROVE. None of that is reachable below the root. A finding's own keys are
+# the ones the schema names — `id`, `severity`, `title` and the rest are KNOWN
+# keys and are never candidates for stripping — so an unknown key inside a
+# finding or a disposition entry cannot remove a finding, cannot change a
+# severity, and cannot alter a disposition's action. Whatever it holds is
+# elaboration that had no slot in the format, and the only question is whether
+# losing it is worth failing the gate over. It is not: applying the container
+# rule at every depth turns `"failure_scenario": ["step one", "step two"]` —
+# the same borrowed vocabulary the soft key set exists for, spelled as a list —
+# back into a whole discarded lens.
+
+
+def test_a_container_valued_borrowed_key_inside_a_finding_is_stripped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The reproduction: the incident's key, written as a list instead of a
+    # string. Below the root, the value's type buys nothing.
+    finding = _finding_with_failure_scenario(
+        failure_scenario=["step one", "step two"]
+    )
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    parsed = validate_findings_file(path)
+    assert "failure_scenario" not in parsed["findings"][0]
+    assert parsed["findings"][0]["severity"] == "HIGH"
+    out = capsys.readouterr().out
+    assert "failure_scenario" in out
+    assert "findings/0" in out
+
+
+def test_a_container_valued_unknown_key_in_a_disposition_entry_is_stripped(
+    tmp_path: Path,
+) -> None:
+    data = _valid_result()
+    data["disposition"] = [
+        {
+            "id": "correctness-1",
+            "action": "kept",
+            "evidence": {"file": "Sources/A.swift", "lines": [1, 2]},
+        }
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert "evidence" not in parsed["disposition"][0]
+    assert parsed["disposition"][0]["action"] == "kept"
+
+
+def test_depth_stripping_does_not_soften_a_missing_dropped_note(
+    tmp_path: Path,
+) -> None:
+    # The known keys are never stripped, so the one place a note is load-bearing
+    # still fails closed even when the entry also carries an unknown container.
+    data = _valid_result()
+    data["disposition"] = [
+        {"id": "correctness-1", "action": "dropped", "rationale": {"why": "n/a"}}
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match="note"):
+        validate_result_file(path)
+
+
+# --- the warning is model-written text, and GitHub reads stdout -------------
+#
+# Every part of the strip warning that varies — the key names, and the path
+# components that are themselves object keys — was written by the review
+# session. GitHub parses a job's stdout line by line for `::` workflow
+# commands, so a key spelled with a newline in it would let the session emit
+# its own annotations, or a `::stop-commands::` that switches annotation
+# parsing off for the rest of the job. The run that carries it is GREEN — the
+# keys were stripped, the file validated — which is what makes it worth
+# defending: nothing else is failing to draw attention.
+
+
+def test_sanitize_flattens_line_breaks() -> None:
+    assert validate._sanitize_log_text("a\nb") == "a\\nb"
+    assert validate._sanitize_log_text("a\r\nb") == "a\\r\\nb"
+    assert validate._sanitize_log_text("plain") == "plain"
+
+
+def test_a_key_name_cannot_forge_a_second_annotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    finding = _finding_with_failure_scenario()
+    del finding["failure_scenario"]
+    finding["x\n::warning::forged"] = "payload"
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    validate_findings_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    warnings = [line for line in lines if line.startswith("::warning::")]
+    assert len(warnings) == 1
+    # The break is escaped in place, so the forged directive stays inside the
+    # one real annotation as text.
+    assert "x\\n::warning::forged" in warnings[0]
+    assert not any(line.startswith("::warning::forged") for line in lines)
+
+
+def test_the_strip_warning_is_an_annotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It fires on runs that go on to PASS, so a bare stdout line is where it
+    # would go unread.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding_with_failure_scenario()],
+        },
+    )
+    validate_findings_file(path)
+    out = capsys.readouterr().out
+    assert out.startswith("::warning::")
+    assert "failure_scenario" in out
+
+
+def test_a_file_name_cannot_forge_an_annotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The path is model-written too: the specialist names its own file with the
+    # Write tool, and the workflow's `findings-*.json` glob matches a name
+    # carrying a newline as readily as any other.
+    finding = _finding_with_failure_scenario()
+    path = _write(
+        tmp_path / "findings-a\n::error::forged.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    validate_findings_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert "findings-a\\n::error::forged.json" in lines[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_finding_shaped_content_below_root_is_dropped_by_design(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A nested container CAN hold finding-shaped content, and it is dropped.
+
+    Pinned so it reads as a decision rather than an accident. The guarantee the
+    depth rule makes is narrower than "nothing important can hide below the
+    root": a strip there never removes an element of the DECLARED findings array
+    and never touches a known field, but content the model wrote into a slot the
+    format does not have goes with the key, warning and all.
+
+    Failing closed on it instead is the worse trade. `related_findings` is
+    indistinguishable by type from `"failure_scenario": ["step one", "step
+    two"]` — the incident's own borrowed vocabulary spelled as a list — so a
+    rule that caught one would cost a whole lens for the other. And a rejection
+    would not have surfaced the nested finding either: it would have discarded
+    the declared ones too and forced a re-run.
+    """
+    smuggled = _high_finding("correctness-nested")
+    finding = _finding_with_failure_scenario()
+    del finding["failure_scenario"]
+    finding["related_findings"] = [smuggled]
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    parsed = validate_findings_file(path)
+
+    assert "related_findings" not in parsed["findings"][0]
+    # Only the DECLARED array feeds the verdict; the smuggled finding is gone.
+    assert [f["id"] for f in parsed["findings"]] == ["correctness-1"]
+    out = capsys.readouterr().out
+    assert "related_findings" in out
+    assert "findings/0" in out
+
+
+def test_one_annotation_per_file_lists_every_site(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The incident's real shape: a lens that borrows a key name writes it on
+    # every finding it reports. One annotation naming every site, not one per
+    # site — twenty near-identical notes would hit GitHub's per-step annotation
+    # display cap and bury whatever else the run had to say.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [
+                _finding_with_failure_scenario(id="correctness-1"),
+                _finding_with_failure_scenario(id="correctness-2"),
+                _finding_with_failure_scenario(id="correctness-3"),
+            ],
+        },
+    )
+    validate_findings_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    for index in range(3):
+        assert f"at findings/{index}: failure_scenario" in lines[0]
+
+
+# --- every model-derived interpolation goes through the choke point ---------
+#
+# The strip warning is not the only line that carries model-written text into a
+# log GitHub parses for `::` commands. A file's PATH is model-written — the
+# specialist names its own file with the Write tool, and `findings-*.json`
+# matches a newline-bearing name — and it appears in the `ok:` line of a
+# perfectly VALID file and in the `error:` line of a rejected one. So does file
+# CONTENT: the `specialist` name, and the finding ids the disposition check
+# reports. Every one of those is routed through `_sanitize_log_text`, which
+# stays the single place the escaping is defined.
+#
+# The `ok:` line is the sharper of the two, because it prints on success: a
+# forged annotation there rides a run that goes on to post a review.
+
+_FORGED_NAME = "findings-a\n::error::forged.json"
+
+
+def test_a_valid_file_with_a_forged_name_stays_one_ok_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path / _FORGED_NAME, {"specialist": "correctness", "findings": []})
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    ok_lines = [line for line in lines if line.startswith("ok: ")]
+    assert len(ok_lines) == 2  # the findings file and the result file
+    assert "findings-a\\n::error::forged.json" in ok_lines[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_a_rejected_file_with_a_forged_name_stays_one_error_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path / _FORGED_NAME, {"specialist": "correctness"})  # no findings
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = capsys.readouterr().err.splitlines()
+    error_lines = [line for line in lines if line.startswith("error: ")]
+    assert len(error_lines) == 1
+    assert "findings-a\\n::error::forged.json" in error_lines[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_the_strip_warning_does_not_claim_the_file_validated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The annotation is printed BEFORE the strict pass, so it cannot claim the
+    # file validated — sometimes the very next line rejects it. Here a `dropped`
+    # entry spells its reason `reason` instead of `note`: the unknown key is
+    # stripped and annotated, and then the file fails closed for want of the
+    # `note` a dropped finding must carry. The annotation stays (it is useful
+    # context on a rejected file); what it asserts is narrowed to what has
+    # actually happened by the time it prints.
+    data = _valid_result()
+    data["disposition"] = [
+        {"id": "correctness-1", "action": "dropped", "reason": "premise refuted"}
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match="note"):
+        validate_result_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert "reason" in lines[0]
+    assert "validated" not in lines[0]
+    assert "kept for the validation that follows" in lines[0]
+
+
+# --- the sanitize invariant is per-SITE, not per-helper ---------------------
+#
+# `_sanitize_log_text` being correct proves nothing about a print that forgets
+# to call it, and a call site is exactly the kind of thing a later edit drops
+# while the helper's own tests stay green. So every site that interpolates
+# model-written text gets its own test, each crafting input that carries
+# "\n::error::forged" through that ONE site — a specialist name, a finding id, a
+# value quoted back by a schema error, an exception message — and each failing
+# if the call is removed from that site alone.
+
+_FORGED = "\n::error::forged"
+
+
+def _forged_lines(captured: str) -> list[str]:
+    return captured.splitlines()
+
+
+def _assert_one_line_and_inert(lines: list[str], needle: str) -> None:
+    matches = [line for line in lines if needle in line]
+    assert len(matches) == 1, f"expected exactly one line carrying {needle!r}"
+    assert "\\n::error::forged" in matches[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_a_forged_specialist_name_cannot_split_the_unexpected_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The broadest surface of the four: `specialist` is free-form model-authored
+    # content inside a file that passes the schema, and the warning it feeds
+    # prints on a run that goes on to PASS.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": f"acme{_FORGED}", "findings": []},
+    )
+    _write_specialist_file(tmp_path, "conventions")
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, "conventions") == 0
+
+    lines = _forged_lines(capsys.readouterr().out)
+    _assert_one_line_and_inert(lines, "unexpected specialist(s)")
+
+
+def test_a_forged_finding_id_cannot_split_the_disposition_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Finding ids are model-authored and reach the log whenever the merge fails
+    # to account for one.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_high_finding(f"correctness-1{_FORGED}")],
+        },
+    )
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "disposition list does not account")
+
+
+def test_a_forged_result_error_cannot_split_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The result-error site's own test, reached by injecting the raise.
+
+    No crafted review-result.json reaches it. Two things stand in the way, and
+    both are worth naming because either could stop being true. jsonschema
+    `repr()`s the offending value into its message, so a newline a model writes
+    into a value arrives already escaped; and the only raw interpolation in a
+    schema error is the FILE PATH, which for the merged result is the
+    workflow's own `--result-file` literal rather than anything the session
+    named. (The specialist files are different — their names come from the
+    session's Write calls through a glob, which is why the sibling test above
+    can craft that one for real.)
+
+    The sanitize call stays and is pinned anyway: it costs nothing, and the
+    guarantee it backstops is two accidents deep — a schema gaining
+    `patternProperties` would put a model-written key straight into the
+    instance path this line prints.
+    """
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+
+    def _raise(_path: str) -> dict:
+        raise SchemaValidationError(f"review-result.json{_FORGED}: bad")
+
+    monkeypatch.setattr(validate, "validate_result_file", _raise)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "review-result.json")
+
+
+def test_a_forged_verdict_error_cannot_split_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The verdict site's own test, reached by patching the raiser.
+
+    `verdict_from_findings` quotes the offending finding's id and severity, but
+    no schema-VALID file can reach it: `severity` is an enum, so anything the
+    function would reject the strict pass rejected first. The site is
+    defense-in-depth against that guarantee being weakened later, and its
+    sanitize call deserves a test regardless — so the raise is injected rather
+    than smuggled through a file that cannot exist today.
+    """
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+
+    def _raise(_findings: list[dict]) -> str:
+        raise ValueError(f"finding 'x{_FORGED}' has unknown severity")
+
+    monkeypatch.setattr(validate, "verdict_from_findings", _raise)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "unknown severity")
+
+
+def test_a_forged_expected_specialists_error_cannot_split_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The `--expected-specialists` error site, reached by injecting the raise.
+
+    No CLI value reaches it carrying forged text. The raise fires only when the
+    value names NO specialist — whitespace or bare separators — so a value with
+    `::error::forged` in it parses to a lens name and never raises at all; and
+    the message quotes the value with `!r`, which escapes the newline before
+    this line is composed. The wrapper is uniform policy rather than a live
+    defense here, and it is pinned so that policy cannot quietly lapse at this
+    site.
+    """
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+
+    def _raise(_raw: str | None) -> list[str]:
+        raise ValueError(f"--expected-specialists was supplied as{_FORGED}")
+
+    monkeypatch.setattr(validate, "parse_expected_specialists", _raise)
+    assert _run_main(monkeypatch, tmp_path, "correctness") == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "--expected-specialists")
+
+
+def test_a_forged_glob_cannot_split_the_empty_glob_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The empty-glob line cannot be split — by either of two mechanisms.
+
+    A PROPERTY test rather than a per-site one, and deliberately so. This line
+    is defended twice over: `!r` escapes the newline as it quotes the glob, and
+    the sanitize wrapper escapes whatever `!r` did not. Removing either alone
+    leaves the property intact, so this fails only when BOTH are gone — which is
+    the honest shape of the guarantee. What it pins is the thing that matters
+    (an operator-supplied glob can never forge an annotation), not which of the
+    two redundant mechanisms happens to be carrying it.
+    """
+    _write_empty_result(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--specialist-files",
+            f"findings-a{_FORGED}-*.json",
+            "--result-file",
+            str(tmp_path / "review-result.json"),
+        ],
+    )
+    assert validate.main() == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "no specialist findings files match")
 
 
 # --- the infrastructure-failure channel --------------------------------------

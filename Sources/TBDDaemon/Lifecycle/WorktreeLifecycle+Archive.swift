@@ -159,16 +159,83 @@ extension WorktreeLifecycle {
             }
         }
 
-        // git worktree remove
-        try? await git.worktreeRemove(
-            repoPath: repo.path,
-            worktreePath: worktree.path
-        )
+        // Hand the directory to the deletion queue rather than removing it in
+        // place. `git worktree remove` must unlink every file, which for a
+        // dependency-heavy worktree runs past any subprocess deadline; when the
+        // deadline killed it, the result was a half-deleted directory that was
+        // still registered with git and still occupied its pool slot, while the
+        // row already read `.archived`. The rename is one syscall, so the
+        // archive completes regardless of tree size and the bytes are reclaimed
+        // afterwards with no clock attached.
+        do {
+            let queued = try deletionQueue.enqueue(worktreePath: worktree.path)
 
-        // The directory is gone from disk — fire the event-driven scratchpad
-        // cleanup hook (Task 8) rather than waiting for the next hourly sweep.
-        if let onWorktreeRemoved {
-            await onWorktreeRemoved(worktree.path, repo.path)
+            // The directory no longer sits at the registered path, so git's
+            // administrative entry is stale — drop it. A failure here is
+            // logged, not fatal: the next GC sweep prunes, because
+            // `OrphanGC.pruneStaleRegistrations` looks for exactly this
+            // wreckage — an archived row whose directory is gone while git
+            // still lists a worktree at its path. Without that, a registration
+            // outliving its directory would be permanent, since revive's
+            // preflight refuses a path git still has registered.
+            do {
+                try await git.worktreePrune(repoPath: repo.path)
+            } catch {
+                archiveLogger.error("""
+                archive: prune failed for \(repo.path, privacy: .public) \
+                after queueing \(worktree.path, privacy: .public): \(error, privacy: .public)
+                """)
+            }
+
+            // The rename above is the commit point (design spec "The commit
+            // point"): the directory has already left its pool slot, so the
+            // callback's precondition — the path is gone — holds here, before
+            // the bytes are actually reclaimed by the drain below. Firing now
+            // rather than after drain matches the design's ordering and keeps
+            // the event-driven scratchpad cleanup this callback exists to
+            // trigger prompt even when the drain that follows is slow.
+            if let onWorktreeRemoved {
+                await onWorktreeRemoved(worktree.path, repo.path)
+            }
+
+            // Reclaim the bytes inline, with no deadline attached. Every
+            // production caller that reaches this method through an RPC —
+            // `worktree.archive`, `repo.remove`'s cascade, and auto-archive on
+            // merge — invokes it from a detached task, so draining here blocks
+            // nothing an RPC is waiting on. The synchronous
+            // `archiveWorktree(worktreeID:force:)` wrapper (tests, and any
+            // future CLI use) deliberately blocks until the drain finishes —
+            // archive completion is meant to mean "the bytes are gone" there.
+            // An interrupted drain leaves a queue entry the GC sweep finishes.
+            // The unlink itself runs on the queue's own serial dispatch queue,
+            // so a multi-minute removal neither holds a cooperative-pool
+            // thread nor races another archive's drain for the disk.
+            await deletionQueue.drain(queued)
+        } catch {
+            archiveLogger.error("""
+            archive: could not queue \(worktree.path, privacy: .public) for deletion \
+            (\(error, privacy: .public)) — falling back to in-place removal
+            """)
+            do {
+                try await git.worktreeRemove(
+                    repoPath: repo.path,
+                    worktreePath: worktree.path,
+                    timeout: GitManager.worktreeRemoveFallbackTimeout
+                )
+                // Only claim the directory is gone when it actually is. This
+                // callback drives scratchpad reclamation, whose consumer
+                // previously had to re-check the path itself because this
+                // fired unconditionally after a swallowed failure.
+                let removed = !FileManager.default.fileExists(atPath: worktree.path)
+                if removed, let onWorktreeRemoved {
+                    await onWorktreeRemoved(worktree.path, repo.path)
+                }
+            } catch {
+                archiveLogger.error("""
+                archive: in-place removal of \(worktree.path, privacy: .public) \
+                also failed: \(error, privacy: .public) — the GC sweep will retry
+                """)
+            }
         }
     }
 
