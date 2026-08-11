@@ -37,6 +37,14 @@ VALIDATE = PIPELINE_DIR / "validate.py"
 # Where the real Stop hook persists its nudge counter, relative to $TMPDIR.
 NUDGE_COUNTER_NAME = "claude-review-v2-block-count"
 
+# Every file the hook keeps under $TMPDIR. A resume loop must clear all of
+# them; see reset_nudge_counter.
+HOOK_STATE_NAMES = (
+    NUDGE_COUNTER_NAME,
+    "claude-review-v2-hold-started",
+    "claude-review-v2-hold-count",
+)
+
 
 def git(project: Path, *args: str) -> None:
     subprocess.run(
@@ -145,14 +153,16 @@ def nudge_count(sandbox: Path) -> int:
 
 
 def reset_nudge_counter(sandbox: Path) -> None:
-    """Between-invocation reset for resume loops.
+    """Between-invocation reset for resume loops — ALL THREE state files.
 
-    The counter survives the process (it lives in TMPDIR, not session state),
-    so WITHOUT this a resumed session inherits a burned-out counter and the
-    Stop hook allows its very first stop attempt — zero nudges, backstop
-    silently disarmed.
+    They survive the process (they live in TMPDIR, not session state), and each
+    stale one silently disarms a different backstop: a burned-out nudge counter
+    lets the Stop hook allow the very first stop attempt, a hold counter at its
+    cap does the same to the uncounted hold, and a stale start stamp puts the
+    hold deadline in the past.
     """
-    (sandbox / "tmp" / NUDGE_COUNTER_NAME).unlink(missing_ok=True)
+    for name in HOOK_STATE_NAMES:
+        (sandbox / "tmp" / name).unlink(missing_ok=True)
 
 
 # --- shared scenario builders (fan-out + resume tests) ------------------------

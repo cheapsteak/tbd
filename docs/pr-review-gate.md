@@ -56,18 +56,91 @@ why, and for what reviving it actually takes.
 5. **Verdict.** `validate.py`, not the model, computes the verdict: it
    schema-validates the findings and the merged result, checks the disposition list
    accounts for every specialist finding id, and writes `REJECT` to `verdict.txt`
-   iff any HIGH or MEDIUM finding survives the merge, otherwise `APPROVE`. A `Stop`
-   hook
-   ([`claude-review-v2/hooks/stop-hook.sh`](../.github/workflows/claude-review-v2/hooks/stop-hook.sh))
-   refuses to end the session until `review-result.json` exists and parses. The job
-   then enforces the verdict with an exact string match: `APPROVE` passes, `REJECT`
-   blocks the merge, and anything else (missing / malformed / killed session) fails
-   closed.
+   iff any HIGH or MEDIUM finding survives the merge, otherwise `APPROVE`. It also
+   checks the fan-out was *complete* — every lens named in the job's
+   `REVIEW_SPECIALISTS` must have produced a findings file the schema accepts — so
+   half a review can never read as a clean one. A `Stop` hook keeps the session
+   alive long enough to produce that material; see
+   [below](#keeping-the-session-alive-long-enough-to-report). The job then enforces
+   the verdict with an exact string match: `APPROVE` passes, `REJECT` blocks the
+   merge, and anything else (missing / malformed / killed session) fails closed.
 
 Every file the pipeline reads back out of the workspace — `review-result.json`,
 `verdict.txt`, `skip-decision.json`, `discussion-context.txt`, `findings-*.json` —
 is deleted after checkout, before anything runs, so a PR cannot pre-commit a forged
 `verdict.txt=APPROVE` or a skip decision and approve itself.
+
+## Keeping the session alive long enough to report
+
+The review session runs headless, where ending a turn ends the whole process — and a
+specialist subagent still working when that happens does not get its findings file
+onto disk. A review that needs roughly ten minutes must therefore be held open, while
+a session that will never produce a result must still terminate. Four mechanisms
+split that difference; the thresholds and the reasoning behind them are in
+[`docs/specs/2026-08-10-review-orchestrator-liveness-design.md`](specs/2026-08-10-review-orchestrator-liveness-design.md).
+
+- **The hook holds, uncounted, while specialist findings are pending.**
+  [`claude-review-v2/hooks/stop-hook.sh`](../.github/workflows/claude-review-v2/hooks/stop-hook.sh)
+  runs every time the session tries to end, and learns which files to expect from
+  the job-level `REVIEW_SPECIALISTS` variable — the same declaration that supplies
+  `validate.py`'s `--expected-specialists`, so a hook and a validator that must
+  agree about the lens set cannot drift apart. While any expected
+  `findings-<name>.json` is absent or unparseable, the hook blocks the stop with a
+  reason telling the orchestrator its specialists are still running, and **spends
+  none of its nudge budget** doing so: a session that cannot comply yet is not a
+  session refusing to. The hold is bounded by a 25-minute wall clock, past which
+  the hook stands aside — measured from the session's first stop attempt, not from
+  the start of the job.
+- **Each hold sleeps 30 seconds before it blocks.** A block costs a turn, and the
+  session's `--max-turns` budget runs out well before 25 minutes of holding would;
+  sleeping spends wall clock instead, which is what makes the deadline the real
+  bound. Two numbers follow from it and must move together: the hook's command
+  timeout in `hooks/settings.json` is 60 seconds, strictly greater than the sleep,
+  because a hook killed mid-sleep emits no block at all; and the defensive cap of
+  60 holds is 30 minutes of sleeping, so the 25-minute deadline still binds first.
+- **The hook nudges, boundedly, once only the merge is missing.** When every
+  expected findings file is present and parses but `review-result.json` is not
+  there, the model has all its inputs and is simply not writing the merge. The hook
+  blocks with instructions for writing that file and counts the block, giving up
+  after five. The count applies to this state alone.
+- **The hook always exits 0.** Empty stdin, an absent `jq`, an unwritable state
+  file — none of them may wedge the session, because allowing a stop is never a
+  gate bypass. `validate.py` fails closed downstream regardless. Two of those cases
+  resolve toward releasing rather than holding: state that cannot be persisted
+  defeats both bounds at once, so the hook stands aside instead of holding forever,
+  and with `jq` off `PATH` a present non-empty file counts as ready, so a finished
+  review is never reported as a running one.
+- **The job carries `timeout-minutes: 45`.** A session that wedges rather than ends
+  would otherwise run to GitHub's six-hour cap while the author waits on a check
+  that never reports.
+
+### Telling a stalled session from a rejected diff
+
+A red `claude-review` is not always a rejected diff, and the two call for opposite
+responses. `validate.py` writes no `verdict.txt` on any validation failure, so the
+distinguishing error line in the job log is what an operator reads:
+
+- **A stalled session** — `the review session produced NOTHING: no specialist
+  findings file and no review-result.json`. No lens reported and no merge was
+  written, so no code was reviewed at all. Treat it as an infrastructure failure
+  rather than a verdict, and read nothing into it about the diff. Re-running the
+  check may clear it, because the underlying failure is a race; a stall that
+  recurs is a pipeline defect to fix, not a check to re-run.
+- **A partial fan-out** — one lens named as having produced no findings file while
+  another reported. The session ran and the review is incomplete.
+- **A findings file the schema rejected** — a lens named as having produced a file
+  that failed validation, printed directly beneath the schema error itself. That
+  lens *did* run; its output was discarded, and the schema error above is the thing
+  to act on.
+- **A broken invocation** — `--expected-specialists` supplied while naming no lens,
+  which is what an unset or blank `REVIEW_SPECIALISTS` expands to. Nothing can be
+  checked, so nothing is trusted.
+
+All four fail closed, and none of them posts a review comment: the post step runs
+only behind a trustworthy verdict. A stall is therefore something you read in the
+run — `validate.py` writes the diagnosis to the job log — never on the PR. Whatever
+a step annotation or check summary shows alongside it is the workflow's and GitHub's
+rendering of a failed step; the log line is the part the scripts guarantee.
 
 ## Trusted fork PRs need `allow-unsafe-pr-checkout`
 
