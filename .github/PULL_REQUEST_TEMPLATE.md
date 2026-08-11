@@ -2,7 +2,9 @@
 Pick the variant that matches this PR and delete the other, including these
 instructions. Refactors, DX, and ops changes use the FEATURE skeleton, with
 Summary carrying the motivation. Replace each section's guidance comment with
-prose. This repo is public: no org, ticket, or host names — see CLAUDE.md.
+prose. Sections whose guidance marks them optional may be deleted outright
+when they don't apply. This repo is public: no org, ticket, or host names —
+see CLAUDE.md.
 -->
 
 <!-- ═══════════════════════ BUG FIX ═══════════════════════ -->
