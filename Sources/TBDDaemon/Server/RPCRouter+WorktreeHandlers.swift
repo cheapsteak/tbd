@@ -120,7 +120,7 @@ extension RPCRouter {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                         worktreeID: pending.id, repoID: pending.repoID,
-                        name: pending.name, path: pending.path
+                        name: pending.name, path: pending.localPath
                     )))
                 case .preSessionPending:
                     // The lifecycle already broadcast `.worktreeCreated` (and
@@ -183,7 +183,7 @@ extension RPCRouter {
         // count, and enriching all archived rows made that lookup take ~19s.
         if params.status == .archived && (params.includeSessionCounts ?? true) {
             for i in worktrees.indices where worktrees[i].status == .archived {
-                if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].path) {
+                if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].localPath) {
                     worktrees[i].liveClaudeSessionCount = ClaudeSessionScanner.countSessionFiles(projectDir: dir)
                 } else {
                     worktrees[i].liveClaudeSessionCount = 0
@@ -285,7 +285,7 @@ extension RPCRouter {
 
         // Capture the path before the row is deleted so the result can report
         // the directory we deliberately left on disk.
-        let path = try await db.worktrees.get(id: params.worktreeID)?.path
+        let path = try await db.worktrees.get(id: params.worktreeID)?.localPath
 
         // Forget kills the same windows archive does, so it records the same
         // shape: one worktree-named row per call, ahead of the first kill.
@@ -347,7 +347,7 @@ extension RPCRouter {
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,
-            name: worktree.name, path: worktree.path
+            name: worktree.name, path: worktree.localPath
         )))
 
         return try RPCResponse(result: worktree)
@@ -416,7 +416,7 @@ extension RPCRouter {
                 worktreeID: created.id,
                 repoID: created.repoID,
                 name: created.name,
-                path: created.path
+                path: created.localPath
             )))
         case .preSessionPending:
             // The lifecycle already broadcast `.worktreeCreated` alongside
@@ -444,12 +444,12 @@ extension RPCRouter {
         case .inserted:
             subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
                 worktreeID: worktree.id, repoID: worktree.repoID,
-                name: worktree.name, path: worktree.path
+                name: worktree.name, path: worktree.localPath
             )))
         case .revived:
             subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
                 worktreeID: worktree.id, repoID: worktree.repoID,
-                name: worktree.name, path: worktree.path
+                name: worktree.name, path: worktree.localPath
             )))
         case .unchanged:
             break

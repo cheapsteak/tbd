@@ -33,7 +33,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/myapp").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -41,7 +41,7 @@ struct ScratchPromoteRPCTests {
         #expect(resp.success)
         let result = try resp.decodeResult(ScratchPromoteResult.self)
         #expect(FileManager.default.fileExists(atPath: dest))
-        #expect(!FileManager.default.fileExists(atPath: wt.path))
+        #expect(!FileManager.default.fileExists(atPath: wt.localPath))
         let row = try await db.worktrees.get(id: wt.id)
         #expect(row?.promotedToRepoID == result.repoID)
         #expect(try await db.repos.get(id: result.repoID) != nil)
@@ -58,7 +58,7 @@ struct ScratchPromoteRPCTests {
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
             params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
         #expect(!resp.success)
-        #expect(FileManager.default.fileExists(atPath: wt.path))       // not moved
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))       // not moved
         #expect(!FileManager.default.fileExists(atPath: dest))         // dest not created
         #expect(try await db.worktrees.get(id: wt.id)?.promotedToRepoID == nil)
     }
@@ -71,7 +71,7 @@ struct ScratchPromoteRPCTests {
         var wt = try created.decodeResult(Worktree.self)
         try await db.worktrees.rename(id: wt.id, displayName: "My Cool App")  // displayName != name now
         wt = try await db.worktrees.get(id: wt.id)!
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/folder-name").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -88,7 +88,7 @@ struct ScratchPromoteRPCTests {
         var wt = try created.decodeResult(Worktree.self)
         try await db.worktrees.rename(id: wt.id, displayName: "Renamed Scratch")
         wt = try await db.worktrees.get(id: wt.id)!
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/folder-name").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -103,7 +103,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)   // displayName == name (still default)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/coolfolder").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -127,7 +127,7 @@ struct ScratchPromoteRPCTests {
         #expect(!resp.success)
         #expect(!FileManager.default.fileExists(atPath: dest))
         let row = try await db.worktrees.get(id: wt.id)
-        #expect(row?.path == wt.path)
+        #expect(row?.localPath == wt.localPath)
         #expect(row?.promotedToRepoID == nil)
         #expect(try await db.repos.list().count == repoCountBefore)
     }
@@ -138,7 +138,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
         let repoCountBefore = try await db.repos.list().count
 
         let dest = home.appendingPathComponent("projects/already-here").path
@@ -147,9 +147,9 @@ struct ScratchPromoteRPCTests {
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
             params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
         #expect(!resp.success)
-        #expect(FileManager.default.fileExists(atPath: wt.path))          // scratch folder untouched
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))          // scratch folder untouched
         let row = try await db.worktrees.get(id: wt.id)
-        #expect(row?.path == wt.path)
+        #expect(row?.localPath == wt.localPath)
         #expect(row?.promotedToRepoID == nil)
         #expect(try await db.repos.list().count == repoCountBefore)       // no repo row created
     }
@@ -163,17 +163,17 @@ struct ScratchPromoteRPCTests {
         // git init WITHOUT a commit — distinct from the no-git-at-all case,
         // exercises the hasCommits guard specifically.
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", wt.path, "init"]; try p.run(); p.waitUntilExit()
+        p.arguments = ["-C", wt.localPath, "init"]; try p.run(); p.waitUntilExit()
         let repoCountBefore = try await db.repos.list().count
 
         let dest = home.appendingPathComponent("projects/no-commits-yet").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
             params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
         #expect(!resp.success)
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
         #expect(!FileManager.default.fileExists(atPath: dest))
         let row = try await db.worktrees.get(id: wt.id)
-        #expect(row?.path == wt.path)
+        #expect(row?.localPath == wt.localPath)
         #expect(row?.promotedToRepoID == nil)
         #expect(try await db.repos.list().count == repoCountBefore)
     }
@@ -184,7 +184,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
         let repoCountBefore = try await db.repos.list().count
 
         // Dest is another path under the scratch base — must be rejected
@@ -193,10 +193,10 @@ struct ScratchPromoteRPCTests {
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
             params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
         #expect(!resp.success)
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
         #expect(!FileManager.default.fileExists(atPath: dest))
         let row = try await db.worktrees.get(id: wt.id)
-        #expect(row?.path == wt.path)
+        #expect(row?.localPath == wt.localPath)
         #expect(row?.promotedToRepoID == nil)
         #expect(try await db.repos.list().count == repoCountBefore)
     }
@@ -215,7 +215,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -238,7 +238,7 @@ struct ScratchPromoteRPCTests {
         #expect(resp.error?.contains("Moved the folder back") == true)
 
         // Folder is back home; dest is gone.
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
         #expect(!FileManager.default.fileExists(atPath: dest))
         // Scratch row still active and un-promoted — retryable.
         let row = try #require(try await db.worktrees.get(id: wt.id))

@@ -352,7 +352,7 @@ public actor HibernationCoordinator {
         guard let sessionID = terminal.claudeSessionID else {
             return .notEligible(reason: "No session id to resume later")
         }
-        guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
         let server = worktree.tmuxServer
@@ -546,7 +546,7 @@ public actor HibernationCoordinator {
         // conflation this whole change exists to remove. Practically
         // unreachable either way: `terminal.worktreeID` is a cascading foreign
         // key, so a terminal row outliving its worktree does not happen.
-        guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notHibernated
         }
         let target: PaneSendTarget
@@ -604,7 +604,7 @@ public actor HibernationCoordinator {
         guard terminal.isParked else { return await classifyUnparkedWake(terminal) }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
         guard !wakesInFlight.contains(terminalID) else { return .inFlight }
-        guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
         // Never respawn into a missing directory: tmux's `-c` silently falls
@@ -683,7 +683,7 @@ public actor HibernationCoordinator {
         // machine-invisible. Cheap no-op once already trusted. `config` is a
         // `try?` read; fall back to the shipped default.
         await ClaudeTrustSeeder.ensureTrusted(
-            worktree: worktree,
+            worktree: worktree.worktree,
             autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
             profileConfigDir: profileConfigDir)
         // Pre-resume freshness: if the worktree was moved/promoted while this
@@ -743,7 +743,7 @@ public actor HibernationCoordinator {
         // the delayed session-recapture Task below.
         let outcome = await withServerLock(server) {
             await self.wakeTmuxSection(
-                terminal: terminal, worktree: worktree, server: server,
+                terminal: terminal, worktree: worktree.worktree, server: server,
                 windowID: windowID, paneID: paneID, spawnCommand: spawn.command,
                 env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows
             )
@@ -828,7 +828,7 @@ public actor HibernationCoordinator {
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     shellCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
@@ -856,7 +856,7 @@ public actor HibernationCoordinator {
                 let bootstrapWindowID = try await tmux.ensureServer(
                     server: server,
                     session: "main",
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
@@ -864,7 +864,7 @@ public actor HibernationCoordinator {
                 let window = try await tmux.createWindow(
                     server: server,
                     session: "main",
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     shellCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
@@ -1030,7 +1030,7 @@ public actor HibernationCoordinator {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
         for terminal in allTerminals where terminal.isParked {
-            guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else { continue }
+            guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else { continue }
             let server = worktree.tmuxServer
 
             // Check if the window still exists AND is running claude
@@ -1169,7 +1169,7 @@ public actor HibernationCoordinator {
         server: String, windowID: String, excluding terminalID: UUID
     ) async -> Bool {
         guard let terminals = try? await db.terminals.list(),
-              let worktrees = try? await db.worktrees.list() else { return false }
+              let worktrees = try? await db.worktrees.listLocal() else { return false }
         let serverWorktreeIDs = Set(worktrees.filter { $0.tmuxServer == server }.map(\.id))
         return terminals.contains {
             $0.id != terminalID

@@ -22,7 +22,7 @@ import Testing
     #expect(result.status == .active)
     #expect(result.name.contains("-"))
     #expect(result.branch.hasPrefix("tbd/"))
-    #expect(FileManager.default.fileExists(atPath: result.path))
+    #expect(FileManager.default.fileExists(atPath: result.localPath))
 
     // Verify terminals were created
     let terminals = try await db.terminals.list(worktreeID: result.id)
@@ -182,7 +182,7 @@ import Testing
     #expect(result.status == .active)
     #expect(result.name == "my-folder")
     #expect(result.branch == "feat/custom-branch")
-    #expect(result.path.hasSuffix("/my-folder"))
+    #expect(result.localPath.hasSuffix("/my-folder"))
 }
 
 @Test func testCreateWithExplicitDisplayName() async throws {
@@ -294,13 +294,13 @@ import Testing
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
     let archived = try await db.worktrees.get(id: wt.id)
     #expect(archived?.status == .archived)
-    #expect(!FileManager.default.fileExists(atPath: wt.path))
+    #expect(!FileManager.default.fileExists(atPath: wt.localPath))
 
     // Verify terminals were cleaned up
     let terminals = try await db.terminals.list(worktreeID: wt.id)
@@ -340,7 +340,7 @@ import Testing
     let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
 
     #expect(revived.status == .active)
-    #expect(FileManager.default.fileExists(atPath: revived.path))
+    #expect(FileManager.default.fileExists(atPath: revived.localPath))
 
     // Verify fresh terminals were created
     let terminals = try await db.terminals.list(worktreeID: revived.id)
@@ -388,10 +388,10 @@ import Testing
 
     // Re-create a stray directory where the worktree used to live.
     try FileManager.default.createDirectory(
-        atPath: wt.path, withIntermediateDirectories: true
+        atPath: wt.localPath, withIntermediateDirectories: true
     )
     try "stray".write(
-        toFile: (wt.path as NSString).appendingPathComponent("file.txt"),
+        toFile: (wt.localPath as NSString).appendingPathComponent("file.txt"),
         atomically: true, encoding: .utf8
     )
 
@@ -601,7 +601,7 @@ import Testing
     let secondSessionID = UUID().uuidString
     let window = try await lifecycle.tmux.createWindow(
         server: wt.tmuxServer, session: "main",
-        cwd: wt.path, shellCommand: "echo test"
+        cwd: wt.localPath, shellCommand: "echo test"
     )
     _ = try await db.terminals.create(
         worktreeID: wt.id,
@@ -710,9 +710,9 @@ import Testing
 
     // Path should be under the canonical layout (tempDir/.tbd/worktrees/<name>)
     // because makeTestRepo overrides worktreeRoot to <tempDir>/.tbd/worktrees.
-    #expect(wt.path.hasPrefix(tempDir.path))
-    #expect(wt.path.contains(".tbd/worktrees/"))
-    #expect(wt.path.contains(wt.name))
+    #expect(wt.localPath.hasPrefix(tempDir.path))
+    #expect(wt.localPath.contains(".tbd/worktrees/"))
+    #expect(wt.localPath.contains(wt.name))
 }
 
 // MARK: - Reconcile Tests
@@ -982,7 +982,7 @@ import Testing
     #expect(wt.name == wt.displayName, "name == displayName; hasDefaultDisplayName is true")
     #expect(wt.hasDefaultDisplayName, "stop-rename-check hook will fire")
     #expect(wt.branch.hasPrefix("tbd/"), "Auto-generated worktrees use tbd/* branch")
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 }
 
 @Test func testCreateWorktreeExistingBranchWithoutFolderHasDefaultDisplayName() async throws {
@@ -1026,7 +1026,7 @@ import Testing
     #expect(wt.name == wt.displayName, "Existing-branch worktrees must have name == displayName")
     #expect(wt.hasDefaultDisplayName, "Existing-branch worktrees must have hasDefaultDisplayName == true")
     #expect(wt.branch == "my-feature")
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 }
 
 // MARK: - Helpers

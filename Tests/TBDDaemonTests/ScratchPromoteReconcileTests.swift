@@ -62,7 +62,7 @@ struct ScratchPromoteReconcileTests {
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)

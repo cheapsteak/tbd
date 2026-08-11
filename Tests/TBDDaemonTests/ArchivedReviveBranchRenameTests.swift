@@ -22,7 +22,7 @@ import Testing
 
     // Rename the branch from inside the worktree (simulates user `git branch -m`).
     let newBranch = "renamed-\(UUID().uuidString.prefix(6))"
-    try await shell("git branch -m \(newBranch)", at: URL(fileURLWithPath: wt.path))
+    try await shell("git branch -m \(newBranch)", at: URL(fileURLWithPath: wt.localPath))
 
     // Archive — should detect the rename and persist the new branch.
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
@@ -44,7 +44,7 @@ import Testing
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
-    let expectedSHA = try await GitManager().headSHA(worktreePath: wt.path)
+    let expectedSHA = try await GitManager().headSHA(worktreePath: wt.localPath)
 
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -70,7 +70,7 @@ import Testing
 
     let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
     #expect(revived.status == .active)
-    #expect(FileManager.default.fileExists(atPath: revived.path))
+    #expect(FileManager.default.fileExists(atPath: revived.localPath))
 }
 
 @Test func testReviveFallsBackToSHAWhenBranchMissing() async throws {
@@ -86,7 +86,7 @@ import Testing
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
     // Capture SHA before archive.
-    let sha = try await GitManager().headSHA(worktreePath: wt.path)
+    let sha = try await GitManager().headSHA(worktreePath: wt.localPath)
 
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -102,10 +102,10 @@ import Testing
 
     let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
     #expect(revived.status == .active)
-    #expect(FileManager.default.fileExists(atPath: revived.path))
+    #expect(FileManager.default.fileExists(atPath: revived.localPath))
 
     // The new worktree should be on the (newly created) bogus branch, with HEAD == sha.
-    let revivedSHA = try await GitManager().headSHA(worktreePath: revived.path)
+    let revivedSHA = try await GitManager().headSHA(worktreePath: revived.localPath)
     #expect(revivedSHA == sha)
 }
 
@@ -174,7 +174,7 @@ import Testing
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     let originalBranch = wt.branch
     let renamedBranch = "renamed-\(UUID().uuidString.prefix(6))"
-    try await shell("git branch -m \(renamedBranch)", at: URL(fileURLWithPath: wt.path))
+    try await shell("git branch -m \(renamedBranch)", at: URL(fileURLWithPath: wt.localPath))
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
     // Roll the DB row back so it has the *old* branch name. This mimics the

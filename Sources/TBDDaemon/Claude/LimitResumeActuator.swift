@@ -259,7 +259,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         //    (cancel silently), same as a dead window.
         guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil),
               !terminal.isParked,
-              let worktree = ((try? await db.worktrees.get(id: terminal.worktreeID)) ?? nil)
+              let worktree = ((try? await db.worktrees.getLocal(id: terminal.worktreeID)) ?? nil)
         else { return .notEligible(.terminalGone) }
         let server = worktree.tmuxServer
         guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {

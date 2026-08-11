@@ -110,7 +110,11 @@ private struct PinnedTerminalCell: View {
         // scratch spaces live only in `scratchWorktrees`, never the
         // repo-grouped dict, so a dict-only lookup leaves scratch pins stuck
         // on "Loading..." forever.
+        // Resolved as a `LocalWorktree` so the cell cannot hand
+        // `TerminalPanelView` a working directory that is not on this disk; a
+        // row with no checkout keeps the existing "Loading..." placeholder.
         let worktree = appState.findWorktree(id: terminal.worktreeID)
+            .flatMap(LocalWorktree.init)
         VStack(spacing: 0) {
             // Header: pin icon + worktree name
             HStack(spacing: 4) {

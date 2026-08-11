@@ -12,14 +12,20 @@ extension WorktreeLifecycle {
     /// Runs git checks concurrently and updates the DB + broadcasts deltas.
     public func refreshGitStatuses(repoID: UUID) async {
         guard let repo = try? await db.repos.get(id: repoID) else { return }
-        var worktrees = (try? await db.worktrees.list(repoID: repoID, status: .active)) ?? []
+        // Fetched through `listLocal`: a remote row has no checkout on this
+        // disk, so it has no path to match against `git worktree list` and no
+        // branch for the conflict probes below. Unwrapped back to bare rows
+        // because the branch-sync pass mutates elements in place and
+        // `LocalWorktree` forwards reads only — the fence is at the fetch.
+        var worktrees = ((try? await db.worktrees.listLocal(repoID: repoID, status: .active)) ?? [])
+            .map(\.worktree)
 
         // Sync branch names: one `git worktree list` call gives us
         // the current branch for every worktree — update DB if changed.
         if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path) {
             let branchByPath = Dictionary(gitWorktrees.map { ($0.path, $0.branch) }, uniquingKeysWith: { _, b in b })
             for (i, wt) in worktrees.enumerated() {
-                if let gitBranch = branchByPath[wt.path], gitBranch != wt.branch {
+                if let gitBranch = branchByPath[wt.localPath], gitBranch != wt.branch {
                     try? await db.worktrees.updateBranch(id: wt.id, branch: gitBranch)
                     worktrees[i].branch = gitBranch  // use updated branch for conflict check below
                 }
@@ -144,7 +150,14 @@ extension WorktreeLifecycle {
 
         let gitWorktrees = try await git.worktreeList(repoPath: repo.path)
         let correctTmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
-        var dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
+        // Every fetch in this sweep is `listLocal`, not `list`. Reconcile's
+        // whole job is to make DB rows agree with what git and tmux report on
+        // THIS disk, so a row with no local checkout is not stale — it is out
+        // of scope. Handed the location-neutral `list`, the archival pass
+        // below would archive every remote row on every sweep (its path is
+        // never in `gitPaths`) and the canonicalization pass would stamp a
+        // tmux server name onto rows that have no tmux server at all.
+        var dbWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)
 
         // Fix stale tmux server names (e.g. after migration from UUID-based to
         // path-based naming). CAUTION: a non-canonical stored server is NOT
@@ -156,7 +169,7 @@ extension WorktreeLifecycle {
         // So: canonicalize ONLY when the stored server has no live window for
         // this worktree's terminals — the genuinely-stale case the self-heal
         // was built for.
-        let mainWorktrees = try await db.worktrees.list(repoID: repoID, status: .main)
+        let mainWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .main)
         for wt in (dbWorktrees + mainWorktrees) where wt.tmuxServer != correctTmuxServer {
             if await hasLiveWindow(server: wt.tmuxServer, worktreeID: wt.id) {
                 logger.info("reconcile: keeping non-canonical tmux server \(wt.tmuxServer, privacy: .public) for worktree \(wt.id, privacy: .public) — it has live windows (promoted-scratch inheritance)")
@@ -169,7 +182,7 @@ extension WorktreeLifecycle {
             }
         }
         // Re-fetch with corrected names
-        dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
+        dbWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)
 
         let gitPaths = Set(gitWorktrees.map(\.path))
         // Include `.creating` rows so a worktree whose pre-session phase-3
@@ -177,8 +190,27 @@ extension WorktreeLifecycle {
         // finishes) isn't "unknown" to the re-adopt pass below — re-adopting
         // its path would violate the UNIQUE path constraint and abort this
         // repo's reconcile.
+        //
+        // This one set deliberately fetches through the location-neutral
+        // `list(...)` and then states its two exclusions here, in the open,
+        // rather than borrowing `LocalWorktree.init?`. What it must contain is
+        // "every path a live creating row already claims", and a path missing
+        // from it is not a harmless omission: the re-adopt pass would treat
+        // that path as unknown, create a second row on it, and abort this
+        // repo's whole reconcile on the UNIQUE path constraint.
+        // `LocalWorktree.init?` is a predicate about a worktree TBD may act on
+        // right now, which is a different question — and any later tightening
+        // of it (say, requiring the directory to exist, which a creating row's
+        // does not yet) would silently shrink this set.
+        //
+        // Both exclusions are safe because neither kind of row can claim a
+        // path `git worktree list` will ever report back: a remote row's
+        // `remote://` path is synthetic, and an empty path is no path at all.
         let creatingPaths = Set(
-            (try await db.worktrees.list(repoID: repoID, status: .creating)).map(\.path)
+            (try await db.worktrees.list(repoID: repoID, status: .creating))
+                .filter { $0.location.isLocal }
+                .map(\.localPath)
+                .filter { !$0.isEmpty }
         )
         let dbPaths = Set(dbWorktrees.map(\.path)).union(creatingPaths)
 
@@ -266,8 +298,8 @@ extension WorktreeLifecycle {
         // machine with many worktrees that spawned N simultaneous `claude
         // --resume` processes (~0.5-1.5 GB each) and OOM'd the machine (#284).
         // Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
-        let allLiveWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
-            + (try await db.worktrees.list(repoID: repoID, status: .main))
+        let allLiveWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)
+            + (try await db.worktrees.listLocal(repoID: repoID, status: .main))
         // Probe the server each worktree row actually STORES, not the
         // canonical name: after a scratch promote the main worktree's windows
         // live on the inherited scratch server, and probing the canonical
@@ -377,7 +409,12 @@ extension WorktreeLifecycle {
         // For the canonical per-repo server — referenced by nothing outside
         // this repo — this reduces to the previous behavior: killed when the
         // repo has no live worktrees, orphan-swept otherwise.
-        let repoRows = try await db.worktrees.list(repoID: repoID)
+        // Local rows only, at all three fetches below: the servers to visit and
+        // the rows that keep one alive are both tmux facts, and a remote row
+        // names no tmux server. Including one would put its empty server name
+        // in `referencedServers` and make that same row count as a live
+        // reference to it.
+        let repoRows = try await db.worktrees.listLocal(repoID: repoID)
         var referencedServers = Set(repoRows.map(\.tmuxServer))
         referencedServers.insert(correctTmuxServer)
         // Also visit every server referenced by scratch rows (repoID nil,
@@ -392,9 +429,9 @@ extension WorktreeLifecycle {
         // servers into every repo's reconcile makes whichever repo reconciles
         // next sweep those orphans; the live-row checks below already span
         // all repos + scratch spaces, so live scratch windows stay safe.
-        let scratchRows = try await db.worktrees.list(scratchOnly: true)
+        let scratchRows = try await db.worktrees.listLocal(scratchOnly: true)
         referencedServers.formUnion(scratchRows.map(\.tmuxServer))
-        let globalLiveRows = try await db.worktrees.list(excludeArchived: true)
+        let globalLiveRows = try await db.worktrees.listLocal(excludeArchived: true)
 
         for server in referencedServers.sorted() {
             let liveRowsOnServer = globalLiveRows.filter { $0.tmuxServer == server }

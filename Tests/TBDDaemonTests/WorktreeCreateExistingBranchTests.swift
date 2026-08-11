@@ -32,7 +32,7 @@ import Testing
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     #expect(wt.status == .active)
     #expect(wt.branch.hasPrefix("tbd/"))
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 }
 
 @Test func testCreateWorktreeUsesExistingLocalBranch() async throws {
@@ -65,7 +65,7 @@ import Testing
     #expect(!wt.branch.hasPrefix("tbd/"))
     // Folder name is derived from the branch's local name (sanitized).
     #expect(wt.name == "existing-feature")
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     // Verify git also reports the worktree on the existing branch.
     // Path comparison uses `hasSuffix` because macOS resolves the temp dir
@@ -126,7 +126,7 @@ import Testing
     // Stored branch is the LOCAL tracking branch name (no `origin/` prefix).
     #expect(wt.branch == "remote-feature")
     #expect(wt.name == "remote-feature")
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     // Verify a local tracking branch was created and is what the worktree
     // is checked out on. See the path-suffix note in the local-branch test.
@@ -139,10 +139,10 @@ import Testing
 @Test func testCreateWorktreeForExistingBranchDeDupesAgainstArchivedRowPath() async throws {
     // Regression: re-opening an existing branch whose PREVIOUS worktree was
     // archived must not collide with the archived row's `path` (the
-    // `worktree.path` column is globally UNIQUE, including archived rows).
+    // `worktree.localPath` column is globally UNIQUE, including archived rows).
     // Archived worktrees keep their `path` but have no directory on disk, so
     // the old filesystem-only uniqueness check returned the base name
-    // unchanged and the insert threw `UNIQUE constraint failed: worktree.path`.
+    // unchanged and the insert threw `UNIQUE constraint failed: worktree.localPath`.
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -183,8 +183,8 @@ import Testing
         useExistingBranch: true
     )
     #expect(pending.name == "existing-feature-2")
-    #expect(pending.path != archivedPath)
-    #expect(pending.path.hasSuffix("/existing-feature-2"))
+    #expect(pending.localPath != archivedPath)
+    #expect(pending.localPath.hasSuffix("/existing-feature-2"))
 
     // Drive completion and confirm the worktree goes active with a real
     // checkout at the de-duped path.
@@ -198,7 +198,7 @@ import Testing
     }
     let completed = try #require(try await db.worktrees.get(id: pending.id))
     #expect(completed.status == .active)
-    #expect(FileManager.default.fileExists(atPath: completed.path))
+    #expect(FileManager.default.fileExists(atPath: completed.localPath))
 
     let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
     #expect(listed.contains { entry in
@@ -283,7 +283,7 @@ import Testing
 
     #expect(wt.status == .active)
     #expect(wt.branch == "already-here", "should have adopted the existing branch, not renamed around it")
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
     #expect(listed.contains { $0.branch == "already-here" })

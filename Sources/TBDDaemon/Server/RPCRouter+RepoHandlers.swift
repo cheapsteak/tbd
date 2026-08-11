@@ -75,8 +75,22 @@ extension RPCRouter {
             return RPCResponse(error: "Repository not found: \(params.repoID)")
         }
 
-        // Check for active worktrees
+        // Check for active worktrees. Location-neutral on purpose: a remote
+        // lane is as much a live thing the operator would lose as a local
+        // worktree, so it blocks an unforced removal just the same and is
+        // counted in the refusal below.
         let activeWorktrees = try await db.worktrees.list(repoID: repo.id, status: .active)
+
+        // Only the local ones are cascade-archived. Archiving a remote lane
+        // means stopping its provider session, which nothing on this path can
+        // do — and `beginArchiveWorktree` resolves its row through `getLocal`,
+        // so handing it a remote id would throw `worktreeNotFound` partway
+        // through the cascade and strand the teardown half-done. A remote
+        // row is instead removed by the `deleteForRepo` in
+        // `completeRepoRemoval`, along with the repo's archived and main rows:
+        // there are no local files to reclaim and nothing on disk to leave
+        // behind.
+        let localActiveWorktrees = activeWorktrees.compactMap(LocalWorktree.init)
 
         guard !activeWorktrees.isEmpty else {
             // Nothing to archive, so nothing to wait for: the removal finishes
@@ -115,14 +129,16 @@ extension RPCRouter {
         // would grow the outcome contract for a case where the appends
         // that carried it would very likely fail too — the log was
         // unwritable one row ago.
+        // A remote lane gets no row, because no teardown of it happens here
+        // and the record may only claim acts that were attempted.
         var actuationIDs: [String] = []
-        for wt in activeWorktrees {
+        for wt in localActiveWorktrees {
             actuationIDs.append(try await beginActuation(
                 .repoRemove, actor: actor,
                 target: ActuationTarget(worktree: wt.id.uuidString)))
         }
 
-        // Cascade-archive all active worktrees. Two-phase, same split
+        // Cascade-archive all active LOCAL worktrees. Two-phase, same split
         // as `handleWorktreeArchive`: phase 1 (`beginArchiveWorktree`)
         // is the throwing part — DB status flip, session capture,
         // tmux teardown — and runs synchronously in this loop so the
@@ -133,7 +149,7 @@ extension RPCRouter {
         // it is collected here and run by the detached tail below;
         // otherwise this RPC would block on N unbounded drains.
         var pendingCompletions: [(worktree: Worktree, repo: Repo)] = []
-        for (index, wt) in activeWorktrees.enumerated() {
+        for (index, wt) in localActiveWorktrees.enumerated() {
             let worktree: Worktree
             let wtRepo: Repo
             do {

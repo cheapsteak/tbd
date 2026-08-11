@@ -26,7 +26,7 @@ import Testing
     }
 
     #expect(result.status == .active)
-    #expect(result.path == worktreePath)
+    #expect(result.localPath == worktreePath)
     #expect(result.branch == branch)
     #expect(result.name == "feature-x")
     #expect(result.repoID == repo.id)
@@ -58,7 +58,7 @@ import Testing
 
     #expect(first.id == second.id)
     let allActive = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(allActive.filter { $0.path == worktreePath }.count == 1)
+    #expect(allActive.filter { $0.localPath == worktreePath }.count == 1)
 }
 
 @Test func testAdoptRevivesArchivedRow() async throws {

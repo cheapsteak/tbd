@@ -95,7 +95,7 @@ import Testing
         #expect(wt.branch == "feature-x")
         #expect(wt.prNumber == 7)
         // Worktree HEAD sits on the pull-ref commit, not on main.
-        let head = try await GitManager().headSHA(worktreePath: wt.path)
+        let head = try await GitManager().headSHA(worktreePath: wt.localPath)
         #expect(head == prSHA)
 
         let stored = try #require(try await db.worktrees.get(id: wt.id))
@@ -131,7 +131,7 @@ import Testing
         // Landed on the uniquified branch at the pull-ref commit...
         #expect(wt.branch == "feature-x-2")
         #expect(wt.prNumber == 7)
-        let head = try await GitManager().headSHA(worktreePath: wt.path)
+        let head = try await GitManager().headSHA(worktreePath: wt.localPath)
         #expect(head == prSHA)
 
         // ...and the original branch is untouched by the force refspec.
@@ -164,7 +164,7 @@ import Testing
         #expect(wt.status == .active)
         #expect(wt.branch == "feature-x")     // existing branch, not uniquified
         #expect(wt.prNumber == 9)             // still stamped for status tracking
-        let head = try await GitManager().headSHA(worktreePath: wt.path)
+        let head = try await GitManager().headSHA(worktreePath: wt.localPath)
         #expect(head == branchSHA)
         // No stray duplicate branch was created by a pull-ref fetch.
         let dupExists = try await GitManager().localBranchExists(repoPath: repoDir.path, name: "feature-x-2")

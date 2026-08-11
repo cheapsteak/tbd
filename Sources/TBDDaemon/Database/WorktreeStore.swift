@@ -37,6 +37,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
     var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
     var pinSortOrder: Int?  // sidebar dock ordering; nil = falls back to pinnedAt
+    var location: String?  // "local" | "remote"; nil reads as local
+    var providerName: String?  // set only alongside location == "remote"
+    var providerSessionID: String?  // set only alongside location == "remote"
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -44,7 +47,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.name = wt.name
         self.displayName = wt.displayName
         self.branch = wt.branch
-        self.path = wt.path
+        self.path = wt.localPath
         self.status = wt.status.rawValue
         self.hasConflicts = wt.hasConflicts
         self.createdAt = wt.createdAt
@@ -68,6 +71,16 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
         self.pinnedAt = wt.pinnedAt
         self.pinSortOrder = wt.pinSortOrder
+        switch wt.location {
+        case .local:
+            self.location = "local"
+            self.providerName = nil
+            self.providerSessionID = nil
+        case let .remote(provider, sessionID):
+            self.location = "remote"
+            self.providerName = provider
+            self.providerSessionID = sessionID
+        }
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -104,6 +117,16 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             decodeLogger.warning("worktree row \(id, privacy: .public): unknown status \(status, privacy: .public); defaulting to .active")
             worktreeStatus = .active
         }
+        // Mirrors `Worktree.init(from:)`: only a complete "remote" triple is a
+        // remote row. A null column (pre-v70), an unknown kind, or a "remote"
+        // missing either provider field reads as local rather than dropping
+        // the row.
+        let worktreeLocation: WorktreeLocation
+        if location == "remote", let providerName, let providerSessionID {
+            worktreeLocation = .remote(provider: providerName, sessionID: providerSessionID)
+        } else {
+            worktreeLocation = .local
+        }
         return Worktree(
             id: uuid,
             repoID: repoID.flatMap { UUID(uuidString: $0) },
@@ -127,7 +150,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             prNumber: pr_number,
             foreignHead: foreign_head ?? false,
             pinnedAt: pinnedAt,
-            pinSortOrder: pinSortOrder
+            pinSortOrder: pinSortOrder,
+            location: worktreeLocation
         )
     }
 }
@@ -179,6 +203,14 @@ public struct WorktreeStore: Sendable {
     /// new worktree's sibling group (same parentWorktreeID), so nested
     /// children get their own contiguous ordering separate from top-level
     /// worktrees in the same repo.
+    ///
+    /// `path` is used verbatim for a local worktree and **ignored** for a
+    /// remote one, whose path is derived from `location` — see
+    /// `WorktreeLocation.storagePath` for why a remote row cannot store the
+    /// caller's value (or an empty placeholder). Deriving here rather than at
+    /// the call site means no future caller can forget and collide with an
+    /// existing remote row on the column's UNIQUE constraint. Prefer
+    /// `createRemote` for remote rows, which does not ask for a path at all.
     public func create(
         repoID: UUID,
         name: String,
@@ -188,7 +220,8 @@ public struct WorktreeStore: Sendable {
         tmuxServer: String,
         status: WorktreeStatus = .active,
         parentWorktreeID: UUID? = nil,
-        prNumber: Int? = nil
+        prNumber: Int? = nil,
+        location: WorktreeLocation = .local
     ) async throws -> Worktree {
         try await writer.write { db in
             let maxOrder: Int
@@ -210,17 +243,48 @@ public struct WorktreeStore: Sendable {
                 name: name,
                 displayName: displayName ?? name,
                 branch: branch,
-                path: path,
+                path: location.storagePath ?? path,
                 status: status,
                 tmuxServer: tmuxServer,
                 sortOrder: maxOrder + 1,
                 parentWorktreeID: parentWorktreeID,
-                prNumber: prNumber
+                prNumber: prNumber,
+                location: location
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
             return wt
         }
+    }
+
+    /// Create a row for an agent session on a machine TBD does not manage.
+    ///
+    /// There is no path and no tmux server to pass: the path is derived from
+    /// the provider binding (`WorktreeLocation.storagePath`) and `tmuxServer`
+    /// is empty, since a remote lane has no tmux server of its own. Both facts
+    /// live here rather than at every call site so that "what does a remote
+    /// row store in the local-only columns" has exactly one answer.
+    public func createRemote(
+        repoID: UUID,
+        name: String,
+        displayName: String? = nil,
+        branch: String,
+        provider: String,
+        sessionID: String,
+        status: WorktreeStatus = .active,
+        parentWorktreeID: UUID? = nil
+    ) async throws -> Worktree {
+        try await create(
+            repoID: repoID,
+            name: name,
+            displayName: displayName,
+            branch: branch,
+            path: "",
+            tmuxServer: "",
+            status: status,
+            parentWorktreeID: parentWorktreeID,
+            location: .remote(provider: provider, sessionID: sessionID)
+        )
     }
 
     /// Create a repo-less "scratch" worktree row (repoID == nil). branch is "".
@@ -448,6 +512,49 @@ public struct WorktreeStore: Sendable {
         try await writer.read { db in
             try WorktreeRecord.fetchOne(db, key: id.uuidString)?.toModel()
         }
+    }
+
+    /// `get(id:)` restricted to worktrees with files on this machine.
+    ///
+    /// Local-only callers use this so a remote row cannot reach code that
+    /// would operate on a directory that does not exist. Returning nil for a
+    /// remote id is deliberate and is **not** an error: the caller's existing
+    /// not-found branch is the correct response to "this worktree has nothing
+    /// local to act on".
+    public func getLocal(id: UUID) async throws -> LocalWorktree? {
+        try await get(id: id).flatMap(LocalWorktree.init)
+    }
+
+    /// `list(...)` restricted to worktrees with files on this machine. Takes
+    /// the same filters as `list(...)` and forwards them unchanged.
+    ///
+    /// The filtering happens in Swift rather than SQL so that
+    /// `LocalWorktree.init?` stays the single definition of "local" — a WHERE
+    /// clause would be a second one, free to drift from the empty-path rule.
+    ///
+    /// Consequence: `limit`/`offset` are applied by SQL *before* the filter, so
+    /// a page containing remote rows yields fewer than `limit` locals.
+    /// Acceptable because no local-only caller paginates — the only caller that
+    /// passes `limit`/`offset` is the location-neutral `worktree.list` RPC,
+    /// which stays on `list(...)`.
+    public func listLocal(
+        repoID: UUID? = nil,
+        status: WorktreeStatus? = nil,
+        excludeArchived: Bool = false,
+        scratchOnly: Bool = false,
+        limit: Int? = nil,
+        offset: Int? = nil,
+        nameQuery: String? = nil
+    ) async throws -> [LocalWorktree] {
+        try await list(
+            repoID: repoID,
+            status: status,
+            excludeArchived: excludeArchived,
+            scratchOnly: scratchOnly,
+            limit: limit,
+            offset: offset,
+            nameQuery: nameQuery
+        ).compactMap(LocalWorktree.init)
     }
 
     /// Archive a worktree (set status to archived and record the timestamp).

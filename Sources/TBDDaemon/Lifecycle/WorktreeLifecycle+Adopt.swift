@@ -63,12 +63,12 @@ extension WorktreeLifecycle {
 
         // Idempotency: check for an existing row at this exact path.
         let existingActive = try await db.worktrees.list(repoID: repoID, status: .active)
-        if let match = existingActive.first(where: { $0.path == path }) {
+        if let match = existingActive.first(where: { $0.localPath == path }) {
             adoptLogger.info("adoptWorktree: \(path, privacy: .public) already active as \(match.id, privacy: .public)")
             return .unchanged(match)
         }
         let existingArchived = try await db.worktrees.list(repoID: repoID, status: .archived)
-        if let match = existingArchived.first(where: { $0.path == path }) {
+        if let match = existingArchived.first(where: { $0.localPath == path }) {
             adoptLogger.info("adoptWorktree: reviving archived row \(match.id, privacy: .public) for \(path, privacy: .public)")
             try await db.worktrees.updateStatus(id: match.id, status: .active)
             // Honor caller's displayName override on revival — without this, a

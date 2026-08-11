@@ -83,7 +83,7 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
 
         // Look up the worktree to get tmux server and path
-        guard let worktree = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
@@ -171,7 +171,7 @@ extension RPCRouter {
 
         // Build env vars available in all TBD terminals
         var env = SystemPromptBuilder.promptLayers(
-            repo: repo, worktree: worktree, scratchInstructions: createConfig?.scratchInstructions,
+            repo: repo, worktree: worktree.worktree, scratchInstructions: createConfig?.scratchInstructions,
             scratchRenamePrompt: createConfig?.scratchRenamePrompt)
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
@@ -319,7 +319,7 @@ extension RPCRouter {
             claudeSessionID = sessionID
             freshSessionID = sessionID
             appendSystemPrompt = SystemPromptBuilder.build(
-                repo: repo, worktree: worktree, isResume: false,
+                repo: repo, worktree: worktree.worktree, isResume: false,
                 scratchInstructions: createConfig?.scratchInstructions,
                 scratchRenamePrompt: createConfig?.scratchRenamePrompt)
             label = isLoginSession ? TerminalLabel.login : TerminalLabel.claudeCode
@@ -350,7 +350,7 @@ extension RPCRouter {
         // reinstating the stall.
         if isClaudeType {
             await ClaudeTrustSeeder.ensureTrusted(
-                worktree: worktree,
+                worktree: worktree.worktree,
                 autoTrustNonScratch: createConfig?.autoTrustWorktrees ?? true,
                 profileConfigDir: profileConfigDir)
         }
@@ -549,7 +549,7 @@ extension RPCRouter {
             // are on and the row looks busy) while a DB failure still confirms
             // the request row before it propagates.
             let railWorktree = try await actuating(actuationID) {
-                try await db.worktrees.get(id: terminal.worktreeID)
+                try await db.worktrees.getLocal(id: terminal.worktreeID)
             }
             if let railWorktree,
                await tmux.windowExists(
@@ -578,7 +578,7 @@ extension RPCRouter {
         // Terminals). Strictly best-effort: any failure logs inside
         // captureOnClose and the close proceeds unchanged.
         let worktree = try await actuating(actuationID) {
-            try await db.worktrees.get(id: terminal.worktreeID)
+            try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
         // Set when the kill itself failed. The deletion proceeds regardless
         // (pre-existing contract — the row goes and the response is the same),
@@ -646,7 +646,7 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalHistoryReviveParams.self, from: paramsData)
 
-        guard let worktree = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
         // A revived terminal must land in a live worktree — an archived row's
@@ -708,7 +708,7 @@ extension RPCRouter {
             // rather than in the create-time parameter list. `reviveConfig` is a
             // `try?` read; fall back to the shipped default.
             await ClaudeTrustSeeder.ensureTrusted(
-                worktree: worktree,
+                worktree: worktree.worktree,
                 autoTrustNonScratch: reviveConfig?.autoTrustWorktrees ?? true,
                 profileConfigDir: profileConfigDir)
             await TranscriptProjectDirSync.ensureSessionResumableDetached(
@@ -751,7 +751,7 @@ extension RPCRouter {
             )
             let terminal = try await actuating(actuationID) {
                 try await spawnRevivedTerminal(
-                    worktree: worktree,
+                    worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
                     spawnCommand: spawn.command,
                     env: env,
@@ -786,7 +786,7 @@ extension RPCRouter {
         ]
         let terminal = try await actuating(actuationID) {
             try await spawnRevivedTerminal(
-                worktree: worktree,
+                worktree: worktree.worktree,
                 plannedTerminalID: plannedTerminalID,
                 spawnCommand: command,
                 env: env,
@@ -824,7 +824,7 @@ extension RPCRouter {
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
-            cwd: worktree.path,
+            cwd: worktree.localPath,
             shellCommand: spawnCommand,
             env: env,
             sensitiveEnv: sensitiveEnv,
@@ -894,7 +894,7 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
-        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
@@ -1121,7 +1121,7 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
-        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
@@ -1148,7 +1148,7 @@ extension RPCRouter {
             return RPCResponse(error: "No Claude session ID for terminal \(params.terminalID)")
         }
 
-        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
@@ -1354,7 +1354,7 @@ extension RPCRouter {
         guard let sessionID = oldTerminal.claudeSessionID else {
             return RPCResponse(error: "Terminal \(params.terminalID) is not a Claude terminal")
         }
-        guard let worktree = try await db.worktrees.get(id: oldTerminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: oldTerminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
@@ -1464,7 +1464,7 @@ extension RPCRouter {
         let plannedTerminalID = mode == .inPlace ? oldTerminal.id : UUID()
         let swapConfig = try? await db.config.get()
         var env = SystemPromptBuilder.promptLayers(
-            repo: repo, worktree: worktree, scratchInstructions: swapConfig?.scratchInstructions,
+            repo: repo, worktree: worktree.worktree, scratchInstructions: swapConfig?.scratchInstructions,
             scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
@@ -1556,7 +1556,7 @@ extension RPCRouter {
         // Claude-only handler. `swapConfig` is a `try?` read; fall back to the
         // shipped default.
         await ClaudeTrustSeeder.ensureTrusted(
-            worktree: worktree,
+            worktree: worktree.worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
             profileConfigDir: configDirManager.resolveConfigDir(for: resolved))
 
@@ -1594,7 +1594,7 @@ extension RPCRouter {
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
             let appendPrompt = SystemPromptBuilder.build(
-                repo: repo, worktree: worktree, isResume: false,
+                repo: repo, worktree: worktree.worktree, isResume: false,
                 scratchInstructions: swapConfig?.scratchInstructions,
                 scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
             spawn = ClaudeSpawnCommandBuilder.build(
@@ -1640,7 +1640,7 @@ extension RPCRouter {
             switch mode {
             case .fork:
                 response = try await forkSwapNewTab(
-                    worktree: worktree,
+                    worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
                     spawnCommand: spawn.command,
                     env: env,
@@ -1655,7 +1655,7 @@ extension RPCRouter {
             case .inPlace:
                 let outcome = try await inPlaceSwapRespawn(
                     oldTerminal: oldTerminal,
-                    worktree: worktree,
+                    worktree: worktree.worktree,
                     spawnCommand: spawn.command,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
@@ -1701,7 +1701,7 @@ extension RPCRouter {
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
-            cwd: worktree.path,
+            cwd: worktree.localPath,
             shellCommand: spawnCommand,
             env: env,
             sensitiveEnv: sensitiveEnv,
@@ -1784,7 +1784,7 @@ extension RPCRouter {
             try await tmux.respawnWindow(
                 server: server,
                 windowID: windowID,
-                cwd: worktree.path,
+                cwd: worktree.localPath,
                 shellCommand: spawnCommand,
                 env: env,
                 sensitiveEnv: sensitiveEnv,
@@ -1916,7 +1916,7 @@ extension RPCRouter {
         }
 
         // Look up the worktree to get the tmux server name
-        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
@@ -2190,7 +2190,7 @@ extension RPCRouter {
         terminalID: UUID, sessionID: String?, payload: String, submit: Bool
     ) async -> ActuationOutcome {
         guard let terminal = try? await db.terminals.get(id: terminalID),
-              let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
+              let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .refused(.notFound)
         }
         // The kind is re-read too, not just the pane. A `recreateWindow` landing
@@ -2397,7 +2397,7 @@ extension RPCRouter {
         // tmux servers killed, so resizing windows there spawns dead `tmux
         // resize-window` processes (errors swallowed by `try?`) on every
         // resize-debounce tick during a window drag.
-        let worktrees = try await db.worktrees.list(status: .active)
+        let worktrees = try await db.worktrees.listLocal(status: .active)
         let serverByWorktree = Dictionary(uniqueKeysWithValues: worktrees.map { ($0.id, $0.tmuxServer) })
 
         logger.debug("setMainAreaSize \(params.cols, privacy: .public)x\(params.rows, privacy: .public) across \(allTerminals.count, privacy: .public) terminals")
@@ -2498,9 +2498,9 @@ extension RPCRouter {
 
             // Reconcile DB against actual git worktree list
             do {
-                let beforeCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
+                let beforeCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
                 try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
-                let afterCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
+                let afterCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
                 let delta = abs(beforeCount - afterCount)
                 worktreesReconciled += delta
             } catch {
@@ -2648,9 +2648,9 @@ extension RPCRouter {
             // of the promoted-to repo.
             if !accepted,
                let resolvedWorktreeID = resolved?.worktreeID,
-               let ownerWorktree = try await db.worktrees.get(id: terminal.worktreeID),
+               let ownerWorktree = try await db.worktrees.getLocal(id: terminal.worktreeID),
                let promotedRepoID = ownerWorktree.promotedToRepoID,
-               let resolvedWorktree = try await db.worktrees.get(id: resolvedWorktreeID),
+               let resolvedWorktree = try await db.worktrees.getLocal(id: resolvedWorktreeID),
                resolvedWorktree.repoID == promotedRepoID,
                resolvedWorktree.status == .main {
                 accepted = true
@@ -2750,7 +2750,7 @@ extension RPCRouter {
         if params.activityState == .idle,
            let storedPath = terminal.transcriptPath, !storedPath.isEmpty,
            FileManager.default.fileExists(atPath: storedPath),
-           let worktree = try? await db.worktrees.get(id: terminal.worktreeID) {
+           let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) {
             let derivedDir = TranscriptProjectDirSync.derivedProjectDir(
                 worktreePath: worktree.path,
                 projectsRoot: claudeProjectsRoot(forProfileID: terminal.profileID)
@@ -2803,7 +2803,7 @@ extension RPCRouter {
             return response
         }
 
-        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             response = RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
             return response
         }
@@ -2862,7 +2862,7 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
         guard let sessionID = terminal.claudeSessionID,
-              let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+              let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
 

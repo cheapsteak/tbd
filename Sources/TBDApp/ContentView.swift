@@ -622,16 +622,18 @@ private struct WorktreeDetailAreaView: View {
     @Binding var filePanelWidth: Double
     @State private var contentAreaHeight: CGFloat = 600
 
-    private var selectedWorktree: Worktree? {
-        guard let id = appState.selectedWorktreeIDs.first else { return nil }
-        // findWorktree also resolves scratch spaces (repo-less worktrees).
-        return appState.findWorktree(id: id)
+    /// The file panel reads a directory, so it binds to the local-only
+    /// selection. `LocalWorktree` subsumes the empty-path check this used to
+    /// spell out — the optimistic `.creating` placeholder has no directory yet
+    /// and does not convert.
+    private var selectedLocalWorktree: LocalWorktree? {
+        appState.selectedLocalWorktree
     }
 
     var body: some View {
         HStack(spacing: 0) {
             TerminalContainerView()
-            if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
+            if showFilePanel, let worktree = selectedLocalWorktree {
                 FilePanelDivider(panelWidth: Binding(
                     get: { CGFloat(filePanelWidth) },
                     set: { filePanelWidth = Double($0) }

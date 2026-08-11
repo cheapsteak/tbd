@@ -28,7 +28,7 @@ struct ScratchNew: AsyncParsableCommand {
         if json { printJSON(wt) } else {
             print("Created scratch space: \(wt.displayName)")
             print("  ID:   \(wt.id)")
-            print("  Path: \(wt.path)")
+            print("  Path: \(wt.localPath)")
         }
     }
 }
@@ -50,7 +50,7 @@ struct ScratchList: AsyncParsableCommand {
         if scratch.isEmpty { print("No scratch spaces. Use 'tbd scratch new' to create one."); return }
         for wt in scratch {
             let promoted = wt.promotedToRepoID != nil ? "  [promoted]" : ""
-            print("\(wt.id)  \(wt.displayName)\(promoted)  \(wt.path)")
+            print("\(wt.id)  \(wt.displayName)\(promoted)  \(wt.localPath)")
         }
     }
 }

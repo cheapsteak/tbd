@@ -305,6 +305,10 @@ extension WorktreeLifecycle {
         // left to flip or notify. A thrown DB error is NOT proof the row is
         // gone — treat it as transient and proceed with the spawn rather
         // than tear down a valid worktree.
+        // Location-neutral on purpose: the question is "did the row vanish",
+        // and `getLocal` would answer nil for a row that exists but is remote
+        // — indistinguishable here from deleted, and the branch below kills a
+        // live tmux window. Existence is not a locality question.
         let rowExists: Bool
         do {
             rowExists = try await db.worktrees.get(id: worktree.id) != nil
@@ -527,7 +531,7 @@ extension WorktreeLifecycle {
     func rerunPreSessionHook(
         worktreeID: UUID, cols: Int? = nil, rows: Int? = nil
     ) async throws {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw RerunPreSessionError.worktreeNotFound(worktreeID)
         }
         // A `.creating` worktree is already running its hook under phase 3.
@@ -548,7 +552,7 @@ extension WorktreeLifecycle {
         let spawn: PreSessionSpawn?
         do {
             spawn = try await spawnPreSessionTerminal(
-                worktree: worktree, repo: repo,
+                worktree: worktree.worktree, repo: repo,
                 worktreePath: worktree.path,
                 cols: cols, rows: rows,
                 claimsFocus: false
@@ -567,7 +571,7 @@ extension WorktreeLifecycle {
 
         let lifecycle = self
         Task.detached {
-            await lifecycle.finishRerunPreSession(worktree: worktree, preSession: spawn)
+            await lifecycle.finishRerunPreSession(worktree: worktree.worktree, preSession: spawn)
         }
     }
 

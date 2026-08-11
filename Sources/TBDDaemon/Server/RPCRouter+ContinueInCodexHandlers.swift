@@ -53,7 +53,7 @@ extension RPCRouter {
             throw ContinueInCodexHandlerError.userFacing(
                 "The selected Claude transcript is missing or unreadable: \(transcriptPath)")
         }
-        guard let worktree = try await db.worktrees.get(id: source.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: source.worktreeID) else {
             throw ContinueInCodexHandlerError.userFacing(
                 "Worktree not found for source terminal \(source.id).")
         }

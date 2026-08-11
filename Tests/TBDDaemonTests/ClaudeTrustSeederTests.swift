@@ -408,7 +408,7 @@ struct ClaudeTrustSeederTests {
             }
         }
 
-        let missing = worktrees.map(\.path).filter { !isTrusted($0, in: configDir) }
+        let missing = worktrees.map(\.localPath).filter { !isTrusted($0, in: configDir) }
         #expect(
             missing.isEmpty,
             // Each lost key is a worktree that will stall on the trust dialog.

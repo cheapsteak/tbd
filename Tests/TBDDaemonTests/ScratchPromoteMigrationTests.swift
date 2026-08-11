@@ -69,7 +69,7 @@ struct ScratchPromoteMigrationTests {
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -129,7 +129,7 @@ struct ScratchPromoteMigrationTests {
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.path)
+        try gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -148,9 +148,9 @@ struct ScratchPromoteMigrationTests {
         let profileRoot = home.appendingPathComponent(
             "profiles/\(profileID.uuidString.lowercased())/claude/projects", isDirectory: true)
         let oldAmbient = TranscriptProjectDirSync.derivedProjectDir(
-            worktreePath: wt.path, projectsRoot: ambientRoot)
+            worktreePath: wt.localPath, projectsRoot: ambientRoot)
         let oldProfile = TranscriptProjectDirSync.derivedProjectDir(
-            worktreePath: wt.path, projectsRoot: profileRoot)
+            worktreePath: wt.localPath, projectsRoot: profileRoot)
         try writeFile("ambient transcript", to: oldAmbient.appendingPathComponent("amb-1.jsonl"))
         try writeFile("sub", to: oldAmbient.appendingPathComponent("amb-1/subagents/agent-a.jsonl"))
         try writeFile("remember me", to: oldAmbient.appendingPathComponent("memory/MEMORY.md"))

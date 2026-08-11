@@ -36,7 +36,7 @@ extension WorktreeLifecycle {
     /// when the user deliberately re-adds the path (adopt or create), which
     /// restores normal reconcile behavior.
     public func forgetWorktree(worktreeID: UUID) async throws {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 

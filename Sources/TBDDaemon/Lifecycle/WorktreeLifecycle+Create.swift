@@ -54,10 +54,10 @@ extension WorktreeLifecycle {
         if case .preSessionPending(let phase3) = completion {
             await phase3.value
         }
-        guard let completed = try await db.worktrees.get(id: pending.id) else {
+        guard let completed = try await db.worktrees.getLocal(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)
         }
-        return completed
+        return completed.worktree
     }
 
     // MARK: - Two-Phase Create
@@ -125,8 +125,12 @@ extension WorktreeLifecycle {
             // paths already reserved by ANY row (active, archived, creating,
             // main). An archived worktree keeps its `path` even after its
             // directory is deleted, so a filesystem-only check would collide
-            // and the insert would throw `UNIQUE constraint failed`.
-            let reserved = Set(try await db.worktrees.list().map(\.path))
+            // and the insert would throw `UNIQUE constraint failed`. This
+            // fetch deliberately stays on the location-neutral `list(...)`:
+            // the constraint it mirrors spans every row on the table, so a
+            // path withheld from this set is not a harmless omission — the
+            // insert below would abort on it.
+            let reserved = Set(try await db.worktrees.list().map(\.localPath))
             resolvedName = Self.uniqueFolderName(
                 base: baseFolder, in: canonicalBase, reserved: reserved
             )
@@ -223,7 +227,7 @@ extension WorktreeLifecycle {
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
     public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
         guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
@@ -354,7 +358,7 @@ extension WorktreeLifecycle {
             // row, so carry the `foreignHead` stamp onto the in-memory copy —
             // otherwise the very first Claude spawn would still seed trust for
             // a tree it just fetched from a fork.
-            var stamped = worktree
+            var stamped = worktree.worktree
             stamped.foreignHead = stamped.foreignHead || checkedOutForeignHead
             let spawnWorktree = stamped
 
@@ -667,7 +671,7 @@ extension WorktreeLifecycle {
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
-        let worktreePath = worktreePath ?? worktree.path
+        let worktreePath = worktreePath ?? worktree.localPath
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
         let primaryTerminalKind: TerminalKind = carryover == nil

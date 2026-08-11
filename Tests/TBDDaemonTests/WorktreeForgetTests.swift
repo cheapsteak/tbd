@@ -24,10 +24,10 @@ import Testing
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     // Drop a gitignored-style artifact to prove forget preserves on-disk files.
-    let marker = (wt.path as NSString).appendingPathComponent("keep-me.txt")
+    let marker = (wt.localPath as NSString).appendingPathComponent("keep-me.txt")
     try "preserve".write(toFile: marker, atomically: true, encoding: .utf8)
 
     // Seed a tab override row so the tab-cleanup assertion is meaningful.
@@ -40,7 +40,7 @@ import Testing
 
     // 1. Directory (and its files) still on disk — forget did NOT run
     //    `git worktree remove`.
-    #expect(FileManager.default.fileExists(atPath: wt.path),
+    #expect(FileManager.default.fileExists(atPath: wt.localPath),
             "forget must NOT delete the worktree directory")
     #expect(FileManager.default.fileExists(atPath: marker),
             "forget must preserve files inside the worktree directory")
@@ -78,11 +78,11 @@ import Testing
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
-    #expect(!FileManager.default.fileExists(atPath: wt.path),
+    #expect(!FileManager.default.fileExists(atPath: wt.localPath),
             "archive must delete the worktree directory (contrast with forget)")
 }
 

@@ -4,6 +4,17 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// Carries the observed state on the primary failure line (assertion-hygiene
+/// rule 4: only `Issue.record(_: some Error)` — which a thrown error becomes —
+/// survives into the CI summary).
+private struct RepoRemoveWaitTimeout: Error, CustomStringConvertible {
+    let what: String
+    let seconds: TimeInterval
+    var description: String {
+        "timed out waiting for \(what) — the row was still present after polling up to \(seconds) seconds"
+    }
+}
+
 // Repo-scoped RPC methods: repo.add, repo.list, repo.remove,
 // repo.updateInstructions, plus the unknown-method fallthrough (a
 // generic router behavior that doesn't belong with any single subsystem).
@@ -100,6 +111,83 @@ extension RPCRouterTests {
 
         #expect(!response.success)
         #expect(response.error?.contains("active worktree") == true)
+    }
+
+    /// A remote lane still counts as something the operator would lose, so it
+    /// blocks an unforced removal exactly like a local worktree does.
+    @Test("repo.remove refuses when only a remote worktree is active, without force")
+    func repoRemoveRefusesActiveRemoteWorktree() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        _ = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "remote-wt", branch: "tbd/remote-wt",
+            provider: "stub", sessionID: "s-1")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: false)))
+
+        #expect(!response.success)
+        #expect(response.error?.contains("active worktree") == true)
+    }
+
+    /// The cascade must not half-complete. `archiveWorktree` resolves its row
+    /// through `getLocal`, which has nothing to return for a remote lane, so a
+    /// cascade fed every active row threw `worktreeNotFound` partway through:
+    /// the local worktree stayed torn down, the repo stayed registered, and the
+    /// caller got a not-found error naming a worktree it never asked about.
+    /// The remote row is skipped by the cascade and removed by `deleteForRepo`
+    /// with the rest — archiving a lane means stopping its provider session,
+    /// which nothing here can do.
+    @Test("repo.remove --force clears a repo owning both a local and a remote worktree")
+    func repoRemoveForceCascadesPastARemoteRow() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local-wt", branch: "tbd/local-wt",
+            path: "/tmp/test-wt-\(UUID().uuidString)", tmuxServer: "tbd-test")
+        let remote = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "remote-wt", branch: "tbd/remote-wt",
+            provider: "stub", sessionID: "s-1")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: true)))
+
+        // A forced removal answers as soon as phase 1 has archived every local
+        // worktree; the row deletions run in `handleRepoRemove`'s detached
+        // tail, so the cascade's outcome has to be waited for, not read
+        // straight after the response.
+        #expect(response.success, "the cascade aborted: \(response.error ?? "no error")")
+        try await waitUntilRemoved("the detached tail to delete the repo row") {
+            ((try? await db.repos.get(id: repo.id)) ?? nil) == nil
+        }
+        #expect(try await db.worktrees.get(id: local.id) == nil,
+                "a local worktree row outlived its removed repo")
+        #expect(try await db.worktrees.get(id: remote.id) == nil,
+                "a remote worktree row outlived its removed repo")
+    }
+
+    /// Polls `condition` until it holds or the deadline passes, then throws so
+    /// the diagnostic lands on the primary failure line (assertion-hygiene
+    /// rule 4). Mirrors `RepoRemoveCascadeTests.waitUntil`, whose error type is
+    /// file-private to that suite.
+    private func waitUntilRemoved(
+        _ what: String, timeout: TimeInterval = 10,
+        _ condition: @Sendable () async -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw RepoRemoveWaitTimeout(what: what, seconds: timeout)
     }
 
     /// Medium-2 review finding: `repo.remove` hard-deletes every worktree
