@@ -93,6 +93,25 @@ struct TerminalPanelViewTests {
             "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
     }
 
+    @Test("budget exhaustion presentation exposes manual retry")
+    func budgetExhaustionPresentationExposesManualRetry() {
+        #expect(TerminalRecoveryExhaustionPresentation.retryTitle == "Retry")
+        #expect(TerminalRecoveryExhaustionPresentation.message ==
+            "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
+    }
+
+    @MainActor
+    @Test("budget exhaustion asks the panel to reveal manual retry")
+    func budgetExhaustionRevealsManualRetry() {
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        var revealCount = 0
+        coordinator.onRecoveryExhausted = { revealCount += 1 }
+
+        coordinator.recoveryDidExhaust()
+
+        #expect(revealCount == 1)
+    }
+
     @MainActor
     @Test("stable preparation message is fed once per coordinator")
     func stablePreparationMessageIsFedOnce() {

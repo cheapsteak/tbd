@@ -12,6 +12,12 @@ enum TerminalPreparationAction: Equatable, Sendable {
     case requestAutomaticRecovery(failedStage: TmuxPreparationStage)
 }
 
+enum TerminalRecoveryExhaustionPresentation {
+    static let message =
+        "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
+    static let retryTitle = "Retry"
+}
+
 /// Sendable wrapper for a weak TerminalView reference, used to pass the
 /// reference into an `NSEvent` local monitor closure under strict concurrency.
 private final class WeakTerminalRef: @unchecked Sendable {
@@ -67,6 +73,7 @@ struct TerminalPanelView: View {
 
     @State private var proxyWarning: String?
     @State private var didProbe = false
+    @State private var showsRecoveryExhaustion = false
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -118,6 +125,24 @@ struct TerminalPanelView: View {
                 .padding(.vertical, 4)
                 .background(Color.orange.opacity(0.18))
             }
+            if showsRecoveryExhaustion {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(TerminalRecoveryExhaustionPresentation.message)
+                        .font(.caption)
+                    Spacer()
+                    Button(TerminalRecoveryExhaustionPresentation.retryTitle) {
+                        Task {
+                            await appState.recreateTerminalWindow(terminalID: terminalID)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.orange.opacity(0.18))
+            }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
                 tmuxServer: tmuxServer,
@@ -129,6 +154,7 @@ struct TerminalPanelView: View {
                 onFilePathClicked: onFilePathClicked,
                 onTerminalNotification: onTerminalNotification,
                 onMissingWindow: onMissingWindow,
+                onRecoveryExhausted: { showsRecoveryExhaustion = true },
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
                 parkedNoticeMessage: parkedNoticeMessage,
@@ -211,6 +237,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var appearance: AppearanceSettings
     var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
+    var onRecoveryExhausted: (@MainActor () -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
@@ -249,6 +276,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.appState = appState
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onMissingWindow = onMissingWindow
+        context.coordinator.onRecoveryExhausted = onRecoveryExhausted
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
         // Feed snapshot before tmux connects so the user sees the last state
@@ -344,6 +372,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .first(where: { $0.id == terminalID })?
             .isCodexTerminal == true
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
+        context.coordinator.onRecoveryExhausted = onRecoveryExhausted
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
@@ -365,6 +394,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var panelID: UUID = UUID()
         var tabCloseContext: TabCloseContext?
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
+        var onRecoveryExhausted: (@MainActor () -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
         /// over this terminal and should receive scroll/click events instead of
         /// the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
@@ -431,7 +461,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             for outcome: AutomaticTerminalRecreationOutcome
         ) -> String? {
             guard outcome == .budgetExhausted else { return nil }
-            return "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
+            return TerminalRecoveryExhaustionPresentation.message
+        }
+
+        @MainActor
+        func recoveryDidExhaust() {
+            onRecoveryExhausted?()
         }
 
         @MainActor
@@ -557,6 +592,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 let outcome = await onMissingWindow()
                 logAutomaticRecoveryOutcome(outcome, failedStage: failedStage)
                 if let message = Self.recoveryMessage(for: outcome) {
+                    recoveryDidExhaust()
                     feedPreparationMessage(message, into: terminalView)
                 }
                 return
