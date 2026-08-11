@@ -125,8 +125,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
 
         /// `@MainActor` like the panel coordinator's sibling: SwiftUI already
         /// calls `dismantleNSView` on the main thread, and annotating it turns
-        /// that convention into a compiler-enforced guarantee. `ChildReaper`'s
-        /// ordering fix depends on this teardown running on the main queue.
+        /// that convention into a compiler-enforced guarantee — which is what
+        /// lets `ChildExitObservation` describe its writer and reader sides as
+        /// serialized rather than merely conventional.
         @MainActor
         func cleanup() {
             // Idempotent: a second call must not re-run the teardown (it would

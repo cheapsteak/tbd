@@ -23,22 +23,36 @@ import Testing
 /// `DispatchQueue.main` for both `childMonitor` and the `DispatchIO` cleanup
 /// handler; passing a background queue here would test a configuration TBD
 /// never uses. That is only sound because this process genuinely drains the
-/// main queue (`Tests/CLAUDE.md`, "@MainActor tests: suspend to drain"), so the
-/// monitor is live rather than merely idle — the child outlives the coordinator
-/// precisely because `cleanup()` cancels that live monitor, which is the
-/// behavior under test. The consequence is a discipline these tests must keep:
-/// **suspend, never block, on the main actor.** The fd close that ends the
-/// child is itself a main-queue block, so a synchronous wait here would
-/// deadlock against the very work it is waiting for. Every wait below is an
-/// `await`.
+/// main queue (`Tests/CLAUDE.md`), so the monitor is live rather than merely
+/// idle — the child outlives the coordinator precisely because `cleanup()`
+/// cancels that live monitor, which is the behavior under test.
+///
+/// **These tests are deliberately NOT `@MainActor`, and each takes exactly one
+/// main-actor hop.** They need main only for the steps that are main-isolated
+/// — `startProcess` (whose delegate callback asserts main isolation) and
+/// `cleanup()` — so each test batches all of those into a single
+/// `MainActor.run`, and everything else (every poll, every `waitpid`) happens
+/// off it. Both halves were measured under full-suite load: the `@MainActor`
+/// version re-acquired main at each of ~200 poll resumptions and blew the 60 s
+/// limit on four tests, and a version that merely moved the polls off main but
+/// still took four separate hops blew it on two. Main is contended by hundreds
+/// of other main-isolated tests in that pass, so the count of hops is the
+/// thing to keep small — and never wait for main-queue work while occupying
+/// the main queue.
 ///
 /// Bounded by construction: each test polls against a 5 s cap and force-kills
 /// its child in a `defer`, so nothing can park on a `waitpid` that never
 /// returns. (`cleanup()` also appends a line to `/tmp/tbd-bridge.log` via the
 /// production `debugLog`; no TBD-owned store is touched.)
-@MainActor
 @Suite("Terminal teardown reaps its PTY child", .timeLimit(.minutes(1)))
 struct TerminalTeardownReapTests {
+
+    /// Everything a one-shot test needs out of its single main-actor hop.
+    private struct OneShotRun {
+        let first: pid_t
+        let probe: pid_t
+        let stillHeld: Bool
+    }
 
     private struct ChildSurvivedTeardown: Error, CustomStringConvertible {
         let pid: pid_t
@@ -70,9 +84,9 @@ struct TerminalTeardownReapTests {
     /// the main queue keeps draining — see the suite comment.
     private func waitForChildToVanish(_ pid: pid_t) async -> Bool {
         var polls = 0
-        while processExists(pid), polls < 200 {
+        while processExists(pid), polls < 50 {
             polls += 1
-            try? await Task.sleep(for: .milliseconds(25))
+            try? await Task.sleep(for: .milliseconds(100))
         }
         if processExists(pid) {
             Issue.record(ChildSurvivedTeardown(pid: pid, polls: polls, state: describeState(pid)))
@@ -88,6 +102,11 @@ struct TerminalTeardownReapTests {
     /// returns, the coordinator's own property is the only strong reference, so
     /// `deinit` fires exactly when `cleanup()` releases it — as in production,
     /// where the coordinator is likewise the only owner.
+    /// `@MainActor` because `startProcess` asks the delegate for the window
+    /// size, and both coordinators answer inside `MainActor.assumeIsolated` —
+    /// which traps off main. Production starts every PTY from a main-isolated
+    /// context, so this matches it; only the waiting below happens off main.
+    @MainActor
     private func startChild(
         delegate: LocalProcessDelegate, lifetime: String, assign: (LocalProcess) -> Void
     ) -> pid_t {
@@ -118,8 +137,15 @@ struct TerminalTeardownReapTests {
     @Test("an exiting PTY child is reaped by TerminalPanelView teardown, not left <defunct>")
     func panelCleanupReapsChild() async throws {
         let coordinator = TerminalPanelRepresentable.Coordinator()
-        // Outlives cleanup(), then exits on its own — see the doc comment.
-        let pid = startChild(delegate: coordinator, lifetime: "0.4") { coordinator.localProcess = $0 }
+        // Every main-isolated step in one hop — see the suite comment.
+        let pid = await MainActor.run { () -> pid_t in
+            // Outlives cleanup(), then exits on its own — see the doc comment.
+            let pid = startChild(delegate: coordinator, lifetime: "0.4") {
+                coordinator.localProcess = $0
+            }
+            coordinator.cleanup()
+            return pid
+        }
         try #require(pid > 0, "forkpty must have produced a child pid")
 
         var reaped = false
@@ -131,8 +157,6 @@ struct TerminalTeardownReapTests {
                 ChildReaper.reapBlocking(pid: pid)
             }
         }
-
-        coordinator.cleanup()
 
         reaped = await waitForChildToVanish(pid)
         #expect(reaped)
@@ -156,7 +180,13 @@ struct TerminalTeardownReapTests {
     @Test("LocalPTYTerminalRepresentable teardown kills AND reaps its child")
     func localPTYCleanupReapsChild() async throws {
         let coordinator = LocalPTYTerminalRepresentable.Coordinator()
-        let pid = startChild(delegate: coordinator, lifetime: "120") { coordinator.localProcess = $0 }
+        let pid = await MainActor.run { () -> pid_t in
+            let pid = startChild(delegate: coordinator, lifetime: "120") {
+                coordinator.localProcess = $0
+            }
+            coordinator.cleanup()
+            return pid
+        }
         try #require(pid > 0, "forkpty must have produced a child pid")
 
         var reaped = false
@@ -166,8 +196,6 @@ struct TerminalTeardownReapTests {
                 ChildReaper.reapBlocking(pid: pid)
             }
         }
-
-        coordinator.cleanup()
 
         reaped = await waitForChildToVanish(pid)
         #expect(reaped)
@@ -194,71 +222,56 @@ struct TerminalTeardownReapTests {
     @Test("a second TerminalPanelView cleanup() tears nothing down")
     func panelCleanupIsOneShot() async throws {
         let coordinator = TerminalPanelRepresentable.Coordinator()
-        let firstPid = startChild(delegate: coordinator, lifetime: "0.4") {
-            coordinator.localProcess = $0
-        }
-        try #require(firstPid > 0, "forkpty must have produced a child pid")
-
-        var firstReaped = false
-        defer {
-            if !firstReaped {
-                kill(firstPid, SIGKILL)
-                ChildReaper.reapBlocking(pid: firstPid)
+        let run = await MainActor.run { () -> OneShotRun in
+            let first = startChild(delegate: coordinator, lifetime: "0.4") {
+                coordinator.localProcess = $0
             }
+            coordinator.cleanup()
+            // Fresh state for the second call to (not) act on.
+            let probe = startChild(delegate: coordinator, lifetime: "120") {
+                coordinator.localProcess = $0
+            }
+            coordinator.cleanup()
+            return OneShotRun(first: first, probe: probe, stillHeld: coordinator.localProcess != nil)
         }
+        try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
+        defer { disposeProbe(pid: run.probe) { coordinator.localProcess = nil } }
 
-        coordinator.cleanup()
-        firstReaped = await waitForChildToVanish(firstPid)
-        try #require(firstReaped, "the first teardown must reap its child")
-
-        let probePid = startChild(delegate: coordinator, lifetime: "120") {
-            coordinator.localProcess = $0
-        }
-        try #require(probePid > 0, "forkpty must have produced a probe pid")
-        defer { disposeProbe(pid: probePid) { coordinator.localProcess = nil } }
-
-        coordinator.cleanup()
-
-        #expect(coordinator.localProcess != nil,
+        #expect(run.stillHeld,
                 "a second cleanup() must not release state it never set up")
-        #expect(processExists(probePid),
+        #expect(processExists(run.probe),
                 "a second cleanup() must not reap or signal anything")
+
+        let firstReaped = await waitForChildToVanish(run.first)
+        #expect(firstReaped, "the real teardown must still have reaped its own child")
     }
 
     @Test("a second LocalPTYTerminalRepresentable cleanup() tears nothing down")
     func localPTYCleanupIsOneShot() async throws {
         let coordinator = LocalPTYTerminalRepresentable.Coordinator()
-        let firstPid = startChild(delegate: coordinator, lifetime: "120") {
-            coordinator.localProcess = $0
-        }
-        try #require(firstPid > 0, "forkpty must have produced a child pid")
-
-        var firstReaped = false
-        defer {
-            if !firstReaped {
-                kill(firstPid, SIGKILL)
-                ChildReaper.reapBlocking(pid: firstPid)
+        let run = await MainActor.run { () -> OneShotRun in
+            let first = startChild(delegate: coordinator, lifetime: "120") {
+                coordinator.localProcess = $0
             }
+            coordinator.cleanup()
+            let probe = startChild(delegate: coordinator, lifetime: "120") {
+                coordinator.localProcess = $0
+            }
+            coordinator.cleanup()
+            return OneShotRun(first: first, probe: probe, stillHeld: coordinator.localProcess != nil)
         }
-
-        coordinator.cleanup()
-        firstReaped = await waitForChildToVanish(firstPid)
-        try #require(firstReaped, "the first teardown must kill and reap its child")
-
-        let probePid = startChild(delegate: coordinator, lifetime: "120") {
-            coordinator.localProcess = $0
-        }
-        try #require(probePid > 0, "forkpty must have produced a probe pid")
-        defer { disposeProbe(pid: probePid) { coordinator.localProcess = nil } }
-
-        coordinator.cleanup()
+        try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
+        defer { disposeProbe(pid: run.probe) { coordinator.localProcess = nil } }
 
         // Sharper here than on the panel path: without the guard this second
         // call reaches `localProcess?.terminate()`, so the probe would be
         // SIGTERMed as well as released.
-        #expect(coordinator.localProcess != nil,
+        #expect(run.stillHeld,
                 "a second cleanup() must not release state it never set up")
-        #expect(processExists(probePid),
+        #expect(processExists(run.probe),
                 "a second cleanup() must not terminate a process it never started")
+
+        let firstReaped = await waitForChildToVanish(run.first)
+        #expect(firstReaped, "the real teardown must still have killed and reaped its own child")
     }
 }
