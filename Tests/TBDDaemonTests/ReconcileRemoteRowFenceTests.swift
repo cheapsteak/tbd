@@ -68,29 +68,103 @@ import Foundation
         #expect(after.tmuxServer == "", "reconcile canonicalized a remote row's tmux server")
     }
 
-    /// Orphan GC keys on filesystem paths and snapshot refs, and a remote row
-    /// has neither, so it needs no fence of its own. This asserts that claim
-    /// rather than trusting it — with the master switch pinned ON and the
-    /// scratchpad base pointed at a temp dir, so a sweep that really runs is
-    /// what leaves the row alone.
-    @Test func orphanGCSweepLeavesARemoteRowIntact() async throws {
+    /// Orphan GC's scratchpad reconciliation maps a worktree row's stored path
+    /// to a scratchpad slug and deletes that directory once the worktree path
+    /// itself is absent from disk. A remote row's path is the synthetic
+    /// `remote://` URI, which is absent by construction — so an unfenced fetch
+    /// makes every archived remote lane a standing reap candidate on every
+    /// sweep.
+    ///
+    /// Both tests below discriminate by construction: a directory really is
+    /// planted at the remote row's slug, so an unfenced run deletes it and
+    /// records the reap. Asserting the row's own columns would prove nothing —
+    /// orphan GC never writes to the worktree table.
+    ///
+    /// Each also plants a second scratchpad behind an archived *local* row
+    /// whose directory is gone, so a run that reaped nothing at all cannot pass
+    /// by doing nothing.
+    private struct ScratchpadFixture {
+        let repoID: UUID
+        let remoteScratchpad: URL
+        let localScratchpad: URL
+    }
+
+    /// Plants `base/<slug>` for one archived remote row and one archived local
+    /// row whose worktree directory does not exist.
+    private func seedScratchpads(
+        db: TBDDatabase, repoPath: String, base: URL
+    ) async throws -> ScratchpadFixture {
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let (repo, remote) = try await seedRemoteRow(db: db, repoPath: repoPath)
+        try await db.worktrees.archive(id: remote.id)
+
+        let goneLocalPath = "/tmp/tbd-gone-wt-\(UUID().uuidString)"
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "gone-wt", branch: "gone-wt",
+            path: goneLocalPath, tmuxServer: "tbd-test")
+        try await db.worktrees.archive(id: local.id)
+
+        let remoteDir = base.appendingPathComponent(
+            ScratchpadCollector.slug(forWorktreePath: remote.localPath))
+        let localDir = base.appendingPathComponent(
+            ScratchpadCollector.slug(forWorktreePath: goneLocalPath))
+        for dir in [remoteDir, localDir] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return ScratchpadFixture(
+            repoID: repo.id, remoteScratchpad: remoteDir, localScratchpad: localDir)
+    }
+
+    @Test func orphanGCSweepNeverReapsARemoteRowsScratchpad() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
-        let (_, remote) = try await seedRemoteRow(db: db, repoPath: repoDir.path)
+        let base = tempDir.appendingPathComponent("scratchpads", isDirectory: true)
+        let fixture = try await seedScratchpads(db: db, repoPath: repoDir.path, base: base)
 
         let gc = OrphanGC(
-            db: db,
-            git: GitManager(),
-            broadcast: { _ in },
-            lsofProvider: { [] },
-            scratchpadBase: tempDir.appendingPathComponent("scratchpads", isDirectory: true)
-        )
-        _ = await gc.sweep(dryRun: false)
+            db: db, git: GitManager(), broadcast: { _ in },
+            lsofProvider: { [] }, scratchpadBase: base)
+        let result = await gc.sweep(dryRun: false)
 
-        let after = try #require(try await db.worktrees.get(id: remote.id))
-        #expect(after.status == .active)
+        #expect(FileManager.default.fileExists(atPath: fixture.remoteScratchpad.path),
+                "the sweep reaped a directory sitting at a remote row's scratchpad slug")
+        #expect(!FileManager.default.fileExists(atPath: fixture.localScratchpad.path),
+                "the sweep reaped nothing at all — the remote arm proves nothing")
+        #expect(result.reaped == 1)
+        #expect(!result.planned.contains { $0.contains(fixture.remoteScratchpad.path) },
+                "the remote row reached the reap-candidate plan: \(result.planned)")
+
+        let reaped = try await db.reapRecords.list(repoPath: nil).map(\.worktreePath)
+        #expect(reaped == [fixture.localScratchpad.path])
+    }
+
+    /// `repo.remove` runs the same reconciliation over EVERY row the repo owns
+    /// — every status — right before `deleteForRepo`, so it needs the same
+    /// fence as the periodic sweep.
+    @Test func repoRemovalReconciliationNeverReapsARemoteRowsScratchpad() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        let base = tempDir.appendingPathComponent("scratchpads", isDirectory: true)
+        let fixture = try await seedScratchpads(db: db, repoPath: repoDir.path, base: base)
+
+        let gc = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in },
+            lsofProvider: { [] }, scratchpadBase: base)
+        await gc.reconcileScratchpadsBeforeRepoRemoval(
+            repoID: fixture.repoID, repoPath: repoDir.path)
+
+        #expect(FileManager.default.fileExists(atPath: fixture.remoteScratchpad.path),
+                "repo-removal reconciliation reaped a remote row's scratchpad slug")
+        #expect(!FileManager.default.fileExists(atPath: fixture.localScratchpad.path),
+                "the reconciliation reaped nothing at all — the remote arm proves nothing")
+
+        let reaped = try await db.reapRecords.list(repoPath: nil).map(\.worktreePath)
+        #expect(reaped == [fixture.localScratchpad.path])
     }
 }

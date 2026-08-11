@@ -425,9 +425,18 @@ public actor OrphanGC {
         planned: inout [String], reaped: inout Int
     ) async {
         let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
+        // Narrowed to local rows, and that is load-bearing rather than
+        // tidiness: "its directory is already gone" is the whole reap
+        // criterion, and a remote row's path — the synthetic `remote://` URI —
+        // is absent from disk by construction, so every archived remote lane
+        // would otherwise be a standing reap candidate on every sweep. The
+        // narrowing happens here rather than at the caller's shared read
+        // because `reclaimDeletionQueue` consumes that same list and asks a
+        // different question of it.
         let gone = archived
-            .filter { !FileManager.default.fileExists(atPath: $0.localPath) }
-            .map { (worktreePath: $0.localPath, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
+            .compactMap(LocalWorktree.init)
+            .filter { !FileManager.default.fileExists(atPath: $0.path) }
+            .map { (worktreePath: $0.path, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
 
         guard !dryRun else {
             for entry in gone {
@@ -471,8 +480,12 @@ public actor OrphanGC {
             """)
             return
         }
-        guard let rows = try? await db.worktrees.list(repoID: repoID) else { return }
-        let pairs = rows.map { (worktreePath: $0.localPath, repoPath: repoPath) }
+        // `listLocal` for the same reason the sweep's own reconciliation
+        // narrows: a remote row's synthetic `remote://` path is absent from
+        // disk by construction, which is exactly the shape `reconcile` reads
+        // as "the worktree is gone, reap its scratchpad".
+        guard let rows = try? await db.worktrees.listLocal(repoID: repoID) else { return }
+        let pairs = rows.map { (worktreePath: $0.path, repoPath: repoPath) }
         let records = await scratchpadCollector.reconcile(knownPaths: pairs, now: now())
         for record in records {
             await insertReapRecord(record)

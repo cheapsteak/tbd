@@ -397,9 +397,18 @@ call, would be strictly worse than one that never claimed the provider work.
 ### Does not apply
 
 Hibernation, relocate, forget, scratch promote, and adopt-existing-directory
-have no remote meaning and are unreachable through `LocalWorktree`. Orphan GC
-needs no change: it keys on filesystem paths and snapshot refs, and a remote row
-has neither.
+have no remote meaning and are unreachable through `LocalWorktree`.
+
+Orphan GC's agent-worktree collector enumerates git's own worktree list and so
+never sees a remote row at all. Its scratchpad reconciliation would, and is
+fenced: both of its worktree fetches go through `listLocal`. The fence is what
+makes it safe, not the absence of a path — "the worktree's directory is gone"
+is the entire reap criterion, and a remote row's synthetic `remote://` path is
+absent from disk by construction, so a location-neutral fetch would make every
+archived lane a standing reap candidate on every sweep. The slug such a path
+produces cannot collide with a real scratchpad's, so nothing was ever at risk of
+being deleted — but a row that reaches a reaper's candidate list is one refactor
+away from being reaped, and the boundary is cheaper to hold than to re-derive.
 
 ## Sidebar
 
@@ -473,7 +482,10 @@ Boundary, the tests that would have caught the hazard:
   `worktree.path`'s UNIQUE constraint from admitting only one remote lane.
 - A remote `.creating` row left behind by a daemon restart reaches `.failed`
   rather than spinning.
-- An orphan-GC sweep leaves a remote row intact.
+- Orphan GC never reaps a directory planted at a remote row's scratchpad slug —
+  in the periodic sweep and in the repo-removal reconciliation both. Each arm
+  also plants a scratchpad behind a gone *local* row, so a run that reaped
+  nothing cannot pass by doing nothing.
 - `repo.remove --force` on a repo owning a local worktree and a remote lane
   clears the repo and both rows without throwing, and writes a dispose row for
   the local worktree only.
