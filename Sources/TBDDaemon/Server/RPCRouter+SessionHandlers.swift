@@ -9,7 +9,7 @@ extension RPCRouter {
     func handleSessionList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SessionListParams.self, from: paramsData)
 
-        guard let worktree = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return try RPCResponse(result: [SessionSummary]())
         }
 
