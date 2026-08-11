@@ -1121,3 +1121,79 @@ def test_main_still_reports_a_partial_fan_out_per_lens(
     err = capsys.readouterr().err
     assert "that review lens never ran" in err
     assert "INFRASTRUCTURE" not in err
+
+
+# --- the infrastructure-failure channel --------------------------------------
+#
+# The session's deterministic "I cannot review" path. Without it, a session
+# whose pinned-SHA diff errors has only bad options: an empty findings array
+# computes as APPROVE (an unreviewed PR goes green on the required check), and
+# a fabricated HIGH finding computes as REJECT — which the skip cache then
+# re-asserts against the diff's patch-id on every re-run. Failing validation
+# outright writes no verdict and records no marker, so the next run reviews
+# fresh.
+
+from validate import read_infrastructure_failure  # noqa: E402
+
+
+def test_infra_failure_preempts_everything_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Even with both specialist files present and valid, the channel wins.
+    for name in ("correctness", "conventions"):
+        _write_specialist_file(tmp_path, name)
+    _write(
+        tmp_path / "review-result.json",
+        {"infrastructure_failure": "pinned merge-base diff errored"},
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "review-infrastructure failure" in err
+    assert "pinned merge-base diff errored" in err
+    assert "NOT a verdict" in err
+
+
+def test_infra_failure_message_is_single_line_and_capped() -> None:
+    # A runaway or multi-line message must not mangle the single-line
+    # ::error:: annotation the workflow builds from the last error line.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "review-result.json"
+        path.write_text(
+            json.dumps({"infrastructure_failure": "line one\nline two  " + "x" * 900}),
+            encoding="utf-8",
+        )
+        message = read_infrastructure_failure(str(path))
+    assert message is not None
+    assert "\n" not in message
+    assert message.startswith("line one line two x")
+    assert len(message) <= 500
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"infrastructure_failure": ""}',
+        '{"infrastructure_failure": "   "}',
+        '{"infrastructure_failure": 7}',
+        '["infrastructure_failure"]',
+        "not json at all",
+    ],
+)
+def test_non_messages_do_not_trigger_the_infra_channel(
+    tmp_path: Path, content: str
+) -> None:
+    # Empty, non-string, non-object, and unparseable shapes all fall through to
+    # the stall/schema diagnostics, which name those states more precisely.
+    path = tmp_path / "review-result.json"
+    path.write_text(content, encoding="utf-8")
+    assert read_infrastructure_failure(str(path)) is None
+
+
+def test_missing_result_file_is_not_an_infra_report(tmp_path: Path) -> None:
+    assert read_infrastructure_failure(str(tmp_path / "absent.json")) is None

@@ -210,11 +210,31 @@ def test_the_description_cannot_clear_findings() -> None:
     # The description is rewritable at any moment — including after a REJECT —
     # so the clearing power STEP 2 grants to discussion must exclude it, or an
     # author edits their way past a finding without changing a line of code.
+    # The rule must reach every reader: the orchestrator's context paragraph,
+    # the STEP 1 checklist the specialists are composed from, and STEP 2 where
+    # the merge happens.
     prompt = step_source(read_workflow(), SESSION_STEP)
     assert "NEVER clear, downgrade, or pre-empt a finding" in prompt
+    _, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert "clear, downgrade, or pre-empt a finding" in fanout
     _, _, merge_section = prompt.partition("STEP 2 — MERGE")
     assert merge_section, "the prompt no longer contains a `STEP 2 — MERGE` section"
     assert "never downgrades or drops a finding" in merge_section
+
+
+def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
+    # "Report it in the diagnostics section" routes the failure into collapsed
+    # prose no script reads: the session then submits empty findings, and
+    # validate.py computes empty findings as APPROVE — an unreviewed PR goes
+    # green on the required check. The prompt must instead route the failure to
+    # the infrastructure_failure key that validate.py fails closed on, and the
+    # specialists must escalate rather than silently review something else.
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert '{"infrastructure_failure":' in environment
+    assert "empty findings array computes as APPROVE" in environment
+    assert "state the failure prominently in your returned summary" in fanout
 
 
 def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:
@@ -222,9 +242,15 @@ def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:
     # `git blame`/`git log <path>` stop at the boundary SILENTLY — the same
     # confident-wrong-answer class as the diff, aimed at the premise audit.
     # `cat .git/shallow` is the deterministic detector, and Bash(cat:*) is
-    # already in the session's allowedTools.
+    # already in the session's allowedTools. Like the pinned-diff rule, it must
+    # appear in BOTH instruction positions: the specialists hold git log/blame
+    # and run the premise audit one level down, where the orchestrator cannot
+    # see a wrong conclusion form.
     prompt = step_source(read_workflow(), SESSION_STEP)
-    assert "cat .git/shallow" in prompt
+    environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert "cat .git/shallow" in environment
+    assert "cat .git/shallow" in fanout
     assert "WITH FULL GIT HISTORY (all branches)" not in prompt
 
 

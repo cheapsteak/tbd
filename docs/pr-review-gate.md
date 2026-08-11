@@ -140,6 +140,16 @@ distinguishing error line in the job log is what an operator reads:
 - **A broken invocation** — `--expected-specialists` supplied while naming no lens,
   which is what an unset or blank `REVIEW_SPECIALISTS` expands to. Nothing can be
   checked, so nothing is trusted.
+- **A session-reported infrastructure failure** — `the review session reported a
+  review-infrastructure failure and reviewed nothing`, followed by the session's
+  own one-line reason. This is the session's deterministic "I cannot review"
+  channel: when the pinned merge-base diff itself errors, the prompt directs the
+  session to write `review-result.json` as `{"infrastructure_failure": "<why>"}`
+  instead of submitting an empty review — an empty findings array would compute
+  as APPROVE, and a fabricated finding would compute as a REJECT that the skip
+  cache then re-asserts against the diff's patch-id. `validate.py` checks the
+  key before any schema validation and fails closed with no verdict, so nothing
+  is posted and nothing is cached; re-running the check reviews fresh.
 
 All four fail closed, and none of them posts a review comment: the post step runs
 only behind a trustworthy verdict. A stall is therefore something you read in the
@@ -214,10 +224,18 @@ comparable with the markers earlier runs recorded.
 Pinning protects the diff; it cannot protect history walks. When the PR is up to
 date with its base, the grafted commit sits on HEAD's own ancestry, and
 `git blame` / `git log <path>` stop there silently — blame attributes every older
-line to the boundary commit. The prompt therefore tells the session how to detect
-the graft (`cat .git/shallow` — the `Bash(cat:*)` grant already covers it), to
-avoid premise-audit conclusions that depend on history beyond the boundary, and to
-note the limitation in the review diagnostics.
+line to the boundary commit. The prompt therefore tells the session — orchestrator
+and specialists alike, since the specialists hold `git log`/`git blame` and run the
+premise audit — how to detect the graft (`cat .git/shallow`, which the
+`Bash(cat:*)` grant already covers), and to avoid premise-audit conclusions that
+depend on history beyond the boundary.
+
+And if the session cannot produce even the pinned diff, it has a deterministic
+fail-closed channel rather than a judgment call: it writes `review-result.json` as
+`{"infrastructure_failure": "<why>"}` and `validate.py` fails the run before any
+schema check — see the failure-mode list above. The one wrong move — submitting a
+review with empty findings, which computes as APPROVE — is named and forbidden in
+the prompt, in both the orchestrator's instructions and the specialists'.
 
 **Both merge-base checks fail closed, and say they are not verdicts.** The **Ensure
 a merge-base with the base branch** step runs `git fetch --unshallow origin` when

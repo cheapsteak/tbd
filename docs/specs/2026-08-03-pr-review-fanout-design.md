@@ -168,6 +168,14 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   and every downstream step is skipped: nothing is posted and no patch-id/verdict
   marker is recorded. That last part is the point — a run that cannot see the true
   diff must not cache a verdict about it, so the next run reviews fresh.
+- **The session's own fail-closed channel**: if the pinned diff errors *inside* the
+  session, the prompt directs it to write `review-result.json` as
+  `{"infrastructure_failure": "<why>"}` and stop. The validate script checks that key
+  before any schema validation and exits non-zero with no verdict. Both alternatives
+  are named failure modes: an empty findings array computes as APPROVE (an unreviewed
+  PR goes green), and a fabricated finding computes as a REJECT the patch-id skip
+  then re-asserts on every re-run. The Stop hook is satisfied by the file existing
+  and parsing, so the session ends promptly rather than being held.
 - **Verdict**: the validate script computes `APPROVE`/`REJECT` from
   `review-result.json` — REJECT iff any unaddressed `HIGH` or `MEDIUM` finding survives
   the merge. The model never types the verdict. The Stop hook gates on the *artifact*

@@ -275,6 +275,33 @@ def validate_result_file(path: str) -> dict:
     return _validate_file(path, "review-result.schema.json")
 
 
+def read_infrastructure_failure(path: str) -> str | None:
+    """The session's deterministic fail-closed channel for "I cannot review".
+
+    When the review session cannot produce the PR's diff at all (the pinned
+    merge-base diff itself errors), it is told to write review-result.json as
+    `{"infrastructure_failure": "<why>"}` instead of inventing an empty review
+    — because an empty findings array computes as APPROVE, which would turn an
+    unreviewed PR into a green required check. This reader returns that message
+    (whitespace-collapsed, capped so a runaway string cannot mangle the
+    single-line ::error:: annotation) when the file is a JSON object carrying a
+    non-empty string under that key, and None otherwise. Missing or unparseable
+    files are None on purpose: those states belong to the stall and schema
+    diagnostics, which name them more precisely.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("infrastructure_failure")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return " ".join(value.split())[:500]
+
+
 # --- main (the only I/O shell) ----------------------------------------------
 
 
@@ -306,6 +333,23 @@ def main() -> int:
         expected = parse_expected_specialists(args.expected_specialists)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        print("validation FAILED — no verdict written (gate fails closed)")
+        return 1
+
+    # The infrastructure-failure channel preempts every other check: the
+    # session is saying it could not review at all, and the one wrong response
+    # to that is computing a verdict from whatever else reached disk. Exiting
+    # here writes no verdict.txt, the enforce step fails closed, nothing is
+    # posted, and no patch-id/verdict marker is recorded — so the failure is
+    # never cached against the diff the way a REJECT would be.
+    infra = read_infrastructure_failure(args.result_file)
+    if infra is not None:
+        print(
+            "error: the review session reported a review-infrastructure "
+            f"failure and reviewed nothing: {infra} — this is NOT a verdict "
+            "on the PR; re-run the check",
+            file=sys.stderr,
+        )
         print("validation FAILED — no verdict written (gate fails closed)")
         return 1
 
