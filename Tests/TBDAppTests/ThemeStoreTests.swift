@@ -180,6 +180,7 @@ struct ThemeStoreTests {
 
         let store = ThemeStore(themesDirectory: themesDir)
         store.startWatching()
+        defer { store.stopWatching() }
         store.reloadFromDisk()
         #expect(store.userThemes.isEmpty)
 
@@ -192,25 +193,47 @@ struct ThemeStoreTests {
         try JSONEncoder().encode(theme)
             .write(to: themesDir.appendingPathComponent("ext.json"))
 
-        // Generous positive-wait deadline that only elapses on failure. Both
-        // this polling loop and the FSEvents callback's `Task { @MainActor in
-        // ... }` bounce must acquire a turn on the single serial MainActor
-        // executor (bound to the process's one main thread); under a
-        // full-suite `swift test --parallel -j 2` run, hundreds of other
-        // @MainActor suites queue for that same executor and can stretch
-        // delivery well past a 5s window (reproduced locally: reload landed
-        // at ~12s wall-clock). Same root cause as the cooperative-pool
-        // starvation documented for `ciSafeDeadline` in
+        // Hang guard, not a tolerance window. This is a positive wait: it breaks
+        // on the first satisfying probe (~0.1s on the healthy path), so only a
+        // genuinely failing run ever pays the deadline.
+        //
+        // Why it has to be generous at all: both this polling loop and the
+        // FSEvents callback's `Task { @MainActor in ... }` bounce must acquire a
+        // turn on the single serial MainActor executor (bound to the process's
+        // one main thread), and every @MainActor suite in the process queues for
+        // that same executor. Same root cause as the cooperative-pool starvation
+        // documented for `ciSafeDeadline` in
         // Tests/TBDDaemonTests/ControlModeTestSupport.swift (PR #379).
-        // Passing runs still complete in ~0.1s.
-        let deadline = Date().addingTimeInterval(30)
+        //
+        // 90s is anchored to that same population-derived figure rather than
+        // tuned here. The predecessor 30s was sized (PR #441) against a
+        // ~3000-test process where the reproduced delay was ~12s; the population
+        // is now 5417, and this test failed at 30s on a loaded multi-agent dev
+        // box during a full in-process run. Re-derive if the population moves
+        // materially again — see Tests/CLAUDE.md, "Population is the scheduler".
+        let timeout: TimeInterval = 90
+        let deadline = Date().addingTimeInterval(timeout)
         while store.userThemes.isEmpty && Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        guard !store.userThemes.isEmpty else {
+            // Thrown, not `#expect(..., "message")`: only `Issue.record(_: some
+            // Error)` puts the diagnostic on the primary failure line CI
+            // summaries quote (Tests/CLAUDE.md rule 4). The three observations
+            // discriminate the failure modes: `loadErrors` separates "reload ran
+            // but decode failed" from "reload never ran", and the directory
+            // listing separates "the file never landed" (a test bug) from "the
+            // watcher never fired".
+            throw Failure("""
+                the themes-directory watcher never reloaded after an external add — \
+                after \(timeout)s, userThemes=\(store.userThemes.map(\.id)), \
+                loadErrors=\(store.loadErrors), \
+                directory contents=\(String(describing: try? FileManager.default
+                    .contentsOfDirectory(atPath: themesDir.path)))
+                """)
+        }
         #expect(store.userThemes.count == 1)
         #expect(store.userThemes.first?.id == "ext")
-
-        store.stopWatching()
     }
 
     @Test("saveAs rejects display names that slugify to empty")
@@ -301,4 +324,13 @@ struct ThemeStoreTests {
         #expect(appearance.schemeID == ColorSchemes.defaultScheme.id)
         #expect(appearance.draftSchemeOverride == nil)
     }
+}
+
+// MARK: - Local helpers
+
+/// Timeout diagnostics travel as a thrown `Error` so they land on the primary
+/// failure line and survive into the CI summary (Tests/CLAUDE.md, rule 4).
+private struct Failure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }

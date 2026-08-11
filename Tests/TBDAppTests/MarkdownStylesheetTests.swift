@@ -1,9 +1,13 @@
+import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tier 1, except for `themesDirectoryWatchSeesAStylesheetCreatedLater`, which
-/// is tier 2 (real filesystem, real dispatch source, bounded polling).
+/// is tier 2: a real filesystem and a real dispatch source deliver the *event*,
+/// while the debounce *timer* is virtual — the same split `FileWatcherTests`
+/// documents.
 ///
 /// Every test supplies its own tmp themes directory and its own
 /// `UserDefaults(suiteName:)`. Neither `~/tbd` nor `UserDefaults.standard` is
@@ -285,9 +289,27 @@ struct MarkdownStylesheetTests {
     /// That is the only way the viewer can notice a stylesheet that did not
     /// exist when it opened — there is no inode for a file watcher to open.
     ///
-    /// Tier 2 by construction (real dispatch source), so it uses the production
-    /// clock and bounded polling rather than a `TestClock`.
-    @Test("a watch on the themes directory sees a stylesheet created later")
+    /// Tier 2, split the way `FileWatcherTests` splits: a real dispatch source
+    /// delivers the *event*, while the debounce *timer* is virtual — production
+    /// takes `clock: any Clock<Duration>`, so the 150 ms window is crossed by
+    /// advancing a `TestClock` instead of being waited out on a loaded runner.
+    /// Waiting out a real debounce plus `AsyncStream` delivery under one 8 s
+    /// bound is exactly what starved here when the process carried >5000 tests.
+    ///
+    /// The bounded polls that remain wait only on legs that are genuinely
+    /// real-time — the dispatch source delivering an event and production
+    /// reaching `clock.sleep` (observed through `armed`), and the consuming
+    /// `Task` receiving an `AsyncStream` element — never on the debounce
+    /// interval itself. Each is a hang guard whose healthy path exits on its
+    /// first probe, and each timeout travels as a thrown `Failure` carrying the
+    /// observed counts (Tests/CLAUDE.md rule 4).
+    ///
+    /// One-sidedness worth naming: this watches a *directory*, so the events
+    /// are not attributable to a particular entry. A straggler probe event
+    /// could in principle supply the phase-2 arm or notification. The final
+    /// `resolve()` assertion is what pins the actual content — a watcher that
+    /// never saw `later.css` cannot make it read `body{color:teal}`.
+    @Test("a watch on the themes directory sees a stylesheet created later", .clockDriven)
     func themesDirectoryWatchSeesAStylesheetCreatedLater() async throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -300,45 +322,73 @@ struct MarkdownStylesheetTests {
             ) == bundledMarker)
         }
 
+        let clock = TestClock<Swift.Duration>()
+        let armed = Counter()
         let notified = Counter()
-        let watcher = FileWatcher()
+        let watcher = FileWatcher(clock: RecordingClock(base: clock, armed: armed))
         let stream = watcher.changes(for: dir.path)
         let consumer = Task { for await _ in stream { notified.record() } }
         defer { consumer.cancel() }
 
-        // Same dispatch-source registration race `FileWatcherTests` documents:
-        // `resume()` is asynchronous, so the first create can land before the
-        // source is listening. Retry, waiting out three full debounce windows
-        // per attempt.
-        let url = dir.appendingPathComponent("later.css")
-        for attempt in 0..<4 {
+        // Phase 1 — prove the source is registered and delivering.
+        //
+        // Same dispatch-source registration race `FileWatcherTests.writeUntilArmed`
+        // documents: `resume()` registers its kqueue filter asynchronously, so a
+        // create issued right after `changes(for:)` returns can be lost forever.
+        // Retrying is legitimate ONLY for that first-write race; every wait after
+        // this one treats a missing event as event loss, not as something to
+        // retry.
+        let attempts = 4
+        let attemptWindow: Duration = .seconds(2)
+        var registered = false
+        for attempt in 0..<attempts {
             try "body{color:teal}".write(
                 to: dir.appendingPathComponent("probe-\(attempt).css"),
                 atomically: true, encoding: .utf8
             )
-            let deadline = ContinuousClock.now.advanced(by: FileWatcher.debounceInterval * 3)
-            while notified.count == 0, ContinuousClock.now < deadline {
-                try? await Task.sleep(for: .milliseconds(10))
+            if await Self.waitUntil(attemptWindow, { armed.count > 0 }) {
+                registered = true
+                break
             }
-            if notified.count > 0 { break }
         }
-        guard notified.count > 0 else {
+        guard registered else {
             throw Failure("""
-                a FileWatcher on a directory never reported an entry being created — \
-                observed \(notified.count) notifications after \
-                4 attempts of \(FileWatcher.debounceInterval * 3) each
+                a FileWatcher on a directory armed no debounce timer for an entry being \
+                created — observed armed=\(armed.count) after \(attempts) attempts of \
+                \(attemptWindow) each
                 """)
         }
 
-        // The event the viewer actually cares about: the selected stylesheet
-        // appearing. After it, resolution must stop returning the bundled sheet.
-        let before = notified.count
-        try "body{color:teal}".write(to: url, atomically: true, encoding: .utf8)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
-        while notified.count == before, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
+        // The timer is virtual, so crossing the window costs no wall time. The
+        // poll after it is the real leg: `AsyncStream` delivery into the
+        // consuming `Task`, on the same 8 s budget `FileWatcherTests.poll` uses.
+        await clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+        guard await Self.waitUntil(.seconds(8), { notified.count > 0 }) else {
+            throw Failure("""
+                the debounce window elapsed but no notification reached the consumer — \
+                observed \(notified.count) after polling up to 8 seconds
+                """)
         }
-        guard notified.count > before else {
+
+        // Phase 2 — the event the viewer actually cares about: the selected
+        // stylesheet appearing. After it, resolution must stop returning the
+        // bundled sheet.
+        let before = notified.count
+        let armedBefore = armed.count
+        let url = dir.appendingPathComponent("later.css")
+        try "body{color:teal}".write(to: url, atomically: true, encoding: .utf8)
+        // No retry here: the source has already delivered once, so a missing arm
+        // is event loss. This waits only for kernel event -> GCD handler ->
+        // production reaching `clock.sleep`, the leg `writeUntilArmed`'s 8 s
+        // budget covers.
+        guard await Self.waitUntil(.seconds(8), { armed.count > armedBefore }) else {
+            throw Failure("""
+                creating the selected stylesheet armed no new debounce timer — observed \
+                armed=\(armed.count) (baseline \(armedBefore)) after polling up to 8 seconds
+                """)
+        }
+        await clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+        guard await Self.waitUntil(.seconds(8), { notified.count > before }) else {
             throw Failure("""
                 creating the selected stylesheet produced no directory notification — \
                 observed \(notified.count) (baseline \(before)) after polling up to 8 seconds
@@ -355,6 +405,25 @@ struct MarkdownStylesheetTests {
         consumer.cancel()
         _ = await consumer.value
     }
+
+    /// Bounded poll on a fact produced by **real** scheduling — a dispatch
+    /// source delivering an event, or `AsyncStream` handing an element to its
+    /// consumer.
+    ///
+    /// `timeout` is a hang guard, never a tolerance window: the healthy path
+    /// returns on the first probe. It returns a `Bool` rather than recording an
+    /// issue itself so each call site can throw a `Failure` naming what it
+    /// observed (Tests/CLAUDE.md rule 4) — only a thrown error lands on the
+    /// primary failure line that CI summaries quote.
+    private static func waitUntil(_ timeout: Duration,
+                                  pollInterval: Duration = .milliseconds(25),
+                                  _ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: pollInterval)
+        }
+        return condition()
+    }
 }
 
 // MARK: - Local helpers
@@ -364,6 +433,30 @@ struct MarkdownStylesheetTests {
 private struct Failure: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
+}
+
+/// A `Clock` that delegates to a `TestClock` and counts every armed sleep.
+///
+/// Mirrors `FileWatcherTests.RecordingClock`, for the same reason: arming is
+/// the only *positive, pollable* fact that the FS event was delivered and
+/// production reached its timer. `TestClock.checkSuspension()` can answer only
+/// "is anything suspended", so it cannot distinguish a superseded debounce
+/// still being torn down from the fresh one a later write just armed.
+///
+/// Delegating rather than reimplementing keeps virtual time exactly
+/// `TestClock`'s, so `advanceWhenSuspended` on the base clock behaves normally.
+private struct RecordingClock: Clock {
+    let base: TestClock<Swift.Duration>
+    let armed: Counter
+
+    var now: TestClock<Swift.Duration>.Instant { base.now }
+    var minimumResolution: Swift.Duration { base.minimumResolution }
+
+    func sleep(until deadline: TestClock<Swift.Duration>.Instant,
+               tolerance: Swift.Duration?) async throws {
+        armed.record()
+        try await base.sleep(until: deadline, tolerance: tolerance)
+    }
 }
 
 private final class Counter: @unchecked Sendable {
