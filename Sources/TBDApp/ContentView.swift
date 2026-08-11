@@ -288,13 +288,53 @@ struct ContentView: View {
         } message: {
             Text(appState.alertMessage ?? "")
         }
+        .alert(
+            "tmux Not Found",
+            isPresented: Binding(
+                get: { appState.isTmuxLocationPromptPresented },
+                set: { presented in
+                    if !presented {
+                        appState.dismissTmuxLocationPrompt()
+                    }
+                }
+            )
+        ) {
+            Button("Locate tmux…") {
+                appState.dismissTmuxLocationPrompt()
+                locateTmuxExecutable()
+            }
+            Button("Not Now", role: .cancel) {
+                appState.dismissTmuxLocationPrompt()
+            }
+        } message: {
+            Text("TBD could not find tmux in PATH and no saved fallback is available. Locate the tmux executable to use TBD terminals.")
+        }
         .onAppear {
+            appState.checkTmuxAvailabilityAtStartup()
             // Keep-alive: seed recentlyVisitedWorktreeIDs with the initially-restored
             // selection so the ZStack renders the right SingleWorktreeView on first frame.
             if appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first {
                 appState.touchVisitedWorktree(id)
                 appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
+        }
+    }
+
+    private func locateTmuxExecutable() {
+        let panel = NSOpenPanel()
+        panel.title = "Locate tmux"
+        panel.message = "Choose the tmux executable."
+        panel.prompt = "Choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try appState.saveTmuxExecutableFallback(url.path)
+        } catch {
+            appState.alertIsError = true
+            appState.alertMessage = error.localizedDescription
         }
     }
 

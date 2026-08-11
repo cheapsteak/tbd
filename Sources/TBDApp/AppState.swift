@@ -1032,10 +1032,16 @@ final class AppState: ObservableObject {
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
 
+    @Published private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
+    @Published private(set) var savedTmuxExecutablePath: String?
+    @Published private(set) var isTmuxLocationPromptPresented = false
+    private var hasCheckedTmuxAvailabilityAtStartup = false
+
     let themeStore = ThemeStore()
 
     let daemonClient = DaemonClient()
-    let tmuxBridge = TmuxBridge(tmuxExecutableResolver: TmuxExecutableResolver())
+    let tmuxExecutableResolver: TmuxExecutableResolver
+    let tmuxBridge: TmuxBridge
     /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
     /// Lives here — not on any view — so SwiftUI view destruction cannot tear
     /// down an active reader. Keyed by `FDVendHeader.routingKey`.
@@ -1206,8 +1212,15 @@ final class AppState: ObservableObject {
     /// so they never clobber the developer's running app preferences.
     let userDefaults: UserDefaults
 
-    init(userDefaults: UserDefaults = .standard) {
+    init(
+        userDefaults: UserDefaults = .standard,
+        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()
+    ) {
         self.userDefaults = userDefaults
+        self.tmuxExecutableResolver = tmuxExecutableResolver
+        self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
+        self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
+        self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         restoreLayouts()
         restorePaneHistories()
         restoreRemoteSessionDisplayNames()
@@ -1242,6 +1255,33 @@ final class AppState: ObservableObject {
                 startPolling()
             }
         }
+    }
+
+    func refreshTmuxExecutableState() {
+        savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
+        tmuxExecutableResolution = tmuxExecutableResolver.resolve()
+    }
+
+    func checkTmuxAvailabilityAtStartup() {
+        guard !hasCheckedTmuxAvailabilityAtStartup else { return }
+        hasCheckedTmuxAvailabilityAtStartup = true
+        refreshTmuxExecutableState()
+        isTmuxLocationPromptPresented = tmuxExecutableResolution == nil
+    }
+
+    func dismissTmuxLocationPrompt() {
+        isTmuxLocationPromptPresented = false
+    }
+
+    func saveTmuxExecutableFallback(_ path: String) throws {
+        try tmuxExecutableResolver.save(path)
+        refreshTmuxExecutableState()
+        isTmuxLocationPromptPresented = false
+    }
+
+    func clearTmuxExecutableFallback() throws {
+        try tmuxExecutableResolver.clear()
+        refreshTmuxExecutableState()
     }
 
     /// True when this process is a SwiftPM / XCTest test harness. Detected by
