@@ -307,7 +307,7 @@ extension WorktreeLifecycle {
         // than tear down a valid worktree.
         let rowExists: Bool
         do {
-            rowExists = try await db.worktrees.get(id: worktree.id) != nil
+            rowExists = try await db.worktrees.getLocal(id: worktree.id) != nil
         } catch {
             logger.warning("phase-3: worktree existence check failed for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public) — assuming the row still exists and proceeding")
             rowExists = true
@@ -527,7 +527,7 @@ extension WorktreeLifecycle {
     func rerunPreSessionHook(
         worktreeID: UUID, cols: Int? = nil, rows: Int? = nil
     ) async throws {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw RerunPreSessionError.worktreeNotFound(worktreeID)
         }
         // A `.creating` worktree is already running its hook under phase 3.
@@ -548,7 +548,7 @@ extension WorktreeLifecycle {
         let spawn: PreSessionSpawn?
         do {
             spawn = try await spawnPreSessionTerminal(
-                worktree: worktree, repo: repo,
+                worktree: worktree.worktree, repo: repo,
                 worktreePath: worktree.path,
                 cols: cols, rows: rows,
                 claimsFocus: false
@@ -567,7 +567,7 @@ extension WorktreeLifecycle {
 
         let lifecycle = self
         Task.detached {
-            await lifecycle.finishRerunPreSession(worktree: worktree, preSession: spawn)
+            await lifecycle.finishRerunPreSession(worktree: worktree.worktree, preSession: spawn)
         }
     }
 
