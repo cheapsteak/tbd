@@ -252,9 +252,12 @@ defaults to true and already governs every other GC deletion, so the escape
 hatch exists and is one toggle.
 
 Two properties limit the risk. Reclamation touches only directories that pass
-the provenance gate, and the enqueue step is strictly less destructive than the
-`git worktree remove` it replaces — a rename is reversible until the drain
-runs.
+the provenance gate, and the enqueue step trades a partial unlink for a rename:
+where an interrupted `git worktree remove` left a tree half-deleted in its pool
+slot, an interrupted archive now leaves it whole inside `.deleting/`. That is a
+crash-recovery property, not a window in which a user could change their mind —
+every call path drains immediately after enqueuing, and a holding period is
+rejected below.
 
 ## Testing
 

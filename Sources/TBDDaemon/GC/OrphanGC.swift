@@ -57,6 +57,14 @@ public actor OrphanGC {
     private let agentCollector: AgentWorktreeCollector
     private let scratchpadCollector: ScratchpadCollector
     private let deletionQueueCollector: DeletionQueueCollector
+    /// Test-only injection seam: awaited once inside `reclaimDeletionQueue`,
+    /// after the interrupted-archive candidate list has been computed and
+    /// before any candidate is reaped. That is the exact window the pre-reap
+    /// row re-read closes, and nothing else in the sweep is slow or
+    /// interruptible enough to land a concurrent `forgetWorktree` in it
+    /// deterministically. `nil` in production (both public inits omit it), so
+    /// the sweep is unchanged there.
+    private let beforeInterruptedArchiveReap: (@Sendable () async -> Void)?
 
     /// Production seam: an injected `lsofProvider` returns a non-optional
     /// `[String]` — by definition authoritative, it can't signal
@@ -90,7 +98,8 @@ public actor OrphanGC {
         broadcast: @escaping @Sendable (StateDelta) -> Void,
         liveCWDsProvider: (@Sendable () async -> [String]?)?,
         scratchpadBase: URL? = nil,
-        now: (@Sendable () -> Date)? = nil
+        now: (@Sendable () -> Date)? = nil,
+        beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -103,6 +112,7 @@ public actor OrphanGC {
         self.scratchpadBase = resolvedScratchpadBase
         self.now = resolvedNow
         self.snapshot = snap
+        self.beforeInterruptedArchiveReap = beforeInterruptedArchiveReap
         self.agentCollector = AgentWorktreeCollector(git: git, snapshot: snap, now: resolvedNow)
         self.scratchpadCollector = ScratchpadCollector(base: resolvedScratchpadBase)
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
@@ -246,6 +256,7 @@ public actor OrphanGC {
             prefixesByRepoID: prefixesByRepoID,
             scratchPrefix: scratchPrefix
         )
+        await beforeInterruptedArchiveReap?()
         for candidate in candidates {
             switch await deletionQueueCollector.decide(
                 candidate, liveCWDs: live, graceSeconds: graceSeconds
@@ -266,6 +277,27 @@ public actor OrphanGC {
                 // (du failed or timed out) is the unmeasured record we would
                 // have written anyway.
                 let bytes = await GCDiskUsage.apparentBytes(path: candidate.path)
+                // Re-read the row immediately before acting on it. The
+                // candidate list above is a snapshot, and `forgetWorktree`
+                // hard-deletes a row while promising the directory stays
+                // put — so a forget landing between the snapshot and here
+                // would otherwise still get its directory reaped, silently
+                // breaking that promise. A revive (status back to `.active`)
+                // is the same hazard through a different door. The check
+                // lives here rather than in `DeletionQueueCollector`
+                // deliberately: that type has no database access, and
+                // keeping it that way is worth a round trip per reap. A read
+                // failure reads as "skip", the keep-favoring direction every
+                // other gate in this sweep takes.
+                let refreshed = (try? await db.worktrees.get(id: candidate.worktreeID)) ?? nil
+                guard refreshed?.status == .archived else {
+                    planned.append("KEEP row-changed \(candidate.path)")
+                    logger.info("""
+                    gc: keep row-changed \(candidate.path, privacy: .public) — \
+                    its row was deleted or left .archived after this sweep listed it
+                    """)
+                    continue
+                }
                 guard let entry = await deletionQueueCollector.reap(candidate) else {
                     planned.append("KEEP enqueue-failed \(candidate.path)")
                     continue

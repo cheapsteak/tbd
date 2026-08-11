@@ -18,14 +18,16 @@ private final class BroadcastDeltas: @unchecked Sendable {
 struct OrphanGCDeletionQueueTests {
 
     private func makeGC(
-        db: TBDDatabase, git: GitManager = GitManager(), now: @escaping @Sendable () -> Date = { Date() }
+        db: TBDDatabase, git: GitManager = GitManager(), now: @escaping @Sendable () -> Date = { Date() },
+        beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil
     ) -> OrphanGC {
         OrphanGC(
             db: db, git: git,
             broadcast: { _ in },
-            lsofProvider: { [] },
+            liveCWDsProvider: { [] },
             scratchpadBase: nil,
-            now: now
+            now: now,
+            beforeInterruptedArchiveReap: beforeInterruptedArchiveReap
         )
     }
 
@@ -306,6 +308,62 @@ struct OrphanGCDeletionQueueTests {
         // adopted worktree itself is still outside every TBD prefix.
         #expect(FileManager.default.fileExists(atPath: path))
         #expect(result.planned.contains("KEEP not-tbd-prefix \(path)"))
+    }
+
+    /// `forgetWorktree` hard-deletes the row and promises the directory stays
+    /// where it is. The sweep snapshots archived rows once and acts on them
+    /// later, so a forget landing in that window would otherwise still have
+    /// its directory reaped. The pre-reap re-read closes it.
+    @Test func sweepSkipsACandidateWhoseRowWasForgottenMidSweep() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        let repoRow = try await db.repos.create(
+            path: repo.path, displayName: "acme", defaultBranch: "main")
+        let path = try await makeInterruptedArchive(
+            db: db, repo: repo, repoID: repoRow.id, name: "forgotten")
+        let wtID = try #require(
+            (try await db.worktrees.list(status: .archived)).first { $0.path == path }?.id)
+
+        // Interleaved exactly where the race lives: after the candidate list
+        // was built, before anything is reaped.
+        let gc = makeGC(db: db, beforeInterruptedArchiveReap: {
+            try? await db.worktrees.delete(id: wtID)
+        })
+        let result = await gc.sweep()
+
+        #expect(FileManager.default.fileExists(atPath: path),
+                "forget promises the directory stays put — the sweep must not reap it")
+        #expect(result.planned.contains("KEEP row-changed \(path)"))
+        let records = try await db.reapRecords.list(repoPath: nil)
+        #expect(records.isEmpty)
+    }
+
+    /// The same window, entered through the other door: the row survives but
+    /// is no longer `.archived` (a revive that landed mid-sweep). Reaping then
+    /// would rename a live worktree's directory out from under it.
+    @Test func sweepSkipsACandidateRevivedMidSweep() async throws {
+        let (tmp, repo) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        let repoRow = try await db.repos.create(
+            path: repo.path, displayName: "acme", defaultBranch: "main")
+        let path = try await makeInterruptedArchive(
+            db: db, repo: repo, repoID: repoRow.id, name: "revived")
+        let wtID = try #require(
+            (try await db.worktrees.list(status: .archived)).first { $0.path == path }?.id)
+
+        let gc = makeGC(db: db, beforeInterruptedArchiveReap: {
+            try? await db.worktrees.updateStatus(id: wtID, status: .active)
+        })
+        let result = await gc.sweep()
+
+        #expect(FileManager.default.fileExists(atPath: path))
+        #expect(result.planned.contains("KEEP row-changed \(path)"))
     }
 
     @Test func sweepDoesNothingWhenGCDisabled() async throws {
