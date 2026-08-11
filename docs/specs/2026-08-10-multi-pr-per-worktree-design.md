@@ -128,6 +128,15 @@ open the gate and bind whatever PR URL the output happened to carry. An
 unterminated heredoc swallows the rest of the command, and a `<<` that is not a
 heredoc at all is read as one; both lose binds rather than inventing them.
 
+The hook entry also carries an explicit **3-second timeout**, rather than
+inheriting Claude Code's 60-second default. This is the first TBD hook matching a
+universally-used tool, so a wedged daemon socket would otherwise stall every
+Bash call every agent runs, fleet-wide, for a minute each. Three seconds is far
+more than the happy path needs — the common case is a `cat` and a `grep` that
+matches nothing, spawning no `tbd` at all — and a binding lost to a timeout is
+re-derivable by branch matching on the next poll, so the timeout costs at most a
+delayed bind.
+
 This reads the hook's structured `tool_input` / `tool_response` JSON. It is not
 TUI screen-scraping — that rule bans inferring state from a rendered terminal
 screen and directs us to machine interfaces such as hook payloads, which is
@@ -297,6 +306,17 @@ toolbar forever. The binding list therefore travels with a count of tombstones.
 
 New RPC methods `pr.bindings`, `pr.attach`, and `pr.detach` back the first three;
 `pr.list` and `pr.refresh` keep their present contracts.
+
+The app does not poll `pr.bindings`. A fifth method, `pr.bindingsAll`, takes no
+worktree parameter and returns every worktree's live bindings with its tombstone
+count in one round trip, from a single read of the table. The per-worktree method
+cannot serve the app, because the app has no way to name the worktrees worth
+asking about: a hook-bound PR sits on a branch its worktree never checked out, so
+it appears in no branch-derived status cache and no targeted fan-out would ever
+reach it — the headline case would be invisible until the user selected that
+worktree. Reporting the whole table also gives a poll ONE outcome: a failure
+keeps the previously published map wholesale, and a worktree absent from a
+success loses its entry, which is how a detach is observed.
 
 The `tbd` skill gains a short entry covering `list`, `attach`, and `detach`, so an
 agent asked to tidy a worktree's PRs can do it without being told the commands.

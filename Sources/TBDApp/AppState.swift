@@ -1182,6 +1182,12 @@ final class AppState: ObservableObject {
         alert.buttons[1].keyEquivalent = "\r"
         return alert.runModal() == .alertFirstButtonReturn
     }
+    /// How `refreshPRBindings` fetches the whole fleet's PR bindings —
+    /// injectable for the same reason as `daemonCapabilitiesFetcher`
+    /// (`DaemonClient` is concrete, no protocol), so a poll can be driven
+    /// without a daemon.
+    lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
+        { [daemonClient] in try await daemonClient.listAllPRBindings() }
     /// How `loadTabStates` fetches a worktree's persisted tab order / labels /
     /// active tab — injectable for the same reason as `daemonCapabilitiesFetcher`
     /// (`DaemonClient` is concrete, no protocol), so hydration tests can drive
@@ -2682,89 +2688,50 @@ final class AppState: ObservableObject {
             if fetched != prStatuses {
                 prStatuses = fetched
             }
-            await refreshPRBindings(worktreeIDs: prBindingRefreshTargets(statuses: fetched))
         } catch {
             logger.error("Failed to list PR statuses: \(error)")
             handleConnectionError(error)
         }
+        // Outside the `do`, deliberately. The two come from different daemon
+        // paths — `pr.list` runs the git/`gh` poll, `pr.bindingsAll` is one
+        // indexed read — so a GitHub hiccup must not also freeze the dropdown.
+        // Same reasoning as `refreshPRStatus(worktreeID:)` below.
+        await refreshPRBindings()
     }
 
-    /// Which worktrees to re-fetch bindings for on a poll. `pr.bindings` is
-    /// per-worktree, so the set is deliberately narrow: the worktrees the
-    /// daemon just reported a PR status for (a bound worktree gets its
-    /// worst-of status written every pass), the ones already known to have
-    /// bindings (so a detach or an all-merged worktree is observed rather than
-    /// left stale forever), the ones known to carry tombstones (whose live list
-    /// is empty, so `prBindings` no longer names them, yet whose detached count
-    /// still has to be re-confirmed after an `attach` revives one), and the
-    /// current selection (the only worktree whose toolbar control is on screen).
-    private func prBindingRefreshTargets(statuses: [UUID: PRStatus]) -> Set<UUID> {
-        Set(statuses.keys)
-            .union(prBindings.keys)
-            .union(prDetachedCounts.keys)
-            .union(selectedWorktreeIDs)
-    }
-
-    /// How many `pr.bindings` calls may be in flight at once. Each one parks a
-    /// blocking `connect`/`recv` on the cooperative thread pool for as long as
-    /// the daemon takes to answer, so the window — not the fleet size — is what
-    /// bounds the pool pressure a poll can create.
-    static let prBindingFetchConcurrency = 6
-
-    /// Fetch and publish bindings for the given worktrees.
+    /// Fetch and publish EVERY worktree's PR bindings.
     ///
-    /// `pr.bindings` is per-worktree — one indexed SELECT in the daemon — so a
-    /// poll of a 40-worktree fleet is 40 calls. They are issued concurrently and
-    /// applied as a single batch: awaited in sequence they were 40 serial round
-    /// trips per tick, and publishing per worktree would have thrashed
-    /// `prBindings` (and every view observing it) up to 40 times per poll.
+    /// One call, not a fan-out, and the "one" is what fixes the bug the
+    /// per-worktree shape had: the app could only ask about worktrees it already
+    /// knew had PRs (a branch-derived status, an existing binding, a tombstone,
+    /// or the selection), so a worktree whose only PR was bound by the
+    /// `gh pr create` hook — on a branch it never checked out, hence in no
+    /// status cache — stayed invisible until the user selected it. That is the
+    /// headline case of the multi-PR design, so the daemon reports the whole
+    /// table and the app replaces its maps wholesale.
     ///
-    /// The concurrency is WINDOWED at `prBindingFetchConcurrency`, and that
-    /// bound is the point. `DaemonClient` does not serialize these for us: its
-    /// `sendRawAsync` escapes the actor with `Task.detached` onto a `private
-    /// nonisolated sendRaw` that opens a fresh socket per request. Nothing
-    /// interleaves on the wire as a result — each call has its own connection —
-    /// but nothing throttles them either, so an unbounded group put one blocking
-    /// `connect`/`recv` loop per worktree on the cooperative thread pool, each
-    /// bounded only by `rpcRecvDeadlineSeconds` (300 s). That is the pool
-    /// saturation `DaemonClient.makeConnectedSocket` arms `SO_RCVTIMEO` against.
+    /// The two surviving semantics:
     ///
-    /// Two per-worktree outcomes stay distinct, deliberately: a FAILED fetch
-    /// keeps the previous value (a `gh`/RPC hiccup must not blank the toolbar),
-    /// while an EMPTY result DOES drop the key — everything-detached, or
-    /// nothing ever bound, is a real answer. That fold lives in
-    /// `PRBindingRefresh.merge` so it can be asserted without a daemon.
-    private func refreshPRBindings(worktreeIDs: Set<UUID>) async {
-        guard !worktreeIDs.isEmpty else { return }
-        let client = daemonClient
-        let outcomes = await mapConcurrently(
-            Array(worktreeIDs), limit: Self.prBindingFetchConcurrency
-        ) { worktreeID in
-            do {
-                return PRBindingFetchOutcome(
-                    worktreeID: worktreeID,
-                    result: try await client.listPRBindings(worktreeID: worktreeID))
-            } catch {
-                return PRBindingFetchOutcome(
-                    worktreeID: worktreeID, result: nil, failure: "\(error)")
-            }
+    /// - a FAILED fetch keeps the previous maps. It is now one failure for the
+    ///   whole fleet rather than one per worktree, so this early return is the
+    ///   only thing standing between an RPC hiccup and every toolbar blanking at
+    ///   once.
+    /// - a worktree ABSENT from a SUCCESSFUL response loses its entry, so a
+    ///   `tbd pr detach` is observed. `PRBindingRefresh.state(from:)` owns that,
+    ///   which is how it can be asserted without a daemon.
+    func refreshPRBindings() async {
+        let result: PRBindingsAllResult
+        do {
+            result = try await prBindingsFetcher()
+        } catch {
+            // Leave the previous values in place — a failed fetch is not
+            // evidence that any worktree lost its PRs.
+            logger.error("Failed to list PR bindings: \(String(describing: error), privacy: .public)")
+            return
         }
-
-        for outcome in outcomes where outcome.result == nil {
-            // Leave the previous value in place — a failed fetch is not
-            // evidence that the worktree lost its PRs.
-            logger.error("""
-                Failed to list PR bindings for \(outcome.worktreeID, privacy: .public): \
-                \(outcome.failure ?? "unknown", privacy: .public)
-                """)
-        }
-
-        let merged = PRBindingRefresh.merge(
-            PRBindingRefresh.State(bindings: prBindings, detachedCounts: prDetachedCounts),
-            applying: outcomes
-        )
-        if merged.bindings != prBindings { prBindings = merged.bindings }
-        if merged.detachedCounts != prDetachedCounts { prDetachedCounts = merged.detachedCounts }
+        let next = PRBindingRefresh.state(from: result)
+        if next.bindings != prBindings { prBindings = next.bindings }
+        if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
     }
 
     /// Trigger an immediate PR refresh for one worktree (on-select).
@@ -2780,8 +2747,11 @@ final class AppState: ObservableObject {
         }
         // Bindings are fetched even when the status refresh failed: the two
         // come from different daemon paths (a `gh` call versus one indexed
-        // SELECT), so a GitHub hiccup must not also blank the dropdown.
-        await refreshPRBindings(worktreeIDs: [worktreeID])
+        // SELECT), so a GitHub hiccup must not also blank the dropdown. The
+        // whole fleet comes back rather than this worktree alone — it is one
+        // round trip either way, and a targeted fetch is what left hook-bound
+        // worktrees invisible until they were selected.
+        await refreshPRBindings()
     }
 
     /// Refresh unread notifications from the daemon.

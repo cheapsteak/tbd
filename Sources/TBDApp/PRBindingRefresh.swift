@@ -1,38 +1,23 @@
 import Foundation
 import TBDShared
 
-/// One worktree's outcome from a `pr.bindings` fetch.
+/// Turning a `pr.bindingsAll` response into the app's published PR state —
+/// pulled out of `AppState.refreshPRBindings` as a pure value transform so the
+/// contract below can be asserted without a daemon.
 ///
-/// The daemon error is carried as a `String` rather than an `any Error` because
-/// `Error` is not `Sendable` and this value crosses back to the main actor.
-struct PRBindingFetchOutcome: Sendable {
-    let worktreeID: UUID
-    /// `nil` means the fetch FAILED. A non-nil result with an empty `bindings`
-    /// array is the daemon answering "this worktree has none", which is a real
-    /// answer and must not be confused with the failure.
-    let result: PRBindingsResult?
-    let failure: String?
-
-    init(worktreeID: UUID, result: PRBindingsResult?, failure: String? = nil) {
-        self.worktreeID = worktreeID
-        self.result = result
-        self.failure = failure
-    }
-}
-
-/// Folding a round of per-worktree `pr.bindings` fetches into the app's published
-/// state — pulled out of `AppState.refreshPRBindings` as a pure value transform
-/// so the two-branch contract below can be asserted without a daemon.
+/// The daemon reports the whole binding table in one call, so a successful poll
+/// REPLACES the published maps rather than merging into them. That is what makes
+/// the two outcomes that matter fall out of the shape rather than out of
+/// per-worktree bookkeeping:
 ///
-/// Two per-worktree outcomes stay distinct, deliberately:
-///
-/// - a FAILED fetch keeps the previous value. An RPC hiccup is not evidence that
-///   a worktree lost its PRs, and blanking the toolbar on one is a visible flap.
-/// - an EMPTY result DOES drop the key. Everything-detached, or nothing ever
-///   bound, is a real answer and the surfaces must follow it.
+/// - a FAILED fetch keeps the previous maps untouched. An RPC hiccup is not
+///   evidence that the fleet lost its PRs, and blanking every toolbar at once is
+///   a very visible flap. `AppState` simply does not call this on a failure.
+/// - a worktree ABSENT from the response loses its entry. Everything-detached,
+///   or nothing ever bound, is a real answer and the surfaces must follow it.
 enum PRBindingRefresh {
 
-    /// The published state this fold produces. `detachedCounts` is tracked
+    /// The published state this transform produces. `detachedCounts` is tracked
     /// alongside `bindings` rather than inside it because it survives the very
     /// case that empties `bindings`: a worktree whose last PR was detached has
     /// no live bindings and a non-zero count, and that count is the only thing
@@ -42,27 +27,24 @@ enum PRBindingRefresh {
         var detachedCounts: [UUID: Int] = [:]
     }
 
-    /// Applies `outcomes` on top of `previous`. Worktrees absent from `outcomes`
-    /// are untouched.
-    static func merge(_ previous: State, applying outcomes: [PRBindingFetchOutcome]) -> State {
-        var merged = previous
-        for outcome in outcomes {
-            guard let result = outcome.result else { continue }
-            if result.bindings.isEmpty {
-                merged.bindings.removeValue(forKey: outcome.worktreeID)
-            } else {
-                merged.bindings[outcome.worktreeID] = result.bindings
+    /// The state a whole-fleet response describes.
+    ///
+    /// Empty lists and zero counts are stored as ABSENCE, so each map stays the
+    /// set of worktrees that actually have something rather than growing an
+    /// entry per worktree ever polled — and so equality against the previously
+    /// published map means what `AppState` reads it as.
+    static func state(from result: PRBindingsAllResult) -> State {
+        var state = State()
+        for entry in result.worktrees {
+            if !entry.bindings.isEmpty {
+                state.bindings[entry.worktreeID] = entry.bindings
             }
-            // A zero count is stored as absence, so the dictionary stays the
-            // set of worktrees with tombstones rather than growing one entry per
-            // worktree ever polled.
-            let detached = result.detachedCount ?? 0
-            if detached == 0 {
-                merged.detachedCounts.removeValue(forKey: outcome.worktreeID)
-            } else {
-                merged.detachedCounts[outcome.worktreeID] = detached
+            // A daemon that predates the field omits it; `nil` reads as zero,
+            // the pre-existing behaviour.
+            if let detached = entry.detachedCount, detached > 0 {
+                state.detachedCounts[entry.worktreeID] = detached
             }
         }
-        return merged
+        return state
     }
 }

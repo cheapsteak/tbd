@@ -327,6 +327,8 @@ public final class RPCRouter: Sendable {
                 return try await handlePRRefresh(request.paramsData)
             case RPCMethod.prBindings:
                 return try await handlePRBindings(request.paramsData)
+            case RPCMethod.prBindingsAll:
+                return try await handlePRBindingsAll()
             case RPCMethod.prAttach:
                 return try await handlePRAttach(request.paramsData)
             case RPCMethod.prDetach:
@@ -879,6 +881,31 @@ public final class RPCRouter: Sendable {
         let live = all.filter { !$0.detached }
         return try RPCResponse(result: PRBindingsResult(
             bindings: live, detachedCount: all.count - live.count))
+    }
+
+    /// Every worktree's bindings in one call — the app's poll.
+    ///
+    /// No worktree parameter, deliberately. The app cannot name the worktrees to
+    /// ask about: a worktree whose only PR was bound by the `gh pr create` hook,
+    /// on a branch it never checked out, is in no branch-derived status cache,
+    /// so any per-worktree fan-out can only ever reach worktrees already known
+    /// to have PRs — and the hook-bound case is precisely the one multi-PR
+    /// exists to make visible. One indexed read of the whole table costs less
+    /// than the N round trips it replaces.
+    ///
+    /// Entries are sorted by worktree id so the response is byte-stable across
+    /// calls with unchanged data; the bindings inside each entry keep bind order.
+    private func handlePRBindingsAll() async throws -> RPCResponse {
+        let all = try await db.prBindings.listAllByWorktree()
+        let worktreeIDs = Set(all.live.keys).union(all.detachedCounts.keys)
+        let entries = worktreeIDs
+            .sorted { $0.uuidString < $1.uuidString }
+            .map { worktreeID in
+                PRBindingsAllEntry(worktreeID: worktreeID,
+                                   bindings: all.live[worktreeID] ?? [],
+                                   detachedCount: all.detachedCounts[worktreeID] ?? 0)
+            }
+        return try RPCResponse(result: PRBindingsAllResult(worktrees: entries))
     }
 
     private func handlePRAttach(_ paramsData: Data) async throws -> RPCResponse {

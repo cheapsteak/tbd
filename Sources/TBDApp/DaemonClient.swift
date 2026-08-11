@@ -784,18 +784,25 @@ actor DaemonClient {
         return result.statuses
     }
 
-    /// Fetch one worktree's live PR bindings (tombstoned ones are excluded by
-    /// the daemon) together with how many are tombstoned. An unbound worktree
-    /// returns an empty array rather than an error.
+    /// Fetch EVERY worktree's live PR bindings (tombstoned ones are excluded by
+    /// the daemon), each with a count of how many of its bindings ARE
+    /// tombstoned, in a single round trip — the app's poll.
     ///
-    /// The whole result is returned rather than just `bindings`, because an
-    /// empty list means two different things and only `detachedCount` separates
-    /// them — see `PRBindingsResult.detachedCount`.
-    func listPRBindings(worktreeID: UUID) async throws -> PRBindingsResult {
-        try await callAsync(
-            method: RPCMethod.prBindings,
-            params: PRBindingsParams(worktreeID: worktreeID),
-            resultType: PRBindingsResult.self
+    /// Deliberately not a per-worktree call fanned out. The app has no way to
+    /// name the worktrees worth asking about: a hook-bound PR on a branch the
+    /// worktree never checked out appears in no branch-derived status cache, so
+    /// a targeted fetch reaches only worktrees already known to have PRs and the
+    /// hook-bound case stays invisible. One call also has one outcome, which is
+    /// what lets a failure keep the previous map wholesale.
+    ///
+    /// The whole result is returned rather than just the bindings, because an
+    /// empty list means two different things and only the tombstone count
+    /// separates them — see `PRBindingsResult.detachedCount`. The per-worktree
+    /// `pr.bindings` remains for `tbd pr list`.
+    func listAllPRBindings() async throws -> PRBindingsAllResult {
+        try await callNoParamsAsync(
+            method: RPCMethod.prBindingsAll,
+            resultType: PRBindingsAllResult.self
         )
     }
 

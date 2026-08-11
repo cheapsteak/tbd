@@ -497,10 +497,16 @@ extension AppState {
     /// Open one bound PR: an in-app webview tab, reusing an existing tab for the
     /// same URL, or the default browser when ⌘ is held.
     ///
-    /// The single entry point for every PR-opening surface — the toolbar split
-    /// button's primary action, its multi-PR dropdown rows, and the status-bar
-    /// chips — so those cannot drift apart on which one opens a tab and which
-    /// one shells out to a browser.
+    /// The single entry point for the TOOLBAR's PR surfaces — the split
+    /// button's primary action and its multi-PR dropdown rows — so those two
+    /// cannot drift apart on which opens a tab and which shells out.
+    ///
+    /// The toolbar is the only in-app-tab surface, deliberately. The status-bar
+    /// chips and the sidebar row indicator open the default browser directly
+    /// (`NSWorkspace.shared.open`) and are not callers here: a click on the
+    /// at-a-glance strip or on a sidebar glyph is a "take me to GitHub" gesture,
+    /// while the toolbar control is where a PR gets parked as a tab in the
+    /// worktree. That difference is a product decision, not an oversight.
     ///
     /// `inBrowser` defaults to the ⌘ state *at the call site* (default
     /// arguments are evaluated there), which keeps the modifier check next to

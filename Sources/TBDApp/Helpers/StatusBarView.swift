@@ -177,7 +177,7 @@ struct StatusBarView: View {
                 // three surfaces cannot show different PRs for one worktree.
                 let bindings = appState.effectivePRBindings(worktreeID: selected.id)
                 if !bindings.isEmpty {
-                    PRChipCluster(bindings: bindings, worktreeID: selected.id)
+                    PRChipCluster(bindings: bindings)
                         // Same reason as the path cluster: yield width to the
                         // version/display-name label rather than squeezing it.
                         .layoutPriority(-1)
@@ -240,19 +240,15 @@ private struct StatusBarHoverAffordance: ViewModifier {
 /// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
-    /// The worktree the chips belong to — the one whose tab strip a click
-    /// opens the PR in. Passed down rather than read off a binding so the
-    /// cluster targets the same worktree the status bar is describing.
-    let worktreeID: UUID
 
     var body: some View {
         let model = StatusBarView.prChips(bindings)
         HStack(spacing: 6) {
             ForEach(model.chips) { chip in
-                PRChipView(chip: chip, worktreeID: worktreeID)
+                PRChipView(chip: chip)
             }
             if model.overflow > 0 {
-                PRChipOverflowMenu(bindings: bindings, overflow: model.overflow, worktreeID: worktreeID)
+                PRChipOverflowMenu(bindings: bindings, overflow: model.overflow)
             }
         }
     }
@@ -261,10 +257,7 @@ private struct PRChipCluster: View {
 /// One `● #412` chip. Chrome-less like `CopyableStatusText` — the hover
 /// underline plus pointing-hand cursor are the whole affordance.
 private struct PRChipView: View {
-    @EnvironmentObject var appState: AppState
-
     let chip: StatusBarView.PRChip
-    let worktreeID: UUID
 
     @State private var isHovering = false
 
@@ -300,12 +293,16 @@ private struct PRChipView: View {
         .contentShape(Rectangle())
         .help(tooltip)
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
-        // Same helper the toolbar's split button and dropdown rows use, so a
-        // chip and a toolbar row for the same PR land in the same tab —
-        // in-app webview, reused by URL, ⌘-click for the default browser.
+        // Opens the DEFAULT BROWSER, not an in-app tab. Intentional, and the
+        // one place the status bar and the toolbar deliberately differ: the
+        // toolbar control and its dropdown open a webview tab, while the status
+        // bar agrees with the sidebar row indicator and shells out. Not drift —
+        // the status bar is an at-a-glance strip, and a click there is a "take
+        // me to GitHub" gesture rather than a request to park a tab in the
+        // worktree.
         .onTapGesture {
             guard let url = chip.url else { return }
-            appState.openPR(url: url, number: chip.number, worktreeID: worktreeID)
+            NSWorkspace.shared.open(url)
         }
         .accessibilityElement()
         .accessibilityLabel("PR \(chip.label)")
@@ -318,20 +315,20 @@ private struct PRChipView: View {
 /// dropdown shows — `PRBindingPresentation.menuRows`, in bind order — so the
 /// two surfaces cannot describe the same worktree differently.
 private struct PRChipOverflowMenu: View {
-    @EnvironmentObject var appState: AppState
-
     let bindings: [PRBinding]
     let overflow: Int
-    let worktreeID: UUID
 
     @State private var isHovering = false
 
     var body: some View {
         Menu {
             ForEach(PRBindingPresentation.menuRows(bindings)) { row in
+                // The default browser, matching the chips beside it — see
+                // `PRChipView`'s tap handler for why the status bar differs
+                // from the toolbar here.
                 Button(row.title) {
                     guard let url = row.url else { return }
-                    appState.openPR(url: url, number: row.number, worktreeID: worktreeID)
+                    NSWorkspace.shared.open(url)
                 }
                 .disabled(row.url == nil)
             }

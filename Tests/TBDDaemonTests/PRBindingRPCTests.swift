@@ -27,6 +27,7 @@ private struct PRBindingRPCHarness {
     let db: TBDDatabase
     let router: RPCRouter
     let worktreeID: UUID
+    let repoID: UUID
 
     init(repo: (owner: String, name: String)?) async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -35,6 +36,7 @@ private struct PRBindingRPCHarness {
         let createdRepo = try await db.repos.create(
             path: "/tmp/prbinding-rpc-repo-\(suffix)",
             displayName: "acme-prod", defaultBranch: "main")
+        repoID = createdRepo.id
         worktreeID = try await db.worktrees.create(
             repoID: createdRepo.id, name: "wt-\(suffix)", branch: "branch-\(suffix)",
             path: "/tmp/prbinding-rpc-wt-\(suffix)", tmuxServer: "tbd-prbinding-rpc").id
@@ -50,32 +52,51 @@ private struct PRBindingRPCHarness {
             actuationLog: makeTestActuationLog())
     }
 
+    /// A second (third, …) worktree in the same repo, so the batched
+    /// `pr.bindingsAll` can be asserted across more than one.
+    func addWorktree() async throws -> UUID {
+        let suffix = UUID().uuidString
+        return try await db.worktrees.create(
+            repoID: repoID, name: "wt-\(suffix)", branch: "branch-\(suffix)",
+            path: "/tmp/prbinding-rpc-wt-\(suffix)", tmuxServer: "tbd-prbinding-rpc").id
+    }
+
     func bindings() async throws -> PRBindingsResult {
         let request = try RPCRequest(method: RPCMethod.prBindings,
                                      params: PRBindingsParams(worktreeID: worktreeID))
         return try decode(PRBindingsResult.self, await router.handle(request))
     }
 
+    /// The batched read the app polls — no worktree parameter at all.
+    func bindingsAll() async throws -> PRBindingsAllResult {
+        let request = RPCRequest(method: RPCMethod.prBindingsAll)
+        return try decode(PRBindingsAllResult.self, await router.handle(request))
+    }
+
     @discardableResult
     func attach(url: String? = nil, number: Int? = nil,
-                source: String? = nil) async throws -> PRAttachResult {
-        try await attachRaw(url: url, number: number, source: source)
+                source: String? = nil, worktreeID: UUID? = nil) async throws -> PRAttachResult {
+        try await attachRaw(url: url, number: number, source: source, worktreeID: worktreeID)
     }
 
     /// The unguarded form the "neither url nor number" test drives — it still
     /// throws on an error response, which is the assertion that test makes.
-    func attachRaw(url: String?, number: Int?, source: String? = nil) async throws -> PRAttachResult {
+    func attachRaw(url: String?, number: Int?, source: String? = nil,
+                   worktreeID: UUID? = nil) async throws -> PRAttachResult {
         let request = try RPCRequest(
             method: RPCMethod.prAttach,
-            params: PRBindingRefParams(worktreeID: worktreeID, url: url,
+            params: PRBindingRefParams(worktreeID: worktreeID ?? self.worktreeID, url: url,
                                        number: number, source: source))
         return try decode(PRAttachResult.self, await router.handle(request))
     }
 
-    func detach(url: String? = nil, number: Int? = nil) async throws -> Bool {
+    @discardableResult
+    func detach(url: String? = nil, number: Int? = nil,
+                worktreeID: UUID? = nil) async throws -> Bool {
         let request = try RPCRequest(
             method: RPCMethod.prDetach,
-            params: PRBindingRefParams(worktreeID: worktreeID, url: url, number: number))
+            params: PRBindingRefParams(worktreeID: worktreeID ?? self.worktreeID,
+                                       url: url, number: number))
         return try decode(PRDetachResult.self, await router.handle(request)).detached
     }
 
@@ -164,6 +185,67 @@ struct PRBindingRPCTests {
         listed = try await harness.bindings()
         #expect(listed.bindings.map(\.number) == [413])
         #expect(listed.detachedCount == 1)
+    }
+
+    // MARK: - pr.bindingsAll
+
+    /// The batched read exists because the app cannot name the worktrees worth
+    /// asking about: a hook-bound PR sits on a branch its worktree never checked
+    /// out, so it appears in no branch-derived status cache and a per-worktree
+    /// fan-out never reaches it. One call reports the whole table.
+    @Test("pr.bindingsAll returns several worktrees' bindings in one call")
+    func bindingsAllAcrossWorktrees() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let second = try await harness.addWorktree()
+        try await harness.attach(number: 412)
+        try await harness.attach(number: 413)
+        try await harness.attach(number: 500, worktreeID: second)
+
+        let all = try await harness.bindingsAll()
+        #expect(all.worktrees.count == 2)
+        let byWorktree = Dictionary(uniqueKeysWithValues:
+            all.worktrees.map { ($0.worktreeID, $0) })
+        #expect(byWorktree[harness.worktreeID]?.bindings.map(\.number) == [412, 413])
+        #expect(byWorktree[second]?.bindings.map(\.number) == [500])
+        #expect(byWorktree[harness.worktreeID]?.detachedCount == 0)
+        #expect(byWorktree[second]?.detachedCount == 0)
+    }
+
+    /// Tombstoned rows are excluded from the live lists but still counted, and a
+    /// worktree whose bindings are ALL tombstoned still has to appear — an empty
+    /// live list with a non-zero count is what suppresses the app's
+    /// legacy-status fallback, so a detach is not silently undone.
+    @Test("pr.bindingsAll excludes tombstoned rows and still reports a tombstone-only worktree")
+    func bindingsAllReportsTombstones() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let tombstonedOnly = try await harness.addWorktree()
+        try await harness.attach(number: 412)
+        try await harness.attach(number: 413)
+        try await harness.attach(number: 500, worktreeID: tombstonedOnly)
+        #expect(try await harness.detach(number: 413))
+        #expect(try await harness.detach(number: 500, worktreeID: tombstonedOnly))
+
+        let all = try await harness.bindingsAll()
+        let byWorktree = Dictionary(uniqueKeysWithValues:
+            all.worktrees.map { ($0.worktreeID, $0) })
+        #expect(byWorktree[harness.worktreeID]?.bindings.map(\.number) == [412])
+        #expect(byWorktree[harness.worktreeID]?.detachedCount == 1)
+        // Present, with nothing live and one tombstone.
+        #expect(byWorktree[tombstonedOnly]?.bindings.isEmpty == true)
+        #expect(byWorktree[tombstonedOnly]?.detachedCount == 1)
+    }
+
+    /// A worktree with neither a live binding nor a tombstone says nothing, so
+    /// the response does not grow one entry per worktree in the fleet.
+    @Test("pr.bindingsAll omits a worktree that has no bindings at all")
+    func bindingsAllOmitsUnboundWorktrees() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        _ = try await harness.addWorktree()
+        #expect(try await harness.bindingsAll().worktrees.isEmpty)
+
+        try await harness.attach(number: 412)
+        let all = try await harness.bindingsAll()
+        #expect(all.worktrees.map(\.worktreeID) == [harness.worktreeID])
     }
 
     @Test("pr.detach of an unbound PR reports false rather than erroring")

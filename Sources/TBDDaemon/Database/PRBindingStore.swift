@@ -66,6 +66,21 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     }
 }
 
+/// The whole binding table, partitioned by worktree — what `listAllByWorktree`
+/// returns and what `pr.bindingsAll` reports.
+public struct AllWorktreeBindings: Sendable {
+    /// Live bindings per worktree, in bind order. A worktree with none is
+    /// absent rather than mapped to an empty array.
+    public let live: [UUID: [PRBinding]]
+    /// Tombstoned bindings per worktree, for the worktrees that have any.
+    public let detachedCounts: [UUID: Int]
+
+    public init(live: [UUID: [PRBinding]], detachedCounts: [UUID: Int]) {
+        self.live = live
+        self.detachedCounts = detachedCounts
+    }
+}
+
 /// Persistence for PR bindings. Enforces first-source-wins deduplication,
 /// tombstone semantics, and the per-worktree cap.
 public struct PRBindingStore: Sendable {
@@ -132,6 +147,38 @@ public struct PRBindingStore: Sendable {
                 .fetchAll(db)
                 .compactMap { $0.toModel() }
         }
+    }
+
+    /// Every worktree's live bindings and tombstone count, from ONE read.
+    ///
+    /// One query rather than a live pass and a tombstone pass, for the same
+    /// reason `handlePRBindings` partitions in Swift: two SELECTs racing a
+    /// concurrent detach can disagree, and a live list that has lost a row while
+    /// the count has not yet gained it reads to the app as "nothing bound and
+    /// nothing detached" — which is exactly when the legacy-status fallback
+    /// resurrects a PR the user just removed.
+    ///
+    /// Live bindings come back in bind order (`boundAt`, then `rowid`), the
+    /// order every PR surface renders, so a row does not move under the cursor
+    /// as CI states change. A worktree with neither a live binding nor a
+    /// tombstone is absent from both maps.
+    public func listAllByWorktree() async throws -> AllWorktreeBindings {
+        let rows = try await writer.read { db in
+            try PRBindingRecord
+                .order(Column("boundAt").asc, Column("rowid").asc)
+                .fetchAll(db)
+        }
+        var live: [UUID: [PRBinding]] = [:]
+        var detachedCounts: [UUID: Int] = [:]
+        for row in rows {
+            guard let binding = row.toModel() else { continue }
+            if binding.detached {
+                detachedCounts[binding.worktreeID, default: 0] += 1
+            } else {
+                live[binding.worktreeID, default: []].append(binding)
+            }
+        }
+        return AllWorktreeBindings(live: live, detachedCounts: detachedCounts)
     }
 
     /// Set or clear a tombstone. Returns true only when a row's state actually

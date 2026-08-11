@@ -149,6 +149,7 @@ public enum RPCMethod {
     public static let prList     = "pr.list"
     public static let prRefresh  = "pr.refresh"
     public static let prBindings = "pr.bindings"
+    public static let prBindingsAll = "pr.bindingsAll"
     public static let prAttach   = "pr.attach"
     public static let prDetach   = "pr.detach"
     public static let cleanup = "cleanup"
@@ -881,6 +882,41 @@ public struct PRBindingsResult: Codable, Sendable {
     public init(bindings: [PRBinding], detachedCount: Int? = nil) {
         self.bindings = bindings
         self.detachedCount = detachedCount
+    }
+}
+
+/// One worktree's row in a `pr.bindingsAll` response.
+public struct PRBindingsAllEntry: Codable, Sendable {
+    public let worktreeID: UUID
+    /// Live bindings only, in bind order — tombstoned ones are not reported.
+    public let bindings: [PRBinding]
+    /// How many of this worktree's bindings are tombstoned. Carries the same
+    /// meaning as `PRBindingsResult.detachedCount` and is optional for the same
+    /// reason: an older daemon omits it and `nil` reads as zero.
+    public let detachedCount: Int?
+    public init(worktreeID: UUID, bindings: [PRBinding], detachedCount: Int? = nil) {
+        self.worktreeID = worktreeID
+        self.bindings = bindings
+        self.detachedCount = detachedCount
+    }
+}
+
+/// Every worktree's bindings in ONE round trip — what the app polls.
+///
+/// The per-worktree `pr.bindings` cannot answer the app's question, because the
+/// app does not know which worktrees to ask about: a worktree whose only PR was
+/// bound by the `gh pr create` hook, on a branch it never checked out, appears
+/// in no branch-derived status cache, so a per-worktree fan-out can only reach
+/// worktrees already known to have PRs. This method carries no worktree
+/// parameter for exactly that reason — the daemon reports the whole table and
+/// the app replaces its map wholesale.
+///
+/// A worktree appears here when it has at least one live binding OR at least one
+/// tombstone; a worktree with neither is simply absent.
+public struct PRBindingsAllResult: Codable, Sendable {
+    public let worktrees: [PRBindingsAllEntry]
+    public init(worktrees: [PRBindingsAllEntry]) {
+        self.worktrees = worktrees
     }
 }
 

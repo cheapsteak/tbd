@@ -188,6 +188,55 @@ struct MergedTransitionPrecedenceTests {
         #expect(try actuationRequests(at: deps.actuationLogPath).isEmpty)
     }
 
+    /// The same claim, driven end to end through the REAL dual-path trigger
+    /// instead of by calling the dispatcher twice.
+    ///
+    /// This is the ordinary upgrade path: a worktree whose PR merged while the
+    /// daemon was down, seen for the first time by a poll that has bound
+    /// nothing yet. `PRStatusManager.apply` observes the merge from inside
+    /// `fetchAll` with an empty live set, so the un-bound fallback fires; the
+    /// same pass then creates the branch binding and `refreshBindingStatuses`
+    /// judges it with `evaluate`, which fires the same fan-out again. Both
+    /// fires are correct — the two once-only sets are deliberately independent,
+    /// so neither may suppress the other's first fire — and safety rests
+    /// entirely on the coordinators being idempotent. The two tests above pin
+    /// that at the dispatcher; this one pins that the real trigger really does
+    /// reach it twice in one pass and the worktree is still archived once.
+    @Test("one poll pass firing both trigger paths archives once and notifies once")
+    func realTriggerBothPathsInOnePassActsOnce() async throws {
+        let deps = try makeDeps()
+        let (wtID, _) = try await makeWorktreeWithTerminal(deps.db)
+        try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
+        try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+        let trigger = deps.dispatcher.makeAllResolvedTrigger()
+
+        // 1. `PRStatusManager.apply` observes the merge — nothing is bound yet,
+        //    so the un-bound fallback owns this worktree and fires.
+        let unbound = try await deps.db.prBindings.list(worktreeID: wtID)
+        #expect(unbound.isEmpty)
+        await trigger.observedMerge(worktreeID: wtID, prNumber: 30, bindings: unbound)
+
+        // 2. Later in the SAME pass the branch matcher binds that PR…
+        let url = "https://github.com/acme/acme-prod/pull/30"
+        _ = try await deps.db.prBindings.upsert(PRBinding(
+            worktreeID: wtID, owner: "acme", repo: "acme-prod", number: 30, url: url,
+            headBranch: "b", status: PRStatus(number: 30, url: url, state: .merged),
+            source: .branch))
+
+        // 3. …and `refreshBindingStatuses` judges the fresh binding, which is
+        //    all-resolved and the worktree's own work, so the fan-out runs again.
+        let bound = try await deps.db.prBindings.list(worktreeID: wtID)
+        await trigger.retainBound(polled: [wtID], bound: [wtID])
+        await trigger.evaluate(worktreeID: wtID, bindings: bound,
+                               branchCandidates: ["b"], provenancePRNumber: nil)
+
+        #expect(try await deps.db.worktrees.get(id: wtID)?.status == .archived)
+        let requests = try actuationRequests(at: deps.actuationLogPath)
+        #expect(requests.count == 1)
+        #expect(requests.first?["kind"] as? String == "dispose")
+        #expect(try await deps.db.notifications.unread(worktreeID: wtID).count == 1)
+    }
+
     // MARK: - Direct Bool contract on the archive coordinator
 
     @Test func archiveReturnsTrueOnlyWhenItBeganArchiving() async throws {
