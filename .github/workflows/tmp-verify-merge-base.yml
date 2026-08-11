@@ -1,0 +1,123 @@
+# THROWAWAY verification workflow — DELETE BEFORE MERGE.
+#
+# A PR cannot test its own review workflow: pull_request_target runs the
+# main-branch copy. This job verifies the merge-base guard changes on a real
+# ubuntu runner instead:
+#   1. reproduces the graft (depth-limited fetch of a moved base ref into a
+#      complete clone) and proves the pinned-SHA diff survives it while the
+#      ref-named diffs break,
+#   2. runs the REAL "Ensure a merge-base" step block (extracted verbatim from
+#      claude-code-review.yml) against a repairable repo and an unrepairable
+#      one, asserting repair and fail-closed respectively,
+#   3. runs the REAL prepare.py in a healthy repo (exit 0, merge_base recorded)
+#      and in a severed repo (non-zero exit, no output files).
+name: TMP verify merge-base guard
+on:
+  push:
+    branches: [fix-review-gate-merge-base]
+
+jobs:
+  tmp-verify-merge-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reproduce the graft on this runner
+        run: |
+          set -euo pipefail
+          git config --global user.email t@acme.invalid
+          git config --global user.name t
+          work="$RUNNER_TEMP/graft-repro"
+          mkdir -p "$work/remote" && cd "$work/remote"
+          git init -q -b main .
+          for f in A B C; do echo "$f" > "$f.txt"; git add .; git commit -qm "commit $f"; done
+          git branch pr HEAD~1
+          git checkout -q pr && echo pr > pr.txt && git add . && git commit -qm "commit D (PR)" && git checkout -q main
+          cd "$work" && git clone -q "file://$work/remote" clone && cd clone
+          git fetch -q origin pr && git checkout -q origin/pr
+          MB="$(git merge-base origin/main HEAD)"
+          echo "merge base while intact: $MB"
+          # base advances after checkout...
+          cd "$work/remote" && echo E > E.txt && git add . && git commit -qm "commit E (new tip)"
+          # ...and a depth-limited re-fetch grafts the complete clone
+          cd "$work/clone" && git fetch --depth=1 origin main
+          test "$(git rev-parse --is-shallow-repository)" = "true" || { echo "::error::expected a graft"; exit 1; }
+          if git merge-base origin/main HEAD; then echo "::error::merge-base should fail after the graft"; exit 1; fi
+          if git diff --quiet origin/main...HEAD 2>/dev/null; then echo "::error::three-dot should fail after the graft"; exit 1; fi
+          # the two-dot fallback "succeeds" with the WRONG diff (base-side files as deletions)
+          git diff --stat origin/main HEAD | grep -q "C.txt" || { echo "::error::expected the two-dot diff to show base-side files"; exit 1; }
+          # the pinned-SHA diff is immune: only the PR's own change
+          git diff --stat "$MB" HEAD
+          test "$(git diff --name-only "$MB" HEAD)" = "pr.txt" || { echo "::error::pinned-SHA diff is wrong"; exit 1; }
+          echo "OK: graft reproduced; pinned-SHA diff immune"
+
+      - name: Extract the real ensure-step block
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".github/workflows/claude-review-v2/tests")
+          from workflow_steps import read_workflow, run_block
+          block = run_block(read_workflow(), "Ensure a merge-base with the base branch")
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "ensure-step.sh"), "w") as fh:
+              fh.write(block)
+          EOF
+          echo "--- extracted block ---"; cat "$RUNNER_TEMP/ensure-step.sh"
+
+      - name: Ensure-step repairs a shallow clone and fails closed on disjoint history
+        run: |
+          set -uo pipefail
+          work="$RUNNER_TEMP/ensure-cases"
+          # Case 1: shallow clone of a real repo -> the step must unshallow and succeed.
+          mkdir -p "$work" && cd "$work"
+          git clone -q --depth=1 "file://$RUNNER_TEMP/graft-repro/remote" shallow && cd shallow
+          git fetch -q --depth=1 origin pr && git checkout -q FETCH_HEAD
+          if BASE_REF=main bash -e "$RUNNER_TEMP/ensure-step.sh"; then
+            echo "OK: repaired the shallow clone"
+          else
+            echo "::error::ensure step failed on a repairable clone"; exit 1
+          fi
+          # Case 2: origin/main severed to an orphan root -> repair cannot help; must exit 1 with ::error::.
+          cd "$work"
+          git clone -q "file://$RUNNER_TEMP/graft-repro/remote" severed && cd severed
+          git fetch -q origin pr && git checkout -q FETCH_HEAD
+          empty_tree="$(git hash-object -w -t tree /dev/null)"
+          orphan="$(git commit-tree "$empty_tree" -m "unrelated root")"
+          git update-ref refs/remotes/origin/main "$orphan"
+          # the repair fetch would restore origin/main from the remote, so point the remote somewhere empty first
+          git init -q --bare "$work/empty"
+          git remote set-url origin "file://$work/empty"
+          out="$(BASE_REF=main bash -e "$RUNNER_TEMP/ensure-step.sh" 2>&1)" && { echo "::error::ensure step should have failed closed"; echo "$out"; exit 1; }
+          echo "$out" | grep -q "::error::" || { echo "::error::expected an ::error:: annotation"; echo "$out"; exit 1; }
+          echo "$out" | grep -qi "NOT a verdict" || { echo "::error::expected the not-a-verdict wording"; echo "$out"; exit 1; }
+          echo "OK: failed closed on unrepairable history"
+
+      - name: prepare.py records the merge base and aborts without one
+        run: |
+          set -euo pipefail
+          prepare="$GITHUB_WORKSPACE/.github/workflows/claude-review-v2/prepare.py"
+          work="$RUNNER_TEMP/prepare-cases" && mkdir -p "$work"
+          : > "$work/prior-body.txt"
+          # Healthy: fresh full clone at the PR head.
+          cd "$work" && git clone -q "file://$RUNNER_TEMP/graft-repro/remote" healthy && cd healthy
+          git fetch -q origin pr && git checkout -q FETCH_HEAD
+          MB="$(git merge-base origin/main HEAD)"
+          # gh has no token here: the discussion fetch fails OPEN (empty context), which is fine
+          python3 "$prepare" --pr 1 --repo acme/acme-app --prior-review-body-file "$work/prior-body.txt" --base-ref main
+          test "$(jq -r '.merge_base' skip-decision.json)" = "$MB" || { echo "::error::merge_base not recorded"; exit 1; }
+          echo "OK: healthy repo records merge_base=$MB"
+          # Severed: orphan origin/main -> must exit non-zero, write nothing
+          cd "$work" && git clone -q "file://$RUNNER_TEMP/graft-repro/remote" severed && cd severed
+          git fetch -q origin pr && git checkout -q FETCH_HEAD
+          empty_tree="$(git hash-object -w -t tree /dev/null)"
+          orphan="$(git commit-tree "$empty_tree" -m "unrelated root")"
+          git update-ref refs/remotes/origin/main "$orphan"
+          if python3 "$prepare" --pr 1 --repo acme/acme-app --prior-review-body-file "$work/prior-body.txt" --base-ref main; then
+            echo "::error::prepare.py should have aborted"; exit 1
+          fi
+          test ! -f skip-decision.json || { echo "::error::skip-decision.json must not be written on abort"; exit 1; }
+          test ! -f discussion-context.txt || { echo "::error::discussion-context.txt must not be written on abort"; exit 1; }
+          echo "OK: prepare.py fails closed with no output files"
