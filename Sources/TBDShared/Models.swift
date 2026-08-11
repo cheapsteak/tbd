@@ -109,6 +109,17 @@ public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
     case nightwatch
 }
 
+/// Where a worktree's files live. `.local` means a git worktree on this
+/// machine at the worktree's path. `.remote` means an agent session on a
+/// machine TBD does not manage, reached through a registered provider; there is
+/// no local checkout and no tmux server.
+public enum WorktreeLocation: Equatable, Sendable, Hashable {
+    case local
+    case remote(provider: String, sessionID: String)
+
+    public var isLocal: Bool { self == .local }
+}
+
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     /// nil for scratch spaces (repo-less worktrees).
@@ -181,6 +192,17 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// order — which is what lets the column ship with no backfill.
     public var pinSortOrder: Int?
 
+    /// Where this worktree's files live. Rows written before v70 decode as
+    /// `.local`, which is what they are.
+    public var location: WorktreeLocation = .local
+
+    /// The `(provider, sessionID)` pair identifying this row's provider
+    /// session, or nil when the worktree is local.
+    public var providerBinding: (provider: String, sessionID: String)? {
+        guard case let .remote(provider, sessionID) = location else { return nil }
+        return (provider, sessionID)
+    }
+
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
 
@@ -213,7 +235,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 prNumber: Int? = nil,
                 foreignHead: Bool = false,
                 pinnedAt: Date? = nil,
-                pinSortOrder: Int? = nil) {
+                pinSortOrder: Int? = nil,
+                location: WorktreeLocation = .local) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -238,6 +261,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.foreignHead = foreignHead
         self.pinnedAt = pinnedAt
         self.pinSortOrder = pinSortOrder
+        self.location = location
     }
 
     enum CodingKeys: String, CodingKey {
@@ -247,6 +271,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
+        case locationKind, providerName, providerSessionID
     }
 
     public init(from decoder: Decoder) throws {
@@ -277,6 +302,59 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         foreignHead = try c.decodeIfPresent(Bool.self, forKey: .foreignHead) ?? false
         pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
         pinSortOrder = try c.decodeIfPresent(Int.self, forKey: .pinSortOrder)
+        // Absent in JSON written before v70, and unknown kinds are what a
+        // NEWER daemon will send an older app. Both land on `.local`: a
+        // pre-v70 row genuinely is local, and an unrecognized kind is safer
+        // read as local than dropped, which would fail the whole decode.
+        let kind = try c.decodeIfPresent(String.self, forKey: .locationKind) ?? "local"
+        if kind == "remote",
+           let provider = try c.decodeIfPresent(String.self, forKey: .providerName),
+           let sessionID = try c.decodeIfPresent(String.self, forKey: .providerSessionID) {
+            location = .remote(provider: provider, sessionID: sessionID)
+        } else {
+            location = .local
+        }
+    }
+
+    /// Hand-written because `location` is an enum with an associated value that
+    /// rides the wire as three flat keys, which no synthesized encoder can
+    /// produce. Every stored property is listed here: a property added to the
+    /// struct and forgotten here would silently vanish between daemon and app.
+    /// `WorktreeLocationTests.roundTripsAFullyPopulatedWorktree` is the guard.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(repoID, forKey: .repoID)
+        try c.encode(name, forKey: .name)
+        try c.encode(displayName, forKey: .displayName)
+        try c.encode(branch, forKey: .branch)
+        try c.encode(path, forKey: .path)
+        try c.encode(status, forKey: .status)
+        try c.encode(hasConflicts, forKey: .hasConflicts)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
+        try c.encode(tmuxServer, forKey: .tmuxServer)
+        try c.encodeIfPresent(archivedClaudeSessions, forKey: .archivedClaudeSessions)
+        try c.encode(sortOrder, forKey: .sortOrder)
+        try c.encodeIfPresent(archivedHeadSHA, forKey: .archivedHeadSHA)
+        try c.encodeIfPresent(liveClaudeSessionCount, forKey: .liveClaudeSessionCount)
+        try c.encodeIfPresent(parentWorktreeID, forKey: .parentWorktreeID)
+        try c.encodeIfPresent(autoArchiveOnMerge, forKey: .autoArchiveOnMerge)
+        try c.encodeIfPresent(autoHibernateOnMerge, forKey: .autoHibernateOnMerge)
+        try c.encodeIfPresent(promotedToRepoID, forKey: .promotedToRepoID)
+        try c.encodeIfPresent(prStatus, forKey: .prStatus)
+        try c.encodeIfPresent(prNumber, forKey: .prNumber)
+        try c.encode(foreignHead, forKey: .foreignHead)
+        try c.encodeIfPresent(pinnedAt, forKey: .pinnedAt)
+        try c.encodeIfPresent(pinSortOrder, forKey: .pinSortOrder)
+        switch location {
+        case .local:
+            try c.encode("local", forKey: .locationKind)
+        case let .remote(provider, sessionID):
+            try c.encode("remote", forKey: .locationKind)
+            try c.encode(provider, forKey: .providerName)
+            try c.encode(sessionID, forKey: .providerSessionID)
+        }
     }
 }
 

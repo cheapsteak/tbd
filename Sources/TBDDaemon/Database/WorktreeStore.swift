@@ -37,6 +37,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var panel_surface_imported_at: Date?  // stamped once the legacy layout is imported; nil = never imported
     var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
     var pinSortOrder: Int?  // sidebar dock ordering; nil = falls back to pinnedAt
+    var location: String?  // "local" | "remote"; nil reads as local
+    var providerName: String?  // set only alongside location == "remote"
+    var providerSessionID: String?  // set only alongside location == "remote"
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -68,6 +71,16 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
         self.pinnedAt = wt.pinnedAt
         self.pinSortOrder = wt.pinSortOrder
+        switch wt.location {
+        case .local:
+            self.location = "local"
+            self.providerName = nil
+            self.providerSessionID = nil
+        case let .remote(provider, sessionID):
+            self.location = "remote"
+            self.providerName = provider
+            self.providerSessionID = sessionID
+        }
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -104,6 +117,16 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             decodeLogger.warning("worktree row \(id, privacy: .public): unknown status \(status, privacy: .public); defaulting to .active")
             worktreeStatus = .active
         }
+        // Mirrors `Worktree.init(from:)`: only a complete "remote" triple is a
+        // remote row. A null column (pre-v70), an unknown kind, or a "remote"
+        // missing either provider field reads as local rather than dropping
+        // the row.
+        let worktreeLocation: WorktreeLocation
+        if location == "remote", let providerName, let providerSessionID {
+            worktreeLocation = .remote(provider: providerName, sessionID: providerSessionID)
+        } else {
+            worktreeLocation = .local
+        }
         return Worktree(
             id: uuid,
             repoID: repoID.flatMap { UUID(uuidString: $0) },
@@ -127,7 +150,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             prNumber: pr_number,
             foreignHead: foreign_head ?? false,
             pinnedAt: pinnedAt,
-            pinSortOrder: pinSortOrder
+            pinSortOrder: pinSortOrder,
+            location: worktreeLocation
         )
     }
 }
@@ -188,7 +212,8 @@ public struct WorktreeStore: Sendable {
         tmuxServer: String,
         status: WorktreeStatus = .active,
         parentWorktreeID: UUID? = nil,
-        prNumber: Int? = nil
+        prNumber: Int? = nil,
+        location: WorktreeLocation = .local
     ) async throws -> Worktree {
         try await writer.write { db in
             let maxOrder: Int
@@ -215,7 +240,8 @@ public struct WorktreeStore: Sendable {
                 tmuxServer: tmuxServer,
                 sortOrder: maxOrder + 1,
                 parentWorktreeID: parentWorktreeID,
-                prNumber: prNumber
+                prNumber: prNumber,
+                location: location
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
