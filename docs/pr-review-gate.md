@@ -89,7 +89,15 @@ and the reasoning behind them are in
   reason telling the orchestrator its specialists are still running, and **spends
   none of its nudge budget** doing so: a session that cannot comply yet is not a
   session refusing to. The hold is bounded by a 25-minute wall clock, past which
-  the hook stands aside.
+  the hook stands aside — measured from the session's first stop attempt, not from
+  the start of the job.
+- **Each hold sleeps 30 seconds before it blocks.** A block costs a turn, and the
+  session's `--max-turns` budget runs out well before 25 minutes of holding would;
+  sleeping spends wall clock instead, which is what makes the deadline the real
+  bound. Two numbers follow from it and must move together: the hook's command
+  timeout in `hooks/settings.json` is 60 seconds, strictly greater than the sleep,
+  because a hook killed mid-sleep emits no block at all; and the defensive cap of
+  60 holds is 30 minutes of sleeping, so the 25-minute deadline still binds first.
 - **The hook nudges, boundedly, once only the merge is missing.** When every
   expected findings file is present and parses but `review-result.json` is not
   there, the model has all its inputs and is simply not writing the merge. The hook
@@ -97,7 +105,11 @@ and the reasoning behind them are in
   after five. The count applies to this state alone.
 - **The hook always exits 0.** Empty stdin, an absent `jq`, an unwritable state
   file — none of them may wedge the session, because allowing a stop is never a
-  gate bypass. `validate.py` fails closed downstream regardless.
+  gate bypass. `validate.py` fails closed downstream regardless. Two of those cases
+  resolve toward releasing rather than holding: state that cannot be persisted
+  defeats both bounds at once, so the hook stands aside instead of holding forever,
+  and with `jq` off `PATH` a present non-empty file counts as ready, so a finished
+  review is never reported as a running one.
 - **The job carries `timeout-minutes: 45`.** A session that wedges rather than ends
   would otherwise run to GitHub's six-hour cap while the author waits on a check
   that never reports.

@@ -428,9 +428,11 @@ and the whole test suite.
   therefore restarts the fan-out rather than collecting it, and the corrective
   prompt must point at whichever `findings-*.json` did survive, whose content
   never enters the orchestrator's own transcript. Two mechanics are mandatory:
-  reset the Stop hook's counter AND start-stamp files between invocations (a
-  stale counter at the ceiling silently disarms the nudge; a stale stamp puts
-  the hold deadline in the past and disarms the hold — both measured), and keep
+  reset all three of the Stop hook's state files between invocations — its nudge
+  counter, its start stamp, and its hold counter (a stale counter at the ceiling
+  silently disarms the nudge; a stale hold counter at its cap disarms the hold;
+  a stale stamp puts the hold deadline in the past and disarms it a second way
+  — all measured), and keep
   each invocation's own liveness intact, since a resume that stalls the same way
   buys nothing. The session-liveness repair in
   `2026-08-10-review-orchestrator-liveness-design.md` addresses the

@@ -73,7 +73,9 @@ of ours. A fix that encodes the current scheduling behavior would inherit that e
 - **Deadlines** — **hook 25 minutes, job 45 minutes.** Roughly 1.8× the observed good
   run for the hook, with a generous outer bound on the job. The threshold errs toward
   paying for a slow review rather than killing a working one, because killing a working
-  review reproduces the failure this design exists to remove.
+  review reproduces the failure this design exists to remove. A wall-clock deadline is
+  only reachable if holding costs wall clock, so each hold sleeps 30 seconds before it
+  blocks; §3.2 gives the turn-budget arithmetic that fixes that number.
 
 ## 3. Design
 
@@ -101,10 +103,11 @@ changes, from "a notification arrived" to "both files are on disk".
 wall-clock deadline. On its first invocation it stamps a start time beside its counter
 file.
 
-- **A findings file is missing, and the run is inside 25 minutes** — block **without
-  consuming the nudge budget**, with a reason that tells the orchestrator its specialists
-  are still running and its turn must continue. This is the repair: an uncounted hold
-  keeps the process alive, and the in-flight specialists with it.
+- **A findings file is missing, and the run is inside 25 minutes** — sleep 30 seconds,
+  then block **without consuming the nudge budget**, with a reason that tells the
+  orchestrator its specialists are still running and its turn must continue. This is the
+  repair: an uncounted hold keeps the process alive, and the in-flight specialists with
+  it.
 - **Every findings file is present and `review-result.json` is missing** — block and
   consume the budget, exactly as today, with today's reason. The model has everything it
   needs and is not writing the result. This is the state the five-nudge ceiling was
@@ -112,21 +115,56 @@ file.
 - **Past 25 minutes** — exit 0 and let the session end. `validate.py` then fails closed.
   The deadline is what keeps an uncounted hold from becoming an unbounded one.
 
+**The hold sleeps, because a hold costs a turn.** Every hold is a block, and every block
+costs one turn of the session's `--max-turns 100` budget — so the scarce resource is turns,
+not seconds. PR #604 burned 35 turns in 184 seconds, about five seconds a turn, leaving
+roughly 65. Holding at that rate spends those 65 turns in about five minutes of wall clock,
+against specialists that need ten: the session would die of turn exhaustion long before a
+25-minute deadline could be reached, in exactly the case the deadline exists for, and a
+60-hold cap would never be approached either. Sleeping converts a turn into wall clock at
+zero token cost, which is precisely the currency the hold is short of. At 30 seconds a
+hold, the remaining turns cover a little over thirty minutes, so the 25-minute wall clock
+becomes the binding bound as designed.
+
+The same arithmetic keeps the two bounds consistent: 60 holds of 30 seconds is 30 minutes
+of sleep against a 25-minute deadline, so the deadline is always reached first and the hold
+cap remains what it is meant to be — a backstop against a broken clock, not a second
+deadline. The cap also sits below the turns the budget leaves, so neither bound asks for
+turns the session does not have.
+
+The sleep makes the hook's command timeout load-bearing, so `hooks/settings.json` declares
+one explicitly at 60 seconds rather than relying on a default that a harness release could
+move. It must stay strictly greater than the sleep: a hook killed mid-sleep emits no block,
+and the session ends — the failure the hold exists to prevent.
+
 The hook learns which files to expect from `REVIEW_SPECIALISTS`, a job-level environment
 variable holding the comma-separated specialist set. The same variable supplies
 `validate.py`'s `--expected-specialists`, so the set is declared once rather than
 duplicated between a hook and a script that must agree about it.
 
-The hook's existing fail-safe contract is unchanged and constrains every addition: it
-always exits 0. Malformed stdin, an absent `jq`, an unwritable counter or stamp file — none
-may wedge the session, because allowing a stop is never a gate bypass. `validate.py` fails
-closed downstream.
+The hook's fail-safe contract is unchanged and constrains every addition: it always exits
+0. Malformed stdin, an absent `jq`, an unwritable state file — none may wedge the session,
+because allowing a stop is never a gate bypass. `validate.py` fails closed downstream. Two
+of those cases have a direction that must be chosen deliberately rather than inherited:
 
-One mechanic carries forward from the fan-out spec's §6 and now covers a second file: a
-stale counter sitting at the ceiling silently disarms the hook, so any future loop that
-invokes the session more than once must reset both the counter and the start stamp between
-invocations. A stale start stamp disarms the hold the same way, by placing the deadline in
-the past.
+- **State that cannot be written releases the session.** Both bounds are made of persisted
+  state, so if the start stamp or the hold counter cannot be written, elapsed time reads as
+  zero on every invocation and the hold count never rises — a hook that kept blocking would
+  block forever. Giving up costs a failed review that a human re-runs; the alternative
+  costs a wedged runner.
+- **Without `jq`, a present non-empty file counts as ready.** `jq` is probed once, and both
+  the result check and the findings checks fall back to a plain non-empty-file test when it
+  is absent. Reading a finished review as unfinished would tell the orchestrator its
+  specialists are still running — a falsehood it can act on by re-spawning duplicates —
+  and would hold the session for the whole deadline over a missing binary. Content that is
+  present but malformed is caught downstream by `validate.py`, which schema-validates and
+  fails closed.
+
+One mechanic carries forward from the fan-out spec's §6 and now covers three files: the
+nudge counter, the start stamp, and the hold counter. Any future loop that invokes the
+session more than once must reset all three between invocations. A counter sitting at its
+ceiling silently disarms the nudge, a hold counter at its cap disarms the hold, and a stale
+start stamp disarms the hold a second way by placing the deadline in the past.
 
 ### 3.3 A stall reports as a stall
 
@@ -147,6 +185,17 @@ a rejected diff without opening the job log.
 The `claude-review` job declares `timeout-minutes: 45`. It carries no timeout today, so a
 session that wedges rather than ends runs to GitHub's six-hour cap while the author waits
 for a check that will never report.
+
+The two windows are measured from different origins, and the 25 sits inside the 45 only
+because of what separates them. The job's clock starts when the runner picks the job up;
+the hook's starts at the session's **first stop attempt**, which is after checkout,
+unshallow, token mint, `prepare.py`, and the session's own work up to that point. Twenty
+minutes of headroom covers that preamble comfortably today. The job timeout is the outer
+backstop for everything the hook cannot see — including a session that wedges without ever
+attempting to stop, where the hook's window never starts at all — so nothing depends on the
+two clocks agreeing. If the preamble ever grows past that headroom, the symptom is a job
+killed at 45 minutes with the hook still holding, which the job log shows plainly; the fix
+is to widen the outer bound, not to add machinery for aligning the origins.
 
 ### 3.5 What this corrects in the fan-out spec
 
@@ -171,9 +220,22 @@ The unit tests live beside the code they cover, in
   inside the deadline blocks and leaves the counter untouched; a complete findings set with
   no result file blocks and increments the counter; a run past the deadline exits 0. The
   counter assertion is the discriminating one — a test that only checks "it blocked" passes
-  against today's broken hook.
-- **The fail-safe contract**, re-asserted against the new code paths: empty stdin, absent
-  `REVIEW_SPECIALISTS`, and an unwritable stamp path each exit 0.
+  against a hook that conflates the two states.
+- **The sleep and the bounds it interacts with.** A pending hold takes at least its
+  configured sleep before emitting the block; a run past the deadline, and one at the hold
+  cap, each return promptly and release, proving both bounds are tested before the sleep
+  rather than after it. The unit tests drive the duration to zero through an environment
+  variable so the suite stays fast, so two further assertions pin what the tests cannot
+  exercise: that the shipped default is 30 seconds with no configuration, and that
+  `settings.json` declares a hook timeout strictly greater than it.
+- **The fail-safe contract**, in a form that can fail. Exit code 0 alone is not an
+  assertion here — every path of the script exits 0, so a test that checks only that passes
+  against a hook that holds forever. Empty stdin and an absent `REVIEW_SPECIALISTS` are
+  asserted on behavior, and the unwritable-state case loops invocations until it observes
+  an actual release, the same shape as the broken-clock case.
+- **The `jq`-absent fallbacks**, run against a `PATH` built without `jq`: a valid result
+  file ends the session, a complete findings set reaches the counted nudge, a missing
+  findings file still holds, and an empty result file does not count as written.
 - **`validate.py`'s new class**, and the two existing ones, so the third does not swallow
   them.
 - **`timeout-minutes` and the `REVIEW_SPECIALISTS` wiring**, as structural assertions in
@@ -211,15 +273,18 @@ repeating the trust, checkout, and restore sequence per job.
 ## 6. Rejected alternatives
 
 - **A bounded poll loop in the prompt** — instruct the orchestrator to poll for both
-  findings files until they appear. The session holds no sleep affordance: `allowedTools`
-  carries no `Bash(sleep:*)`, so the poll degrades to a tight loop of `Read` calls that
-  burns the turn budget, and each iteration remains a turn that can end. It re-creates the
-  failure with more steps.
-- **A sleeping Stop hook** — keep background specialists and have the hook sleep and
-  re-check, holding the process open without the model changing behavior. It works, but it
-  couples the gate to hook-timeout semantics, spends runner minutes sleeping, and risks
-  nudging the model into spawning duplicate specialists. The uncounted block in §3.2 buys
-  the same liveness without a sleep.
+  findings files until they appear. The model has no sleep affordance of its own —
+  `allowedTools` carries no `Bash(sleep:*)`, and the hook's sleep (§3.2) is the harness
+  waiting between turns, not something the orchestrator can invoke — so the poll degrades
+  to a tight loop of `Read` calls that burns the turn budget, and each iteration remains a
+  turn that can end. It re-creates the failure with more steps.
+- **Raising `--max-turns` instead of sleeping** — buy the hold its wall clock by giving the
+  session more turns rather than by spending fewer. Every hold is a real model round trip,
+  so the cost scales with the budget, and the number that would have to be guessed is the
+  product of two unknowns: how long a review takes and how fast the harness turns holds
+  over. The sleep fixes the seconds-per-hold directly, which is why 60 holds and 25 minutes
+  can be stated as a single arithmetic rather than as a hope about pacing. The budget stays
+  where the fan-out spec set it, sized for review work rather than for waiting.
 - **Automatic retry of the review step** — recovers the observed case without a human, at
   double the worst-case cost and latency. Rejected mainly because it makes a systematic
   regression present as an intermittent one, which is how a required check quietly stops

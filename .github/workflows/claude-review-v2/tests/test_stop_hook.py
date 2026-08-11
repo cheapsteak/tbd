@@ -10,11 +10,18 @@ against the broken hook.
 Every case also re-asserts the hook's fail-safe contract: exit code 0. A
 hook that exits non-zero wedges the session, and allowing a stop is never a
 gate bypass because validate.py fails closed downstream.
+
+The hold path sleeps in production, because a hold costs a turn and the
+session's turn budget is scarcer than its wall clock. Cases here drive the
+sleep to 0 via REVIEW_HOLD_SLEEP_SECONDS so the suite stays fast; the cases
+that are ABOUT the sleep set it explicitly, and one asserts the production
+default is still 30 seconds with no configuration.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -24,9 +31,15 @@ import pytest
 HOOK = (
     Path(__file__).resolve().parent.parent / "hooks" / "stop-hook.sh"
 )
+SETTINGS = (
+    Path(__file__).resolve().parent.parent / "hooks" / "settings.json"
+)
 
 COUNT_FILE = "claude-review-v2-block-count"
 START_FILE = "claude-review-v2-hold-started"
+HOLD_FILE = "claude-review-v2-hold-count"
+
+DEFAULT_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
 
 
 def _run(
@@ -34,11 +47,14 @@ def _run(
     state_dir: Path,
     specialists: str | None = "correctness,conventions",
     stdin: str = '{"stop_hook_active": true}',
+    sleep_seconds: str = "0",
+    path: str = DEFAULT_PATH,
 ) -> subprocess.CompletedProcess[str]:
     env = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        "PATH": path,
         "CLAUDE_PROJECT_DIR": str(project_dir),
         "TMPDIR": str(state_dir),
+        "REVIEW_HOLD_SLEEP_SECONDS": sleep_seconds,
     }
     if specialists is not None:
         env["REVIEW_SPECIALISTS"] = specialists
@@ -48,8 +64,26 @@ def _run(
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
     )
+
+
+def _path_without_jq(tmp_path: Path) -> str:
+    """A PATH carrying everything the hook shells out to EXCEPT jq.
+
+    Removing the directories jq lives in would also remove `cat` and `date`,
+    so the absence has to be built rather than subtracted.
+    """
+    bindir = tmp_path / "nojq-bin"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("bash", "cat", "date", "tr"):
+        found = shutil.which(tool)
+        assert found, f"test prerequisite missing: {tool}"
+        link = bindir / tool
+        if not link.exists():
+            link.symlink_to(found)
+    assert shutil.which("jq", path=str(bindir)) is None
+    return str(bindir)
 
 
 def _decision(proc: subprocess.CompletedProcess[str]) -> dict | None:
@@ -188,6 +222,70 @@ def test_inside_the_deadline_the_hook_still_holds(
     assert _decision(_run(project, state))["decision"] == "block"
 
 
+# --- the hold sleeps, so that a hold costs wall clock and not a turn -------
+
+
+def test_the_pending_hold_sleeps_before_emitting_its_block(
+    dirs: tuple[Path, Path],
+) -> None:
+    """A hold is a turn, and turns are the budget the session runs out of
+    first. Sleeping inside the hook converts one turn into wall clock at no
+    token cost, which is what lets the 25-minute deadline be the real bound."""
+    project, state = dirs
+    started = time.monotonic()
+    proc = _run(project, state, sleep_seconds="2")
+    elapsed = time.monotonic() - started
+    assert _decision(proc)["decision"] == "block"
+    assert elapsed >= 2
+
+
+def test_the_production_sleep_default_needs_no_configuration() -> None:
+    """30 s is the shipped default: the workflow sets no override, so the
+    arithmetic in the hook's comment holds for the real job."""
+    assert 'REVIEW_HOLD_SLEEP_SECONDS:-30}' in HOOK.read_text()
+
+
+def test_the_stop_hook_command_outlives_its_own_sleep() -> None:
+    """A hook killed at its default timeout mid-sleep would emit no block and
+    the session would end — the exact failure the hold exists to prevent."""
+    settings = json.loads(SETTINGS.read_text())
+    entries = [
+        cmd
+        for matcher in settings["hooks"]["Stop"]
+        for cmd in matcher["hooks"]
+    ]
+    assert entries, "no Stop hook command declared"
+    for cmd in entries:
+        assert cmd["timeout"] == 60
+        assert cmd["timeout"] > 30  # strictly longer than the sleep
+
+
+def test_the_deadline_is_checked_before_the_hook_sleeps(
+    dirs: tuple[Path, Path],
+) -> None:
+    """Never sleep and then release: past the deadline the session is being
+    let go, so the wait would buy nothing and only burn runner minutes."""
+    project, state = dirs
+    (state / START_FILE).write_text(str(int(time.time()) - 1501))
+    started = time.monotonic()
+    proc = _run(project, state, sleep_seconds="30")
+    elapsed = time.monotonic() - started
+    assert _decision(proc) is None
+    assert elapsed < 5
+
+
+def test_the_hold_cap_is_checked_before_the_hook_sleeps(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    (state / HOLD_FILE).write_text("60")
+    started = time.monotonic()
+    proc = _run(project, state, sleep_seconds="30")
+    elapsed = time.monotonic() - started
+    assert _decision(proc) is None
+    assert elapsed < 5
+
+
 def test_first_invocation_stamps_a_start_time(dirs: tuple[Path, Path]) -> None:
     project, state = dirs
     before = int(time.time())
@@ -227,13 +325,76 @@ def test_absent_specialist_env_falls_back_to_the_known_pair(
     assert _count(state) == 1  # counted => it knew both files were present
 
 
-def test_unwritable_state_dir_never_wedges_the_session(
+def test_an_unwritable_state_dir_cannot_hold_forever(
     dirs: tuple[Path, Path], tmp_path: Path
 ) -> None:
+    """Both bounds are made of persisted state: with nowhere to persist it,
+    the start stamp reads as "now" on every invocation and the hold count
+    never leaves zero, so a hook that kept blocking would block forever.
+    Asserting only "exit code 0" cannot see that — every path of this script
+    exits 0 — so the assertion has to be that a release is actually
+    observed."""
     project, _ = dirs
     unwritable = tmp_path / "ro"
     unwritable.mkdir(mode=0o500)
-    assert _run(project, unwritable).returncode == 0
+    releases = 0
+    for _ in range(70):
+        proc = _run(project, unwritable)
+        assert proc.returncode == 0
+        if _decision(proc) is None:
+            releases += 1
+            break
+    assert releases == 1
+
+
+# --- jq absent: the fallback must not invent a pending review --------------
+
+
+def test_a_valid_result_file_ends_the_session_without_jq(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Claiming "specialists still running" over a missing binary is a
+    falsehood the orchestrator acts on — it can re-spawn duplicate
+    specialists — and it holds the session for the whole deadline."""
+    project, state = dirs
+    _write_result(project)
+    proc = _run(project, state, path=_path_without_jq(tmp_path))
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+
+
+def test_present_findings_still_reach_the_counted_nudge_without_jq(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    project, state = dirs
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    proc = _run(project, state, path=_path_without_jq(tmp_path))
+    assert proc.returncode == 0
+    assert _decision(proc)["decision"] == "block"
+    assert "review-result.json" in _decision(proc)["reason"]
+    assert _count(state) == 1
+
+
+def test_a_missing_findings_file_still_holds_without_jq(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    project, state = dirs
+    _write_findings(project, "correctness")
+    proc = _run(project, state, path=_path_without_jq(tmp_path))
+    assert _decision(proc)["decision"] == "block"
+    assert _count(state) == 0
+
+
+def test_an_empty_result_file_does_not_end_the_session_without_jq(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Non-emptiness is the strongest evidence available with no parser, so
+    an empty file must still read as "not written"."""
+    project, state = dirs
+    (project / "review-result.json").write_text("")
+    proc = _run(project, state, path=_path_without_jq(tmp_path))
+    assert _decision(proc)["decision"] == "block"
 
 
 def test_a_broken_clock_cannot_hold_forever(dirs: tuple[Path, Path]) -> None:
