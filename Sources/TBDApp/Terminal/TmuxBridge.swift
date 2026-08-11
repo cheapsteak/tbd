@@ -101,6 +101,10 @@ final class TmuxBridge: @unchecked Sendable {
         ["list-windows", "-a", "-F", "#{window_id}"]
     }
 
+    static func clientSessionQueryArgs() -> [String] {
+        ["list-clients", "-F", "#{client_session}"]
+    }
+
     static func killSessionArgs(sessionName: String) -> [String] {
         ["kill-session", "-t", sessionName]
     }
@@ -262,6 +266,25 @@ final class TmuxBridge: @unchecked Sendable {
         return TmuxPreparedSession(
             executablePath: viewerCommand[0],
             arguments: Array(viewerCommand.dropFirst())
+        )
+    }
+
+    static func clientInventoryConfirmsAttachment(
+        querySucceeded: Bool,
+        output: String,
+        expectedSessionName: String
+    ) -> Bool {
+        guard querySucceeded else { return false }
+        let clientSessions = Set(output.split(whereSeparator: { $0.isNewline }).map(String.init))
+        return clientSessions.contains(expectedSessionName)
+    }
+
+    func hasAttachedClient(server: String, sessionName: String) async -> Bool {
+        let result = await runTmux(server: server, args: Self.clientSessionQueryArgs())
+        return Self.clientInventoryConfirmsAttachment(
+            querySucceeded: result.success,
+            output: result.output,
+            expectedSessionName: sessionName
         )
     }
 

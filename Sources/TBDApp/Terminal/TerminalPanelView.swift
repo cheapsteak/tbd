@@ -12,8 +12,15 @@ enum TerminalPreparationAction: Equatable, Sendable {
     case requestAutomaticRecovery(failedStage: TmuxPreparationStage)
 }
 
-enum TerminalRecoveryExhaustionPresentation {
-    static let message =
+struct TerminalRecoveryDiagnosticContext: Equatable, Sendable {
+    let terminalID: UUID
+    let worktreeID: UUID?
+}
+
+enum TerminalRecoveryPresentation {
+    static let failedMessage =
+        "Automatic terminal recovery failed. Retry manually or close the tab."
+    static let exhaustedMessage =
         "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
     static let retryTitle = "Retry"
 }
@@ -73,7 +80,7 @@ struct TerminalPanelView: View {
 
     @State private var proxyWarning: String?
     @State private var didProbe = false
-    @State private var showsRecoveryExhaustion = false
+    @State private var recoveryGuidanceMessage: String?
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -125,14 +132,14 @@ struct TerminalPanelView: View {
                 .padding(.vertical, 4)
                 .background(Color.orange.opacity(0.18))
             }
-            if showsRecoveryExhaustion {
+            if let recoveryGuidanceMessage {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Text(TerminalRecoveryExhaustionPresentation.message)
+                    Text(recoveryGuidanceMessage)
                         .font(.caption)
                     Spacer()
-                    Button(TerminalRecoveryExhaustionPresentation.retryTitle) {
+                    Button(TerminalRecoveryPresentation.retryTitle) {
                         Task {
                             await appState.recreateTerminalWindow(terminalID: terminalID)
                         }
@@ -154,7 +161,7 @@ struct TerminalPanelView: View {
                 onFilePathClicked: onFilePathClicked,
                 onTerminalNotification: onTerminalNotification,
                 onMissingWindow: onMissingWindow,
-                onRecoveryExhausted: { showsRecoveryExhaustion = true },
+                onRecoveryGuidance: { recoveryGuidanceMessage = $0 },
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
                 parkedNoticeMessage: parkedNoticeMessage,
@@ -237,7 +244,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var appearance: AppearanceSettings
     var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-    var onRecoveryExhausted: (@MainActor () -> Void)?
+    var onRecoveryGuidance: (@MainActor (String) -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
@@ -276,7 +283,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.appState = appState
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onMissingWindow = onMissingWindow
-        context.coordinator.onRecoveryExhausted = onRecoveryExhausted
+        context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
         // Feed snapshot before tmux connects so the user sees the last state
@@ -372,7 +379,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .first(where: { $0.id == terminalID })?
             .isCodexTerminal == true
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
-        context.coordinator.onRecoveryExhausted = onRecoveryExhausted
+        context.coordinator.onRecoveryGuidance = onRecoveryGuidance
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
@@ -394,7 +401,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var panelID: UUID = UUID()
         var tabCloseContext: TabCloseContext?
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-        var onRecoveryExhausted: (@MainActor () -> Void)?
+        var onRecoveryGuidance: (@MainActor (String) -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
         /// over this terminal and should receive scroll/click events instead of
         /// the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
@@ -404,6 +411,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// headlessly — the reap wiring is otherwise unreachable from a test,
         /// since everything else about this type needs a live `NSView`.
         var localProcess: LocalProcess?
+        private var groupedViewerProcessRunning = false
+        private var groupedViewerProcessGeneration: UInt64 = 0
+        private var groupedViewerConfirmationStarted = false
+        private var groupedViewerAttachmentConfirmed = false
+        private var groupedViewerConfirmationAttemptCount = 0
+        private static let maximumGroupedViewerConfirmationAttempts = 2
         /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
         /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
         /// (it is free, and could have been recycled for another child of this
@@ -457,7 +470,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 return .startViewer(prepared)
             case .failure(.commandFailed):
                 return .showMessage(
-                    "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics and retry."
+                    "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
                 )
             case .failure(.windowMissing(let failedStage)):
                 return .requestAutomaticRecovery(failedStage: failedStage)
@@ -467,13 +480,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         nonisolated static func recoveryMessage(
             for outcome: AutomaticTerminalRecreationOutcome
         ) -> String? {
-            guard outcome == .budgetExhausted else { return nil }
-            return TerminalRecoveryExhaustionPresentation.message
+            switch outcome {
+            case .failed:
+                return TerminalRecoveryPresentation.failedMessage
+            case .budgetExhausted:
+                return TerminalRecoveryPresentation.exhaustedMessage
+            case .alreadyInFlight, .terminalUnavailable, .recreated:
+                return nil
+            }
         }
 
         @MainActor
-        func recoveryDidExhaust() {
-            onRecoveryExhausted?()
+        func recoveryGuidanceDidBecomeAvailable(_ message: String) {
+            onRecoveryGuidance?(message)
         }
 
         @MainActor
@@ -482,9 +501,77 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         @MainActor
-        func viewerProcessDidStart(processRunning: Bool) {
-            guard processRunning else { return }
+        @discardableResult
+        func groupedViewerProcessDidStart(processRunning: Bool) -> UInt64 {
+            groupedViewerProcessGeneration &+= 1
+            groupedViewerProcessRunning = processRunning
+            groupedViewerConfirmationStarted = false
+            groupedViewerAttachmentConfirmed = false
+            groupedViewerConfirmationAttemptCount = 0
+            return groupedViewerProcessGeneration
+        }
+
+        @MainActor
+        func beginGroupedViewerAttachmentConfirmation() -> UInt64? {
+            guard groupedViewerProcessRunning,
+                  !groupedViewerConfirmationStarted,
+                  !groupedViewerAttachmentConfirmed,
+                  groupedViewerConfirmationAttemptCount < Self.maximumGroupedViewerConfirmationAttempts,
+                  !isTornDown else { return nil }
+            groupedViewerConfirmationStarted = true
+            groupedViewerConfirmationAttemptCount += 1
+            return groupedViewerProcessGeneration
+        }
+
+        @MainActor
+        func groupedViewerDidReceiveOutput() {
+            guard let tmuxBridge,
+                  let processGeneration = beginGroupedViewerAttachmentConfirmation() else { return }
+            let server = tmuxServer
+            let sessionName = TmuxBridge.sessionName(for: panelID)
+            Task { [weak self] in
+                let attached = await tmuxBridge.hasAttachedClient(
+                    server: server,
+                    sessionName: sessionName
+                )
+                let shouldRetry = self?.groupedViewerAttachmentProbeDidComplete(
+                    clientAttached: attached,
+                    processGeneration: processGeneration
+                ) ?? false
+                if shouldRetry {
+                    self?.groupedViewerDidReceiveOutput()
+                }
+            }
+        }
+
+        @MainActor
+        func groupedViewerAttachmentProbeDidComplete(
+            clientAttached: Bool,
+            processGeneration: UInt64
+        ) -> Bool {
+            guard processGeneration == groupedViewerProcessGeneration,
+                  !groupedViewerAttachmentConfirmed,
+                  !isTornDown else { return false }
+            guard clientAttached else {
+                guard groupedViewerProcessRunning,
+                      groupedViewerConfirmationAttemptCount < Self.maximumGroupedViewerConfirmationAttempts else {
+                    return false
+                }
+                // Re-arm one immediate retry. This does not depend on another
+                // PTY output chunk, which an attached idle client may never emit.
+                groupedViewerConfirmationStarted = false
+                return true
+            }
+            guard groupedViewerProcessRunning else { return false }
+            groupedViewerAttachmentConfirmed = true
             appState?.terminalViewerDidStart(terminalID: panelID)
+            return false
+        }
+
+        @MainActor
+        func groupedViewerProcessDidTerminate() {
+            groupedViewerProcessRunning = false
+            groupedViewerConfirmationStarted = false
         }
 
         @MainActor
@@ -499,6 +586,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 .flatMap { $0 }
                 .first(where: { $0.id == panelID })?
                 .worktreeID
+        }
+
+        @MainActor
+        func recoveryDiagnosticContext() -> TerminalRecoveryDiagnosticContext {
+            TerminalRecoveryDiagnosticContext(
+                terminalID: panelID,
+                worktreeID: worktreeIDForDiagnostics()
+            )
         }
 
         @MainActor
@@ -528,25 +623,31 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         @MainActor
         private func logAutomaticRecoveryOutcome(
             _ outcome: AutomaticTerminalRecreationOutcome,
-            failedStage: TmuxPreparationStage
+            failedStage: TmuxPreparationStage,
+            diagnosticContext: TerminalRecoveryDiagnosticContext
         ) {
-            let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
+            let terminalID = diagnosticContext.terminalID
+            let worktreeID = diagnosticContext.worktreeID?.uuidString ?? "unknown"
             switch outcome {
             case .alreadyInFlight:
                 logger.info(
-                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=alreadyInFlight"
+                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=alreadyInFlight"
+                )
+            case .terminalUnavailable:
+                logger.info(
+                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=terminalUnavailable"
                 )
             case .recreated(let attempt):
                 logger.info(
-                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=recreated attempt=\(attempt, privacy: .public)"
+                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=recreated attempt=\(attempt, privacy: .public)"
                 )
             case .failed(let attempt):
                 logger.error(
-                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=failed attempt=\(attempt, privacy: .public)"
+                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=failed attempt=\(attempt, privacy: .public)"
                 )
             case .budgetExhausted:
                 logger.error(
-                    "automatic terminal recovery terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=budgetExhausted attempt=none"
+                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=budgetExhausted attempt=none"
                 )
             }
         }
@@ -592,10 +693,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     logPreparationFailure(failure)
                 }
                 guard let onMissingWindow else { return }
+                let diagnosticContext = recoveryDiagnosticContext()
                 let outcome = await onMissingWindow()
-                logAutomaticRecoveryOutcome(outcome, failedStage: failedStage)
+                logAutomaticRecoveryOutcome(
+                    outcome,
+                    failedStage: failedStage,
+                    diagnosticContext: diagnosticContext
+                )
                 if let message = Self.recoveryMessage(for: outcome) {
-                    recoveryDidExhaust()
+                    recoveryGuidanceDidBecomeAvailable(message)
                     feedPreparationMessage(message, into: terminalView)
                 }
                 return
@@ -621,7 +727,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 environment: envPairs,
                 execName: nil
             )
-            viewerProcessDidStart(processRunning: process.running)
+            groupedViewerProcessDidStart(processRunning: process.running)
 
             // Send correct initial size from SwiftTerm's own computed dimensions
             // (accounts for scroller width and actual cell metrics).
@@ -1116,6 +1222,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // callback can set it.
             childExitObservation.record()
             DispatchQueue.main.async { [weak self] in
+                self?.groupedViewerProcessDidTerminate()
                 // This fires when the *attach client* (the on-screen tmux
                 // viewer) dies. A clean exit (code 0) means the view was torn
                 // down or detached while the underlying tmux window keeps
@@ -1139,6 +1246,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         func dataReceived(slice: ArraySlice<UInt8>) {
             DispatchQueue.main.async { [weak self] in
+                self?.groupedViewerDidReceiveOutput()
                 self?.terminalView?.feed(byteArray: slice)
             }
         }

@@ -12,7 +12,7 @@ struct TerminalPanelViewTests {
         )
 
         #expect(action == .showMessage(
-            "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics and retry."
+            "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
         ))
     }
 
@@ -37,24 +37,98 @@ struct TerminalPanelViewTests {
     }
 
     @MainActor
-    @Test("only a running viewer process resets the automatic recovery budget")
-    func onlyRunningViewerProcessResetsRecoveryBudget() {
+    @Test("confirmed grouped viewer attachment, not process spawn, resets the automatic recovery budget")
+    func confirmedGroupedViewerAttachmentResetsRecoveryBudget() {
         let state = AppState()
         let terminalID = UUID()
+        seedTerminal(terminalID, in: state)
         _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
         state.finishTerminalRecreation(terminalID: terminalID)
 
         let coordinator = TerminalPanelRepresentable.Coordinator()
         coordinator.appState = state
         coordinator.panelID = terminalID
-        coordinator.viewerProcessDidStart(processRunning: false)
+        let generation = coordinator.groupedViewerProcessDidStart(processRunning: true)
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
             .claimed(automaticAttempt: 2))
         state.finishTerminalRecreation(terminalID: terminalID)
 
-        coordinator.viewerProcessDidStart(processRunning: true)
+        #expect(coordinator.groupedViewerAttachmentProbeDidComplete(
+            clientAttached: false,
+            processGeneration: generation
+        ))
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
+        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
+            clientAttached: true,
+            processGeneration: generation
+        ))
 
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 1))
+    }
+
+    @MainActor
+    @Test("failed grouped viewer attachment confirmation does not reset recovery")
+    func failedGroupedViewerConfirmationDoesNotResetRecoveryBudget() {
+        let state = AppState()
+        let terminalID = UUID()
+        seedTerminal(terminalID, in: state)
+        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+        let generation = coordinator.groupedViewerProcessDidStart(processRunning: true)
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
+        #expect(coordinator.groupedViewerAttachmentProbeDidComplete(
+            clientAttached: false,
+            processGeneration: generation
+        ))
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
+        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
+            clientAttached: false,
+            processGeneration: generation
+        ))
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == nil)
+
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 2))
+    }
+
+    @MainActor
+    @Test("a late grouped viewer probe cannot confirm a restarted process")
+    func lateGroupedViewerProbeCannotConfirmRestartedProcess() {
+        let state = AppState()
+        let terminalID = UUID()
+        seedTerminal(terminalID, in: state)
+        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+        let staleGeneration = coordinator.groupedViewerProcessDidStart(processRunning: true)
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == staleGeneration)
+        coordinator.groupedViewerProcessDidTerminate()
+        let liveGeneration = coordinator.groupedViewerProcessDidStart(processRunning: true)
+
+        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
+            clientAttached: true,
+            processGeneration: staleGeneration
+        ))
+
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 2))
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == liveGeneration)
+        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
+            clientAttached: true,
+            processGeneration: liveGeneration
+        ))
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
             .claimed(automaticAttempt: 1))
     }
@@ -64,6 +138,7 @@ struct TerminalPanelViewTests {
     func controlModeAttachmentResetsRecoveryBudget() {
         let state = AppState()
         let terminalID = UUID()
+        seedTerminal(terminalID, in: state)
         _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
         state.finishTerminalRecreation(terminalID: terminalID)
 
@@ -82,23 +157,37 @@ struct TerminalPanelViewTests {
             "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
     }
 
+    @Test("failed automatic recovery renders stable manual retry guidance")
+    func failedRecoveryRendersStableGuidance() {
+        #expect(TerminalPanelRepresentable.Coordinator.recoveryMessage(for: .failed(attempt: 1)) ==
+            "Automatic terminal recovery failed. Retry manually or close the tab.")
+    }
+
     @Test("budget exhaustion presentation exposes manual retry")
     func budgetExhaustionPresentationExposesManualRetry() {
-        #expect(TerminalRecoveryExhaustionPresentation.retryTitle == "Retry")
-        #expect(TerminalRecoveryExhaustionPresentation.message ==
+        #expect(TerminalRecoveryPresentation.retryTitle == "Retry")
+        #expect(TerminalRecoveryPresentation.exhaustedMessage ==
             "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
     }
 
     @MainActor
-    @Test("budget exhaustion asks the panel to reveal manual retry")
-    func budgetExhaustionRevealsManualRetry() {
+    @Test("recovery guidance callback carries the actual failed and exhausted messages")
+    func recoveryGuidanceCallbackCarriesActualMessage() {
         let coordinator = TerminalPanelRepresentable.Coordinator()
-        var revealCount = 0
-        coordinator.onRecoveryExhausted = { revealCount += 1 }
+        var messages: [String] = []
+        coordinator.onRecoveryGuidance = { messages.append($0) }
 
-        coordinator.recoveryDidExhaust()
+        coordinator.recoveryGuidanceDidBecomeAvailable(
+            TerminalRecoveryPresentation.failedMessage
+        )
+        coordinator.recoveryGuidanceDidBecomeAvailable(
+            TerminalRecoveryPresentation.exhaustedMessage
+        )
 
-        #expect(revealCount == 1)
+        #expect(messages == [
+            "Automatic terminal recovery failed. Retry manually or close the tab.",
+            "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
+        ])
     }
 
     @MainActor
@@ -133,6 +222,28 @@ struct TerminalPanelViewTests {
         coordinator.panelID = terminalID
 
         #expect(coordinator.worktreeIDForDiagnostics() == worktreeID)
+    }
+
+    @MainActor
+    @Test("recovery diagnostic context retains worktree after terminal removal")
+    func recoveryDiagnosticContextSurvivesTerminalRemoval() {
+        let state = AppState()
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        seedTerminal(terminalID, in: state, worktreeID: worktreeID)
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+
+        let context = coordinator.recoveryDiagnosticContext()
+        state.removeDeletedTerminalFromState(
+            terminalID: terminalID,
+            worktreeID: worktreeID
+        )
+
+        #expect(coordinator.worktreeIDForDiagnostics() == nil)
+        #expect(context.terminalID == terminalID)
+        #expect(context.worktreeID == worktreeID)
     }
 
     @MainActor
@@ -338,5 +449,21 @@ struct TerminalPanelViewTests {
         await Task.yield()
 
         #expect(state.terminals[worktreeID]?[0].activityState == .working)
+    }
+
+    @MainActor
+    private func seedTerminal(
+        _ terminalID: UUID,
+        in state: AppState,
+        worktreeID: UUID = UUID()
+    ) {
+        state.terminals[worktreeID] = [Terminal(
+            id: terminalID,
+            worktreeID: worktreeID,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Shell",
+            kind: .shell
+        )]
     }
 }

@@ -42,9 +42,30 @@ struct TmuxBridgeTests {
         #expect(TmuxBridge.windowInventoryQueryArgs() == [
             "list-windows", "-a", "-F", "#{window_id}",
         ])
+        #expect(TmuxBridge.clientSessionQueryArgs() == [
+            "list-clients", "-F", "#{client_session}",
+        ])
         #expect(TmuxBridge.killSessionArgs(sessionName: sessionName) == [
             "kill-session", "-t", sessionName,
         ])
+    }
+
+    @Test func clientInventoryConfirmsOnlyTheExpectedAttachedSession() {
+        #expect(TmuxBridge.clientInventoryConfirmsAttachment(
+            querySucceeded: true,
+            output: "main\ntbd-view-4c4f1a61",
+            expectedSessionName: "tbd-view-4c4f1a61"
+        ))
+        #expect(!TmuxBridge.clientInventoryConfirmsAttachment(
+            querySucceeded: true,
+            output: "main",
+            expectedSessionName: "tbd-view-4c4f1a61"
+        ))
+        #expect(!TmuxBridge.clientInventoryConfirmsAttachment(
+            querySucceeded: false,
+            output: "tbd-view-4c4f1a61",
+            expectedSessionName: "tbd-view-4c4f1a61"
+        ))
     }
 
     @Test func preparedSessionCarriesViewerCommand() {
