@@ -75,8 +75,8 @@ is deleted after checkout, before anything runs, so a PR cannot pre-commit a for
 The review session runs headless, where ending a turn ends the whole process — and a
 specialist subagent still working when that happens does not get its findings file
 onto disk. A review that needs roughly ten minutes must therefore be held open, while
-a session that will never produce a result must still terminate. Four mechanisms
-split that difference; the thresholds and the reasoning behind them are in
+a session that will never produce a result must still terminate. The mechanisms
+below split that difference; the thresholds and the reasoning behind them are in
 [`docs/specs/2026-08-10-review-orchestrator-liveness-design.md`](specs/2026-08-10-review-orchestrator-liveness-design.md).
 
 - **The hook holds, uncounted, while specialist findings are pending.**
@@ -98,18 +98,30 @@ split that difference; the thresholds and the reasoning behind them are in
   timeout in `hooks/settings.json` is 60 seconds, strictly greater than the sleep,
   because a hook killed mid-sleep emits no block at all; and the defensive cap of
   60 holds is 30 minutes of sleeping, so the 25-minute deadline still binds first.
-- **The hook nudges, boundedly, once only the merge is missing.** When every
-  expected findings file is present and parses but `review-result.json` is not
-  there, the model has all its inputs and is simply not writing the merge. The hook
+- **The hook nudges, boundedly, when the merge needs model action.** When every
+  expected findings file is present and parses but `review-result.json` is missing
+  or unparseable, the model has all its inputs and must write the merge. The hook
   blocks with instructions for writing that file and counts the block, giving up
-  after five. The count applies to this state alone.
+  after five.
+- **Complete artifacts receive deterministic in-session preflight.** Once all
+  expected findings files and `review-result.json` parse, the hook runs the same
+  base-pipeline `validate.py` command, specialist glob, and expected-specialist
+  declaration used after the session. A schema, completeness, or disposition
+  failure uses the same five-nudge counted path and feeds the validator's exact
+  output back for correction. A successful preflight allows the stop. It runs in
+  an isolated temporary directory, so its provisional `verdict.txt` is discarded;
+  the post-session validator, re-restored from the pinned base SHA, remains the
+  authoritative verdict computation.
 - **The hook always exits 0.** Empty stdin, an absent `jq`, an unwritable state
   file — none of them may wedge the session, because allowing a stop is never a
   gate bypass. `validate.py` fails closed downstream regardless. Two of those cases
   resolve toward releasing rather than holding: state that cannot be persisted
   defeats both bounds at once, so the hook stands aside instead of holding forever,
   and with `jq` off `PATH` a present non-empty file counts as ready, so a finished
-  review is never reported as a running one.
+  review is never reported as a running one. If Python, the base validator, or the
+  isolated preflight directory is unavailable, the hook likewise releases
+  immediately and relies on downstream fail-closed validation rather than spending
+  five nudges on an infrastructure failure.
 - **The job carries `timeout-minutes: 45`.** A session that wedges rather than ends
   would otherwise run to GitHub's six-hour cap while the author waits on a check
   that never reports.

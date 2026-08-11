@@ -114,6 +114,18 @@ def test_the_session_prompt_explains_the_restored_directory() -> None:
     assert "git show HEAD:<path>" in prompt
 
 
+def test_the_session_prompt_pins_the_finding_contract_and_lossless_correction() -> None:
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    assert (
+        "The allowed finding keys are exactly `id`, `file`, `line`, `severity`, "
+        "`title`, `body`, and `confidence`; additional properties are forbidden"
+        in prompt
+    )
+    assert "Scenario detail belongs in `body`" in prompt
+    assert "preserve every finding's ID, severity, and substance" in prompt
+    assert "Do not invent, drop, or silently replace findings" in prompt
+
+
 # --- exactly one job may be named `claude-review` ---------------------------
 
 # Branch protection matches a required check by JOB NAME, not by workflow file.

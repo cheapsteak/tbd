@@ -192,11 +192,12 @@ def is_session_stall(
     claim being made is "nothing reached disk":
 
     - `result_present` is whether review-result.json EXISTS, not whether it
-      passed the schema. The Stop hook releases the session the moment that
-      file parses as JSON, so "present but schema-invalid" is a normal terminal
-      state; reading validity here would announce that the session produced
-      nothing while its result file sits on disk, and would suppress the schema
-      error naming the actual defect.
+      passed the schema. A schema-invalid result proves the session reached its
+      merge and wrote something, even though the Stop hook's deterministic
+      preflight asks the model to correct it before release. Reading validity
+      here would announce that the session produced nothing while its result
+      file sits on disk, and would suppress the schema error naming the actual
+      defect.
     - `any_specialist_file` is whether the specialist glob matched ANY file.
       `seen` and `rejected` are populated per-lens, so a matched file that
       cannot be attributed to a lens — `findings-.json`, which fits the glob

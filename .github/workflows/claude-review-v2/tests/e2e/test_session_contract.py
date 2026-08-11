@@ -6,8 +6,8 @@ the actual session contract from docs/specs/2026-08-03-pr-review-fanout-design.m
 
 - the CLI executes scripted tool_use turns (writes the specialist findings file
   and review-result.json) rather than silently retrying,
-- the real Stop hook (hooks/stop-hook.sh) lets the session end once
-  review-result.json exists and parses — and does not wedge it,
+- the real Stop hook (hooks/stop-hook.sh) lets the session end once all expected
+  artifacts pass deterministic preflight — and does not wedge it,
 - the real validate.py accepts the written files and computes the verdict.
 
 Zero tokens, fully deterministic. Skipped when no `claude` binary is on PATH,

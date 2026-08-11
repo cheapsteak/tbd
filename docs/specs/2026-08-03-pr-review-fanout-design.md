@@ -151,10 +151,20 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
 
 - **Verdict**: the validate script computes `APPROVE`/`REJECT` from
   `review-result.json` — REJECT iff any unaddressed `HIGH` or `MEDIUM` finding survives
-  the merge. The model never types the verdict. The Stop hook gates on the *artifact*
-  rather than on a token: it refuses to end the session until `review-result.json`
-  exists and parses. The enforce step is fail-closed — a missing file is a red check.
-  The validate script also enforces specialist-set completeness
+  the merge. The model never types the verdict. The Stop hook gates on the artifacts
+  rather than on a token. Expected findings that are missing or unparseable receive an
+  uncounted liveness hold; findings that are ready while `review-result.json` is missing
+  or unparseable receive a counted merge nudge. Once every artifact parses, the hook runs
+  the base pipeline's `validate.py` with the same specialist glob and expected-specialist
+  declaration used after the session. Schema, completeness, and disposition failures
+  receive a counted correction nudge carrying the validator's exact output, while a
+  successful preflight allows the session to end. Both counted paths stop after five
+  blocks. The preflight runs from an isolated temporary directory and discards its
+  provisional `verdict.txt`; validation after the base-pipeline re-restore remains
+  authoritative. If the preflight infrastructure is unavailable, the hook releases under
+  its always-exit-zero fail-safe and downstream validation fails closed. The enforce step
+  is fail-closed — a missing file is a red check. The validate script also enforces
+  specialist-set completeness
   (`--expected-specialists`): if any named
   specialist contributed no *valid* findings file it fails closed with no verdict
   written. The diagnostic distinguishes the two causes, because they send an

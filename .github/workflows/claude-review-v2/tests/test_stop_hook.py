@@ -21,8 +21,10 @@ default is still 30 seconds with no configuration.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -34,12 +36,16 @@ HOOK = (
 SETTINGS = (
     Path(__file__).resolve().parent.parent / "hooks" / "settings.json"
 )
+PIPELINE = Path(__file__).resolve().parent.parent
 
 COUNT_FILE = "claude-review-v2-block-count"
 START_FILE = "claude-review-v2-hold-started"
 HOLD_FILE = "claude-review-v2-hold-count"
 
-DEFAULT_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+DEFAULT_PATH = (
+    f"{Path(sys.executable).parent}:"
+    "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+)
 
 
 def _run(
@@ -76,12 +82,17 @@ def _path_without_jq(tmp_path: Path) -> str:
     """
     bindir = tmp_path / "nojq-bin"
     bindir.mkdir(exist_ok=True)
-    for tool in ("bash", "cat", "date", "tr"):
+    for tool in ("bash", "cat", "date", "mktemp", "rm", "rmdir", "sleep", "tr"):
         found = shutil.which(tool)
         assert found, f"test prerequisite missing: {tool}"
         link = bindir / tool
         if not link.exists():
             link.symlink_to(found)
+    python = bindir / "python3"
+    python.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n"
+    )
+    python.chmod(0o755)
     assert shutil.which("jq", path=str(bindir)) is None
     return str(bindir)
 
@@ -132,6 +143,48 @@ def _write_result(project_dir: Path) -> None:
     )
 
 
+def _install_validator(project_dir: Path) -> None:
+    target = project_dir / ".github" / "workflows" / "claude-review-v2"
+    target.mkdir(parents=True)
+    shutil.copy2(PIPELINE / "validate.py", target / "validate.py")
+    shutil.copytree(PIPELINE / "schemas", target / "schemas")
+
+
+def _write_invalid_findings_with_valid_result(project_dir: Path) -> None:
+    finding = {
+        "id": "correctness-1",
+        "file": "example.swift",
+        "line": 7,
+        "severity": "MEDIUM",
+        "title": "Example finding",
+        "body": "The failure can occur when the input is empty.",
+        "confidence": 0.9,
+    }
+    (project_dir / "findings-correctness.json").write_text(
+        json.dumps(
+            {
+                "specialist": "correctness",
+                "findings": [
+                    {
+                        **finding,
+                        "failure_scenario": "An empty input reaches this branch.",
+                    }
+                ],
+            }
+        )
+    )
+    _write_findings(project_dir, "conventions")
+    (project_dir / "review-result.json").write_text(
+        json.dumps(
+            {
+                "findings": [finding],
+                "disposition": [{"id": "correctness-1", "action": "kept"}],
+                "comment_body": "One medium finding.",
+            }
+        )
+    )
+
+
 @pytest.fixture()
 def dirs(tmp_path: Path) -> tuple[Path, Path]:
     project = tmp_path / "workspace"
@@ -144,12 +197,120 @@ def dirs(tmp_path: Path) -> tuple[Path, Path]:
 # --- the allow path is unchanged -------------------------------------------
 
 
-def test_parseable_result_file_allows_the_stop(dirs: tuple[Path, Path]) -> None:
+def test_parseable_result_without_findings_still_holds(
+    dirs: tuple[Path, Path],
+) -> None:
     project, state = dirs
     _write_result(project)
     proc = _run(project, state)
     assert proc.returncode == 0
+    assert _decision(proc)["decision"] == "block"
+    assert _count(state) == 0
+
+
+def test_valid_complete_artifacts_allow_without_a_workspace_verdict(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    _write_result(project)
+
+    proc = _run(project, state)
+
+    assert proc.returncode == 0
     assert _decision(proc) is None
+    assert not (project / "verdict.txt").exists()
+    assert list(state.glob("claude-review-v2-preflight.*")) == []
+
+
+def test_schema_invalid_findings_block_even_with_a_parseable_result(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_invalid_findings_with_valid_result(project)
+
+    proc = _run(project, state)
+
+    assert proc.returncode == 0
+    decision = _decision(proc)
+    assert decision is not None
+    assert decision["decision"] == "block"
+    exact_error = (
+        f"error: {project / 'findings-correctness.json'}: schema validation "
+        "failed: at findings/0: Additional properties are not allowed "
+        "('failure_scenario' was unexpected)"
+    )
+    assert exact_error in decision["reason"]
+    assert "Preserve every finding's ID, severity, and substance" in decision["reason"]
+    assert "move that detail into the finding's body" in decision["reason"]
+    assert _count(state) == 1
+
+
+def test_schema_invalid_findings_release_after_five_counted_blocks(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_invalid_findings_with_valid_result(project)
+
+    for _ in range(5):
+        assert _decision(_run(project, state))["decision"] == "block"
+
+    assert _count(state) == 5
+    assert _decision(_run(project, state)) is None
+
+
+def test_an_unavailable_validator_releases_without_consuming_the_budget(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    _write_result(project)
+
+    proc = _run(project, state)
+
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    assert _count(state) == 0
+
+
+def test_a_validator_that_cannot_run_releases_without_consuming_the_budget(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    _write_result(project)
+    validator = project / ".github" / "workflows" / "claude-review-v2" / "validate.py"
+    validator.write_text("this is not valid Python\n")
+
+    proc = _run(project, state)
+
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    assert _count(state) == 0
+
+
+def test_an_unavailable_preflight_cwd_releases_without_consuming_the_budget(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    _write_result(project)
+    missing_state = state / "missing"
+
+    proc = _run(project, missing_state)
+
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    assert _count(missing_state) == 0
 
 
 # --- state 1: specialists still running -> UNCOUNTED hold ------------------
@@ -504,10 +665,84 @@ def test_a_valid_result_file_ends_the_session_without_jq(
     falsehood the orchestrator acts on — it can re-spawn duplicate
     specialists — and it holds the session for the whole deadline."""
     project, state = dirs
+    _install_validator(project)
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
     _write_result(project)
     proc = _run(project, state, path=_path_without_jq(tmp_path))
     assert proc.returncode == 0
     assert _decision(proc) is None
+
+
+def test_schema_invalid_findings_get_exact_feedback_without_jq(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_invalid_findings_with_valid_result(project)
+
+    proc = _run(project, state, path=_path_without_jq(tmp_path))
+
+    assert proc.returncode == 0
+    decision = _decision(proc)
+    assert decision is not None
+    assert decision["decision"] == "block"
+    exact_error = (
+        f"error: {project / 'findings-correctness.json'}: schema validation "
+        "failed: at findings/0: Additional properties are not allowed "
+        "('failure_scenario' was unexpected)"
+    )
+    assert exact_error in decision["reason"]
+    assert "Preserve every finding's ID, severity, and substance" in decision["reason"]
+    assert "move that detail into the finding's body" in decision["reason"]
+    assert _count(state) == 1
+
+
+def test_schema_invalid_findings_get_a_correction_fallback_if_python_disappears(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_invalid_findings_with_valid_result(project)
+    path = Path(_path_without_jq(tmp_path))
+    python = path / "python3"
+    python.write_text(
+        "#!/bin/sh\n"
+        'rm -f "$0"\n'
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n"
+    )
+    python.chmod(0o755)
+
+    proc = _run(project, state, path=str(path))
+
+    assert proc.returncode == 0
+    assert _decision(proc) == {
+        "decision": "block",
+        "reason": (
+            "Review artifacts failed deterministic preflight; preserve every "
+            "finding's ID, severity, and substance and correct the reported "
+            "schema, completeness, or disposition error before stopping."
+        ),
+    }
+    assert _count(state) == 1
+
+
+def test_an_unavailable_python_releases_without_consuming_the_budget(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    _write_result(project)
+    path = Path(_path_without_jq(tmp_path))
+    (path / "python3").unlink()
+
+    proc = _run(project, state, path=str(path))
+
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    assert _count(state) == 0
 
 
 def test_present_findings_still_reach_the_counted_nudge_without_jq(
@@ -520,6 +755,31 @@ def test_present_findings_still_reach_the_counted_nudge_without_jq(
     assert proc.returncode == 0
     assert _decision(proc)["decision"] == "block"
     assert "review-result.json" in _decision(proc)["reason"]
+    assert _count(state) == 1
+
+
+@pytest.mark.parametrize("result_contents", [None, ""], ids=["missing", "unparseable"])
+def test_missing_result_gets_a_specific_fallback_without_jq_or_python(
+    dirs: tuple[Path, Path], tmp_path: Path, result_contents: str | None
+) -> None:
+    project, state = dirs
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    if result_contents is not None:
+        (project / "review-result.json").write_text(result_contents)
+    path = Path(_path_without_jq(tmp_path))
+    (path / "python3").unlink()
+
+    proc = _run(project, state, path=str(path))
+
+    assert proc.returncode == 0
+    assert _decision(proc) == {
+        "decision": "block",
+        "reason": (
+            "Create or correct review-result.json (valid JSON per "
+            "schemas/review-result.schema.json) in the repository root before stopping."
+        ),
+    }
     assert _count(state) == 1
 
 

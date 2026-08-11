@@ -1061,12 +1061,12 @@ def test_main_a_schema_invalid_result_file_is_not_a_stall(
     """A result file that PARSES but fails the schema is a normal terminal
     state, not a stall.
 
-    The Stop hook releases the session as soon as review-result.json parses as
-    JSON, so "present but schema-invalid" is exactly what a session that merged
-    badly leaves behind. Calling that "the session produced NOTHING" is
-    factually false — something is on disk — and it would suppress the schema
-    error that names the real defect, which is the only line an operator can
-    act on.
+    The Stop hook's deterministic preflight asks the model to correct this
+    result before release, but the schema-invalid file still proves the session
+    reached its merge and wrote something. Calling that "the session produced
+    NOTHING" is factually false — something is on disk — and it would suppress
+    the schema error that names the real defect, which is the only line an
+    operator can act on.
     """
     monkeypatch.chdir(tmp_path)
     # Valid JSON, but missing the required `disposition` and `comment_body`.

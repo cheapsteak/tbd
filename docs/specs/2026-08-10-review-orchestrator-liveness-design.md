@@ -1,6 +1,6 @@
 # Review orchestrator liveness: waiting without ending the turn — design
 
-Status: **proposed**. Written 2026-08-10.
+Status: **implemented**. Written 2026-08-10.
 
 Brainstormed per `/tbd-brainstorming`; the four decisions in §2 were answered by a human.
 
@@ -107,21 +107,30 @@ changes, from "a notification arrived" to "both files are on disk".
 
 ### 3.2 The Stop hook holds while work is pending and counts only refusal
 
-`hooks/stop-hook.sh` splits the single state it recognizes today into three, and adds a
-wall-clock deadline. On its first invocation it stamps a start time beside its counter
-file.
+`hooks/stop-hook.sh` recognizes four artifact states and adds a wall-clock deadline. On
+its first invocation it stamps a start time beside its counter file.
 
-- **A findings file is missing, and the run is inside 25 minutes** — sleep 30 seconds,
-  then block **without consuming the nudge budget**, with a reason that tells the
-  orchestrator its specialists are still running and its turn must continue. This is the
-  repair: an uncounted hold keeps the process alive, and the in-flight specialists with
-  it.
-- **Every findings file is present and `review-result.json` is missing** — block and
-  consume the budget, exactly as today, with today's reason. The model has everything it
-  needs and is not writing the result. This is the state the five-nudge ceiling was
-  designed for, and it keeps that ceiling.
-- **Past 25 minutes** — exit 0 and let the session end. `validate.py` then fails closed.
-  The deadline is what keeps an uncounted hold from becoming an unbounded one.
+- **An expected findings file is missing or unparseable inside 25 minutes** — sleep 30
+  seconds, then block **without consuming the nudge budget**, with a reason that tells
+  the orchestrator its specialists are still running and its turn must continue. An
+  uncounted hold keeps the process alive, and the in-flight specialists with it.
+- **Every expected findings file parses and `review-result.json` is missing or
+  unparseable** — block and consume the budget with instructions to write the merge. The
+  model has everything it needs and is not producing a readable result.
+- **Every artifact parses but deterministic preflight rejects it** — run the base
+  pipeline's `validate.py` with the same specialist glob and expected-specialist
+  declaration used after the session, then block and consume the same budget with its
+  exact schema, completeness, or disposition error. Correction instructions preserve
+  every finding's ID, severity, and substance; unsupported unique elaboration moves into
+  `body` rather than being dropped or replaced.
+- **Every artifact passes deterministic preflight** — allow the session to end. The
+  preflight runs in an isolated temporary directory, and its provisional `verdict.txt`
+  is discarded. The post-session validator, re-restored from the pinned base SHA,
+  remains authoritative.
+
+Both counted states share the five-nudge ceiling. Past the 25-minute findings deadline,
+the hook exits 0 and lets `validate.py` fail closed downstream. The deadline keeps the
+uncounted hold from becoming unbounded.
 
 **The hold sleeps, because a hold costs a turn.** Every hold is a block, and every block
 costs one turn of the session's `--max-turns 100` budget — so the scarce resource is turns,
@@ -165,8 +174,13 @@ of those cases have a direction that must be chosen deliberately rather than inh
   is absent. Reading a finished review as unfinished would tell the orchestrator its
   specialists are still running — a falsehood it can act on by re-spawning duplicates —
   and would hold the session for the whole deadline over a missing binary. Content that is
-  present but malformed is caught downstream by `validate.py`, which schema-validates and
-  fails closed.
+  present but malformed is caught by deterministic preflight when its infrastructure is
+  available, and by post-session `validate.py` otherwise; both schema-validate and fail
+  closed.
+- **Unavailable preflight infrastructure releases the session.** If Python, the trusted
+  base validator, or an isolated temporary working directory cannot be invoked, the hook
+  stands aside instead of consuming five nudges on a failure the model cannot repair.
+  Post-session validation still fails closed.
 
 One mechanic carries forward from the fan-out spec's §6 and now covers three files: the
 nudge counter, the start stamp, and the hold counter. Any future loop that invokes the
@@ -232,11 +246,14 @@ than ends is unreachable from between invocations.
 The unit tests live beside the code they cover, in
 `.github/workflows/claude-review-v2/tests/`, and run in the `Review scripts tests` CI job.
 
-- **The hook's three states**, driven by a temporary workspace: a missing findings file
-  inside the deadline blocks and leaves the counter untouched; a complete findings set with
-  no result file blocks and increments the counter; a run past the deadline exits 0. The
-  counter assertion is the discriminating one — a test that only checks "it blocked" passes
-  against a hook that conflates the two states.
+- **The hook's four artifact states**, driven by a temporary workspace: a missing or
+  unparseable findings file inside the deadline blocks and leaves the counter untouched;
+  a complete findings set with a missing or unparseable result blocks and increments the
+  counter; parseable artifacts rejected by deterministic preflight block with its exact
+  error and increment the same counter; valid complete artifacts allow the stop without
+  leaving a workspace `verdict.txt`. Repeated counted failures release after five blocks.
+  The counter assertion is the discriminating one — a test that only checks "it blocked"
+  passes against a hook that conflates these states.
 - **The sleep and the bounds it interacts with.** A pending hold takes at least its
   configured sleep before emitting the block; a run past the deadline, and one at the hold
   cap, each return promptly and release, proving both bounds are tested before the sleep
@@ -249,9 +266,14 @@ The unit tests live beside the code they cover, in
   against a hook that holds forever. Empty stdin and an absent `REVIEW_SPECIALISTS` are
   asserted on behavior, and the unwritable-state case loops invocations until it observes
   an actual release, the same shape as the broken-clock case.
-- **The `jq`-absent fallbacks**, run against a `PATH` built without `jq`: a valid result
-  file ends the session, a complete findings set reaches the counted nudge, a missing
-  findings file still holds, and an empty result file does not count as written.
+- **The `jq`-absent fallbacks**, run against a `PATH` carrying every other hook
+  dependency: valid complete artifacts end the session, schema-invalid artifacts receive
+  exact validator feedback through the counted correction nudge, a complete findings set
+  with no result receives the merge nudge, a missing findings file still holds, and an
+  empty result file does not count as written.
+- **Unavailable preflight infrastructure**, covering a missing Python runtime or trusted
+  validator, a validator that cannot execute normally, and a temporary directory that
+  cannot be created. Each releases with exit code 0 and leaves the nudge counter untouched.
 - **`validate.py`'s new class**, and the two existing ones, so the third does not swallow
   them.
 - **`timeout-minutes` and the `REVIEW_SPECIALISTS` wiring**, as structural assertions in
