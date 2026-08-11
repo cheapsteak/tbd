@@ -618,22 +618,33 @@ public final class RPCRouter: Sendable {
     /// by-number lookups scope to each worktree's own repo). Pulled out
     /// as a pure function (rather than inlined `.filter` in `computePRList`)
     /// so it's directly unit-testable without spinning up git/gh machinery.
+    ///
+    /// Remote rows are excluded for a second reason: everything downstream is
+    /// keyed on the worktree's path. `branchFacts` runs `git` inside it and
+    /// caches the answer under that path, and `PRStatusManager` runs `gh` there
+    /// — against a directory that does not exist on this machine. Polling a
+    /// remote lane's PR is wanted eventually and needs to key on the BRANCH
+    /// instead; until then, not polling is the only correct behavior.
     static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
-        worktrees.filter { !$0.isScratch }
+        worktrees.filter { !$0.isScratch && $0.location.isLocal }
     }
 
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRRefreshParams.self, from: paramsData)
 
-        // Run targeted refresh in the worktree and try the tracked upstream branch when needed.
-        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+        // Run targeted refresh in the worktree and try the tracked upstream
+        // branch when needed. Local rows only, for the same reason
+        // `pollableWorktrees` excludes remote ones: this runs `git` and `gh`
+        // inside the worktree's path. A remote id gets the same "nothing to
+        // report" answer as an unknown one.
+        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
         // Read the branch facts through the SAME cache the poll uses. Reading
         // git directly here would let a user refresh attach a PR that the very
         // next poll — still inside the cache's TTL, still holding the older
         // facts — judges by a different candidate list and clears again.
-        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.localPath, branch: wt.branch)
+        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
         var defaultBranch: String?
         if let repoID = wt.repoID {
             defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
@@ -645,7 +656,7 @@ public final class RPCRouter: Sendable {
             upstreamBranch: upstreamBranch,
             defaultBranch: defaultBranch,
             pushBranch: pushBranch,
-            repoPath: wt.localPath,
+            repoPath: wt.path,
             prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))

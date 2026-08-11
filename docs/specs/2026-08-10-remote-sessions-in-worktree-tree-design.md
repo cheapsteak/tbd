@@ -201,6 +201,21 @@ viewer, the Claude trust seeder, relocate, forget, adopt-existing-directory, and
 reconcile cannot see a remote row — not because someone remembered a guard, but
 because `listLocal` does not return one.
 
+### PR polling is fenced, and has to be un-fenced by branch
+
+PR polling is the one local-only subsystem a remote lane genuinely wants back:
+a lane carries a PR badge like any other row. It is fenced anyway, because
+everything below `pollableWorktrees` is keyed on the worktree's **path** —
+`branchFacts` runs `git` inside the directory and caches its answer under that
+path, and `PRStatusManager` runs `gh` there. Pointed at a remote row, all of it
+operates on a directory that does not exist.
+
+Restoring the badge therefore means re-keying the poll on the **branch**, using
+the repo's own checkout as the working directory, not relaxing the fence. Until
+that lands, a remote lane simply carries no PR status — which is what makes
+fencing the correct move rather than a deferral: it leaves nothing that breaks
+on a remote row.
+
 ## Creation and the CLI
 
 `tbd worktree create` grows `--provider <name>` and a repeatable

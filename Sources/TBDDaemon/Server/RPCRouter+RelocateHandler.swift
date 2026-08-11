@@ -49,9 +49,12 @@ extension RPCRouter {
         try await db.repos.updatePath(id: repo.id, path: newPath)
         repo.path = newPath
 
-        // 3 + 4. Rewrite worktree paths and repair git bookkeeping.
-        let activeWorktrees = try await db.worktrees.list(repoID: repo.id, status: .active)
-        let mainWorktrees = try await db.worktrees.list(repoID: repo.id, status: .main)
+        // 3 + 4. Rewrite worktree paths and repair git bookkeeping. Local rows
+        // only: every step below rewrites a filesystem path and shells out to
+        // `git worktree repair` against it. A remote row has no checkout to
+        // move, and relocating the repo on this machine says nothing about it.
+        let activeWorktrees = try await db.worktrees.listLocal(repoID: repo.id, status: .active)
+        let mainWorktrees = try await db.worktrees.listLocal(repoID: repo.id, status: .main)
         let allWorktrees = activeWorktrees + mainWorktrees
 
         var worktreesRepaired: [UUID] = []
@@ -61,7 +64,7 @@ extension RPCRouter {
             // Synthetic main worktree row points at the repo root, not a real
             // git worktree dir. No `git worktree repair` needed.
             if wt.status == .main {
-                if wt.localPath == oldPath {
+                if wt.path == oldPath {
                     do {
                         try await db.worktrees.updatePath(id: wt.id, path: newPath)
                         worktreesRepaired.append(wt.id)
@@ -73,9 +76,9 @@ extension RPCRouter {
                 continue
             }
 
-            var rewrittenPath = wt.localPath
-            if wt.localPath.hasPrefix(oldLegacyPrefix) {
-                let suffix = String(wt.localPath.dropFirst(oldLegacyPrefix.count))
+            var rewrittenPath = wt.path
+            if wt.path.hasPrefix(oldLegacyPrefix) {
+                let suffix = String(wt.path.dropFirst(oldLegacyPrefix.count))
                 rewrittenPath = newLegacyPrefix + suffix
                 do {
                     try await db.worktrees.updatePath(id: wt.id, path: rewrittenPath)
