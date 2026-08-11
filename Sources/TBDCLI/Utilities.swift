@@ -1,15 +1,52 @@
 import Foundation
 
-/// Print a Codable value as pretty-printed JSON to stdout.
-func printJSON<T: Encodable>(_ value: T) {
+/// Compose a Codable value into the pretty-printed JSON text the CLI prints.
+/// Internal (not private) so TBDCLITests can assert against the same composed
+/// output a command actually emits, rather than a re-encoded lookalike.
+func jsonString<T: Encodable>(_ value: T) -> String? {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
-    if let data = try? encoder.encode(value),
-       let string = String(data: data, encoding: .utf8) {
+    guard let data = try? encoder.encode(value) else { return nil }
+    return String(data: data, encoding: .utf8)
+}
+
+/// Print a Codable value as pretty-printed JSON to stdout.
+func printJSON<T: Encodable>(_ value: T) {
+    if let string = jsonString(value) {
         print(string)
     }
 }
+
+/// Wraps a command's JSON payload with the top-level `schemaVersion` the CLI
+/// contract promises (see `docs/capacity-facts.md`): fields may be added
+/// within a version; a field never changes meaning; removing a field or
+/// changing its meaning requires a version bump.
+///
+/// The payload encodes into the *same* keyed container as `schemaVersion`, so
+/// the envelope is drift-proof: any field the underlying RPC result gains
+/// flows through automatically, with no envelope-side mirror to update.
+/// The payload must therefore encode as a JSON object, not an array.
+struct VersionedJSONEnvelope<Payload: Encodable>: Encodable {
+    let schemaVersion: Int
+    let payload: Payload
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try payload.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+    }
+}
+
+/// Contract version of `tbd profile list --json` — the machine-readable
+/// capacity surface documented in `docs/capacity-facts.md`. Bump only for a
+/// breaking change (a removed field, or a field whose meaning or units
+/// changed); additions ship within the current version.
+let profileListSchemaVersion = 1
 
 /// Print a dictionary as pretty-printed JSON to stdout.
 func printJSON(_ dict: [String: String]) {

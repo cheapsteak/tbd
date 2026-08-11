@@ -208,7 +208,11 @@ struct ProfileList: AsyncParsableCommand {
         )
 
         if json {
-            printJSON(result)
+            // Versioned contract surface — see docs/capacity-facts.md.
+            printJSON(VersionedJSONEnvelope(
+                schemaVersion: profileListSchemaVersion,
+                payload: result
+            ))
             return
         }
         if result.profiles.isEmpty {
