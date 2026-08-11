@@ -33,14 +33,28 @@ from workflow_steps import (
     step_source,
 )
 
+ENSURE_MERGE_BASE_STEP = "Ensure a merge-base with the base branch"
 RESTORE_STEP = "Restore the review pipeline from the base branch"
 RE_RESTORE_STEP = "Re-restore the review pipeline from the base branch"
 SESSION_STEP = "Run Claude Code Review v2 (fan-out session)"
 VALIDATE_STEP = "Validate review result (schemas, disposition coverage, verdict)"
 POST_STEP = "Post review comment and enforce verdict"
 PREPARE_STEP = "Prepare (skip decision + discussion context)"
+COMPOSE_STEP = "Compose the review session prompt"
 
 PIPELINE_DIR = ".github/workflows/claude-review-v2"
+
+
+def _prompt_template() -> str:
+    """The review prompt template, read from the compose step that owns it.
+
+    The prompt reaches the session step as a step OUTPUT — its `prompt:` input
+    is one small expression — because an inline ${{ }}-bearing scalar of this
+    size trips GitHub's 21000-character expression-source cap and turns the
+    whole file into "Invalid workflow file", bricking the required check.
+    Dynamic values appear as __PLACEHOLDER__ tokens in the template.
+    """
+    return run_block(read_workflow(), COMPOSE_STEP)
 
 
 def _condition(step_name: str) -> str:
@@ -102,6 +116,163 @@ def test_the_re_restore_touches_only_the_pipeline_directory() -> None:
     assert checkouts == [f'git checkout "$BASE_SHA" -- {PIPELINE_DIR}']
 
 
+# --- the merge base: repaired, pinned, and never re-derived from a ref ------
+#
+# Two measured ways `origin/<base>` stops having a merge base with HEAD: a fork
+# PR's checkout is shallow even under `fetch-depth: 0` (PR #545), and the review
+# action's own session setup re-fetches the base branch at limited depth AFTER
+# every workflow guard, grafting the ref whenever the base advanced since
+# checkout (PR #614, runs 31497107005 and 31504414058). The first is repairable
+# here; the second is not repairable here at all, which is why the session gets
+# a pinned SHA instead of a ref name. A diff against a MOVED base reports other
+# merged PRs' changes as if this PR reverted them — a confident, plausible,
+# entirely wrong review — so these are assertions about the gate's correctness,
+# not its tidiness.
+
+
+def test_the_ensure_step_repairs_at_full_depth_then_fails_closed() -> None:
+    body = run_block(read_workflow(), ENSURE_MERGE_BASE_STEP)
+    # One repair attempt: an explicit fetch of the base branch that actually
+    # deepens. A plain fetch into a STILL-shallow repo stops at the shallow
+    # boundary and adds no ancestry, so the repair needs both variants: an
+    # --unshallow fetch when a boundary exists, and a plain full fetch when the
+    # repo is complete but the ref is wrong.
+    assert (
+        'git fetch --no-tags --unshallow origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"'
+        in body
+    )
+    assert (
+        'git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"'
+        in body
+    )
+    # And a hard stop if that did not help. A warning here is what let a run
+    # proceed to review a diff it could not compute.
+    assert "::error::" in body
+    assert "exit 1" in body
+    assert "::warning::" not in body
+
+
+def test_the_ensure_step_error_is_named_infrastructure_not_a_verdict() -> None:
+    # A red required check that says nothing sends the author looking for a
+    # defect in their own diff.
+    body = run_block(read_workflow(), ENSURE_MERGE_BASE_STEP)
+    error_lines = [line for line in body.splitlines() if "::error::" in line]
+    assert len(error_lines) == 1
+    assert "infrastructure error" in error_lines[0]
+    assert "NOT a verdict" in error_lines[0]
+
+
+def test_the_prepare_step_exports_the_pinned_merge_base() -> None:
+    body = run_block(read_workflow(), PREPARE_STEP)
+    assert "echo \"merge_base=$(jq -r '.merge_base // \"\"' skip-decision.json)\"" in body
+
+
+def test_the_prompt_pins_the_merge_base_instead_of_naming_the_base_ref() -> None:
+    """The discriminating structural assertion.
+
+    `git diff origin/<base>...HEAD` is exactly the instruction that failed
+    inside the session once the ref was grafted, and the model's improvised
+    two-dot fallback is what produced the fabricated "partial revert" findings.
+    The instruction must therefore be a SHA the prepare step resolved before the
+    damage — a SHA-addressed diff walks no ancestry and cannot be corrupted by
+    a graft.
+    """
+    prompt = _prompt_template()
+    pinned = "git diff __MERGE_BASE__ HEAD"
+    by_ref = "git diff origin/__BASE_REF__...HEAD"
+
+    assert by_ref not in prompt
+    # `git diff origin/…` in ANY form: the two-dot fallback was the harmful one.
+    assert "git diff origin/" not in prompt
+
+    # Present in BOTH instruction positions: the orchestrator's own ENVIRONMENT
+    # briefing, and the text it must hand each specialist. A specialist told to
+    # diff by ref name reproduces the failure one level down, where the
+    # orchestrator never sees it.
+    environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert pinned in environment
+    assert pinned in fanout
+
+    # And the prohibition is stated, not merely implied by omission.
+    assert "NEVER compute the diff against" in environment
+    assert "never diff against" in fanout.lower()
+
+
+def test_the_prompt_tells_the_session_what_an_empty_context_file_means() -> None:
+    # discussion-context.txt now leads with the PR description, so an empty file
+    # means the fetch FAILED. Read as "no description exists", it would silently
+    # gut the correctness lens's premise audit.
+    prompt = _prompt_template()
+    assert "EMPTY file means the fetch FAILED" in prompt
+    assert "title and description" in prompt
+
+
+def test_the_specialist_handoff_carries_the_context_file() -> None:
+    # The measured #614 failure was the orchestrator telling both specialists no
+    # PR description was available. An orchestrator that composes specialist
+    # prompts from the STEP 1 checklist alone reproduces that exactly, so the
+    # checklist itself — not just the earlier context paragraph — must name the
+    # file.
+    prompt = _prompt_template()
+    _, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert "discussion-context.txt" in fanout
+
+
+def test_the_description_cannot_clear_findings() -> None:
+    # The description is rewritable at any moment — including after a REJECT —
+    # so the clearing power STEP 2 grants to discussion must exclude it, or an
+    # author edits their way past a finding without changing a line of code.
+    # The rule must reach every reader: the orchestrator's context paragraph,
+    # the STEP 1 checklist the specialists are composed from, and STEP 2 where
+    # the merge happens.
+    prompt = _prompt_template()
+    assert "NEVER clear, downgrade, or pre-empt a finding" in prompt
+    _, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert "clear, downgrade, or pre-empt a finding" in fanout
+    _, _, merge_section = prompt.partition("STEP 2 — MERGE")
+    assert merge_section, "the prompt no longer contains a `STEP 2 — MERGE` section"
+    assert "never downgrades or drops a finding" in merge_section
+
+
+def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
+    # "Report it in the diagnostics section" routes the failure into collapsed
+    # prose no script reads: the session then submits empty findings, and
+    # validate.py computes empty findings as APPROVE — an unreviewed PR goes
+    # green on the required check. The prompt must instead route the failure to
+    # the infrastructure_failure key that validate.py fails closed on, and the
+    # specialists must escalate rather than silently review something else.
+    prompt = _prompt_template()
+    environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert '{"infrastructure_failure":' in environment
+    assert "empty findings array computes as APPROVE" in environment
+    # The specialists' copy of the channel is a schema-declared FIELD, not prose
+    # in a returned summary the orchestrator may not relay.
+    assert '"infrastructure_failure": "<one line: what failed>"' in fanout
+    # And the one sanctioned fallback is named as such — gh pr diff computes the
+    # same merge-base diff server-side; origin/<base> stays forbidden.
+    assert "the ONLY acceptable fallback is `gh pr diff`" in environment
+
+
+def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:
+    # A graft on HEAD's own ancestry (PR up to date with its base) makes
+    # `git blame`/`git log <path>` stop at the boundary SILENTLY — the same
+    # confident-wrong-answer class as the diff, aimed at the premise audit.
+    # `cat .git/shallow` is the deterministic detector, and Bash(cat:*) is
+    # already in the session's allowedTools. Like the pinned-diff rule, it must
+    # appear in BOTH instruction positions: the specialists hold git log/blame
+    # and run the premise audit one level down, where the orchestrator cannot
+    # see a wrong conclusion form.
+    prompt = _prompt_template()
+    environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert "cat .git/shallow" in environment
+    assert "cat .git/shallow" in fanout
+    assert "WITH FULL GIT HISTORY (all branches)" not in prompt
+
+
 # --- the session is told what the restore did to its checkout ---------------
 
 
@@ -109,7 +280,7 @@ def test_the_session_prompt_explains_the_restored_directory() -> None:
     # Without this the reviewer reads BASE content for those paths and reviews
     # code that is not in the PR — silently, on exactly the PRs that change the
     # review pipeline.
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     assert PIPELINE_DIR in prompt
     assert "restores `.github/workflows/claude-review-v2/` from the base branch" in prompt
     assert "git show HEAD:<path>" in prompt
@@ -287,7 +458,7 @@ def test_the_session_prompt_expects_exactly_the_declared_specialist_set() -> Non
     literals to the declaration. (`findings-<name>.json`, the template spelling,
     carries no lens name and is deliberately not matched.)
     """
-    names = set(_PROMPT_FINDINGS_RE.findall(step_source(read_workflow(), SESSION_STEP)))
+    names = set(_PROMPT_FINDINGS_RE.findall(_prompt_template()))
     assert names, "the fan-out prompt names no findings-<lens>.json file at all"
     declared = set(_review_job()["env"]["REVIEW_SPECIALISTS"].split(","))
     assert names == declared
@@ -412,6 +583,274 @@ def test_a_passing_validate_annotates_nothing_and_succeeds(tmp_path: Path) -> No
     assert _annotations(proc) == []
 
 
+# --- the prompt must never become a capped expression again ------------------
+#
+# GitHub compiles any ${{ }}-bearing YAML scalar into a single format()
+# expression whose SOURCE text is capped at 21000 characters. The review prompt
+# blew through that cap once, and the failure shape is vicious: the whole file
+# reports "Invalid workflow file", the required check never runs, and — because
+# pull_request_target reads the workflow from the base branch — merging the
+# oversized prompt would brick the gate for every PR until an admin merge. The
+# prompt therefore travels as a step OUTPUT (runtime values are uncapped), and
+# these tests keep both halves of that arrangement honest.
+
+
+def test_the_session_prompt_input_is_the_composed_output() -> None:
+    source = step_source(read_workflow(), SESSION_STEP)
+    assert "prompt: ${{ steps.compose-prompt.outputs.prompt }}" in source
+    assert "id: compose-prompt" in step_source(read_workflow(), COMPOSE_STEP)
+
+
+def test_the_compose_step_sits_between_prepare_and_the_session() -> None:
+    text = read_workflow()
+    assert (
+        step_index(text, PREPARE_STEP)
+        < step_index(text, COMPOSE_STEP)
+        < step_index(text, SESSION_STEP)
+    )
+    assert _condition(COMPOSE_STEP) == _condition(SESSION_STEP)
+
+
+def test_the_template_carries_no_inline_expressions() -> None:
+    # Dynamic values enter the template as __PLACEHOLDER__ tokens substituted at
+    # run time. A ${{ }} smuggled back into the template would be inert text to
+    # GitHub (it is inside a quoted heredoc) — shipped to the model verbatim as
+    # a confusing literal — or, worse, a sign someone is migrating the prompt
+    # back toward the capped inline form.
+    assert "${{" not in _prompt_template()
+
+
+def test_no_expression_bearing_scalar_approaches_the_cap() -> None:
+    """Sweep every workflow file for the failure class itself.
+
+    21000 is GitHub's hard limit on an expression's source text; the sweep
+    fails at 19000 so the gate breaks in CI with this named reason rather than
+    on push with "Invalid workflow file"."""
+
+    def scalars(node: object) -> list[str]:
+        if isinstance(node, str):
+            return [node]
+        if isinstance(node, dict):
+            return [s for child in node.values() for s in scalars(child)]
+        if isinstance(node, list):
+            return [s for child in node for s in scalars(child)]
+        return []
+
+    workflows = sorted(
+        path
+        for suffix in ("*.yml", "*.yaml")
+        for path in _WORKFLOWS_DIR.glob(suffix)
+    )
+    assert len(workflows) > 1
+    for path in workflows:
+        for scalar in scalars(_load(path)):
+            if "${{" in scalar:
+                assert len(scalar) < 19000, (
+                    f"{path.name}: an expression-bearing scalar is "
+                    f"{len(scalar)} chars — within sight of GitHub's 21000 "
+                    "expression cap. Move the text into a compose step output "
+                    "(see COMPOSE_STEP) instead of growing the inline scalar."
+                )
+
+
+# --- the compose step, executed for real -------------------------------------
+#
+# The template assertions above read the compose step's TEXT; these run its
+# shell (the same extract-and-execute pattern as the validate-step cases), so a
+# broken substitution — a renamed placeholder, a heredoc quoting slip, a
+# malformed $GITHUB_OUTPUT write — fails here instead of shipping a literal
+# __TOKEN__ into the prompt of a required check.
+
+_COMPOSE_ENV = {
+    "REPOSITORY": "acme/acme-app",
+    "PR_NUMBER": "424",
+    "BASE_REF": "main",
+    "MERGE_BASE": "a" * 40,
+}
+
+
+def _run_compose_step(
+    tmp_path: Path, env_overrides: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    github_output = tmp_path / "github-output.txt"
+    github_output.touch()
+    script = tmp_path / "compose.sh"
+    script.write_text(run_block(read_workflow(), COMPOSE_STEP), encoding="utf-8")
+    env = {
+        "PATH": os.environ["PATH"],
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_OUTPUT": str(github_output),
+        **_COMPOSE_ENV,
+        **(env_overrides or {}),
+    }
+    return subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_compose_step_substitutes_every_placeholder(tmp_path: Path) -> None:
+    proc = _run_compose_step(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    prompt = (tmp_path / "runner-temp" / "claude-review-v2" / "prompt.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "acme/acme-app/pull/424" in prompt
+    assert f"git diff {'a' * 40} HEAD" in prompt
+    assert "origin/main" in prompt  # __BASE_REF__ substituted where referenced
+    assert not re.search(r"__[A-Z_]+__", prompt), "unsubstituted placeholder shipped"
+    # The multiline output is a well-formed heredoc the session step can read.
+    output_lines = (tmp_path / "github-output.txt").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert output_lines[0] == "prompt<<CLAUDE_REVIEW_PROMPT_EOF"
+    assert output_lines[-1] == "CLAUDE_REVIEW_PROMPT_EOF"
+    assert "\n".join(output_lines[1:-1]) == prompt.rstrip("\n")
+
+
+def test_the_compose_step_refuses_an_empty_substitution_value(
+    tmp_path: Path,
+) -> None:
+    # An empty MERGE_BASE would compose a prompt telling the session to run
+    # `git diff  HEAD` — the exact class of quiet corruption the self-check
+    # exists to stop. The step must fail, not compose.
+    proc = _run_compose_step(tmp_path, {"MERGE_BASE": ""})
+    assert proc.returncode != 0
+    assert not (tmp_path / "github-output.txt").read_text(encoding="utf-8").strip()
+
+
+# --- the ensure step, executed for real --------------------------------------
+#
+# The merge-base repair/fail-closed shell is the gate's most safety-critical
+# new logic (two fetch strategies, captured stderr, reused variables under
+# `set -uo pipefail`), so like the compose step it is executed, not just
+# substring-matched. The fixtures are real git repos: the properties under test
+# — what unshallow repairs, what a severed ref does to merge-base — are
+# properties of git.
+
+_ENSURE_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_AUTHOR_NAME": "acme-dev",
+    "GIT_AUTHOR_EMAIL": "dev@acme.invalid",
+    "GIT_COMMITTER_NAME": "acme-dev",
+    "GIT_COMMITTER_EMAIL": "dev@acme.invalid",
+}
+
+
+def _ensure_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo, check=True, capture_output=True, text=True, env=_ENSURE_GIT_ENV,
+    ).stdout.strip()
+
+
+def _remote_with_pr(tmp_path: Path) -> Path:
+    """A file:// 'remote' whose main has advanced past the pr branch point."""
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _ensure_git(remote, "init", "-q", "-b", "main")
+    for name in ("a", "b"):
+        (remote / f"{name}.txt").write_text(f"{name}\n", encoding="utf-8")
+        _ensure_git(remote, "add", "-A")
+        _ensure_git(remote, "commit", "-q", "-m", f"commit {name}")
+    _ensure_git(remote, "branch", "pr", "HEAD~1")
+    _ensure_git(remote, "checkout", "-q", "pr")
+    (remote / "pr.txt").write_text("pr\n", encoding="utf-8")
+    _ensure_git(remote, "add", "-A")
+    _ensure_git(remote, "commit", "-q", "-m", "pr commit")
+    _ensure_git(remote, "checkout", "-q", "main")
+    return remote
+
+
+def _run_ensure_step(repo: Path) -> subprocess.CompletedProcess[str]:
+    script = repo.parent / "ensure-step.sh"
+    script.write_text(
+        run_block(read_workflow(), ENSURE_MERGE_BASE_STEP), encoding="utf-8"
+    )
+    return subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=repo,
+        env={**_ENSURE_GIT_ENV, "BASE_REF": "main"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_ensure_step_repairs_a_shallow_clone(tmp_path: Path) -> None:
+    remote = _remote_with_pr(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth=1", f"file://{remote}", str(clone)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "fetch", "-q", "--depth=1", "origin", "pr")
+    _ensure_git(clone, "checkout", "-q", "FETCH_HEAD")
+    assert _ensure_git(clone, "rev-parse", "--is-shallow-repository") == "true"
+
+    proc = _run_ensure_step(clone)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Merge base with origin/main:" in proc.stdout
+    assert "::error::" not in proc.stdout
+
+
+def test_the_ensure_step_fails_closed_on_unrepairable_history(
+    tmp_path: Path,
+) -> None:
+    remote = _remote_with_pr(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{remote}", str(clone)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "fetch", "-q", "origin", "pr")
+    _ensure_git(clone, "checkout", "-q", "FETCH_HEAD")
+    # Sever origin/main to an orphan root, and point origin at an empty remote
+    # so the repair fetch cannot restore it — the state a depth-limited
+    # re-fetch of a moved ref leaves behind, with no way back.
+    empty_tree = _ensure_git(clone, "hash-object", "-w", "-t", "tree", os.devnull)
+    orphan = _ensure_git(clone, "commit-tree", empty_tree, "-m", "unrelated root")
+    _ensure_git(clone, "update-ref", "refs/remotes/origin/main", orphan)
+    dead_remote = tmp_path / "dead-remote"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(dead_remote)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "remote", "set-url", "origin", f"file://{dead_remote}")
+
+    proc = _run_ensure_step(clone)
+    assert proc.returncode != 0
+    error_lines = [
+        line for line in proc.stdout.splitlines() if line.startswith("::error::")
+    ]
+    assert len(error_lines) == 1
+    assert "infrastructure error" in error_lines[0]
+    assert "NOT a verdict" in error_lines[0]
+    # The repair fetch's own failure is named, not blamed on history corruption.
+    assert "The repair fetch itself FAILED" in error_lines[0]
+
+
+def test_the_ensure_step_passes_a_healthy_complete_clone(tmp_path: Path) -> None:
+    remote = _remote_with_pr(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{remote}", str(clone)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "fetch", "-q", "origin", "pr")
+    _ensure_git(clone, "checkout", "-q", "FETCH_HEAD")
+
+    proc = _run_ensure_step(clone)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Clone already complete — nothing to unshallow." in proc.stdout
+    assert "Merge base with origin/main:" in proc.stdout
+
 # --- the prompt's finding key list is a second copy of the schema's ----------
 
 FINDINGS_SCHEMA_PATH = (
@@ -461,7 +900,7 @@ def test_the_prompt_names_exactly_the_schema_s_finding_keys() -> None:
     The count word is checked with the set, because "Those seven keys" naming
     eight is its own quiet contradiction for a model reading the sentence.
     """
-    prompt = step_source(read_workflow(), SESSION_STEP)
+    prompt = _prompt_template()
     match = _PROMPT_KEY_LIST_RE.search(prompt)
     assert match is not None, (
         "the fan-out prompt no longer carries the `Those <n> keys — ... — are "
@@ -510,3 +949,38 @@ def test_the_two_schemas_declare_the_same_finding_keys() -> None:
         "merge copies specialist findings forward, so the result schema must "
         "accept every key the findings schema does"
     )
+
+
+def test_the_compose_step_fails_on_a_placeholder_it_does_not_know(
+    tmp_path: Path,
+) -> None:
+    # Mutation-check of the production self-check. Rename one template token so
+    # the substitution loop (driven by the fixed `keys` tuple) misses it: the
+    # step itself must fail — by generic scan, not tuple re-walk — rather than
+    # ship the raw token into the prompt of a required check. The literal
+    # `__MERGE_BASE__` appears only in the template (the python builds its
+    # tokens from env names), so the rename cannot touch the substitution code.
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    github_output = tmp_path / "github-output.txt"
+    github_output.touch()
+    script_text = run_block(read_workflow(), COMPOSE_STEP).replace(
+        "__MERGE_BASE__", "__MERGE_BASE_SHA__", 1
+    )
+    script = tmp_path / "compose.sh"
+    script.write_text(script_text, encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(github_output),
+            **_COMPOSE_ENV,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "__MERGE_BASE_SHA__" in proc.stderr
+    assert not github_output.read_text(encoding="utf-8").strip()
