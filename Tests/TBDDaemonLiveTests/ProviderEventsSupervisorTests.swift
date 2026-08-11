@@ -7,14 +7,62 @@ import Foundation
 // polling against explicit deadlines per Tests/CLAUDE.md — no bare
 // Task.sleep as a synchronization primitive, and timeout failures report
 // the observed state, not just what was expected.
-@Suite("ProviderEventsSupervisor (live)")
+//
+// The deadlines below (`saturatedWaitDeadline`, `reapDeadline`) are hang
+// guards sized against the *process population*, not against how long the
+// supervisor ought to take: in CI this target runs in the quiet serial pass
+// where healthy waits are milliseconds, but a full local `scripts/test.sh`
+// puts all 5417 tests in one process, and per-test scheduling latency scales
+// with that total (Tests/CLAUDE.md, "Population is the scheduler"). See each
+// constant for its derivation.
+//
+// The suite time limit is a hang catcher, pinned per the tier-3 convention
+// (Tests/CLAUDE.md: tier-3 suites pin their own limit rather than inheriting
+// `.clockDriven`, whose value is sized for the fast parallel pass). It is NOT
+// a regression detector here — unlike `SubprocessTimeoutTests`, nothing in
+// this suite proves anything by outliving it. Its job is to stop a regressed
+// `stop()` that never returns from wedging a whole local run, since nothing
+// else bounds that. Sized so the first named diagnostic (a 90s bounded wait's
+// thrown failure) always lands well inside it, and above the worst-case
+// failing chain (~90x3 + 30 + stop ~= 310s).
+@Suite("ProviderEventsSupervisor (live)", .timeLimit(.minutes(6)))
 struct ProviderEventsSupervisorTests {
+    /// Hang guard for the bounded waits on supervisor progress (spawn, snapshot
+    /// application, respawn, resync).
+    ///
+    /// Positive waits, all of them: each breaks on its first satisfying probe,
+    /// so raising the guard costs a passing run nothing and only a genuinely
+    /// failing one pays it. 15s was the previous value and produced reds on a
+    /// loaded multi-agent dev box that went green on a targeted rerun — the
+    /// signature of scheduling latency, not of a supervisor defect (mined p50
+    /// per-test duration is ~1/3 of total wall time). 90s matches the
+    /// `ciSafeDeadline` re-derivation for this same contention class; that
+    /// constant lives in `Tests/TBDDaemonTests` and is not importable from this
+    /// target, hence the local literal rather than a shared symbol.
+    private static let saturatedWaitDeadline: TimeInterval = 90
+
+    /// Hang guard for the "no leaked children" waits, which are cheaper than
+    /// the ones above but not free: SIGKILL delivery is kernel-immediate, yet
+    /// `kill(pid, 0)` keeps succeeding on a **zombie** until Foundation's
+    /// termination machinery (or launchd, for an orphan) reaps it — and that
+    /// reaping needs queue turns, which starve under the same contention.
+    private static let reapDeadline: TimeInterval = 30
+
     /// Stub emits hello+snapshot then hangs; killing its process tree must
     /// trigger a restart whose snapshot is REAPPLIED (resync-by-reconnect —
     /// the contract has no cursors, so a fresh connection is the whole
     /// recovery story). Each invocation announces a run-specific session id,
-    /// so the post-restart assertion can only pass if run 2's snapshot
-    /// actually reached the mirror.
+    /// so the post-restart assertion can only pass if a snapshot from a
+    /// connection established *after* the kill reached the mirror.
+    ///
+    /// The stub goes silent after its snapshot and `silenceLimit` is 5, so the
+    /// supervisor's own watchdog legitimately kills and respawns it every few
+    /// seconds of test time. Respawns are therefore expected background
+    /// behaviour, especially on a starved run, and the assertions below are
+    /// written against the contract ("a dead or silent events process is
+    /// replaced, and the replacement resyncs by reconnecting") rather than
+    /// against particular run indices, which are a transient a starved observer
+    /// can miss entirely.
     @Test func snapshotAppliedAndRestartResyncs() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("events-supervisor-\(UUID().uuidString)")
@@ -71,7 +119,7 @@ struct ProviderEventsSupervisorTests {
         let pid = Int32((try? String(contentsOf: pidFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
         var alive = true
-        let leakDeadline = Date().addingTimeInterval(5)
+        let leakDeadline = Date().addingTimeInterval(Self.reapDeadline)
         while Date() < leakDeadline {
             alive = pid > 0 && kill(-pid, 0) == 0
             if !alive { break }
@@ -116,7 +164,7 @@ struct ProviderEventsSupervisorTests {
 
         // Bounded wait for the child to exist before stopping it.
         var pid: Int32 = 0
-        let spawnDeadline = Date().addingTimeInterval(15)
+        let spawnDeadline = Date().addingTimeInterval(Self.saturatedWaitDeadline)
         while Date() < spawnDeadline {
             pid = Int32((try? String(contentsOf: pidFile, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
@@ -128,9 +176,16 @@ struct ProviderEventsSupervisorTests {
         let started = Date()
         await supervisor.stop()
         let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed < 10, "stop() took \(elapsed)s — it must not wait on a TERM-immune child")
+        // The bound discriminates "stop() returned promptly after one ~0.5s kill
+        // grace" from "stop() waited on the TERM-immune child" — and that second
+        // case is UNBOUNDED, because the child ignores TERM forever. So the
+        // number only has to sit far above the worst-case scheduling latency of
+        // stop()'s several actor/task hops under saturation, and far below
+        // "never". 10s failed the first half: it is inside observed per-test
+        // scheduling noise (p90 ~= 26s for trivial tests at population 4536).
+        #expect(elapsed < 60, "stop() took \(elapsed)s — it must not wait on a TERM-immune child")
         var alive = true
-        let leakDeadline = Date().addingTimeInterval(5)
+        let leakDeadline = Date().addingTimeInterval(Self.reapDeadline)
         while Date() < leakDeadline {
             alive = pid > 0 && kill(-pid, 0) == 0
             if !alive { break }
@@ -140,46 +195,122 @@ struct ProviderEventsSupervisorTests {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// Three bounded waits, written against the contract rather than against a
+    /// particular run index.
+    ///
+    /// Why that distinction matters: the stub goes silent after its snapshot
+    /// and `silenceLimit` is 5, so the supervisor's watchdog kills and respawns
+    /// it every few seconds *on its own*. Each respawn bumps the counter file
+    /// and replaces the mirror rows with `{live-a, run-N}` for the new N, so
+    /// `{live-a, run-1}` is a **transient** state — an observer starved past it
+    /// would never see it again while N marched upward, and demanding that
+    /// exact set turned a slow run into a red one reporting
+    /// `rows=["live-a", "run-2"]`. Each wait below therefore asserts the
+    /// property it cares about: that *a* snapshot was applied, that the process
+    /// was replaced, and that a snapshot from a connection established after
+    /// the kill reached the mirror.
     private func runAssertions(db: TBDDatabase, countFile: URL, pidFile: URL) async throws {
-        // Bounded wait (15s deadline, tier-3 discipline): run 1's snapshot lands.
+        // Wait 1: a snapshot has been applied — `live-a` plus whichever `run-N`
+        // is current. Records the highest N seen, which is the baseline the
+        // resync wait below is measured against.
         var rows: [RemoteSessionRow] = []
-        let deadline = Date().addingTimeInterval(15)
+        var maxRunAtKill: Int?
+        let deadline = Date().addingTimeInterval(Self.saturatedWaitDeadline)
         while Date() < deadline {
             rows = (try? await db.remoteSessions.list()) ?? []
-            if Set(rows.map(\.sessionID)) == ["live-a", "run-1"] { break }
+            let ids = rows.map(\.sessionID)
+            if ids.contains("live-a"), let highest = Self.highestRunIndex(ids) {
+                maxRunAtKill = highest
+                break
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
-        #expect(Set(rows.map(\.sessionID)) == ["live-a", "run-1"],
-                "run 1's snapshot not applied within 15s; observed rows=\(rows.map(\.sessionID))")
+        guard let maxRunAtKill else {
+            throw Failure("""
+                no snapshot was applied within \(Self.saturatedWaitDeadline)s — the mirror needs \
+                "live-a" and some "run-<n>"; observed rows=\(rows.map(\.sessionID))
+                """)
+        }
+
+        // Read the invocation count immediately before the kill, so the respawn
+        // wait below is relative to what had already happened rather than to a
+        // fixed `>= 2`.
+        let countAtKill = Self.invocationCount(countFile)
 
         // Kill the whole stub process group (SIGKILL can't be trapped, so the
-        // backgrounded sleep has to be taken out with it) and require a
-        // respawn: only a real second exec can bump the counter file.
+        // backgrounded sleep has to be taken out with it).
+        //
+        // The pid may already be stale — the watchdog may have cycled the
+        // process first, in which case this no-ops on ESRCH and the watchdog's
+        // own respawn satisfies the waits below. That is fine: the contract
+        // under test is "the supervisor replaces a dead or silent events process
+        // and resyncs by reconnecting", not "our kill specifically caused it".
         let pid = try #require(Int32(
             String(contentsOf: pidFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)))
         kill(-pid, SIGKILL)
-        var count = 0
-        let restartDeadline = Date().addingTimeInterval(15)
+
+        // Wait 2: a replacement process really ran. Only a fresh exec bumps the
+        // counter file.
+        var count = countAtKill
+        let restartDeadline = Date().addingTimeInterval(Self.saturatedWaitDeadline)
         while Date() < restartDeadline {
-            count = Int((try? String(contentsOf: countFile, encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0") ?? 0
-            if count >= 2 { break }
+            count = Self.invocationCount(countFile)
+            if count > countAtKill { break }
             try await Task.sleep(for: .milliseconds(200))
         }
-        #expect(count >= 2,
-                "supervisor did not restart the events process within 15s; observed invocation count=\(count)")
+        guard count > countAtKill else {
+            throw Failure("""
+                supervisor did not restart the events process within \
+                \(Self.saturatedWaitDeadline)s; observed invocation count=\(count), \
+                was \(countAtKill) at the kill
+                """)
+        }
 
-        // Reconnect-and-resnapshot IS the resync mechanism, so run 2's
-        // snapshot must reach the mirror. `run-2` exists nowhere else — if the
-        // second connection's hello+snapshot were dropped, this fails.
-        let resyncDeadline = Date().addingTimeInterval(15)
+        // Wait 3: reconnect-and-resnapshot IS the resync mechanism, so a
+        // snapshot from a connection established AFTER the kill must reach the
+        // mirror. `run-M` for M > maxRunAtKill exists nowhere else — no earlier
+        // connection could have produced it — which preserves the original
+        // test's "only a real second connection can pass this" property without
+        // pinning a specific index.
+        var highest: Int?
+        let resyncDeadline = Date().addingTimeInterval(Self.saturatedWaitDeadline)
         while Date() < resyncDeadline {
             rows = (try? await db.remoteSessions.list()) ?? []
-            if rows.contains(where: { $0.sessionID == "run-2" }) { break }
+            highest = Self.highestRunIndex(rows.map(\.sessionID))
+            if let highest, highest > maxRunAtKill { break }
             try await Task.sleep(for: .milliseconds(100))
         }
-        #expect(rows.contains { $0.sessionID == "run-2" },
-                "reconnect snapshot did not resync the mirror; observed rows=\(rows.map(\.sessionID))")
+        guard let highest, highest > maxRunAtKill else {
+            throw Failure("""
+                reconnect snapshot did not resync the mirror within \
+                \(Self.saturatedWaitDeadline)s — no run index above \(maxRunAtKill) reached it; \
+                observed rows=\(rows.map(\.sessionID))
+                """)
+        }
     }
+
+    /// Highest `n` across ids shaped `run-<n>`, or `nil` if the mirror carries
+    /// none. The stub announces one per invocation, so this is "which
+    /// connection's snapshot is currently applied".
+    private static func highestRunIndex(_ ids: some Sequence<String>) -> Int? {
+        ids.compactMap { id -> Int? in
+            guard id.hasPrefix("run-") else { return nil }
+            return Int(id.dropFirst("run-".count))
+        }.max()
+    }
+
+    /// The stub's invocation counter, or 0 if the file is missing or unparsable
+    /// (which is indistinguishable from "not yet written" and treated the same).
+    private static func invocationCount(_ countFile: URL) -> Int {
+        Int((try? String(contentsOf: countFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0") ?? 0
+    }
+}
+
+/// Timeout diagnostics travel as a thrown `Error` so they land on the primary
+/// failure line and survive into the CI summary (Tests/CLAUDE.md, rule 4).
+private struct Failure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }
