@@ -341,12 +341,25 @@ public actor OrphanGC {
     /// forever, so the worktree is permanently unrevivable until someone
     /// prunes by hand.
     ///
-    /// `git worktree prune` is the right instrument rather than a blunt one:
-    /// it drops administrative entries only for worktrees whose directory is
-    /// missing, and skips locked ones outright, so it can never remove a
-    /// registration that still has a directory behind it. The scan is still
-    /// scoped to repos with a matching archived row, so a repo with no
-    /// evidence of this failure is never touched.
+    /// `git worktree prune` is **repo-wide**, and there is no way to scope it
+    /// to one worktree — git offers no such flag. So an archived row with a
+    /// missing directory is only the *trigger*: the prune that follows drops
+    /// every registration in that repo whose directory git finds missing,
+    /// including ones this sweep never looked at. What bounds the blast radius
+    /// is not the trigger but git itself. It re-checks directory existence at
+    /// prune time rather than trusting this sweep's stale listing, it skips
+    /// locked worktrees outright, and it removes only the administrative entry
+    /// — never a directory. So the collateral entries it drops are ones whose
+    /// directory is genuinely gone at that instant, which is the same
+    /// wreckage this method exists to clear.
+    ///
+    /// The residual case is a worktree on a temporarily unmounted volume:
+    /// git sees the directory as missing and prunes a registration the user
+    /// still wants. `git worktree lock` is git's own designated mitigation for
+    /// exactly that, and prune honors it.
+    ///
+    /// Repo selection is still narrow: a repo with no archived row whose
+    /// directory is gone is never pruned at all.
     private func pruneStaleRegistrations(
         repoPathByID: [UUID: String], archived: [Worktree],
         dryRun: Bool, planned: inout [String]
