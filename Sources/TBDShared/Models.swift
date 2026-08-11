@@ -1143,7 +1143,13 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
 }
 
 /// Kind of reaped directory a `ReapRecord` describes.
-public enum ReapKind: String, Codable, Sendable { case agentWorktree, scratchpad }
+public enum ReapKind: String, Codable, Sendable {
+    case agentWorktree
+    case scratchpad
+    /// A TBD worktree directory reclaimed after its archive failed to remove
+    /// it, or drained from a pool's `.deleting/` queue.
+    case archivedWorktree
+}
 
 /// Record of a directory the daemon-owned orphan GC swept and (optionally)
 /// snapshotted before removal. Persisted so a swept worktree/scratchpad can
