@@ -1,9 +1,10 @@
 """Shared sandbox harness for the stub-API e2e tests.
 
-Builds the throwaway project (git repo + the REAL Stop hook wired via project
-settings) and the isolation env for running the real `claude` CLI against a
-StubServer. Extracted from test_session_contract.py so every e2e scenario uses
-the same, hard-won isolation rules:
+Builds the throwaway project (git repo + the REAL Stop hook and validation
+pipeline wired via project settings) and the isolation env for running the
+real `claude` CLI against a StubServer. Extracted from
+test_session_contract.py so every e2e scenario uses the same, hard-won
+isolation rules:
 
 - Sandbox via HOME + CLAUDE_CONFIG_DIR, NOT --settings: --settings layers on
   top of the runner's real global config and leaks it into the test. Session
@@ -24,10 +25,12 @@ Not a test module — pytest does not collect it.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 PIPELINE_DIR = Path(__file__).resolve().parents[2]  # .github/workflows/claude-review-v2
@@ -46,6 +49,15 @@ HOOK_STATE_NAMES = (
 )
 
 
+def real_claude_e2e_skip_reason() -> str | None:
+    """Why real-Claude scenarios cannot prove preflight, or None if ready."""
+    if shutil.which("claude") is None:
+        return "claude CLI not on PATH"
+    if importlib.util.find_spec("jsonschema") is None:
+        return "jsonschema is not importable"
+    return None
+
+
 def git(project: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-c", "user.name=stub", "-c", "user.email=stub@acme.invalid", *args],
@@ -57,7 +69,7 @@ def git(project: Path, *args: str) -> None:
 
 
 def make_project(sandbox: Path) -> Path:
-    """A throwaway git repo wired with the REAL Stop hook via project settings."""
+    """A throwaway repo wired with the real Stop hook and its preflight files."""
     project = sandbox / "project"
     hooks_dir = project / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True)
@@ -66,6 +78,10 @@ def make_project(sandbox: Path) -> Path:
     # itself resolves review-result.json from ${CLAUDE_PROJECT_DIR:-$PWD},
     # which Claude Code sets to the project root when invoking hooks.
     shutil.copy(STOP_HOOK, hooks_dir / "stop-hook.sh")
+    installed_pipeline = project / ".github" / "workflows" / "claude-review-v2"
+    installed_pipeline.mkdir(parents=True)
+    shutil.copy2(VALIDATE, installed_pipeline / "validate.py")
+    shutil.copytree(PIPELINE_DIR / "schemas", installed_pipeline / "schemas")
     settings = {
         "hooks": {
             "Stop": [
@@ -126,9 +142,14 @@ def make_sandbox(sandbox: Path) -> Path:
     return project
 
 
-def sandbox_env(sandbox: Path, base_url: str) -> dict[str, str]:
+def sandbox_env(
+    sandbox: Path,
+    base_url: str,
+    expected_specialists: tuple[str, ...] = ("correctness", "conventions"),
+) -> dict[str, str]:
+    interpreter_dir = str(Path(sys.executable).parent)
     env = {
-        "PATH": os.environ["PATH"],
+        "PATH": os.pathsep.join((interpreter_dir, os.environ["PATH"])),
         "HOME": str(sandbox),
         "CLAUDE_CONFIG_DIR": str(sandbox / "config"),
         "ANTHROPIC_BASE_URL": base_url,
@@ -137,6 +158,7 @@ def sandbox_env(sandbox: Path, base_url: str) -> dict[str, str]:
         "TMPDIR": str(sandbox / "tmp"),
         "NO_PROXY": "127.0.0.1,localhost",
         "TERM": "dumb",
+        "REVIEW_SPECIALISTS": ",".join(expected_specialists),
     }
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         env["IS_SANDBOX"] = "1"

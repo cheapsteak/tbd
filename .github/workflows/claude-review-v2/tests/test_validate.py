@@ -12,6 +12,8 @@ import pytest
 import validate
 from validate import (
     SchemaValidationError,
+    VALIDATION_FAILED_EXIT,
+    VALIDATION_INFRASTRUCTURE_EXIT,
     check_disposition,
     main,
     missing_specialist_report,
@@ -641,6 +643,24 @@ def _write_empty_result(tmp_path: Path) -> None:
     )
 
 
+def test_main_missing_jsonschema_is_an_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+    monkeypatch.setitem(sys.modules, "jsonschema", None)
+
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness")
+
+    assert exit_code == VALIDATION_INFRASTRUCTURE_EXIT
+    captured = capsys.readouterr()
+    assert "jsonschema" in captured.err
+    assert "not installed" in captured.err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
 def _run_main(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -680,7 +700,7 @@ def test_main_one_missing_specialist_fails_and_names_it(
     _write_specialist_file(tmp_path, "correctness")
     _write_empty_result(tmp_path)
     exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "conventions" in err
     assert "produced no findings file" in err
@@ -700,7 +720,7 @@ def test_main_two_missing_specialists_both_named(
     exit_code = _run_main(
         monkeypatch, tmp_path, "correctness,conventions,acme-lens"
     )
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "conventions" in err
     assert "acme-lens" in err
@@ -775,7 +795,7 @@ def test_main_empty_expected_specialists_fails_closed(
     _write_specialist_file(tmp_path, "correctness")
     _write_empty_result(tmp_path)
     exit_code = _run_main(monkeypatch, tmp_path, raw)
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "--expected-specialists" in err
     assert "REVIEW_SPECIALISTS" in err  # points at the variable that expanded empty
@@ -790,7 +810,7 @@ def test_main_empty_expected_specialists_fails_even_on_a_complete_run(
     for name in ("correctness", "conventions"):
         _write_specialist_file(tmp_path, name)
     _write_empty_result(tmp_path)
-    assert _run_main(monkeypatch, tmp_path, "") == 1
+    assert _run_main(monkeypatch, tmp_path, "") == VALIDATION_FAILED_EXIT
     assert not (tmp_path / "verdict.txt").exists()
 
 
@@ -875,7 +895,7 @@ def test_main_absent_specialist_reports_never_ran(
     _write_specialist_file(tmp_path, "correctness")
     _write_empty_result(tmp_path)
     exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert _NEVER_RAN in err
     assert _WAS_REJECTED not in err
@@ -899,7 +919,7 @@ def test_main_rejected_specialist_file_does_not_claim_it_never_ran(
     )
     _write_empty_result(tmp_path)
     exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert _WAS_REJECTED in err
     assert _NEVER_RAN not in err
@@ -917,7 +937,7 @@ def test_main_unparseable_specialist_file_is_reported_as_rejected(
     (tmp_path / "findings-conventions.json").write_text("{not json", "utf-8")
     _write_empty_result(tmp_path)
     exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert _WAS_REJECTED in err
     assert _NEVER_RAN not in err
@@ -934,7 +954,7 @@ def test_main_mixed_causes_are_reported_separately(
     )
     _write_empty_result(tmp_path)
     exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
-    assert exit_code == 1
+    assert exit_code == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert _NEVER_RAN in err and "correctness" in err
     assert _WAS_REJECTED in err and "conventions" in err
@@ -1006,7 +1026,7 @@ def test_main_on_a_stall_prints_only_the_stall_diagnosis(
             "review-result.json",
         ],
     )
-    assert validate.main() == 1
+    assert validate.main() == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "INFRASTRUCTURE" in err
     # The three misleading lines are suppressed in favour of the one that names
@@ -1045,7 +1065,7 @@ def test_main_unattributable_broken_file_is_not_a_stall(
             "review-result.json",
         ],
     )
-    assert validate.main() == 1
+    assert validate.main() == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "findings-.json" in err
     assert "not readable as JSON" in err
@@ -1086,7 +1106,7 @@ def test_main_a_schema_invalid_result_file_is_not_a_stall(
             "review-result.json",
         ],
     )
-    assert validate.main() == 1
+    assert validate.main() == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "INFRASTRUCTURE" not in err
     assert "schema validation failed" in err
@@ -1117,7 +1137,7 @@ def test_main_still_reports_a_partial_fan_out_per_lens(
             "review-result.json",
         ],
     )
-    assert validate.main() == 1
+    assert validate.main() == VALIDATION_FAILED_EXIT
     err = capsys.readouterr().err
     assert "that review lens never ran" in err
     assert "INFRASTRUCTURE" not in err

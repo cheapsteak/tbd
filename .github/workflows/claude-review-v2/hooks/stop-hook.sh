@@ -206,11 +206,10 @@ else
   rm -f "$preflight_dir/verdict.txt" 2>/dev/null || true
   rmdir "$preflight_dir" 2>/dev/null || true
 
-  if [ "$preflight_status" -eq 0 ]; then
-    exit 0
-  fi
-  case "$preflight_output" in
-    *"validation FAILED — no verdict written (gate fails closed)"*) ;;
+  validation_failed_status=3  # validate.py VALIDATION_FAILED_EXIT
+  case "$preflight_status" in
+    0) exit 0 ;;
+    "$validation_failed_status") ;;
     *)
       # The validator itself could not run to its normal fail-closed result.
       # Stand aside and let downstream authoritative validation fail closed

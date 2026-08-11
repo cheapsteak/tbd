@@ -10,9 +10,10 @@ the actual session contract from docs/specs/2026-08-03-pr-review-fanout-design.m
   artifacts pass deterministic preflight — and does not wedge it,
 - the real validate.py accepts the written files and computes the verdict.
 
-Zero tokens, fully deterministic. Skipped when no `claude` binary is on PATH,
-so CI without the toolchain cannot flake. Sandbox isolation rules (hard-won)
-live in harness.py's module docstring.
+Zero tokens, fully deterministic. Skipped unless the real `claude` binary and
+the validator's `jsonschema` dependency are available, so every executed
+scenario proves successful in-session preflight. Sandbox isolation rules
+(hard-won) live in harness.py's module docstring.
 
 This is the single-specialist baseline; the parallel fan-out and resume-loop
 scenarios build on it in test_fanout_contract.py and test_resume_loop.py.
@@ -20,7 +21,6 @@ scenarios build on it in test_fanout_contract.py and test_resume_loop.py.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -53,10 +53,71 @@ _RESULT_DOC = {
     "comment_body": "One MINOR finding on AcmeGreeter.swift; nothing blocking.",
 }
 
+_REAL_CLAUDE_E2E_SKIP_REASON = harness.real_claude_e2e_skip_reason()
+
+
+def test_sandbox_installs_the_real_preflight_pipeline(tmp_path: Path) -> None:
+    project = harness.make_project(tmp_path)
+    installed = project / ".github" / "workflows" / "claude-review-v2"
+
+    assert (installed / "validate.py").read_bytes() == harness.VALIDATE.read_bytes()
+    assert {
+        path.name: path.read_bytes() for path in (installed / "schemas").iterdir()
+    } == {
+        path.name: path.read_bytes()
+        for path in (harness.PIPELINE_DIR / "schemas").iterdir()
+    }
+
+
+def test_sandbox_env_declares_the_selected_specialist_set(tmp_path: Path) -> None:
+    selected = harness.sandbox_env(
+        tmp_path,
+        "http://127.0.0.1:9999",
+        expected_specialists=("correctness",),
+    )
+    default = harness.sandbox_env(tmp_path, "http://127.0.0.1:9999")
+
+    assert selected["REVIEW_SPECIALISTS"] == "correctness"
+    assert default["REVIEW_SPECIALISTS"] == "correctness,conventions"
+
+
+def test_sandbox_env_aligns_hook_python_with_test_interpreter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setitem(harness.os.environ, "PATH", "/usr/bin:/bin")
+
+    env = harness.sandbox_env(tmp_path, "http://127.0.0.1:9999")
+
+    assert Path(env["PATH"].split(harness.os.pathsep)[0]) == Path(sys.executable).parent
+    assert env["PATH"].endswith(f"{harness.os.pathsep}/usr/bin:/bin")
+    hook_python = shutil.which("python3", path=env["PATH"])
+    assert hook_python is not None
+    assert Path(hook_python).resolve() == Path(sys.executable).resolve()
+
+
+def test_real_claude_e2e_prerequisite_reports_missing_claude(monkeypatch) -> None:
+    monkeypatch.setattr(harness.shutil, "which", lambda _name: None)
+
+    assert harness.real_claude_e2e_skip_reason() == "claude CLI not on PATH"
+
+
+def test_real_claude_e2e_prerequisite_reports_missing_jsonschema(monkeypatch) -> None:
+    monkeypatch.setattr(harness.shutil, "which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(harness.importlib.util, "find_spec", lambda _name: None)
+
+    assert harness.real_claude_e2e_skip_reason() == "jsonschema is not importable"
+
+
+def test_real_claude_e2e_prerequisite_accepts_both_dependencies(monkeypatch) -> None:
+    monkeypatch.setattr(harness.shutil, "which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(harness.importlib.util, "find_spec", lambda _name: object())
+
+    assert harness.real_claude_e2e_skip_reason() is None
+
 
 @pytest.mark.skipif(
-    shutil.which("claude") is None,
-    reason="claude CLI not on PATH; stub e2e exercises the real binary",
+    _REAL_CLAUDE_E2E_SKIP_REASON is not None,
+    reason=_REAL_CLAUDE_E2E_SKIP_REASON or "real-Claude prerequisites available",
 )
 def test_session_contract_end_to_end() -> None:
     sandbox = Path(tempfile.mkdtemp(prefix="claude-review-v2-e2e-"))
@@ -102,7 +163,11 @@ def test_session_contract_end_to_end() -> None:
                     "bypassPermissions",
                 ],
                 cwd=project,
-                env=harness.sandbox_env(sandbox, stub.base_url),
+                env=harness.sandbox_env(
+                    sandbox,
+                    stub.base_url,
+                    expected_specialists=("correctness",),
+                ),
                 capture_output=True,
                 text=True,
                 timeout=240,
@@ -129,10 +194,12 @@ def test_session_contract_end_to_end() -> None:
         assert findings_path.is_file(), f"findings file missing.\n{debug}"
         assert result_path.is_file(), f"review-result.json missing.\n{debug}"
 
-        # (e, cont.) The run COMPLETED rather than exhausting the hook's
-        # 5-nudge ceiling: the ceiling path ends the session with no parseable
-        # result file, so a parsing result file distinguishes the two.
+        # (e, cont.) The run completed through preflight rather than exhausting
+        # the hook's bounded correction path.
         assert json.loads(result_path.read_text(encoding="utf-8")) == _RESULT_DOC
+        assert harness.nudge_count(sandbox) == 0, (
+            f"Stop hook nudged {harness.nudge_count(sandbox)} time(s).\n{debug}"
+        )
 
         # (d) The stub modeled everything the CLI needed (the known /api/hello
         # preflight excepted — see harness.tolerated_unexpected_paths).
@@ -140,31 +207,27 @@ def test_session_contract_end_to_end() -> None:
         assert unexpected == [], debug
 
         # (c) The REAL validate.py accepts the session's output end to end.
-        if importlib.util.find_spec("jsonschema") is not None:
-            vproc = subprocess.run(
-                [
-                    sys.executable,
-                    str(harness.VALIDATE),
-                    "--specialist-files",
-                    "findings-*.json",
-                    "--result-file",
-                    "review-result.json",
-                ],
-                cwd=project,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            assert vproc.returncode == 0, (
-                f"validate.py rejected the session's files:\n"
-                f"stdout:\n{vproc.stdout}\nstderr:\n{vproc.stderr}"
-            )
-            verdict = (project / "verdict.txt").read_text(encoding="utf-8")
-            assert verdict == "APPROVE", f"expected APPROVE, got {verdict!r}"
-        else:
-            print(
-                "note: jsonschema not installed — skipped the validate.py "
-                "sub-assertion (files + Stop hook + tool loop still verified)"
-            )
+        vproc = subprocess.run(
+            [
+                sys.executable,
+                str(harness.VALIDATE),
+                "--specialist-files",
+                "findings-*.json",
+                "--result-file",
+                "review-result.json",
+                "--expected-specialists",
+                "correctness",
+            ],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert vproc.returncode == 0, (
+            f"validate.py rejected the session's files:\n"
+            f"stdout:\n{vproc.stdout}\nstderr:\n{vproc.stderr}"
+        )
+        verdict = (project / "verdict.txt").read_text(encoding="utf-8")
+        assert verdict == "APPROVE", f"expected APPROVE, got {verdict!r}"
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)

@@ -28,7 +28,6 @@ on disk is what carries state across the process boundary):
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -48,6 +47,7 @@ _SLOW_ROLE = "conventions"
 # Long enough that the nudge burn (~0.5s) demonstrably finishes first, short
 # enough to keep the suite quick.
 _SLOW_DELAY_SECONDS = 3.0
+_REAL_CLAUDE_E2E_SKIP_REASON = harness.real_claude_e2e_skip_reason()
 
 
 def _result_doc() -> dict:
@@ -65,7 +65,11 @@ def _run_claude(args: list[str], project: Path, sandbox: Path, base_url: str):
     return subprocess.run(
         args,
         cwd=project,
-        env=harness.sandbox_env(sandbox, base_url),
+        env=harness.sandbox_env(
+            sandbox,
+            base_url,
+            expected_specialists=(_FAST_ROLE, _SLOW_ROLE),
+        ),
         capture_output=True,
         text=True,
         timeout=240,
@@ -73,8 +77,8 @@ def _run_claude(args: list[str], project: Path, sandbox: Path, base_url: str):
 
 
 @pytest.mark.skipif(
-    shutil.which("claude") is None,
-    reason="claude CLI not on PATH; stub e2e exercises the real binary",
+    _REAL_CLAUDE_E2E_SKIP_REASON is not None,
+    reason=_REAL_CLAUDE_E2E_SKIP_REASON or "real-Claude prerequisites available",
 )
 def test_resume_loop_end_to_end() -> None:
     sandbox = Path(tempfile.mkdtemp(prefix="claude-review-v2-resume-"))
@@ -197,29 +201,26 @@ def test_resume_loop_end_to_end() -> None:
         assert result_path.is_file(), debug2
         assert json.loads(result_path.read_text(encoding="utf-8")) == _result_doc()
 
-        if importlib.util.find_spec("jsonschema") is not None:
-            vproc = subprocess.run(
-                [
-                    sys.executable,
-                    str(harness.VALIDATE),
-                    "--specialist-files",
-                    "findings-*.json",
-                    "--result-file",
-                    "review-result.json",
-                    "--expected-specialists",
-                    f"{_FAST_ROLE},{_SLOW_ROLE}",
-                ],
-                cwd=project,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            assert vproc.returncode == 0, (
-                f"validate.py rejected the resumed output:\n"
-                f"stdout:\n{vproc.stdout}\nstderr:\n{vproc.stderr}"
-            )
-            assert (project / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
-        else:
-            print("note: jsonschema not installed — validate.py sub-assertion skipped")
+        vproc = subprocess.run(
+            [
+                sys.executable,
+                str(harness.VALIDATE),
+                "--specialist-files",
+                "findings-*.json",
+                "--result-file",
+                "review-result.json",
+                "--expected-specialists",
+                f"{_FAST_ROLE},{_SLOW_ROLE}",
+            ],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert vproc.returncode == 0, (
+            f"validate.py rejected the resumed output:\n"
+            f"stdout:\n{vproc.stdout}\nstderr:\n{vproc.stderr}"
+        )
+        assert (project / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)

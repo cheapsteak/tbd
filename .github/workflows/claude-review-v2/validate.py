@@ -19,7 +19,10 @@ Deterministic bookend that runs AFTER the model review session
   types the verdict) and writes it to verdict.txt.
 
 Any validation failure or uncovered finding exits non-zero: the gate fails
-closed. Pure policy functions take plain data; main() is the only I/O shell.
+closed. Repairable artifact rejection and validator infrastructure failure use
+distinct nonzero codes so an in-session caller never asks the model to repair a
+missing dependency. Pure policy functions take plain data; main() is the only
+I/O shell.
 
 `jsonschema` (pip-installed in CI) is imported lazily inside the validation
 functions so the pure functions — and prepare.py — never need it.
@@ -36,10 +39,20 @@ from pathlib import Path
 
 _SCHEMAS_DIR = Path(__file__).resolve().parent / "schemas"
 
+# Structured contract for callers that distinguish repairable artifact
+# rejection from Python/argparse/infrastructure failures. Any nonzero still
+# fails the workflow closed; the Stop hook counts only this expected code.
+VALIDATION_FAILED_EXIT = 3
+VALIDATION_INFRASTRUCTURE_EXIT = 4
+
 
 class SchemaValidationError(Exception):
     """A findings/result file failed schema validation; message names the file
     and the failing field."""
+
+
+class ValidationInfrastructureError(Exception):
+    """The validator cannot run, so model artifact correction cannot help."""
 
 
 # --- pure policy ------------------------------------------------------------
@@ -232,8 +245,8 @@ def check_disposition(
 def _validate_file(path: str, schema_filename: str) -> dict:
     try:
         import jsonschema
-    except ImportError as exc:  # pragma: no cover - environment misconfiguration
-        raise SchemaValidationError(
+    except ImportError as exc:  # pragma: no cover - exercised via import stubs
+        raise ValidationInfrastructureError(
             f"cannot validate {path}: the 'jsonschema' package is not installed "
             f"(pip install jsonschema) — failing closed ({exc})"
         ) from exc
@@ -308,7 +321,7 @@ def main() -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print("validation FAILED — no verdict written (gate fails closed)")
-        return 1
+        return VALIDATION_FAILED_EXIT
 
     failed = False
 
@@ -321,6 +334,13 @@ def main() -> int:
     for path in specialist_paths:
         try:
             data = validate_findings_file(path)
+        except ValidationInfrastructureError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print(
+                "validation INFRASTRUCTURE FAILED — no verdict written "
+                "(gate fails closed)"
+            )
+            return VALIDATION_INFRASTRUCTURE_EXIT
         except SchemaValidationError as exc:
             print(f"error: {exc}", file=sys.stderr)
             failed = True
@@ -346,6 +366,13 @@ def main() -> int:
     try:
         result = validate_result_file(args.result_file)
         print(f"ok: {args.result_file}")
+    except ValidationInfrastructureError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(
+            "validation INFRASTRUCTURE FAILED — no verdict written "
+            "(gate fails closed)"
+        )
+        return VALIDATION_INFRASTRUCTURE_EXIT
     except SchemaValidationError as exc:
         result_error = str(exc)
 
@@ -413,14 +440,14 @@ def main() -> int:
 
     if failed or result is None:
         print("validation FAILED — no verdict written (gate fails closed)")
-        return 1
+        return VALIDATION_FAILED_EXIT
 
     try:
         verdict = verdict_from_findings(result["findings"])
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print("validation FAILED — no verdict written (gate fails closed)")
-        return 1
+        return VALIDATION_FAILED_EXIT
 
     with open("verdict.txt", "w", encoding="utf-8") as handle:
         handle.write(verdict)

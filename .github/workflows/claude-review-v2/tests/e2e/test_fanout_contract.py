@@ -20,7 +20,6 @@ capture's per-route timestamps rather than assuming any global order.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -35,7 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness  # noqa: E402
 from stub_server import StubServer, ToolCall, Turn, loop_advanced  # noqa: E402
 
-_ROLES = ["correctness", "conventions"]
+_ROLES = ("correctness", "conventions")
+_REAL_CLAUDE_E2E_SKIP_REASON = harness.real_claude_e2e_skip_reason()
 
 
 def _result_doc() -> dict:
@@ -47,8 +47,8 @@ def _result_doc() -> dict:
 
 
 @pytest.mark.skipif(
-    shutil.which("claude") is None,
-    reason="claude CLI not on PATH; stub e2e exercises the real binary",
+    _REAL_CLAUDE_E2E_SKIP_REASON is not None,
+    reason=_REAL_CLAUDE_E2E_SKIP_REASON or "real-Claude prerequisites available",
 )
 def test_parallel_fanout_end_to_end() -> None:
     sandbox = Path(tempfile.mkdtemp(prefix="claude-review-v2-fanout-"))
@@ -90,7 +90,9 @@ def test_parallel_fanout_end_to_end() -> None:
                     "bypassPermissions",
                 ],
                 cwd=project,
-                env=harness.sandbox_env(sandbox, stub.base_url),
+                env=harness.sandbox_env(
+                    sandbox, stub.base_url, expected_specialists=_ROLES
+                ),
                 capture_output=True,
                 text=True,
                 timeout=240,
@@ -147,29 +149,26 @@ def test_parallel_fanout_end_to_end() -> None:
         assert harness.tolerated_unexpected_paths(cap.unexpected_paths) == [], debug
 
         # The REAL validate.py, with the specialist-completeness check.
-        if importlib.util.find_spec("jsonschema") is not None:
-            vproc = subprocess.run(
-                [
-                    sys.executable,
-                    str(harness.VALIDATE),
-                    "--specialist-files",
-                    "findings-*.json",
-                    "--result-file",
-                    "review-result.json",
-                    "--expected-specialists",
-                    ",".join(_ROLES),
-                ],
-                cwd=project,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            assert vproc.returncode == 0, (
-                f"validate.py rejected the fan-out output:\n"
-                f"stdout:\n{vproc.stdout}\nstderr:\n{vproc.stderr}"
-            )
-            assert (project / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
-        else:
-            print("note: jsonschema not installed — validate.py sub-assertion skipped")
+        vproc = subprocess.run(
+            [
+                sys.executable,
+                str(harness.VALIDATE),
+                "--specialist-files",
+                "findings-*.json",
+                "--result-file",
+                "review-result.json",
+                "--expected-specialists",
+                ",".join(_ROLES),
+            ],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert vproc.returncode == 0, (
+            f"validate.py rejected the fan-out output:\n"
+            f"stdout:\n{vproc.stdout}\nstderr:\n{vproc.stderr}"
+        )
+        assert (project / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)

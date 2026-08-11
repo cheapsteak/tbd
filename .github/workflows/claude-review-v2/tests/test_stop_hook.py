@@ -249,6 +249,31 @@ def test_schema_invalid_findings_block_even_with_a_parseable_result(
     assert _count(state) == 1
 
 
+def test_schema_rejection_does_not_depend_on_validator_summary_wording(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_invalid_findings_with_valid_result(project)
+    validator = project / ".github" / "workflows" / "claude-review-v2" / "validate.py"
+    validator.write_text(
+        validator.read_text().replace(
+            "validation FAILED — no verdict written (gate fails closed)",
+            "review artifacts rejected; no verdict produced",
+        )
+    )
+
+    proc = _run(project, state)
+
+    assert proc.returncode == 0
+    decision = _decision(proc)
+    assert decision is not None
+    assert decision["decision"] == "block"
+    assert "failure_scenario" in decision["reason"]
+    assert "review artifacts rejected; no verdict produced" in decision["reason"]
+    assert _count(state) == 1
+
+
 def test_schema_invalid_findings_release_after_five_counted_blocks(
     dirs: tuple[Path, Path],
 ) -> None:
@@ -270,6 +295,26 @@ def test_an_unavailable_validator_releases_without_consuming_the_budget(
     _write_findings(project, "correctness")
     _write_findings(project, "conventions")
     _write_result(project)
+
+    proc = _run(project, state)
+
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    assert _count(state) == 0
+
+
+def test_missing_jsonschema_releases_without_consuming_the_budget(
+    dirs: tuple[Path, Path],
+) -> None:
+    project, state = dirs
+    _install_validator(project)
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    _write_result(project)
+    pipeline = project / ".github" / "workflows" / "claude-review-v2"
+    (pipeline / "jsonschema.py").write_text(
+        "raise ImportError('simulated missing jsonschema')\n"
+    )
 
     proc = _run(project, state)
 

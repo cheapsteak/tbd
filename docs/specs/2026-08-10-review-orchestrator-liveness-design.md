@@ -2,7 +2,10 @@
 
 Status: **implemented**. Written 2026-08-10.
 
-Brainstormed per `/tbd-brainstorming`; the four decisions in §2 were answered by a human.
+Brainstormed per `/tbd-brainstorming`; the first four liveness decisions in §2 were
+answered by a human. The deterministic-preflight decision follows from the fan-out
+pipeline's existing closed-schema and fail-closed validation contract rather than from a
+new product or threshold choice.
 
 Amends the fan-out pipeline described in
 [`2026-08-03-pr-review-fanout-design.md`](2026-08-03-pr-review-fanout-design.md), whose
@@ -66,7 +69,11 @@ neither pins nor controls: the workflow uses `anthropics/claude-code-action@v1`,
 floating tag, so a harness release can change how subagents are scheduled with no change
 of ours. A fix that encodes the current scheduling behavior would inherit that exposure.
 
-## 2. Decisions (human-answered brainstorm)
+## 2. Decisions
+
+The first four decisions set the liveness mechanism and thresholds and were answered by a
+human during brainstorming. The final decision applies the fan-out contract to a bug in
+the mechanism that enforces those decisions; it is not presented as another human answer.
 
 - **Scope** — **smallest change that removes the race**, keeping the single-session shape.
   Restructuring the fan-out into separate workflow jobs stays available but unbuilt; the
@@ -84,6 +91,15 @@ of ours. A fix that encodes the current scheduling behavior would inherit that e
   review reproduces the failure this design exists to remove. A wall-clock deadline is
   only reachable if holding costs wall clock, so each hold sleeps 30 seconds before it
   blocks; §3.2 gives the turn-budget arithmetic that fixes that number.
+- **Deterministic preflight and bounded correction** — **apply the existing
+  closed-schema, specialist-completeness, disposition-coverage, and fail-closed contract
+  before the session ends.** Parseable artifacts are not necessarily valid artifacts, so
+  the Stop hook runs the trusted validator and returns its exact rejection to the model.
+  Repairable validation failures share the existing five-nudge refusal budget; a
+  successful preflight allows the stop, while an unexpected validator or infrastructure
+  failure releases under the hook's always-exit-zero rule and fails closed downstream.
+  This is a bug-fix placement of the fan-out contract at the earliest point that can still
+  correct model output, not a new review-policy or liveness-threshold decision.
 
 ## 3. Design
 
@@ -131,6 +147,14 @@ its first invocation it stamps a start time beside its counter file.
 Both counted states share the five-nudge ceiling. Past the 25-minute findings deadline,
 the hook exits 0 and lets `validate.py` fail closed downstream. The deadline keeps the
 uncounted hold from becoming unbounded.
+
+The validator's exit status is the preflight control signal: `0` means the artifacts pass,
+the named `VALIDATION_FAILED_EXIT` code `3` means the artifacts were deterministically
+rejected and can receive a correction nudge, and the named
+`VALIDATION_INFRASTRUCTURE_EXIT` code `4` identifies a known validator dependency failure.
+Code `4` and every other nonzero release to downstream validation because model correction
+cannot repair validator infrastructure. Diagnostic wording is model feedback only and
+never selects a branch.
 
 **The hold sleeps, because a hold costs a turn.** Every hold is a block, and every block
 costs one turn of the session's `--max-turns 100` budget — so the scarce resource is turns,

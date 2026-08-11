@@ -65,6 +65,8 @@ role's first response to simulate a straggling specialist.
 python3 -m pytest .github/workflows/claude-review-v2/tests/e2e/ -q
 ```
 
-The stub self-tests always run. The e2e scenarios self-skip when no `claude`
-binary is on `PATH`, so CI without the toolchain cannot flake. `validate.py`'s
-sub-assertions additionally need `jsonschema` (skipped with a note otherwise).
+The stub and harness tests always run. The three real-Claude scenarios require
+both a `claude` binary on `PATH` and an importable `jsonschema`; they self-skip
+unless both prerequisites are available. Once a scenario runs, its Stop hook
+and unconditional final `validate.py` assertion use the same Python environment
+and must both complete successfully.
