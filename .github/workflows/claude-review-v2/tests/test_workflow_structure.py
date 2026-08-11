@@ -16,6 +16,7 @@ Every lookup is by exact step NAME, so renaming a step fails loudly.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -409,3 +410,103 @@ def test_a_passing_validate_annotates_nothing_and_succeeds(tmp_path: Path) -> No
     proc = _run_validate_step(tmp_path, "", 0)
     assert proc.returncode == 0
     assert _annotations(proc) == []
+
+
+# --- the prompt's finding key list is a second copy of the schema's ----------
+
+FINDINGS_SCHEMA_PATH = (
+    _WORKFLOWS_DIR / "claude-review-v2" / "schemas" / "findings.schema.json"
+)
+RESULT_SCHEMA_PATH = (
+    _WORKFLOWS_DIR / "claude-review-v2" / "schemas" / "review-result.schema.json"
+)
+
+_PROMPT_KEY_LIST_RE = re.compile(
+    r"Those (?P<count>\w+) keys — (?P<keys>.+?) — are the ONLY keys a finding "
+    r"may carry"
+)
+
+_NUMBER_WORDS = (
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+)
+
+
+def _schema_finding_keys() -> set[str]:
+    schema = json.loads(FINDINGS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return set(schema["$defs"]["finding"]["properties"])
+
+
+def test_the_prompt_names_exactly_the_schema_s_finding_keys() -> None:
+    """The fan-out prompt spells the finding vocabulary a second time.
+
+    It has to: an unknown key INSIDE a finding is stripped with a warning
+    rather than rejected, so a key the prompt permits and the schema does not
+    is deleted and whatever the model wrote in it never reaches a reader. The
+    run stays green and the loss is a line in the log. (A misnamed key at a
+    file's top level still fails closed — that half of the drift is loud.)
+    Nothing else compares these two lists, so this test is the comparison: add
+    a key to `$defs/finding/properties` and it fails until the prompt names it
+    too.
+
+    The count word is checked with the set, because "Those seven keys" naming
+    eight is its own quiet contradiction for a model reading the sentence.
+    """
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    match = _PROMPT_KEY_LIST_RE.search(prompt)
+    assert match is not None, (
+        "the fan-out prompt no longer carries the `Those <n> keys — ... — are "
+        "the ONLY keys a finding may carry` sentence. If the prompt states the "
+        "finding vocabulary another way, retarget this test rather than "
+        "deleting it: an unknown key inside a finding is stripped rather than "
+        "rejected, so nothing else catches this drift"
+    )
+
+    named = set(re.findall(r"`([A-Za-z0-9_]+)`", match.group("keys")))
+    schema_keys = _schema_finding_keys()
+    assert named == schema_keys
+    assert len(schema_keys) < len(_NUMBER_WORDS), (
+        f"the finding schema declares {len(schema_keys)} keys, past the "
+        f"{len(_NUMBER_WORDS) - 1} this test can spell — extend _NUMBER_WORDS "
+        "so the count word is still checked rather than skipped"
+    )
+    assert match.group("count") == _NUMBER_WORDS[len(schema_keys)]
+
+    # And every one of them is backtick-quoted somewhere in the prompt, so the
+    # sentence is not the only place a specialist reads the name.
+    for key in schema_keys:
+        assert f"`{key}`" in prompt
+
+
+def test_the_two_schemas_declare_the_same_finding_keys() -> None:
+    """`$defs/finding` is maintained twice, and the copies must agree.
+
+    The orchestrator does not re-author findings for the merged result: it
+    copies specialist findings forward, so review-result.schema.json has to
+    accept every key findings.schema.json does. Let the two drift and the
+    failure lands at the worst moment — the specialist files all validate, the
+    lenses all report, and the merge is rejected for a key its own inputs were
+    told to write, which reads as a model error rather than a schema one.
+
+    Key sets only. The two `finding` definitions are not required to be
+    identical in every respect, but a key legal in one and unknown in the other
+    is always a defect.
+    """
+    findings_keys = _schema_finding_keys()
+    result_schema = json.loads(RESULT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    result_keys = set(result_schema["$defs"]["finding"]["properties"])
+    assert findings_keys == result_keys, (
+        "findings.schema.json and review-result.schema.json declare different "
+        f"finding keys ({sorted(findings_keys ^ result_keys)} differ) — the "
+        "merge copies specialist findings forward, so the result schema must "
+        "accept every key the findings schema does"
+    )
