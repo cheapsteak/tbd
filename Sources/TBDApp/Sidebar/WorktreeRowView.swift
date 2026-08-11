@@ -308,8 +308,9 @@ struct WorktreeRowView: View {
         // every sidebar row on every body evaluation. Promoted rows are
         // excluded — promotion MOVES the folder, so their directory is expected
         // to be gone; see AppState.scratchRowIsDimmed.
+        // Task 7: the existence probe goes through `LocalWorktree(worktree)`.
         .opacity(AppState.scratchRowIsDimmed(
-            worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
+            worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.localPath)
         ) ? 0.5 : 1.0)
         // The worktree-row hover surface is intentionally reserved: per-session
         // account facts and switching live in the tab bar, and this hover is

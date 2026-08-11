@@ -127,7 +127,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var name: String
     public var displayName: String
     public var branch: String
-    public var path: String
+    /// Absolute path to the git worktree directory on THIS machine. Named
+    /// `localPath` rather than `path` so that every read of it is visibly a
+    /// local-only assumption; code that must work for any worktree goes
+    /// through `LocalWorktree` instead. The wire key and the DB column both
+    /// stay `path`.
+    public var localPath: String
     public var status: WorktreeStatus
     public var hasConflicts: Bool = false
     public var createdAt: Date
@@ -242,7 +247,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.name = name
         self.displayName = displayName
         self.branch = branch
-        self.path = path
+        self.localPath = path
         self.status = status
         self.hasConflicts = hasConflicts
         self.createdAt = createdAt
@@ -281,7 +286,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         name = try c.decode(String.self, forKey: .name)
         displayName = try c.decode(String.self, forKey: .displayName)
         branch = try c.decode(String.self, forKey: .branch)
-        path = try c.decode(String.self, forKey: .path)
+        localPath = try c.decode(String.self, forKey: .path)
         status = try c.decode(WorktreeStatus.self, forKey: .status)
         hasConflicts = try c.decodeIfPresent(Bool.self, forKey: .hasConflicts) ?? false
         createdAt = try c.decode(Date.self, forKey: .createdAt)
@@ -328,7 +333,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encode(name, forKey: .name)
         try c.encode(displayName, forKey: .displayName)
         try c.encode(branch, forKey: .branch)
-        try c.encode(path, forKey: .path)
+        try c.encode(localPath, forKey: .path)
         try c.encode(status, forKey: .status)
         try c.encode(hasConflicts, forKey: .hasConflicts)
         try c.encode(createdAt, forKey: .createdAt)

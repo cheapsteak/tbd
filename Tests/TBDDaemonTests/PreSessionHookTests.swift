@@ -164,7 +164,7 @@ struct PreSessionHookTests {
         let setupBody = windowCalls[1].last ?? ""
         #expect(setupBody.contains("export TBD_EVENT='setup'"))
         #expect(setupBody.contains("export TBD_WORKTREE_NAME='\(wt.name)'"))
-        #expect(setupBody.contains("export TBD_WORKTREE_PATH='\(wt.path)'"))
+        #expect(setupBody.contains("export TBD_WORKTREE_PATH='\(wt.localPath)'"))
         #expect(setupBody.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(setupBody.contains("export TBD_BRANCH='\(wt.branch)'"))
 
@@ -277,7 +277,7 @@ struct PreSessionHookTests {
         #expect(body.contains("export TBD_EVENT='preSession'"))
         #expect(body.contains("export TBD_WORKTREE_ID='\(createdWt.id.uuidString)'"))
         #expect(body.contains("export TBD_WORKTREE_NAME='\(createdWt.name)'"))
-        #expect(body.contains("export TBD_WORKTREE_PATH='\(createdWt.path)'"))
+        #expect(body.contains("export TBD_WORKTREE_PATH='\(createdWt.localPath)'"))
         #expect(body.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(body.contains("export TBD_BRANCH='\(createdWt.branch)'"))
         // The pre-session window must carry `-e DISABLE_AUTO_UPDATE=true` so
@@ -329,7 +329,7 @@ struct PreSessionHookTests {
         #expect(setupBody.contains("export TBD_EVENT='setup'"))
         #expect(setupBody.contains("export TBD_TERMINAL_ID='\(setup.id.uuidString)'"))
         #expect(setupBody.contains("export TBD_WORKTREE_NAME='\(createdWt.name)'"))
-        #expect(setupBody.contains("export TBD_WORKTREE_PATH='\(createdWt.path)'"))
+        #expect(setupBody.contains("export TBD_WORKTREE_PATH='\(createdWt.localPath)'"))
         #expect(setupBody.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(setupBody.contains("export TBD_BRANCH='\(createdWt.branch)'"))
     }
@@ -416,7 +416,7 @@ struct PreSessionHookTests {
         let subscriptions = StateSubscriptionManager()
         let lifecycle = makeLifecycle(db: db, subscriptions: subscriptions, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: repo, worktreePath: worktree.path
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath
         ))
         // tmux is dry-run, so the hook never really runs. Stand in for its
         // clean exit. Must come AFTER the spawn, which deletes any stale
@@ -425,7 +425,7 @@ struct PreSessionHookTests {
 
         await lifecycle.runPreSessionPhase3(
             preSession: spawn, worktree: worktree, repo: repo,
-            worktreePath: worktree.path, skipClaude: true,
+            worktreePath: worktree.localPath, skipClaude: true,
             completionAction: .markActive
         )
 
@@ -444,13 +444,13 @@ struct PreSessionHookTests {
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: repo, worktreePath: worktree.path
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath
         ))
         try writeMarker(worktreeID: worktree.id, exitCode: 3)
 
         await lifecycle.runPreSessionPhase3(
             preSession: spawn, worktree: worktree, repo: repo,
-            worktreePath: worktree.path, skipClaude: true,
+            worktreePath: worktree.localPath, skipClaude: true,
             completionAction: .markActive
         )
 
@@ -470,13 +470,13 @@ struct PreSessionHookTests {
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: repo, worktreePath: worktree.path
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath
         ))
         try writeMarker(worktreeID: worktree.id, exitCode: exitCode)
 
         await lifecycle.runPreSessionPhase3(
             preSession: spawn, worktree: worktree, repo: repo,
-            worktreePath: worktree.path, skipClaude: true,
+            worktreePath: worktree.localPath, skipClaude: true,
             completionAction: .markActive
         )
 
@@ -510,7 +510,7 @@ struct PreSessionHookTests {
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: repo, worktreePath: worktree.path,
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath,
             claimsFocus: false
         ))
 
@@ -537,7 +537,7 @@ struct PreSessionHookTests {
         }
         let lifecycle = makeLifecycle(db: db, subscriptions: subscriptions, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: repo, worktreePath: worktree.path,
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath,
             claimsFocus: false
         ))
 
@@ -560,7 +560,7 @@ struct PreSessionHookTests {
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: repo, worktreePath: worktree.path
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath
         ))
 
         let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
@@ -579,13 +579,13 @@ struct PreSessionHookTests {
         let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 2)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
-            worktree: worktree, repo: nil, worktreePath: worktree.path
+            worktree: worktree, repo: nil, worktreePath: worktree.localPath
         ))
         #expect(try await db.terminals.get(id: spawn.terminalID) != nil)
 
         let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
         let body = windowCalls.first?.last ?? ""
-        #expect(body.contains("export TBD_REPO_PATH='\(worktree.path)'"),
+        #expect(body.contains("export TBD_REPO_PATH='\(worktree.localPath)'"),
                 "with no repo, TBD_REPO_PATH must fall back to the worktree's own path")
     }
 

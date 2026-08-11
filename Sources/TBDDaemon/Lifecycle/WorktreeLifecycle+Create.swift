@@ -130,7 +130,7 @@ extension WorktreeLifecycle {
             // the constraint it mirrors spans every row on the table, so a
             // path withheld from this set is not a harmless omission — the
             // insert below would abort on it.
-            let reserved = Set(try await db.worktrees.list().map(\.path))
+            let reserved = Set(try await db.worktrees.list().map(\.localPath))
             resolvedName = Self.uniqueFolderName(
                 base: baseFolder, in: canonicalBase, reserved: reserved
             )
@@ -671,7 +671,7 @@ extension WorktreeLifecycle {
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
-        let worktreePath = worktreePath ?? worktree.path
+        let worktreePath = worktreePath ?? worktree.localPath
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
         let primaryTerminalKind: TerminalKind = carryover == nil

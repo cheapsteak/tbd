@@ -43,6 +43,8 @@ enum ParkedPaneWakeModel {
 /// based on PaneContent type. Replaces the former TerminalPanelPlaceholder.
 struct PanePlaceholder: View {
     let content: PaneContent
+    // Task 7: this stored property becomes a `LocalWorktree`, and the
+    // `.localPath` reads below become `.path` on the wrapper.
     let worktree: Worktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
@@ -341,7 +343,7 @@ struct PanePlaceholder: View {
         case .webview(_, let url):
             WebviewPaneView(url: url, state: webviewState)
         case .codeViewer(_, let path):
-            CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
+            CodeViewerPaneView(path: path, worktreePath: worktree.localPath, showSourceCode: showSourceCode)
         case .note(let noteID):
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
@@ -409,7 +411,7 @@ struct PanePlaceholder: View {
                     tmuxWindowID: terminal.tmuxWindowID,
                     tmuxBridge: appState.tmuxBridge,
                     tabCloseContext: tabID.map { TabCloseContext(worktreeID: worktree.id, tabID: $0) },
-                    worktreePath: worktree.path,
+                    worktreePath: worktree.localPath,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
                         let result = routeFileClick(into: layout, terminalID: terminalID, path: path)

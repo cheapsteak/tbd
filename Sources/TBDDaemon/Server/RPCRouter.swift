@@ -575,14 +575,14 @@ public final class RPCRouter: Sendable {
         var infos: [PRStatusManager.PollWorktree] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
-            let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
+            let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.localPath, branch: wt.branch)
             infos.append((
                 id: wt.id,
                 branch: wt.branch,
                 upstreamBranch: upstreamBranch,
                 defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
                 pushBranch: pushBranch,
-                worktreePath: wt.path,
+                worktreePath: wt.localPath,
                 prNumber: wt.prNumber
             ))
         }
@@ -633,7 +633,7 @@ public final class RPCRouter: Sendable {
         // git directly here would let a user refresh attach a PR that the very
         // next poll — still inside the cache's TTL, still holding the older
         // facts — judges by a different candidate list and clears again.
-        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
+        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.localPath, branch: wt.branch)
         var defaultBranch: String?
         if let repoID = wt.repoID {
             defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
@@ -645,7 +645,7 @@ public final class RPCRouter: Sendable {
             upstreamBranch: upstreamBranch,
             defaultBranch: defaultBranch,
             pushBranch: pushBranch,
-            repoPath: wt.path,
+            repoPath: wt.localPath,
             prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))

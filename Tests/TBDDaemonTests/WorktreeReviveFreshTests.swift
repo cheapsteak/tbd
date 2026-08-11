@@ -297,7 +297,7 @@ struct WorktreeReviveFreshTests {
         #expect(created.displayName == "stale-owl (revived)")
         #expect(created.branch == "tbd/\(created.name)")
         #expect(
-            try await GitManager().headSHA(repoPath: created.path, ref: "HEAD")
+            try await GitManager().headSHA(repoPath: created.localPath, ref: "HEAD")
                 == remoteSHA
         )
         #expect(
@@ -388,7 +388,7 @@ struct WorktreeReviveFreshTests {
 
         #expect(
             try await GitManager().headSHA(
-                repoPath: outcome.result.worktree.path, ref: "HEAD"
+                repoPath: outcome.result.worktree.localPath, ref: "HEAD"
             ) == localSHA
         )
         let warning = try #require(outcome.result.warning)
@@ -686,7 +686,7 @@ struct WorktreeReviveFreshTests {
             (try? FileManager.default.destinationOfSymbolicLink(atPath: profileRoot.path)) != nil
         )
         let derived = TranscriptProjectDirSync.derivedProjectDir(
-            worktreePath: outcome.result.worktree.path, projectsRoot: profileRoot)
+            worktreePath: outcome.result.worktree.localPath, projectsRoot: profileRoot)
         #expect(
             FileManager.default.fileExists(
                 atPath: derived.appendingPathComponent("A.jsonl").path)

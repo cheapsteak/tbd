@@ -83,4 +83,15 @@ import Foundation
         let decoded = try JSONDecoder().decode(Worktree.self, from: JSONEncoder().encode(wt))
         #expect(decoded == wt)
     }
+
+    /// The stored path is named `localPath` in Swift but must not change the
+    /// wire format: the JSON key stays `path`, so a daemon and an app at
+    /// different versions still agree.
+    @Test func encodesLocalPathUnderThePathKey() throws {
+        let wt = makeWorktree()
+        let object = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(wt)) as? [String: Any]
+        #expect(object?["path"] as? String == "/tmp/n")
+        #expect(object?["localPath"] == nil)
+    }
 }

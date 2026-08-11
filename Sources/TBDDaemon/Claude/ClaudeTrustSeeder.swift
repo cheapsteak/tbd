@@ -151,9 +151,9 @@ enum ClaudeTrustSeeder {
         // in. If the symlink-resolved form differs, seed both — harmless, and it
         // defends against a cwd/symlink mismatch between what TBD stores and what
         // Claude derives at runtime.
-        var projectKeys = [worktree.path]
-        let resolvedPath = URL(fileURLWithPath: worktree.path).resolvingSymlinksInPath().path
-        if resolvedPath != worktree.path {
+        var projectKeys = [worktree.localPath]
+        let resolvedPath = URL(fileURLWithPath: worktree.localPath).resolvingSymlinksInPath().path
+        if resolvedPath != worktree.localPath {
             projectKeys.append(resolvedPath)
         }
 
@@ -161,7 +161,7 @@ enum ClaudeTrustSeeder {
             projectKeys: projectKeys,
             configDirURL: configDirURL,
             claudeJSONPath: claudeJSONPath,
-            worktreePath: worktree.path)
+            worktreePath: worktree.localPath)
     }
 
     /// The process-wide lane every seed's read-merge-write runs on.

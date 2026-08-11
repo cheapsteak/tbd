@@ -47,7 +47,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.name = wt.name
         self.displayName = wt.displayName
         self.branch = wt.branch
-        self.path = wt.path
+        self.path = wt.localPath
         self.status = wt.status.rawValue
         self.hasConflicts = wt.hasConflicts
         self.createdAt = wt.createdAt

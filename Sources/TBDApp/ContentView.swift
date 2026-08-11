@@ -631,7 +631,9 @@ private struct WorktreeDetailAreaView: View {
     var body: some View {
         HStack(spacing: 0) {
             TerminalContainerView()
-            if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
+            // Task 7: becomes `let worktree = selectedLocalWorktree`, which
+            // subsumes the empty-path check.
+            if showFilePanel, let worktree = selectedWorktree, !worktree.localPath.isEmpty {
                 FilePanelDivider(panelWidth: Binding(
                     get: { CGFloat(filePanelWidth) },
                     set: { filePanelWidth = Double($0) }

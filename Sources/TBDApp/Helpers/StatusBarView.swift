@@ -5,12 +5,14 @@ import TBDShared
 struct StatusBarView: View {
     @EnvironmentObject var appState: AppState
 
+    // Task 7: both helpers below take a `LocalWorktree?`, which retires the
+    // hand-written empty-path guards.
     /// Path + repo of the resolved single-selected worktree (nil when it has
     /// no path yet). The caller resolves the selection once per body
     /// evaluation and passes it in, so this never re-runs `findWorktree`.
     private static func selectedWorktreeInfo(_ worktree: Worktree?) -> (path: String, repoID: UUID?)? {
-        guard let worktree, !worktree.path.isEmpty else { return nil }
-        return (worktree.path, worktree.repoID)
+        guard let worktree, !worktree.localPath.isEmpty else { return nil }
+        return (worktree.localPath, worktree.repoID)
     }
 
     /// The bottom-left cluster: where the selected worktree lives on disk and
@@ -29,11 +31,11 @@ struct StatusBarView: View {
         _ worktree: Worktree?,
         home: String = NSHomeDirectory()
     ) -> LocationLabel? {
-        guard let worktree, !worktree.path.isEmpty else { return nil }
+        guard let worktree, !worktree.localPath.isEmpty else { return nil }
         let branch = worktree.branch.trimmingCharacters(in: .whitespacesAndNewlines)
         return LocationLabel(
-            path: worktree.path,
-            displayPath: abbreviateWithTilde(worktree.path, home: home),
+            path: worktree.localPath,
+            displayPath: abbreviateWithTilde(worktree.localPath, home: home),
             branch: branch.isEmpty ? nil : branch
         )
     }
@@ -76,7 +78,7 @@ struct StatusBarView: View {
     private var footerLabel: (text: String, tooltip: String?) {
         let version = "v\(TBDConstants.version)"
         guard let sourcePath = Self.sourceWorktreePath,
-              let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.path == sourcePath }) else {
+              let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.localPath == sourcePath }) else {
             return (version, nil)
         }
         return (worktree.displayName, version)

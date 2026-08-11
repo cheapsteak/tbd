@@ -426,8 +426,8 @@ public actor OrphanGC {
     ) async {
         let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
         let gone = archived
-            .filter { !FileManager.default.fileExists(atPath: $0.path) }
-            .map { (worktreePath: $0.path, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
+            .filter { !FileManager.default.fileExists(atPath: $0.localPath) }
+            .map { (worktreePath: $0.localPath, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
 
         guard !dryRun else {
             for entry in gone {
@@ -472,7 +472,7 @@ public actor OrphanGC {
             return
         }
         guard let rows = try? await db.worktrees.list(repoID: repoID) else { return }
-        let pairs = rows.map { (worktreePath: $0.path, repoPath: repoPath) }
+        let pairs = rows.map { (worktreePath: $0.localPath, repoPath: repoPath) }
         let records = await scratchpadCollector.reconcile(knownPaths: pairs, now: now())
         for record in records {
             await insertReapRecord(record)

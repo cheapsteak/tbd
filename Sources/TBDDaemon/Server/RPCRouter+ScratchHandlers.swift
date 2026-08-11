@@ -80,12 +80,12 @@ extension RPCRouter {
         }
 
         subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
-            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path, status: wt.status)))
+            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.localPath, status: wt.status)))
         for terminal in createdTerminals {
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
                 terminalID: terminal.id, worktreeID: wt.id, label: terminal.label)))
         }
-        scratchLogger.info("scratch.create: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        scratchLogger.info("scratch.create: \(wt.id, privacy: .public) at \(wt.localPath, privacy: .public)")
         return try RPCResponse(result: wt)
     }
 

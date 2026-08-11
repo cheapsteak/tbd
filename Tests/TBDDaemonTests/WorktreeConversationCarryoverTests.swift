@@ -306,7 +306,7 @@ struct WorktreeConversationCarryoverTests {
         )
 
         let destination = TranscriptProjectDirSync.derivedProjectDir(
-            worktreePath: worktree.path,
+            worktreePath: worktree.localPath,
             projectsRoot: projectsRoot
         ).appendingPathComponent("\(sourceSessionID).jsonl")
         #expect(FileManager.default.fileExists(atPath: destination.path))

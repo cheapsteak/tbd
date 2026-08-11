@@ -25,7 +25,7 @@ extension WorktreeLifecycle {
         if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path) {
             let branchByPath = Dictionary(gitWorktrees.map { ($0.path, $0.branch) }, uniquingKeysWith: { _, b in b })
             for (i, wt) in worktrees.enumerated() {
-                if let gitBranch = branchByPath[wt.path], gitBranch != wt.branch {
+                if let gitBranch = branchByPath[wt.localPath], gitBranch != wt.branch {
                     try? await db.worktrees.updateBranch(id: wt.id, branch: gitBranch)
                     worktrees[i].branch = gitBranch  // use updated branch for conflict check below
                 }
@@ -205,7 +205,7 @@ extension WorktreeLifecycle {
         let creatingPaths = Set(
             (try await db.worktrees.list(repoID: repoID, status: .creating))
                 .filter { $0.location.isLocal }
-                .map(\.path)
+                .map(\.localPath)
                 .filter { !$0.isEmpty }
         )
         let dbPaths = Set(dbWorktrees.map(\.path)).union(creatingPaths)

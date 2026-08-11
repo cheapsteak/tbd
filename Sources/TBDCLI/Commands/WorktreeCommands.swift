@@ -151,7 +151,7 @@ struct WorktreeCreate: AsyncParsableCommand {
             print("Created worktree: \(worktree.displayName)")
             print("  ID:     \(worktree.id)")
             print("  Branch: \(worktree.branch)")
-            print("  Path:   \(worktree.path)")
+            print("  Path:   \(worktree.localPath)")
         }
     }
 
@@ -329,7 +329,7 @@ struct WorktreeAdopt: AsyncParsableCommand {
             print("Adopted worktree: \(worktree.displayName)")
             print("  ID:     \(worktree.id)")
             print("  Branch: \(worktree.branch)")
-            print("  Path:   \(worktree.path)")
+            print("  Path:   \(worktree.localPath)")
         }
     }
 
@@ -526,7 +526,7 @@ struct WorktreeRevive: AsyncParsableCommand {
             printJSON(worktree)
         } else {
             print("Worktree revived: \(worktree.displayName)")
-            print("  Path: \(worktree.path)")
+            print("  Path: \(worktree.localPath)")
         }
     }
 }

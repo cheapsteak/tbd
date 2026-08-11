@@ -148,7 +148,7 @@ private struct PinnedTerminalCell: View {
                     tmuxServer: worktree.tmuxServer,
                     tmuxWindowID: terminal.tmuxWindowID,
                     tmuxBridge: appState.tmuxBridge,
-                    worktreePath: worktree.path,
+                    worktreePath: worktree.localPath,
                     onMissingWindow: {
                         await appState.requestAutomaticTerminalRecreation(terminalID: terminal.id)
                     }

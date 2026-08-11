@@ -30,8 +30,8 @@ struct ScratchCreateRPCTests {
         let wt = try response.decodeResult(Worktree.self)
         #expect(wt.repoID == nil)
         #expect(wt.isScratch)
-        #expect(wt.path.hasPrefix(TBDConstants.scratchDir.path))
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(wt.localPath.hasPrefix(TBDConstants.scratchDir.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
         let all = try await db.worktrees.listScratch()
         #expect(all.count == 1)
     }
@@ -115,7 +115,7 @@ struct ScratchCreateRPCTests {
         // Second create with the same name must not collide on the unique path.
         let r2 = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "notes")))
         let w2 = try r2.decodeResult(Worktree.self)
-        #expect(w2.path != w1.path)
+        #expect(w2.localPath != w1.localPath)
     }
 }
 }

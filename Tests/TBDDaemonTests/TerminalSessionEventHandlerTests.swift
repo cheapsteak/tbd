@@ -174,7 +174,7 @@ struct TerminalSessionEventHandlerTests {
     func guardAcceptsMatchingWorktreeCwd() async throws {
         let (terminal, wt) = try await makeTerminal(initialSession: "old-id")
         // A cwd nested inside the terminal's own worktree path.
-        let cwd = wt.path + "/Sources/Foo"
+        let cwd = wt.localPath + "/Sources/Foo"
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
             params: TerminalSessionEventParams(
@@ -197,7 +197,7 @@ struct TerminalSessionEventHandlerTests {
         let foreign = try await makeForeignWorktree()
         // Foreign teammate session inherited TBD_TERMINAL_ID but runs in a
         // different worktree's directory.
-        let cwd = foreign.path + "/subdir"
+        let cwd = foreign.localPath + "/subdir"
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
             params: TerminalSessionEventParams(
@@ -265,7 +265,7 @@ struct TerminalSessionEventHandlerTests {
                 sessionID: "real-session-after-heal",
                 transcriptPath: "/abs/real.jsonl",
                 source: "resume",
-                cwd: wt.path
+                cwd: wt.localPath
             )
         ))
         #expect(response.success)

@@ -41,10 +41,10 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     // Created under the repo's worktreeRoot override → an acceptable prefix
     // for reconcile's re-adopt pass.
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    #expect(FileManager.default.fileExists(atPath: wt.path))
+    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
     try await lifecycle.forgetWorktree(worktreeID: wt.id)
-    #expect(try await db.forgottenWorktrees.contains(path: wt.path),
+    #expect(try await db.forgottenWorktrees.contains(path: wt.localPath),
             "forget must insert a tombstone for the worktree path")
 
     // The directory is still on disk AND still registered with git — exactly
@@ -52,10 +52,10 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(!active.contains { $0.path == wt.path },
+    #expect(!active.contains { $0.localPath == wt.localPath },
             "reconcile must not re-adopt a tombstoned path")
     let all = try await db.worktrees.list()
-    #expect(!all.contains { $0.path == wt.path },
+    #expect(!all.contains { $0.localPath == wt.localPath },
             "no row (any status) may be re-created for a tombstoned path")
 }
 
@@ -80,7 +80,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(active.contains { $0.path == wtPath },
+    #expect(active.contains { $0.localPath == wtPath },
             "reconcile must still adopt untombstoned worktrees under the managed prefix")
 }
 
@@ -96,12 +96,12 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
 
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.forgetWorktree(worktreeID: wt.id)
-    #expect(try await db.forgottenWorktrees.contains(path: wt.path))
+    #expect(try await db.forgottenWorktrees.contains(path: wt.localPath))
 
     // Adopt the same path back — the tombstone must be cleared.
-    let outcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: wt.path)
-    #expect(outcome.worktree.path == wt.path)
-    #expect(!(try await db.forgottenWorktrees.contains(path: wt.path)),
+    let outcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: wt.localPath)
+    #expect(outcome.worktree.localPath == wt.localPath)
+    #expect(!(try await db.forgottenWorktrees.contains(path: wt.localPath)),
             "adopt must clear the forget tombstone for its path")
 
     // Back to normal: with the tombstone gone, reconcile re-adopts the path
@@ -110,7 +110,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     try await db.worktrees.delete(id: outcome.worktree.id)
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(active.contains { $0.path == wt.path },
+    #expect(active.contains { $0.localPath == wt.localPath },
             "after the tombstone is cleared, reconcile behavior is back to normal")
 }
 
@@ -134,7 +134,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     let wt = try await lifecycle.createWorktree(
         repoID: repo.id, folder: "reborn", skipClaude: true
     )
-    #expect(wt.path == expectedPath)
+    #expect(wt.localPath == expectedPath)
     #expect(!(try await db.forgottenWorktrees.contains(path: expectedPath)),
             "create must clear the forget tombstone for its path")
 }
@@ -152,8 +152,8 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.forgetWorktree(worktreeID: wt.id)
     // Seed a second tombstone insert directly (same primary key).
-    try await db.forgottenWorktrees.insert(path: wt.path, repoID: repo.id)
-    #expect(try await db.forgottenWorktrees.contains(path: wt.path))
+    try await db.forgottenWorktrees.insert(path: wt.localPath, repoID: repo.id)
+    #expect(try await db.forgottenWorktrees.contains(path: wt.localPath))
 }
 
 @Suite struct MigrationForgottenWorktreeTests {

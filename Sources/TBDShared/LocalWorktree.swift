@@ -27,11 +27,9 @@ public struct LocalWorktree: Equatable, Sendable {
     /// Fails when the worktree is remote, or when it is local but has no
     /// directory yet (the `.creating` placeholder writes `path: ""`).
     public init?(_ worktree: Worktree) {
-        // `worktree.path` becomes `worktree.localPath` when the stored path is
-        // renamed — both reads below move together.
-        guard worktree.location.isLocal, !worktree.path.isEmpty else { return nil }
+        guard worktree.location.isLocal, !worktree.localPath.isEmpty else { return nil }
         self.worktree = worktree
-        self.path = worktree.path
+        self.path = worktree.localPath
         self.tmuxServer = worktree.tmuxServer
     }
 

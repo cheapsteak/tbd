@@ -24,12 +24,12 @@ import Testing
 
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
         try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
-        #expect(!FileManager.default.fileExists(atPath: wt.path))
-        #expect(await box.paths == [wt.path])
+        #expect(!FileManager.default.fileExists(atPath: wt.localPath))
+        #expect(await box.paths == [wt.localPath])
         #expect(await box.repoPaths == [repo.path], "must thread the owning repo's path alongside the worktree path")
     }
 

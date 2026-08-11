@@ -61,7 +61,7 @@ extension RPCRouter {
             // Synthetic main worktree row points at the repo root, not a real
             // git worktree dir. No `git worktree repair` needed.
             if wt.status == .main {
-                if wt.path == oldPath {
+                if wt.localPath == oldPath {
                     do {
                         try await db.worktrees.updatePath(id: wt.id, path: newPath)
                         worktreesRepaired.append(wt.id)
@@ -73,9 +73,9 @@ extension RPCRouter {
                 continue
             }
 
-            var rewrittenPath = wt.path
-            if wt.path.hasPrefix(oldLegacyPrefix) {
-                let suffix = String(wt.path.dropFirst(oldLegacyPrefix.count))
+            var rewrittenPath = wt.localPath
+            if wt.localPath.hasPrefix(oldLegacyPrefix) {
+                let suffix = String(wt.localPath.dropFirst(oldLegacyPrefix.count))
                 rewrittenPath = newLegacyPrefix + suffix
                 do {
                     try await db.worktrees.updatePath(id: wt.id, path: rewrittenPath)

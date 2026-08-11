@@ -228,7 +228,7 @@ final class ArchiveTombstoneTests: XCTestCase {
             worktreeID: reviveWt.id,
             repoID: reviveWt.repoID,
             name: reviveWt.name,
-            path: reviveWt.path,
+            path: reviveWt.localPath,
             status: reviveWt.status
         )
         state.handleDelta(.worktreeRevived(delta))

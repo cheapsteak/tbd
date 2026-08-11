@@ -239,9 +239,9 @@ public actor DeskSessionManager: DeskSessionManaging {
 
         // Mirror handleScratchCreate: tell connected clients immediately.
         subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
-            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path, status: wt.status)))
+            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.localPath, status: wt.status)))
 
-        logger.info("Created Watch Desk session: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        logger.info("Created Watch Desk session: \(wt.id, privacy: .public) at \(wt.localPath, privacy: .public)")
         return wt
     }
 
@@ -909,7 +909,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         // reads them on its own initiative — before its first tick ever fires —
         // finds them there. Best-effort: the nudge path rewrites this every tick
         // and falls back to the inline prompt if it can't.
-        writeJudgeInstructions(deskPath: worktree.path, mode: mode).map { path in
+        writeJudgeInstructions(deskPath: worktree.localPath, mode: mode).map { path in
             logger.debug("Wrote judge instructions to \(path, privacy: .public)")
         }
 

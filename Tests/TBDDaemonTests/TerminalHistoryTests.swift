@@ -302,8 +302,8 @@ import Testing
     @Test func shellReviveOpensFreshShellWithCapture() async throws {
         let fx = try await makeFixture(label: "sh", kind: .shell, claudeSessionID: nil)
         defer { fx.cleanup() }
-        try makeLiveDir(fx.worktree.path)
-        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+        try makeLiveDir(fx.worktree.localPath)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.localPath) }
 
         // A closed shell terminal with captured scrollback (file + row).
         let shellTerm = Terminal(
@@ -352,8 +352,8 @@ import Testing
     @Test func claudeReviveResumesSession() async throws {
         let fx = try await makeFixture(label: TerminalLabel.claudeCode, kind: .claude, claudeSessionID: "sess-xyz")
         defer { fx.cleanup() }
-        try makeLiveDir(fx.worktree.path)
-        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+        try makeLiveDir(fx.worktree.localPath)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.localPath) }
 
         await fx.db.terminalHistory.store(
             terminal: fx.terminal, text: "claude scrollback\n", closedAt: Date())
@@ -383,8 +383,8 @@ import Testing
     @Test func reviveWithMissingCaptureFileSkipsCat() async throws {
         let fx = try await makeFixture(label: "sh", kind: .shell, claudeSessionID: nil)
         defer { fx.cleanup() }
-        try makeLiveDir(fx.worktree.path)
-        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+        try makeLiveDir(fx.worktree.localPath)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.localPath) }
 
         // History row present, but the capture file is deleted underneath it.
         let shellTerm = Terminal(
@@ -430,8 +430,8 @@ import Testing
     @Test func reviveUnknownEntryErrorsWithoutTerminal() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        try makeLiveDir(fx.worktree.path)
-        defer { try? FileManager.default.removeItem(atPath: fx.worktree.path) }
+        try makeLiveDir(fx.worktree.localPath)
+        defer { try? FileManager.default.removeItem(atPath: fx.worktree.localPath) }
         let tmux = TmuxManager(dryRun: true)
         let router = makeRouter(db: fx.db, tmux: tmux)
 

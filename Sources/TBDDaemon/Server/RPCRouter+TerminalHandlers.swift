@@ -824,7 +824,7 @@ extension RPCRouter {
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
-            cwd: worktree.path,
+            cwd: worktree.localPath,
             shellCommand: spawnCommand,
             env: env,
             sensitiveEnv: sensitiveEnv,
@@ -1701,7 +1701,7 @@ extension RPCRouter {
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
-            cwd: worktree.path,
+            cwd: worktree.localPath,
             shellCommand: spawnCommand,
             env: env,
             sensitiveEnv: sensitiveEnv,
@@ -1784,7 +1784,7 @@ extension RPCRouter {
             try await tmux.respawnWindow(
                 server: server,
                 windowID: windowID,
-                cwd: worktree.path,
+                cwd: worktree.localPath,
                 shellCommand: spawnCommand,
                 env: env,
                 sensitiveEnv: sensitiveEnv,

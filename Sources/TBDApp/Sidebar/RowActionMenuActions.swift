@@ -36,6 +36,8 @@ struct RowActionMenuActions {
         }
     }
 
+    // Task 7: the empty-path guards here and in `context` become
+    // `LocalWorktree(worktree)`, and `pathIsEmpty` its nil check.
     /// Does a `preSession` hook resolve for this worktree? Uses the SAME
     /// five-step chain the daemon executes (`HookResolver` lives in TBDShared
     /// precisely so this can't drift): app per-repo config → `.worktree-hooks/`
@@ -46,13 +48,13 @@ struct RowActionMenuActions {
     /// `appHookPath` is nil for them and resolution falls through to the
     /// in-directory hook or the global default.
     private var hasPreSessionHook: Bool {
-        guard !worktree.path.isEmpty else { return false }
+        guard !worktree.localPath.isEmpty else { return false }
         let appHookPath = worktree.repoID.map {
             TBDConstants.hookPath(repoID: $0, eventName: HookEvent.preSession.rawValue)
         }
         return HookResolver().resolve(
             event: .preSession,
-            repoPath: worktree.path,
+            repoPath: worktree.localPath,
             appHookPath: appHookPath
         ) != nil
     }
@@ -73,7 +75,7 @@ struct RowActionMenuActions {
             },
             autoHibernateEnabled: appState.autoHibernateEnabled,
             hasActiveChildren: !appState.children(of: worktree.id).isEmpty,
-            pathIsEmpty: worktree.path.isEmpty,
+            pathIsEmpty: worktree.localPath.isEmpty,
             hasRepoID: worktree.repoID != nil,
             isScratch: worktree.isScratch,
             isPinned: worktree.pinnedAt != nil,
@@ -99,11 +101,11 @@ struct RowActionMenuActions {
             onRename()
 
         case .openInFinder:
-            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.path)
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.localPath)
 
         case .copyPath:
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(worktree.path, forType: .string)
+            NSPasteboard.general.setString(worktree.localPath, forType: .string)
 
         case .copyBranch:
             NSPasteboard.general.clearContents()

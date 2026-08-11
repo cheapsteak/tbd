@@ -828,7 +828,7 @@ public actor HibernationCoordinator {
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     shellCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
@@ -856,7 +856,7 @@ public actor HibernationCoordinator {
                 let bootstrapWindowID = try await tmux.ensureServer(
                     server: server,
                     session: "main",
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
@@ -864,7 +864,7 @@ public actor HibernationCoordinator {
                 let window = try await tmux.createWindow(
                     server: server,
                     session: "main",
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     shellCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
