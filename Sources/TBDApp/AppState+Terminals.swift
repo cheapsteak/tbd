@@ -27,9 +27,9 @@ enum AutomaticTerminalRecreationOutcome: Equatable {
 
 extension AppState {
     /// Bounds stale-response suppression without retaining app-lifetime
-    /// terminal tombstones or scheduling a cleanup timer. The extra 30 seconds
-    /// beyond DaemonClient's receive deadline ensures any RPC
-    /// already in flight at deletion remains covered through its deadline.
+    /// terminal tombstones or scheduling a cleanup timer. The fixed 30-second
+    /// scheduling/settlement margin beyond DaemonClient's shared transport
+    /// deadline covers response completion and main-actor callback ordering.
     nonisolated static let terminalDeletionTombstoneTTL: TimeInterval =
         DaemonClient.rpcRecvDeadlineSeconds + 30
 
