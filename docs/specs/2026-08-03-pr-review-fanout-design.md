@@ -418,19 +418,28 @@ and the whole test suite.
 - **Discussion fingerprint** (new comments defeat the patch-id skip): add it the first
   time an author's clarifying comment goes unreviewed because the skip suppressed a
   round.
-- **Resume-based retry loop** (the first upgrade rung if reviews die incomplete): a
-  bounded workflow loop of run → check `review-result.json` → `claude -p --resume
-  <session_id>` with a corrective prompt. Verified against the real CLI: session state
-  persists under `CLAUDE_CONFIG_DIR` and resumed requests carry the full prior history;
-  the process does not exit while background specialists are pending, so their findings
-  files land before the post-exit check runs. Two mechanics are mandatory: reset the
-  Stop hook's nudge-counter file between invocations (a stale counter at the ceiling
-  silently disarms the hook — measured), and the corrective prompt must point at the
-  on-disk `findings-*.json`, whose content never enters the orchestrator's own
-  transcript. Add it the first time a review dies incomplete on a real PR.
-- **Interactive PTY driver** (mid-flight nudges, deadline steering): the last-resort
-  rung, only if the resume loop above proves insufficient — e.g. sessions wedging
-  rather than ending, which a between-invocation loop cannot reach.
+- **Resume-based retry loop**: a bounded workflow loop of run → check
+  `review-result.json` → `claude -p --resume <session_id>` with a corrective
+  prompt. Session state persists under `CLAUDE_CONFIG_DIR` and resumed requests
+  carry the full prior history. The loop does NOT recover in-flight work: when a
+  headless session ends, its background specialists die with the process and
+  their findings files never land — measured on PR #604, where the session
+  exited after 184s with both specialists pending and nothing on disk. A resume
+  therefore restarts the fan-out rather than collecting it, and the corrective
+  prompt must point at whichever `findings-*.json` did survive, whose content
+  never enters the orchestrator's own transcript. Two mechanics are mandatory:
+  reset the Stop hook's counter AND start-stamp files between invocations (a
+  stale counter at the ceiling silently disarms the nudge; a stale stamp puts
+  the hold deadline in the past and disarms the hold — both measured), and keep
+  each invocation's own liveness intact, since a resume that stalls the same way
+  buys nothing. The session-liveness repair in
+  `2026-08-10-review-orchestrator-liveness-design.md` addresses the
+  died-incomplete case directly; add this loop only if reviews still die
+  incomplete after it.
+- **Interactive PTY driver** (mid-flight nudges, deadline steering): the named
+  fallback if session-liveness repairs at the prompt and hook layer stop
+  holding — in particular for sessions that wedge rather than end, which no
+  between-invocation loop can reach.
 - **Inline review comments**: findings state their file path and line numbers inside
   the one review comment rather than being anchored to diff lines.
 
@@ -440,4 +449,6 @@ and the whole test suite.
   budget on the largest realistic PR. The turn budget carries headroom for the
   investigation requirements (§3.3), and a session that runs out fails closed rather
   than approving, so the failure is visible; the answer arrives from real PRs.
+  A session that stalls rather than exhausting its budget is a different failure
+  with its own design (`2026-08-10-review-orchestrator-liveness-design.md`).
 - Whether `MINOR` findings should feed the verdict at all (currently: no).
