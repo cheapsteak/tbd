@@ -16,6 +16,7 @@ from validate import (
     main,
     missing_specialist_report,
     missing_specialists,
+    parse_expected_specialists,
     specialist_name_from_path,
     validate_findings_file,
     validate_result_file,
@@ -718,6 +719,81 @@ def test_main_flag_absent_keeps_old_behavior_single_file_ok(
     assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
 
 
+# --- omitted flag vs. supplied-but-empty value ------------------------------
+#
+# These two must not read alike. An OMITTED --expected-specialists is a caller
+# saying "don't check completeness", which is how the e2e suite runs a single
+# lens. A SUPPLIED but empty value is a caller that meant to name a set and
+# handed over nothing — the shape produced when the workflow's
+# `--expected-specialists "$REVIEW_SPECIALISTS"` expands an unset or blank
+# variable. Reading the second as the first turns the merge gate fail-OPEN:
+# every completeness check is skipped, the stall class is disarmed with it, and
+# half a review yields APPROVE.
+
+
+def test_parse_expected_specialists_omitted_is_no_check() -> None:
+    assert parse_expected_specialists(None) == []
+
+
+def test_parse_expected_specialists_splits_and_strips() -> None:
+    assert parse_expected_specialists(" correctness , conventions ") == [
+        "correctness",
+        "conventions",
+    ]
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\t\n", ",", " , ", ",,"])
+def test_parse_expected_specialists_supplied_but_empty_raises(raw: str) -> None:
+    # Whitespace-only and separator-only spellings are the same mistake as "":
+    # the flag was given and names no lens.
+    with pytest.raises(ValueError, match="--expected-specialists"):
+        parse_expected_specialists(raw)
+
+
+def test_main_omitted_expected_specialists_requests_no_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Half the production set on disk, no flag: passes, because no completeness
+    # claim was made. This is the behavior the empty-value failure below must
+    # NOT be conflated with.
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", ","])
+def test_main_empty_expected_specialists_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    raw: str,
+) -> None:
+    # The fail-open reproduction, run against exactly the same fixtures as the
+    # omitted case above: one lens of two, plus a valid result. Before the fix
+    # this returned 0 and wrote APPROVE — a verdict from half a review.
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, raw)
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "--expected-specialists" in err
+    assert "REVIEW_SPECIALISTS" in err  # points at the variable that expanded empty
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_empty_expected_specialists_fails_even_on_a_complete_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Not "the check found nothing missing" — the invocation itself is
+    # unusable, so a run that would otherwise have passed still fails closed.
+    for name in ("correctness", "conventions"):
+        _write_specialist_file(tmp_path, name)
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, "") == 1
+    assert not (tmp_path / "verdict.txt").exists()
+
+
 def test_main_unexpected_extra_specialist_warns_but_passes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -869,30 +945,36 @@ def test_main_mixed_causes_are_reported_separately(
 from validate import STALL_REPORT, is_session_stall  # noqa: E402
 
 
+_BOTH_LENSES = ["correctness", "conventions"]
+
+
 def test_stall_is_everything_absent() -> None:
-    assert is_session_stall(["correctness", "conventions"], [], [], False)
+    assert is_session_stall(_BOTH_LENSES, [], [], False, False)
 
 
 def test_a_valid_result_is_never_a_stall() -> None:
-    assert not is_session_stall(["correctness", "conventions"], [], [], True)
+    assert not is_session_stall(_BOTH_LENSES, [], [], True, False)
 
 
 def test_one_lens_reporting_is_not_a_stall() -> None:
-    assert not is_session_stall(
-        ["correctness", "conventions"], ["correctness"], [], False
-    )
+    assert not is_session_stall(_BOTH_LENSES, ["correctness"], [], False, True)
 
 
 def test_a_rejected_file_is_not_a_stall() -> None:
     """A schema-rejected file proves the session ran and the lens produced
     output — the operator must be sent to the schema error, not to a stall."""
-    assert not is_session_stall(
-        ["correctness", "conventions"], [], ["conventions"], False
-    )
+    assert not is_session_stall(_BOTH_LENSES, [], ["conventions"], False, True)
+
+
+def test_an_unattributable_file_on_disk_is_not_a_stall() -> None:
+    """The gap the per-lens lists cannot see: a file matched the glob but its
+    lens could not be named, so `seen` and `rejected` are both empty while
+    something is demonstrably on disk. A stall means NOTHING reached disk."""
+    assert not is_session_stall(_BOTH_LENSES, [], [], False, True)
 
 
 def test_no_expected_set_means_no_stall_claim() -> None:
-    assert not is_session_stall([], [], [], False)
+    assert not is_session_stall([], [], [], False, False)
 
 
 def test_stall_report_names_infrastructure_not_verdict() -> None:
@@ -927,6 +1009,43 @@ def test_main_on_a_stall_prints_only_the_stall_diagnosis(
     # specialists completed" describes a merge that never happened.
     assert "no specialist findings files match" not in err
     assert "that review lens never ran" not in err
+
+
+def test_main_unattributable_broken_file_is_not_a_stall(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A file the glob matched but whose lens cannot be named is still a file.
+
+    `findings-.json` matches `findings-*.json` yet not `findings-<name>.json`,
+    so it lands in neither `seen` nor `rejected` — the two lists a stall used to
+    be inferred from. Something reached disk and its parse error was printed one
+    line earlier, so "the session produced NOTHING" would contradict the
+    diagnostic directly above it and send the operator to an infrastructure
+    hunt instead of to the broken file.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "findings-.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--specialist-files",
+            "findings-*.json",
+            "--expected-specialists",
+            "correctness,conventions",
+            "--result-file",
+            "review-result.json",
+        ],
+    )
+    assert validate.main() == 1
+    err = capsys.readouterr().err
+    assert "findings-.json" in err
+    assert "not readable as JSON" in err
+    assert "INFRASTRUCTURE" not in err
+    assert not (tmp_path / "verdict.txt").exists()
 
 
 def test_main_still_reports_a_partial_fan_out_per_lens(

@@ -9,7 +9,9 @@ Deterministic bookend that runs AFTER the model review session
   produced a VALID findings file (a partial fan-out must never read as a clean
   run), reporting separately whether a lens produced nothing at all, produced a
   file the schema rejected, or — when NOTHING at all reached disk — whether the
-  session stalled before reviewing anything,
+  session stalled before reviewing anything. Omitting the flag requests no such
+  check; supplying it while naming no specialist is a broken invocation and
+  fails closed rather than skipping the check,
 - checks the disposition list COVERS every specialist finding ID (presence only —
   the disposition's judgment is never evaluated here, spec §3.4),
 - computes the verdict from the merged findings' severities (the model never
@@ -77,6 +79,40 @@ def missing_specialists(expected: list[str], seen: list[str]) -> list[str]:
     return [name for name in expected if name not in seen_set]
 
 
+def parse_expected_specialists(raw: str | None) -> list[str]:
+    """Split the `--expected-specialists` value into names, in declared order.
+
+    Two spellings of "nothing" must not read alike, and telling them apart is
+    what keeps this a fail-CLOSED gate:
+
+    - **Flag omitted** (`None`) — the caller requests no completeness check.
+      Returns `[]`, which every downstream check reads as "no claim was made
+      about which lenses should have reported". The e2e suite runs a single
+      lens this way.
+    - **Flag supplied, naming no lens** (`''`, whitespace, bare separators) —
+      the caller meant to declare a set and declared nothing. This is what the
+      workflow produces when `--expected-specialists "$REVIEW_SPECIALISTS"`
+      expands an unset or blank variable, and reading it as "no check
+      requested" would silently disable BOTH the completeness check and the
+      session-stall class, so a half-finished fan-out with a valid result file
+      would report APPROVE. Raises instead: an unusable invocation is a broken
+      gate, not a permissive one.
+    """
+    if raw is None:
+        return []
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    if not names:
+        raise ValueError(
+            f"--expected-specialists was supplied as {raw!r} but names no "
+            "specialist. Omit the flag to skip the completeness check; an "
+            "empty value is a broken invocation (usually REVIEW_SPECIALISTS "
+            "unset or blank in the workflow) and would disable both the "
+            "completeness check and the session-stall diagnosis — refusing to "
+            "compute a verdict"
+        )
+    return names
+
+
 _FINDINGS_FILENAME_RE = re.compile(r"\Afindings-(?P<name>.+)\.json\Z")
 
 
@@ -136,7 +172,11 @@ STALL_REPORT = (
 
 
 def is_session_stall(
-    expected: list[str], seen: list[str], rejected: list[str], result_ok: bool
+    expected: list[str],
+    seen: list[str],
+    rejected: list[str],
+    result_ok: bool,
+    any_specialist_file: bool,
 ) -> bool:
     """True when the session produced no output of any kind.
 
@@ -147,12 +187,20 @@ def is_session_stall(
     per-lens diagnostic's "orchestrator may have merged before all specialists
     completed" is then a false lead — no merge was attempted.
 
+    `any_specialist_file` is whether the specialist glob matched ANY file, and
+    it is the authoritative half of "nothing reached disk". `seen` and
+    `rejected` are populated per-lens, so a matched file that cannot be
+    attributed to a lens — `findings-.json`, which fits the glob but not the
+    `findings-<name>.json` convention — appears in neither, and inferring the
+    stall from those two lists alone would announce that the session produced
+    nothing directly beneath that file's own parse error.
+
     Requires a declared expected set: without one there is no claim to make
     about which lenses should have reported.
     """
     if result_ok or not expected:
         return False
-    return not seen and not rejected
+    return not any_specialist_file and not seen and not rejected
 
 
 def check_disposition(
@@ -237,10 +285,20 @@ def main() -> int:
         help=(
             "comma-separated specialist names that must each have produced a "
             "findings file, e.g. 'correctness,conventions'. "
-            "Omitted: no completeness check (any non-empty glob passes)."
+            "Omitted: no completeness check (any non-empty glob passes). "
+            "Supplied but naming no specialist: an error, not a skip."
         ),
     )
     args = parser.parse_args()
+
+    # Checked before any file is read, so a broken invocation cannot reach the
+    # verdict write below under any circumstances.
+    try:
+        expected = parse_expected_specialists(args.expected_specialists)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print("validation FAILED — no verdict written (gate fails closed)")
+        return 1
 
     failed = False
 
@@ -275,16 +333,12 @@ def main() -> int:
     except SchemaValidationError as exc:
         result_error = str(exc)
 
-    expected: list[str] = []
-    if args.expected_specialists is not None:
-        expected = [
-            name.strip()
-            for name in args.expected_specialists.split(",")
-            if name.strip()
-        ]
-
     if is_session_stall(
-        expected, seen_specialists, rejected_specialists, result is not None
+        expected,
+        seen_specialists,
+        rejected_specialists,
+        result is not None,
+        not glob_empty,
     ):
         # One decisive line instead of three true-but-misleading ones. The
         # empty-glob and per-lens messages are suppressed here deliberately:

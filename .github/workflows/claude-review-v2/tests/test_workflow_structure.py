@@ -236,3 +236,37 @@ def test_validate_reads_the_specialist_set_from_that_declaration() -> None:
     body = run_block(read_workflow(), VALIDATE_STEP)
     assert "REVIEW_SPECIALISTS" in body
     assert "'correctness,conventions'" not in body
+
+
+HOOK_PATH = _WORKFLOWS_DIR / "claude-review-v2" / "hooks" / "stop-hook.sh"
+
+_HOOK_FALLBACK_RE = re.compile(
+    r'^specialists="\$\{REVIEW_SPECIALISTS:-(?P<fallback>[^}]*)\}"\s*$',
+    re.MULTILINE,
+)
+
+
+def _hook_specialist_fallback() -> str:
+    text = HOOK_PATH.read_text(encoding="utf-8")
+    match = _HOOK_FALLBACK_RE.search(text)
+    assert match is not None, (
+        f"{HOOK_PATH.name} no longer assigns "
+        '`specialists="${REVIEW_SPECIALISTS:-<fallback>}"` — if the hook now '
+        "learns its specialist set another way, retarget this test rather than "
+        "deleting it: the drift it catches is silent"
+    )
+    return match.group("fallback")
+
+
+def test_the_hook_fallback_matches_the_declared_specialist_set() -> None:
+    """The hook's `:-` default is a second copy of the specialist set.
+
+    It exists so the hook still holds a session open when the environment
+    variable is absent, which means it is exercised precisely when nobody is
+    watching. Add a third lens to `REVIEW_SPECIALISTS` and the stale fallback
+    keeps waiting for two files: the hook stops holding once the two it knows
+    about land, the third specialist is killed with the session, and the
+    fallback's whole job — surviving a missing variable — is what makes the
+    resulting gap invisible. Nothing else compares the two literals.
+    """
+    assert _hook_specialist_fallback() == _review_job()["env"]["REVIEW_SPECIALISTS"]
