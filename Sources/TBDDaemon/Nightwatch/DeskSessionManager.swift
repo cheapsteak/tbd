@@ -136,7 +136,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         // processes can exit before their terminal row is removed, so require a
         // live pane owned by the currently configured primary agent.
         if let cachedID = deskWorktreeID,
-           let existing = try await db.worktrees.get(id: cachedID),
+           let existing = try await db.worktrees.getLocal(id: cachedID),
            existing.status == .active {
             if try await liveAgentTerminal(
                 worktreeID: existing.id,
@@ -150,7 +150,7 @@ public actor DeskSessionManager: DeskSessionManaging {
                 // rather than per tick, reuse-without-respawn is exactly the case where a memorized copy
                 // can go stale — `nudgeDeskSession` compares against `lastNudgedMode` and flags the flip.
                 // Initial frame is one-time; steady-state mode is driven per-tick.
-                return existing
+                return existing.worktree
             }
         }
 
@@ -160,7 +160,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         // Query by displayName to detect existing desk worktrees (active only).
         // This recovery path excludes archived worktrees so off→on cycles don't
         // resurrect dead desk sessions. (survives daemon restart since displayName is stable).
-        let activeWorktrees = try await db.worktrees.list(excludeArchived: true)
+        let activeWorktrees = try await db.worktrees.listLocal(excludeArchived: true)
         if let existing = activeWorktrees.first(where: { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }) {
             deskWorktreeID = existing.id
 
@@ -173,7 +173,7 @@ public actor DeskSessionManager: DeskSessionManaging {
             ) == nil {
                 logger.info("Recovered Watch Desk \(existing.id, privacy: .public) but no live \(preferredKind.rawValue, privacy: .public) terminal; respawning")
                 do {
-                    _ = try await spawnDeskTerminal(worktree: existing, mode: mode)
+                    _ = try await spawnDeskTerminal(worktree: existing.worktree, mode: mode)
                 } catch {
                     logger.warning("Failed to respawn terminal on recovery: \(error.localizedDescription, privacy: .public)")
                     // Best-effort; don't fail the recovery
@@ -181,7 +181,7 @@ public actor DeskSessionManager: DeskSessionManaging {
             }
 
             logger.info("Reusing existing Watch Desk session: \(existing.id, privacy: .public)")
-            return existing
+            return existing.worktree
         }
 
         // Create a new scratch space
@@ -527,13 +527,13 @@ public actor DeskSessionManager: DeskSessionManaging {
 
         do {
             // Worktree first: resolving a live terminal needs the tmux server to query.
-            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+            guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
                 logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
                 return
             }
 
             guard let (agentTerminal, _, _) = try await leasedJudgeTerminal(
-                worktree: worktree
+                worktree: worktree.worktree
             ) else {
                 logger.warning("No uniquely owned live terminal in Watch Desk; skipping wrap-up prompt")
                 return
@@ -613,15 +613,15 @@ public actor DeskSessionManager: DeskSessionManaging {
 
         do {
             // Worktree first: resolving a live terminal needs the tmux server to query.
-            guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+            guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
                 logger.warning("Watch Desk worktree not found: \(worktreeID, privacy: .public)")
                 return
             }
 
             var preferredKind = try await preferredAgentKind()
-            var judge = try await leasedJudgeTerminal(worktree: worktree)
+            var judge = try await leasedJudgeTerminal(worktree: worktree.worktree)
             if judge == nil,
-               try await liveJudgeCandidates(worktree: worktree).isEmpty {
+               try await liveJudgeCandidates(worktree: worktree.worktree).isEmpty {
                 // A terminal row can survive a process/pane exit. Recover in the
                 // nudge path itself so one failed launch does not turn into a
                 // silent all-night outage waiting for a mode toggle or daemon
@@ -630,10 +630,10 @@ public actor DeskSessionManager: DeskSessionManaging {
                 // worktrees.
                 logger.notice("No live \(preferredKind.rawValue, privacy: .public) Watch Desk terminal; retrying spawn before nudge")
                 do {
-                    try await spawnDeskTerminal(worktree: worktree, mode: mode)
+                    try await spawnDeskTerminal(worktree: worktree.worktree, mode: mode)
                     // Re-read in case the preference changed while spawning.
                     preferredKind = try await preferredAgentKind()
-                    judge = try await leasedJudgeTerminal(worktree: worktree)
+                    judge = try await leasedJudgeTerminal(worktree: worktree.worktree)
                 } catch {
                     logger.warning("Failed to recover Watch Desk terminal before nudge: \(error.localizedDescription, privacy: .public)")
                 }
@@ -750,7 +750,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         guard let worktreeID = deskWorktreeID else { return }
 
         do {
-            guard let wt = try await db.worktrees.get(id: worktreeID) else {
+            guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
                 logger.warning("Watch Desk worktree not found during close: \(worktreeID, privacy: .public)")
                 deskWorktreeID = nil
                 return
@@ -824,8 +824,8 @@ public actor DeskSessionManager: DeskSessionManaging {
         await gateAcquire()
         defer { gateRelease() }
         do {
-            guard let worktree = try await db.worktrees.get(id: worktreeID) else { return }
-            _ = try await leasedJudgeTerminal(worktree: worktree)
+            guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else { return }
+            _ = try await leasedJudgeTerminal(worktree: worktree.worktree)
         } catch {
             logger.error("Failed to maintain Watch Desk judge lease: \(error.localizedDescription, privacy: .public)")
         }
