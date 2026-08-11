@@ -476,6 +476,49 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// `get(id:)` restricted to worktrees with files on this machine.
+    ///
+    /// Local-only callers use this so a remote row cannot reach code that
+    /// would operate on a directory that does not exist. Returning nil for a
+    /// remote id is deliberate and is **not** an error: the caller's existing
+    /// not-found branch is the correct response to "this worktree has nothing
+    /// local to act on".
+    public func getLocal(id: UUID) async throws -> LocalWorktree? {
+        try await get(id: id).flatMap(LocalWorktree.init)
+    }
+
+    /// `list(...)` restricted to worktrees with files on this machine. Takes
+    /// the same filters as `list(...)` and forwards them unchanged.
+    ///
+    /// The filtering happens in Swift rather than SQL so that
+    /// `LocalWorktree.init?` stays the single definition of "local" — a WHERE
+    /// clause would be a second one, free to drift from the empty-path rule.
+    ///
+    /// Consequence: `limit`/`offset` are applied by SQL *before* the filter, so
+    /// a page containing remote rows yields fewer than `limit` locals.
+    /// Acceptable because no local-only caller paginates — the only caller that
+    /// passes `limit`/`offset` is the location-neutral `worktree.list` RPC,
+    /// which stays on `list(...)`.
+    public func listLocal(
+        repoID: UUID? = nil,
+        status: WorktreeStatus? = nil,
+        excludeArchived: Bool = false,
+        scratchOnly: Bool = false,
+        limit: Int? = nil,
+        offset: Int? = nil,
+        nameQuery: String? = nil
+    ) async throws -> [LocalWorktree] {
+        try await list(
+            repoID: repoID,
+            status: status,
+            excludeArchived: excludeArchived,
+            scratchOnly: scratchOnly,
+            limit: limit,
+            offset: offset,
+            nameQuery: nameQuery
+        ).compactMap(LocalWorktree.init)
+    }
+
     /// Archive a worktree (set status to archived and record the timestamp).
     /// Optionally saves Claude session IDs and the captured HEAD SHA in the
     /// same transaction so they survive terminal deletion and crashes.
