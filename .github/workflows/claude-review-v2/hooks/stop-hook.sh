@@ -76,6 +76,20 @@ hold_file="$state_dir/claude-review-v2-hold-count"
 # --expected-specialists, so the hook and the validator cannot disagree.
 specialists="${REVIEW_SPECIALISTS:-correctness,conventions}"
 
+# `:-` substitutes on unset or EMPTY only, so a value that is non-empty and yet
+# names nobody — ",", "   ", ",," — survives it. The loop below would then
+# iterate over nothing: findings_pending stays 0, the hook falls into the
+# counted nudge, and the hold is disarmed silently and in the fail-OPEN
+# direction. validate.py rejects the same input outright; a Stop hook cannot
+# (it must always exit 0), so the analogue is to treat it exactly as an absent
+# variable — cleared here and re-expanded so the default stays a single literal,
+# which is what the drift check in tests/test_workflow_structure.py pins.
+case "$specialists" in
+  *[![:space:],]*) ;;   # names at least one specialist
+  *) unset REVIEW_SPECIALISTS
+     specialists="${REVIEW_SPECIALISTS:-correctness,conventions}" ;;
+esac
+
 findings_pending=0
 for name in $(printf '%s' "$specialists" | tr ',' ' '); do
   [ -n "$name" ] || continue
@@ -153,7 +167,13 @@ if [ "$findings_pending" -eq 1 ]; then
   # in the same process, so this sleep is time they get to finish in.
   [ "$hold_sleep_seconds" -eq 0 ] || sleep "$hold_sleep_seconds"
 
-  hold_reason="Your specialist subagents are still running — at least one findings-<name>.json is not yet on disk. Do NOT end your turn. This session is headless: ending the turn ends the whole session and kills the specialists with it, so no findings are ever written and the review gate fails with no verdict. Stay in this turn until every expected findings file exists and parses, then merge them into review-result.json. Expected specialists: ${specialists}."
+  # The reason asks for a bare acknowledgment and NO tool calls, because the
+  # sleep arithmetic above prices a hold at one turn. Every tool call the model
+  # makes while waiting is another turn, so inviting it to poll for the files
+  # halves the wall clock the turn budget buys — and buys nothing, since this
+  # hook just checked those files and will check them again on the next stop
+  # attempt.
+  hold_reason="Your specialist subagents are still running — at least one findings-<name>.json is not yet on disk. Do NOT end your turn. This session is headless: ending the turn ends the whole session and kills the specialists with it, so no findings are ever written and the review gate fails with no verdict. Do NOT call any tools while waiting: this hook is already checking the files for you and will keep holding until they land, and every tool call spends turn budget the wait needs. Reply with one short sentence acknowledging that you are waiting. When every findings file is on disk you will be allowed to stop, so merge them into review-result.json then. Expected specialists: ${specialists}."
 
   jq -n --arg reason "$hold_reason" '{decision: "block", reason: $reason}' 2>/dev/null \
     || printf '{"decision":"block","reason":"Specialists still running — do NOT end your turn; the session is headless and ending it kills them."}\n'

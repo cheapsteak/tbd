@@ -554,13 +554,30 @@ jobs:
         # review. The set comes from the job-level REVIEW_SPECIALISTS so the Stop
         # hook — which holds the session open until those same files exist — reads
         # the identical list.
+        #
+        # The step annotation carries validate.py's OWN last error line. A
+        # stalled session, a partial fan-out, a schema rejection and a broken
+        # invocation are all one red `claude-review`, and an operator reading
+        # the checks page sees the annotation and nothing else — so a single
+        # generic sentence for all four is what trains a maintainer to
+        # reflexively re-run the gate. stderr is captured and replayed
+        # unchanged, so the step log is exactly what it was.
         run: |
           set -uo pipefail
-          if ! python3 .github/workflows/claude-review-v2/validate.py \
+          err_log="$(mktemp)"
+          status=0
+          python3 .github/workflows/claude-review-v2/validate.py \
                  --specialist-files 'findings-*.json' \
                  --expected-specialists "$REVIEW_SPECIALISTS" \
-                 --result-file review-result.json; then
-            echo "::error::Claude review produced no valid result (missing/invalid findings or result file, or uncovered dispositions) — failing closed. Re-run the review."
+                 --result-file review-result.json 2>"$err_log" || status=$?
+          cat "$err_log" >&2
+          if [ "$status" -ne 0 ]; then
+            # The LAST `error:` line is the most specific one validate.py
+            # reached; `|| true` because a failure with none at all (a crash, a
+            # traceback) must still produce the annotation and the exit 1.
+            detail="$(grep '^error: ' "$err_log" | tail -n 1 || true)"
+            detail="${detail#error: }"
+            echo "::error::Claude review produced no valid result (missing/invalid findings or result file, or uncovered dispositions) — failing closed. Re-run the review.${detail:+ Cause: ${detail}}"
             exit 1
           fi
 

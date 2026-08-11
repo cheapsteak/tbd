@@ -8,8 +8,9 @@ Deterministic bookend that runs AFTER the model review session
 - with `--expected-specialists`, checks that every named specialist actually
   produced a VALID findings file (a partial fan-out must never read as a clean
   run), reporting separately whether a lens produced nothing at all, produced a
-  file the schema rejected, or — when NOTHING at all reached disk — whether the
-  session stalled before reviewing anything. Omitting the flag requests no such
+  file the schema rejected, or — when NOTHING at all reached disk, neither a
+  findings file nor a review-result.json — whether the session stalled before
+  reviewing anything. Omitting the flag requests no such
   check; supplying it while naming no specialist is a broken invocation and
   fails closed rather than skipping the check,
 - checks the disposition list COVERS every specialist finding ID (presence only —
@@ -175,7 +176,7 @@ def is_session_stall(
     expected: list[str],
     seen: list[str],
     rejected: list[str],
-    result_ok: bool,
+    result_present: bool,
     any_specialist_file: bool,
 ) -> bool:
     """True when the session produced no output of any kind.
@@ -187,18 +188,26 @@ def is_session_stall(
     per-lens diagnostic's "orchestrator may have merged before all specialists
     completed" is then a false lead — no merge was attempted.
 
-    `any_specialist_file` is whether the specialist glob matched ANY file, and
-    it is the authoritative half of "nothing reached disk". `seen` and
-    `rejected` are populated per-lens, so a matched file that cannot be
-    attributed to a lens — `findings-.json`, which fits the glob but not the
-    `findings-<name>.json` convention — appears in neither, and inferring the
-    stall from those two lists alone would announce that the session produced
-    nothing directly beneath that file's own parse error.
+    Both file-shaped inputs are about PRESENCE, never validity, because the
+    claim being made is "nothing reached disk":
+
+    - `result_present` is whether review-result.json EXISTS, not whether it
+      passed the schema. The Stop hook releases the session the moment that
+      file parses as JSON, so "present but schema-invalid" is a normal terminal
+      state; reading validity here would announce that the session produced
+      nothing while its result file sits on disk, and would suppress the schema
+      error naming the actual defect.
+    - `any_specialist_file` is whether the specialist glob matched ANY file.
+      `seen` and `rejected` are populated per-lens, so a matched file that
+      cannot be attributed to a lens — `findings-.json`, which fits the glob
+      but not the `findings-<name>.json` convention — appears in neither, and
+      inferring the stall from those two lists alone would announce that the
+      session produced nothing directly beneath that file's own parse error.
 
     Requires a declared expected set: without one there is no claim to make
     about which lenses should have reported.
     """
-    if result_ok or not expected:
+    if result_present or not expected:
         return False
     return not any_specialist_file and not seen and not rejected
 
@@ -325,6 +334,12 @@ def main() -> int:
         specialist_ids.extend(finding["id"] for finding in data["findings"])
         print(f"ok: {path} ({len(data['findings'])} finding(s))")
 
+    # PRESENCE, decided before validity: a result file that exists but fails
+    # the schema is a session that reached its merge and got it wrong, not a
+    # session that produced nothing — and the difference is what decides
+    # whether the schema error below is printed or suppressed.
+    result_present = Path(args.result_file).exists()
+
     result = None
     result_error = None
     try:
@@ -337,13 +352,15 @@ def main() -> int:
         expected,
         seen_specialists,
         rejected_specialists,
-        result is not None,
+        result_present,
         not glob_empty,
     ):
         # One decisive line instead of three true-but-misleading ones. The
         # empty-glob and per-lens messages are suppressed here deliberately:
         # they describe a review that went wrong, and this is a session that
-        # never reviewed anything.
+        # never reviewed anything. The suppressed result error is likewise only
+        # ever "no such file" — a stall requires the result file to be ABSENT,
+        # so a schema rejection can never be swallowed here.
         print(f"error: {STALL_REPORT}", file=sys.stderr)
         failed = True
     else:

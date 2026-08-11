@@ -86,6 +86,30 @@ def _path_without_jq(tmp_path: Path) -> str:
     return str(bindir)
 
 
+def _path_with_sleep_stub(tmp_path: Path) -> tuple[str, Path]:
+    """A PATH whose `sleep` records its argument and returns at once.
+
+    The hook's sleep is the one behavior a test cannot observe by waiting for
+    it: the shipped default is 30 seconds, so asserting on the real wait would
+    cost the suite 30 seconds per case. Recording the argument asserts the same
+    thing — which number reached `sleep` — in no time at all.
+    """
+    bindir = tmp_path / "sleepstub-bin"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("bash", "cat", "date", "tr", "jq"):
+        found = shutil.which(tool)
+        assert found, f"test prerequisite missing: {tool}"
+        link = bindir / tool
+        if not link.exists():
+            link.symlink_to(found)
+    log = tmp_path / "sleep-args.log"
+    log.touch()  # "sleep was never called" must read as empty, not as a miss
+    stub = bindir / "sleep"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> "{log}"\n')
+    stub.chmod(0o755)
+    return str(bindir), log
+
+
 def _decision(proc: subprocess.CompletedProcess[str]) -> dict | None:
     out = proc.stdout.strip()
     return json.loads(out) if out else None
@@ -160,6 +184,21 @@ def test_hold_reason_tells_the_model_not_to_end_its_turn(
     reason = _decision(_run(project, state))["reason"].lower()
     assert "still running" in reason
     assert "do not end your turn" in reason
+
+
+def test_hold_reason_forbids_polling_the_files_it_already_checks(
+    dirs: tuple[Path, Path],
+) -> None:
+    """The sleep arithmetic assumes ONE turn per hold.
+
+    Every tool call the model makes while waiting is another turn, so a reason
+    that invites it to Read or Glob for the findings files halves the wall
+    clock the turn budget buys — and buys nothing, because this hook checked
+    those same files a moment earlier and will check them again on the next
+    stop attempt.
+    """
+    reason = _decision(_run(*dirs))["reason"].lower()
+    assert "do not call any tools" in reason
 
 
 def test_unparseable_findings_file_counts_as_pending(
@@ -325,6 +364,43 @@ def test_absent_specialist_env_falls_back_to_the_known_pair(
     assert _count(state) == 1  # counted => it knew both files were present
 
 
+@pytest.mark.parametrize("nameless", [",", "   ", ",,"])
+def test_a_nameless_specialist_list_still_holds(
+    dirs: tuple[Path, Path], nameless: str
+) -> None:
+    """`:-` defaults on unset or EMPTY only, so a value that names nobody
+    survives it.
+
+    The loop then iterates over nothing, findings_pending stays 0, and the hook
+    drops into the counted nudge with the hold silently disarmed — fail-OPEN,
+    and invisible: the session ends early exactly as it did before this hook
+    existed. validate.py raises on the same input; a Stop hook may never raise
+    (it must always exit 0), so treating it as an absent variable is the
+    analogue.
+    """
+    project, state = dirs
+    proc = _run(project, state, specialists=nameless)
+    assert proc.returncode == 0
+    assert _decision(proc)["decision"] == "block"
+    assert "still running" in _decision(proc)["reason"].lower()
+    assert _count(state) == 0  # held, not nudged
+
+
+@pytest.mark.parametrize("nameless", [",", "   ", ",,"])
+def test_a_nameless_specialist_list_falls_back_to_the_known_pair(
+    dirs: tuple[Path, Path], nameless: str
+) -> None:
+    """The fallback must be the declared pair, not "hold unconditionally":
+    once both known files land, the session has to be able to finish."""
+    project, state = dirs
+    _write_findings(project, "correctness")
+    _write_findings(project, "conventions")
+    proc = _run(project, state, specialists=nameless)
+    assert proc.returncode == 0
+    assert "review-result.json" in _decision(proc)["reason"]
+    assert _count(state) == 1
+
+
 def test_an_unwritable_state_dir_cannot_hold_forever(
     dirs: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -345,6 +421,77 @@ def test_an_unwritable_state_dir_cannot_hold_forever(
             releases += 1
             break
     assert releases == 1
+
+
+# Two independent `|| exit 0` guards stand behind that release — the start-stamp
+# write and the hold-counter write — and the case above cannot tell them apart:
+# with the whole directory unwritable, EITHER guard alone produces the release,
+# so removing one leaves the test green. Each is therefore exercised with only
+# its own file unwritable, the other left working.
+
+
+def _unwritable_file(path: Path) -> None:
+    path.write_text("")
+    path.chmod(0o444)
+
+
+def test_an_unwritable_start_stamp_alone_releases(
+    dirs: tuple[Path, Path],
+) -> None:
+    """With no persisted stamp, elapsed time reads as 0 forever, so the
+    deadline is unreachable and only this guard ends the session."""
+    project, state = dirs
+    _unwritable_file(state / START_FILE)
+    proc = _run(project, state)
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+
+
+def test_an_unwritable_hold_counter_alone_releases(
+    dirs: tuple[Path, Path],
+) -> None:
+    """With no persisted hold count the cap is unreachable, and inside the
+    deadline only this guard ends the session."""
+    project, state = dirs
+    _unwritable_file(state / HOLD_FILE)
+    proc = _run(project, state)
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    # The other guard is not what released this run: the stamp was writable.
+    assert (state / START_FILE).exists()
+
+
+def test_a_non_numeric_sleep_override_falls_back_to_the_default(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """`sleep` is handed this value and `[` compares it as an integer.
+
+    Unclamped, a garbage override makes both complain on stderr and skips the
+    wait entirely — the hold stops costing wall clock and starts costing only
+    turns, which is the trade the sleep exists to reverse. Asserting on the
+    argument the hook actually passes to `sleep` (recorded by a stub, so the
+    green path does not spend 30 real seconds) is what makes the clamp
+    observable at all.
+    """
+    project, state = dirs
+    path, sleep_log = _path_with_sleep_stub(tmp_path)
+    proc = _run(project, state, sleep_seconds="not-a-number", path=path)
+    assert proc.returncode == 0
+    assert _decision(proc)["decision"] == "block"
+    assert proc.stderr == ""
+    assert sleep_log.read_text().split() == ["30"]
+
+
+def test_a_numeric_sleep_override_is_passed_through(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The clamp must not swallow a legitimate override — the unit tests here
+    drive the sleep to 0 through it."""
+    project, state = dirs
+    path, sleep_log = _path_with_sleep_stub(tmp_path)
+    proc = _run(project, state, sleep_seconds="7", path=path)
+    assert _decision(proc)["decision"] == "block"
+    assert sleep_log.read_text().split() == ["7"]
 
 
 # --- jq absent: the fallback must not invent a pending review --------------

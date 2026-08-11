@@ -952,8 +952,13 @@ def test_stall_is_everything_absent() -> None:
     assert is_session_stall(_BOTH_LENSES, [], [], False, False)
 
 
-def test_a_valid_result_is_never_a_stall() -> None:
-    assert not is_session_stall(_BOTH_LENSES, [], [], True, False)
+def test_a_result_file_on_disk_is_never_a_stall() -> None:
+    """PRESENCE, not validity. A result file the schema rejected still proves
+    the session ran far enough to write one, and the parameter that carries
+    that fact is named for it."""
+    assert not is_session_stall(
+        _BOTH_LENSES, [], [], result_present=True, any_specialist_file=False
+    )
 
 
 def test_one_lens_reporting_is_not_a_stall() -> None:
@@ -1045,6 +1050,47 @@ def test_main_unattributable_broken_file_is_not_a_stall(
     assert "findings-.json" in err
     assert "not readable as JSON" in err
     assert "INFRASTRUCTURE" not in err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_a_schema_invalid_result_file_is_not_a_stall(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A result file that PARSES but fails the schema is a normal terminal
+    state, not a stall.
+
+    The Stop hook releases the session as soon as review-result.json parses as
+    JSON, so "present but schema-invalid" is exactly what a session that merged
+    badly leaves behind. Calling that "the session produced NOTHING" is
+    factually false — something is on disk — and it would suppress the schema
+    error that names the real defect, which is the only line an operator can
+    act on.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Valid JSON, but missing the required `disposition` and `comment_body`.
+    (tmp_path / "review-result.json").write_text(
+        json.dumps({"findings": []}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate.py",
+            "--specialist-files",
+            "findings-*.json",
+            "--expected-specialists",
+            "correctness,conventions",
+            "--result-file",
+            "review-result.json",
+        ],
+    )
+    assert validate.main() == 1
+    err = capsys.readouterr().err
+    assert "INFRASTRUCTURE" not in err
+    assert "schema validation failed" in err
+    assert "disposition" in err
     assert not (tmp_path / "verdict.txt").exists()
 
 
