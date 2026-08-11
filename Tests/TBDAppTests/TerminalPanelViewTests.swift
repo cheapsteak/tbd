@@ -5,17 +5,6 @@ import TBDShared
 
 @Suite("Terminal panel close context")
 struct TerminalPanelViewTests {
-    @Test("executable unavailable renders guidance without recovery")
-    func executableUnavailableRendersGuidanceWithoutRecovery() {
-        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
-            for: .failure(.executableUnavailable)
-        )
-
-        #expect(action == .showMessage(
-            "tmux is not available on TBD's PATH. Run scripts/restart.sh from a shell where tmux is available."
-        ))
-    }
-
     @Test("generic command failure renders diagnostics guidance without recovery")
     func commandFailureRendersGuidanceWithoutRecovery() {
         let action = TerminalPanelRepresentable.Coordinator.preparationAction(

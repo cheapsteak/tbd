@@ -39,8 +39,8 @@ struct TmuxBridgeTests {
         ) == [
             "tmux", "-u", "-L", "tbd-repo", "attach", "-t", sessionName,
         ])
-        #expect(TmuxBridge.windowIdentityQueryArgs(windowID: "@147") == [
-            "display-message", "-p", "-t", "@147", "#{window_id}",
+        #expect(TmuxBridge.windowInventoryQueryArgs() == [
+            "list-windows", "-a", "-F", "#{window_id}",
         ])
         #expect(TmuxBridge.killSessionArgs(sessionName: sessionName) == [
             "kill-session", "-t", sessionName,
@@ -68,33 +68,33 @@ struct TmuxBridgeTests {
         ) == .commandFailed(stage: .createViewSession, output: "create failure"))
     }
 
-    @Test func failedWindowStageWithMatchingProbeRemainsGeneric() {
+    @Test func failedWindowStageWithInventoryContainingWindowRemainsGeneric() {
         #expect(TmuxBridge.classifyPreparationFailure(
             stage: .linkWindow,
             output: "link failure",
             probeSucceeded: true,
-            probeOutput: "@147",
+            probeOutput: "@999\n@147",
             expectedWindowID: "@147"
         ) == .commandFailed(stage: .linkWindow, output: "link failure"))
     }
 
-    @Test func failedWindowStageWithFailedProbeMeansWindowMissing() {
+    @Test func failedWindowStageWithFailedInventoryProbeRemainsGeneric() {
         #expect(TmuxBridge.classifyPreparationFailure(
             stage: .linkWindow,
             output: "link failure",
             probeSucceeded: false,
             probeOutput: "",
             expectedWindowID: "@147"
-        ) == .windowMissing(failedStage: .linkWindow))
+        ) == .commandFailed(stage: .linkWindow, output: "link failure"))
     }
 
-    @Test func failedWindowStageWithMismatchedProbeRemainsGeneric() {
+    @Test func failedWindowStageWithInventoryOmittingWindowMeansMissing() {
         #expect(TmuxBridge.classifyPreparationFailure(
             stage: .linkWindow,
             output: "link failure",
             probeSucceeded: true,
             probeOutput: "@999",
             expectedWindowID: "@147"
-        ) == .commandFailed(stage: .linkWindow, output: "link failure"))
+        ) == .windowMissing(failedStage: .linkWindow))
     }
 }

@@ -455,10 +455,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             switch result {
             case .success(let prepared):
                 return .startViewer(prepared)
-            case .failure(.executableUnavailable):
-                return .showMessage(
-                    "tmux is not available on TBD's PATH. Run scripts/restart.sh from a shell where tmux is available."
-                )
             case .failure(.commandFailed):
                 return .showMessage(
                     "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics and retry."
@@ -515,10 +511,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private func logPreparationFailure(_ failure: TmuxPreparationFailure) {
             let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
             switch failure {
-            case .executableUnavailable:
-                logger.error(
-                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=resolveExecutable category=executableUnavailable"
-                )
             case .windowMissing(let failedStage):
                 logger.error(
                     "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=windowMissing"

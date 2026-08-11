@@ -19,7 +19,6 @@ enum TmuxPreparationStage: String, Equatable, Sendable {
 }
 
 enum TmuxPreparationFailure: Error, Equatable, Sendable {
-    case executableUnavailable
     case windowMissing(failedStage: TmuxPreparationStage)
     case commandFailed(stage: TmuxPreparationStage, output: String)
 }
@@ -98,8 +97,8 @@ final class TmuxBridge: @unchecked Sendable {
         ["display-message", "-p", "-t", sessionName, "#{window_id}"]
     }
 
-    static func windowIdentityQueryArgs(windowID: String) -> [String] {
-        ["display-message", "-p", "-t", windowID, "#{window_id}"]
+    static func windowInventoryQueryArgs() -> [String] {
+        ["list-windows", "-a", "-F", "#{window_id}"]
     }
 
     static func killSessionArgs(sessionName: String) -> [String] {
@@ -276,10 +275,15 @@ final class TmuxBridge: @unchecked Sendable {
         guard stage != .createViewSession, let probeSucceeded else {
             return .commandFailed(stage: stage, output: output)
         }
-        if probeSucceeded, probeOutput == expectedWindowID {
+        // A failed probe is ambiguous: the server or subprocess may be
+        // transiently unavailable, so it cannot justify recreating a window.
+        guard probeSucceeded else {
             return .commandFailed(stage: stage, output: output)
         }
-        if probeSucceeded {
+        // Only a successful server-wide inventory that omits the requested
+        // identity is affirmative evidence that the window is missing.
+        let windowIDs = Set((probeOutput ?? "").split(whereSeparator: { $0.isNewline }).map(String.init))
+        guard !windowIDs.contains(expectedWindowID) else {
             return .commandFailed(stage: stage, output: output)
         }
         return .windowMissing(failedStage: stage)
@@ -294,7 +298,7 @@ final class TmuxBridge: @unchecked Sendable {
     ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
         let probeResult = await runTmux(
             server: server,
-            args: Self.windowIdentityQueryArgs(windowID: windowID)
+            args: Self.windowInventoryQueryArgs()
         )
         let failure = Self.classifyPreparationFailure(
             stage: stage,

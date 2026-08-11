@@ -6,6 +6,49 @@ import TBDShared
 @Suite("Terminal recovery AppState")
 @MainActor
 struct TerminalRecoveryAppStateTests {
+    @Test("automatic request returns in-flight without consuming budget")
+    func automaticRequestReturnsInFlightWithoutConsumingBudget() async {
+        let state = AppState()
+        let terminalID = UUID()
+        state.recreatingTerminalIDs.insert(terminalID)
+
+        #expect(await state.requestAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .alreadyInFlight)
+
+        state.finishTerminalRecreation(terminalID: terminalID)
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 1))
+    }
+
+    @Test("automatic request preserves attempts across RPC failures")
+    func automaticRequestPreservesAttemptsAcrossRPCFailures() async {
+        let state = AppState()
+        let terminalID = UUID()
+
+        #expect(await state.requestAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .failed(attempt: 1))
+        #expect(!state.recreatingTerminalIDs.contains(terminalID))
+        #expect(await state.requestAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .failed(attempt: 2))
+        #expect(!state.recreatingTerminalIDs.contains(terminalID))
+        #expect(await state.requestAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .budgetExhausted)
+    }
+
+    @Test("automatic request reports a previously exhausted budget")
+    func automaticRequestReportsPreviouslyExhaustedBudget() async {
+        let state = AppState()
+        let terminalID = UUID()
+        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
+        state.finishTerminalRecreation(terminalID: terminalID)
+        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        #expect(await state.requestAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .budgetExhausted)
+        #expect(!state.recreatingTerminalIDs.contains(terminalID))
+    }
+
     @Test("in-flight automatic request consumes no attempt")
     func inFlightAutomaticRequestConsumesNoAttempt() {
         let state = AppState()
