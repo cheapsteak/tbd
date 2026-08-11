@@ -144,9 +144,9 @@ private func parseBranchDiff(_ output: String) -> [BranchFileChange] {
 // MARK: - FileViewerPanel
 
 struct FileViewerPanel: View {
-    // Task 7: this stored property becomes a `LocalWorktree`, and the
-    // `.localPath` reads below become `.path` on the wrapper.
-    let worktree: Worktree
+    /// Every read below is of a directory on this disk, so the panel takes the
+    /// proven-local wrapper rather than a bare `Worktree`.
+    let worktree: LocalWorktree
     @EnvironmentObject var appState: AppState
 
     @State private var staged: [GitFileStatus] = []
@@ -196,16 +196,16 @@ struct FileViewerPanel: View {
                         .padding(.vertical, 20)
                 }
                 if !staged.isEmpty {
-                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.localPath, onFileClick: handleFileClick)
+                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
                 if !unstaged.isEmpty {
-                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.localPath, onFileClick: handleFileClick)
+                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
                 if !untracked.isEmpty {
-                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.localPath, onFileClick: handleFileClick)
+                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
                 if !branchChanges.isEmpty {
-                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.localPath, onFileClick: handleFileClick)
+                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
             }
             .padding(.vertical, 4)
@@ -213,7 +213,7 @@ struct FileViewerPanel: View {
     }
 
     private func handleFileClick(_ relativePath: String, cmdClick: Bool) {
-        let fullPath = URL(fileURLWithPath: worktree.localPath).appendingPathComponent(relativePath).path
+        let fullPath = URL(fileURLWithPath: worktree.path).appendingPathComponent(relativePath).path
         var tabs = appState.tabs[worktree.id, default: []]
         let fileName = URL(fileURLWithPath: relativePath).lastPathComponent
 
@@ -243,10 +243,10 @@ struct FileViewerPanel: View {
 
     private func refresh() async {
         isLoading = true
-        async let statusTask = loadGitStatus(at: worktree.localPath)
+        async let statusTask = loadGitStatus(at: worktree.path)
         async let branchTask = worktree.status == .main
             ? [BranchFileChange]()
-            : loadBranchDiff(at: worktree.localPath, defaultBranch: defaultBranch)
+            : loadBranchDiff(at: worktree.path, defaultBranch: defaultBranch)
         let statuses = await statusTask
         staged = statuses.filter(\.isStaged)
         unstaged = statuses.filter(\.isUnstaged)

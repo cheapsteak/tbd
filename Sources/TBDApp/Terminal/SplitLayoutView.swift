@@ -5,7 +5,7 @@ import TBDShared
 
 struct SplitLayoutView: View {
     let node: LayoutNode
-    let worktree: Worktree
+    let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
 
@@ -41,7 +41,7 @@ struct SplitContainer: View {
     let direction: SplitDirection
     let children: [LayoutNode]
     let ratios: [CGFloat]
-    let worktree: Worktree
+    let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
 

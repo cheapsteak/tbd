@@ -36,8 +36,14 @@ struct RowActionMenuActions {
         }
     }
 
-    // Task 7: the empty-path guards here and in `context` become
-    // `LocalWorktree(worktree)`, and `pathIsEmpty` its nil check.
+    /// This row's worktree when it has a checkout on this disk. The
+    /// path-dependent actions (`openInFinder`, `copyPath`) and the hook probe
+    /// resolve through it, so none of them can act on a directory that is not
+    /// there; `RowActionMenu.Context.pathIsEmpty` is its nil check.
+    private var localWorktree: LocalWorktree? {
+        LocalWorktree(worktree)
+    }
+
     /// Does a `preSession` hook resolve for this worktree? Uses the SAME
     /// five-step chain the daemon executes (`HookResolver` lives in TBDShared
     /// precisely so this can't drift): app per-repo config → `.worktree-hooks/`
@@ -48,13 +54,13 @@ struct RowActionMenuActions {
     /// `appHookPath` is nil for them and resolution falls through to the
     /// in-directory hook or the global default.
     private var hasPreSessionHook: Bool {
-        guard !worktree.localPath.isEmpty else { return false }
-        let appHookPath = worktree.repoID.map {
+        guard let local = localWorktree else { return false }
+        let appHookPath = local.repoID.map {
             TBDConstants.hookPath(repoID: $0, eventName: HookEvent.preSession.rawValue)
         }
         return HookResolver().resolve(
             event: .preSession,
-            repoPath: worktree.localPath,
+            repoPath: local.path,
             appHookPath: appHookPath
         ) != nil
     }
@@ -75,7 +81,7 @@ struct RowActionMenuActions {
             },
             autoHibernateEnabled: appState.autoHibernateEnabled,
             hasActiveChildren: !appState.children(of: worktree.id).isEmpty,
-            pathIsEmpty: worktree.localPath.isEmpty,
+            pathIsEmpty: localWorktree == nil,
             hasRepoID: worktree.repoID != nil,
             isScratch: worktree.isScratch,
             isPinned: worktree.pinnedAt != nil,
@@ -100,12 +106,18 @@ struct RowActionMenuActions {
         case .rename:
             onRename()
 
+        // Both path actions are hidden when `pathIsEmpty`, so the nil arm is
+        // unreachable through the menu — the binding is what proves it.
         case .openInFinder:
-            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.localPath)
+            if let local = localWorktree {
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: local.path)
+            }
 
         case .copyPath:
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(worktree.localPath, forType: .string)
+            if let local = localWorktree {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(local.path, forType: .string)
+            }
 
         case .copyBranch:
             NSPasteboard.general.clearContents()

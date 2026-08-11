@@ -18,9 +18,14 @@ private func worktree(branch: String, path: String) -> Worktree {
     )
 }
 
+/// The helper takes the proven-local wrapper, so the cases below build one.
+private func localWorktree(branch: String, path: String) -> LocalWorktree? {
+    LocalWorktree(worktree(branch: branch, path: path))
+}
+
 @Test func locationLabel_abbreviatesPathAndKeepsFullValueForCopying() {
     let label = StatusBarView.locationLabel(
-        worktree(branch: "feature/x", path: "/Users/me/tbd/worktrees/acme/wt"),
+        localWorktree(branch: "feature/x", path: "/Users/me/tbd/worktrees/acme/wt"),
         home: "/Users/me"
     )
     #expect(label?.displayPath == "~/tbd/worktrees/acme/wt")
@@ -28,14 +33,20 @@ private func worktree(branch: String, path: String) -> Worktree {
     #expect(label?.branch == "feature/x")
 }
 
-@Test func locationLabel_nilWorktreeOrEmptyPath_returnsNil() {
+@Test func locationLabel_nilWorktree_returnsNil() {
     #expect(StatusBarView.locationLabel(nil, home: "/Users/me") == nil)
-    #expect(StatusBarView.locationLabel(worktree(branch: "main", path: ""), home: "/Users/me") == nil)
+}
+
+/// The empty-path rule moved into `LocalWorktree`: the label helper no longer
+/// spells it out, so this asserts it at the boundary that now owns it. Without
+/// it, a worktree with no checkout would reach the status bar as a blank path.
+@Test func locationLabel_emptyPathWorktree_doesNotConvertToLocal() {
+    #expect(localWorktree(branch: "main", path: "") == nil)
 }
 
 @Test func locationLabel_blankBranch_dropsBranchSegment() {
     let label = StatusBarView.locationLabel(
-        worktree(branch: "   ", path: "/Users/me/scratch"),
+        localWorktree(branch: "   ", path: "/Users/me/scratch"),
         home: "/Users/me"
     )
     #expect(label?.branch == nil)

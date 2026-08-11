@@ -201,7 +201,7 @@ struct SingleWorktreeView: View {
                 // measured size to MainAreaSizeKey so the daemon-side tmux
                 // resize matches the actual SwiftTerm pane area (tab bar +
                 // divider above and the resume banner below are excluded).
-                layoutContent(worktree: worktree)
+                layoutContent(worktree: LocalWorktree(worktree))
                     .background(GeometryReader { geometry in
                         Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
                     })
@@ -264,11 +264,16 @@ struct SingleWorktreeView: View {
         }
     }
 
+    /// Panes root a terminal's working directory at the checkout, so the split
+    /// layout takes the proven-local wrapper. A selection with no directory on
+    /// this disk — the optimistic `.creating` placeholder, which writes
+    /// `path: ""` — has no tabs either, so it falls through to the same empty
+    /// state it always did.
     @ViewBuilder
-    private func layoutContent(worktree: Worktree) -> some View {
+    private func layoutContent(worktree: LocalWorktree?) -> some View {
         if appState.historyActiveWorktrees.contains(worktreeID) {
             HistoryPaneView(worktreeID: worktreeID)
-        } else if let tab = activeTab {
+        } else if let tab = activeTab, let worktree {
             let layoutBinding = Binding<LayoutNode>(
                 get: { appState.layouts[tab.id] ?? .pane(tab.content) },
                 set: { appState.layouts[tab.id] = $0 }
@@ -558,6 +563,12 @@ private struct MultiWorktreeCell: View {
         appState.findWorktree(id: worktreeID)
     }
 
+    /// The same row, proven to have a checkout on this disk. The header renders
+    /// from `worktree` (a name needs no directory); the pane below needs one.
+    private var localWorktree: LocalWorktree? {
+        worktree.flatMap(LocalWorktree.init)
+    }
+
     /// The terminal shown in this cell — derived from the active tab's layout
     /// so it stays consistent with the dock's visibleTerminalIDs filter.
     private var primaryTerminal: Terminal? {
@@ -621,7 +632,7 @@ private struct MultiWorktreeCell: View {
 
     @ViewBuilder
     private var terminalContent: some View {
-        if let worktree, let terminal = primaryTerminal {
+        if let worktree = localWorktree, let terminal = primaryTerminal {
             let layoutBinding = Binding<LayoutNode>(
                 get: {
                     appState.gridLayouts[worktreeID]

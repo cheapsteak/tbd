@@ -443,6 +443,14 @@ final class AppState: ObservableObject {
         return findWorktree(id: id)
     }
 
+    /// The current selection, when it has files on this machine. Views that
+    /// operate on a directory bind to this instead of `selectedWorktree`, so
+    /// they cannot render against a worktree with no local checkout — the
+    /// optimistic `.creating` placeholder (`path: ""`) included.
+    var selectedLocalWorktree: LocalWorktree? {
+        selectedWorktree.flatMap(LocalWorktree.init)
+    }
+
     /// All pinned terminals across all worktrees, sorted by pinnedAt.
     var pinnedTerminals: [Terminal] {
         terminals.values.flatMap { $0 }
