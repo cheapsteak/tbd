@@ -147,8 +147,27 @@ The disposition list is embedded in the posted review comment inside a collapsed
 section, so a silent drop is at least *visible* to a human reading the review, and the
 validate script checks only its *presence* (an ID-coverage count), not its judgment.
 
-### 3.5 Deterministic verdict, one review comment per run, patch-id skip
+### 3.5 Pinned merge base, deterministic verdict, one review comment per run, patch-id skip
 
+- **Pinned merge base**: the prepare script resolves `git merge-base origin/<base>
+  HEAD` and records the SHA in `skip-decision.json` and in the prepare step's
+  `merge_base` output; the session prompt hands that literal SHA to the orchestrator
+  and to each specialist. The prepare script is the last point in the job at which
+  the checkout's history is known intact — the review action's session setup
+  re-fetches the base branch at limited depth and can graft `origin/<base>` into a
+  ref with no common ancestor (measured on PR #614) — so a ref name is not a usable
+  diff basis anywhere downstream of it. The prompt therefore instructs
+  `git diff <merge-base> HEAD`, which is the same diff as
+  `git diff origin/<base>...HEAD` and keeps patch-ids comparable, and forbids naming
+  `origin/<base>` in a diff at all: against a moved ref a two-dot diff succeeds and
+  reports other PRs' merged work as this PR's reverts, which is worse than no review.
+- **Fail closed with no merge base**: if the merge base does not resolve, the prepare
+  script prints a `::error::` annotation naming the failure as review infrastructure
+  rather than a verdict, and exits non-zero *without writing* `skip-decision.json` or
+  `discussion-context.txt`. The step runs under `set -euo pipefail`, so the job fails
+  and every downstream step is skipped: nothing is posted and no patch-id/verdict
+  marker is recorded. That last part is the point — a run that cannot see the true
+  diff must not cache a verdict about it, so the next run reviews fresh.
 - **Verdict**: the validate script computes `APPROVE`/`REJECT` from
   `review-result.json` — REJECT iff any unaddressed `HIGH` or `MEDIUM` finding survives
   the merge. The model never types the verdict. The Stop hook gates on the *artifact*
@@ -208,7 +227,7 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   is addressed to. Minimizing and posting are both best-effort — each warns and
   continues rather than masking the verdict.
 - **Skip**: the prepare script computes `git patch-id --stable` over
-  `git diff base...HEAD`; if it equals the patch-id recorded in the newest sentinel-led
+  `git diff <merge-base> HEAD`; if it equals the patch-id recorded in the newest sentinel-led
   comment, the run short-circuits and re-asserts the recorded verdict without spending
   a review. This path writes NOTHING to the PR: it posts no comment and minimizes
   none. The prior review is still the current review of an unchanged diff, so it stays
@@ -224,14 +243,26 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   post step is best-effort in the same direction: a failed post records no patch-id,
   so the next run full-reviews.
 
-### 3.6 PR discussion context (trimmed anti-hijack envelope)
+### 3.6 PR description and discussion context (trimmed anti-hijack envelope)
 
-The prepare script fetches issue comments, review bodies, and review-thread replies in
-one GraphQL call (the single sanctioned `gh` boundary), then renders a block with these
-properties, all implemented as pure functions:
+The prepare script fetches the PR's title, body and author alongside its issue
+comments, review bodies, and review-thread replies in one GraphQL call (the single
+sanctioned `gh` boundary), then renders a block with these properties, all implemented
+as pure functions:
 
-- **Bot filtering** by GraphQL `__typename == "Bot"` (logins alone are unreliable);
-  empty bodies dropped; ascending timestamp order.
+- **The PR description leads the block**, as its first item, kind `pr-description`.
+  Provisioning it deterministically is what makes the correctness lens's premise audit
+  possible at all: that audit's subject is the description's factual claims about
+  existing code, and a session left to fetch the description itself may simply not —
+  the PR #614 runs issued no `gh` command and told both specialists no description was
+  available.
+- **The description bypasses the item filters.** The bot filter drops bot *comments*,
+  but a bot-opened PR's description is still the statement of intent the diff is
+  measured against; and an empty body renders an explicit "(the PR has no
+  description)" item rather than vanishing, so "no description exists" stays
+  distinguishable from "description unavailable".
+- **Bot filtering** for discussion items by GraphQL `__typename == "Bot"` (logins alone
+  are unreliable); empty bodies dropped; ascending timestamp order.
 - **Sanitization**: strip HTML comments whole (so a quoted state marker can't
   masquerade as ours), then escape angle brackets.
 - **Fencing**: the block sits between BEGIN/END markers carrying a per-run random
@@ -239,7 +270,13 @@ properties, all implemented as pure functions:
   and comment *bodies* are untrusted data, never instructions — and that a marker with
   a different token is ordinary comment text.
 - **Bounded**: per-item and whole-block character caps, oldest items shed first, with
-  a visible truncation note.
+  a visible truncation note. The description carries its own larger per-item cap
+  (8000 characters against 1500), and the whole-block cap sheds discussion items only
+  — a long comment thread cannot push the description out of the block.
+- **An empty file means the fetch FAILED.** With a description always present on a
+  successful fetch, the absence of a fence is unambiguous, and the session prompt says
+  so: treat an empty `discussion-context.txt` as "description unavailable" and report
+  it in the review diagnostics, never as "this PR has no description".
 - **The clearing rule**: discussion can persuade the reviewer that a finding is
   addressed — but a High-severity finding is cleared only by a code change or by the
   author's substantive explanation the reviewer finds convincing; a bare "will fix" is
@@ -252,9 +289,10 @@ preamble — this adds surface area of the same kind, not a new kind.
 ### 3.7 What the gate keeps from the single-session design
 
 Trust gating for forks, `pull_request_target` + explicit `github_token` (the OIDC trap),
-the pre-review reset of every workspace file the pipeline reads back, unshallow/merge-base
-repair, the reviewer App as a stable comment-author identity, and the exact-match
-fail-closed enforce step are all unchanged. The trigger event is unchanged too, so the
+the pre-review reset of every workspace file the pipeline reads back, the unshallow /
+merge-base repair step (which fails closed here rather than warning — §3.5), the
+reviewer App as a stable comment-author identity, and the exact-match fail-closed
+enforce step are all carried over. The trigger event is unchanged too, so the
 admin-merge trap is not sprung.
 
 Where the single-session reviewer restored only its hooks directory from the base branch,

@@ -43,11 +43,16 @@ why, and for what reviving it actually takes.
    forks and harmless for same-repo branches. The default `GITHUB_TOKEN` reads this
    endpoint with only `contents: read` — verified in Actions — so the reviewer App
    token is still minted after the gate rather than before it.
-3. **Skip decision.** `prepare.py` computes the head diff's patch-id and reads the
-   markers off the newest prior review comment. When they match, the run re-asserts
-   the recorded verdict as its own check result and spends no review; otherwise it
-   runs the full pipeline. A missing or unreadable prior comment fails toward a full
-   review, never toward a skip.
+3. **Prepare.** `prepare.py` resolves the PR's merge base with the base branch and
+   pins that SHA for the rest of the run, computes the head diff's patch-id over
+   it, and reads the markers off the newest prior review comment. When the
+   patch-ids match, the run re-asserts the recorded verdict as its own check result
+   and spends no review; otherwise it runs the full pipeline. A missing or
+   unreadable prior comment fails toward a full review, never toward a skip. A
+   merge base that cannot be resolved fails the job outright — see
+   [below](#the-merge-base-goes-missing-two-ways-and-only-one-is-repairable-in-the-workflow).
+   The same script fetches the PR's description and discussion and writes them to
+   `discussion-context.txt` for the session to read.
 4. **Review.** One model session orchestrates two specialist subagents
    (`correctness`, `conventions`). Each specialist writes a schema-validated
    `findings-<name>.json`; the orchestrator merges them into `review-result.json`
@@ -157,9 +162,14 @@ step is already gated on `trusted == true`, the opt-in restores exactly the
 pre-v4.4.0 behavior and adds no new exposure: untrusted fork code still never
 reaches the checkout.
 
-### A fork PR checkout is shallow even with `fetch-depth: 0`
+### The merge base goes missing two ways, and only one is repairable in the workflow
 
-`fetch-depth: 0` does **not** give a fork PR full history. The head SHA is not
+The review's entire subject is the PR's diff against its merge base, so a missing
+merge base is the one infrastructure failure that can make the gate produce a
+*confident wrong answer* rather than no answer. Two mechanisms destroy it, at
+opposite ends of the job.
+
+**A fork PR's checkout is shallow even with `fetch-depth: 0`.** The head SHA is not
 reachable from any base-repo branch, so `actions/checkout` fetches that commit on
 its own and the clone stays shallow — `origin/<base>` ends up holding a single
 commit with no common ancestor with `HEAD`. Measured on PR #545, the first fork PR
@@ -171,18 +181,80 @@ git log --oneline origin/main | wc -l   -> 1
 git diff origin/main...HEAD             -> fatal: no merge base
 ```
 
-The reviewer degrades quietly rather than failing: it falls back to `gh pr diff`,
-which still produces a diff but loses `git log` and `git blame` — precisely what
-the premise-audit instructions in the prompt rely on. Same-repo PRs were never
-affected, which is why this went unnoticed until the gate started admitting forks.
+**The review action's own session setup re-fetches the base branch at limited
+depth**, inside the session step and therefore after every workflow-level guard.
+When the base branch has advanced since checkout, that fetch force-moves
+`refs/remotes/origin/<base>` to the new tip and records that tip in `.git/shallow`
+— a graft that severs the ref's ancestry in a repo that was complete a moment
+before. Measured on PR #614, runs 31497107005 and 31504414058: the workflow's
+merge-base step verified a merge base (8b9b9b8) in both runs, and inside the
+session `git merge-base origin/main HEAD` then failed and
+`git diff origin/main...HEAD` reported `fatal: no merge base`. The failure is
+reproducible locally with `git fetch --depth=1 origin main` into a complete clone
+after the remote branch has moved.
 
-The **Ensure a merge-base with the base branch** step repairs it, running
-`git fetch --unshallow origin` when (and only when) the clone is shallow —
-`--unshallow` errors on a complete repo. It then logs the resolved merge base, or
-emits a `::warning::` if there still isn't one, so a future regression reports
-itself instead of silently degrading the review again. Don't remove that step on
-the assumption `fetch-depth: 0` covers it; it doesn't, and the failure is invisible
-in the review output.
+That second mode is what makes this dangerous rather than merely degrading. A
+three-dot diff simply errors; a two-dot diff against the *moved* ref succeeds and
+reports every other PR merged in the interval as if this PR reverted it. In run
+31504414058 that produced a REJECT whose findings cited files the PR never touched.
+A review that cannot see the diff is recoverable; a review that confidently
+describes a different diff is not.
+
+**The merge base is therefore pinned, not re-derived.** `prepare.py` runs before
+either mechanism can act, resolves `git merge-base origin/<base> HEAD` once, and
+records the SHA in `skip-decision.json` and in the prepare step's `merge_base`
+output. The session prompt hands that literal SHA to the orchestrator and to each
+specialist, instructs them to diff with `git diff <merge-base> HEAD`, and forbids
+naming `origin/<base>` in a diff at all — in any form, three-dot, two-dot, or
+two-argument. A SHA-addressed diff walks no ancestry and both of its endpoints are
+local objects, so the graft cannot corrupt it. `git diff origin/<base>...HEAD` and
+`git diff <merge-base> HEAD` are the same diff, which is also what keeps patch-ids
+comparable with the markers earlier runs recorded.
+
+**Both merge-base checks fail closed, and say they are not verdicts.** The **Ensure
+a merge-base with the base branch** step runs `git fetch --unshallow origin` when
+(and only when) the clone is shallow — `--unshallow` errors on a complete repo —
+then resolves the merge base. If that fails it fetches the base branch explicitly
+at full depth and retries; if it fails again the step prints an `::error::` naming
+the failure as review infrastructure, not a verdict on the PR, and exits 1.
+`prepare.py` applies the same rule at its own layer: an unresolvable merge base
+aborts the run non-zero *without writing* `skip-decision.json` or
+`discussion-context.txt`, which fails the job and skips every downstream step. So
+an aborted run posts nothing and records no patch-id or verdict marker — the next
+run reviews from scratch rather than inheriting a cached opinion formed without a
+diff. Don't relax either check on the assumption `fetch-depth: 0` covers this; it
+doesn't, and a merge base verified at one step says nothing about the next.
+
+### The PR's description reaches the session deterministically
+
+`prepare.py` fetches the PR's title, body, and author through the same GraphQL call
+that collects the discussion, and renders them as the first item inside
+`discussion-context.txt`'s untrusted-data fence, kind `pr-description`. Nothing
+depends on the model choosing to run `gh pr view` — in the PR #614 runs the session
+ran no `gh` command at all, and its orchestrator told both specialists that no PR
+description was available to them. The description is the premise the correctness
+specialist audits ("extract every factual claim the PR description makes about
+existing code"), so a lens that never receives it is auditing nothing.
+
+Four properties follow from that role:
+
+- **It bypasses the bot filter**, which drops bot-authored *comments*. A
+  bot-opened PR's description is still the statement of intent the diff is measured
+  against.
+- **An empty body renders an explicit "(the PR has no description)" item**, so the
+  session can tell a PR that has no description from a description it could not
+  obtain.
+- **It carries its own 8000-character cap**, against 1500 for a discussion item,
+  and the whole-block cap sheds only discussion items — a long comment thread can
+  never push the description out of the block.
+- **An empty `discussion-context.txt` means the fetch failed.** With a description
+  always present on success, the empty file is unambiguous, and the prompt tells the
+  session to treat it as "description unavailable" and to report it in the review
+  diagnostics.
+
+The description is sanitized exactly like every other body: HTML comments stripped
+whole (so a quoted state marker cannot masquerade as the pipeline's own), then
+angle brackets escaped.
 
 ### What a trusted author's branch can execute
 

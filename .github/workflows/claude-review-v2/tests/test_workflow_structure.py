@@ -32,6 +32,7 @@ from workflow_steps import (
     step_source,
 )
 
+ENSURE_MERGE_BASE_STEP = "Ensure a merge-base with the base branch"
 RESTORE_STEP = "Restore the review pipeline from the base branch"
 RE_RESTORE_STEP = "Re-restore the review pipeline from the base branch"
 SESSION_STEP = "Run Claude Code Review v2 (fan-out session)"
@@ -99,6 +100,90 @@ def test_the_re_restore_touches_only_the_pipeline_directory() -> None:
     assert removals == [f'rm -rf "$GITHUB_WORKSPACE/{PIPELINE_DIR}"']
     checkouts = re.findall(r"^\s*git checkout .*$", body, re.MULTILINE)
     assert checkouts == [f'git checkout "$BASE_SHA" -- {PIPELINE_DIR}']
+
+
+# --- the merge base: repaired, pinned, and never re-derived from a ref ------
+#
+# Two measured ways `origin/<base>` stops having a merge base with HEAD: a fork
+# PR's checkout is shallow even under `fetch-depth: 0` (PR #545), and the review
+# action's own session setup re-fetches the base branch at limited depth AFTER
+# every workflow guard, grafting the ref whenever the base advanced since
+# checkout (PR #614, runs 31497107005 and 31504414058). The first is repairable
+# here; the second is not repairable here at all, which is why the session gets
+# a pinned SHA instead of a ref name. A diff against a MOVED base reports other
+# merged PRs' changes as if this PR reverted them — a confident, plausible,
+# entirely wrong review — so these are assertions about the gate's correctness,
+# not its tidiness.
+
+
+def test_the_ensure_step_repairs_at_full_depth_then_fails_closed() -> None:
+    body = run_block(read_workflow(), ENSURE_MERGE_BASE_STEP)
+    # One repair attempt: an explicit full-depth fetch of the base branch.
+    assert (
+        'git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"'
+        in body
+    )
+    # And a hard stop if that did not help. A warning here is what let a run
+    # proceed to review a diff it could not compute.
+    assert "::error::" in body
+    assert "exit 1" in body
+    assert "::warning::" not in body
+
+
+def test_the_ensure_step_error_is_named_infrastructure_not_a_verdict() -> None:
+    # A red required check that says nothing sends the author looking for a
+    # defect in their own diff.
+    body = run_block(read_workflow(), ENSURE_MERGE_BASE_STEP)
+    error_lines = [line for line in body.splitlines() if "::error::" in line]
+    assert len(error_lines) == 1
+    assert "infrastructure error" in error_lines[0]
+    assert "NOT a verdict" in error_lines[0]
+
+
+def test_the_prepare_step_exports_the_pinned_merge_base() -> None:
+    body = run_block(read_workflow(), PREPARE_STEP)
+    assert "echo \"merge_base=$(jq -r '.merge_base // \"\"' skip-decision.json)\"" in body
+
+
+def test_the_prompt_pins_the_merge_base_instead_of_naming_the_base_ref() -> None:
+    """The discriminating structural assertion.
+
+    `git diff origin/<base>...HEAD` is exactly the instruction that failed
+    inside the session once the ref was grafted, and the model's improvised
+    two-dot fallback is what produced the fabricated "partial revert" findings.
+    The instruction must therefore be a SHA the prepare step resolved before the
+    damage — a SHA-addressed diff walks no ancestry and cannot be corrupted by
+    a graft.
+    """
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    pinned = "git diff ${{ steps.prepare.outputs.merge_base }} HEAD"
+    by_ref = "git diff origin/${{ github.event.pull_request.base.ref }}...HEAD"
+
+    assert by_ref not in prompt
+    # `git diff origin/…` in ANY form: the two-dot fallback was the harmful one.
+    assert "git diff origin/" not in prompt
+
+    # Present in BOTH instruction positions: the orchestrator's own ENVIRONMENT
+    # briefing, and the text it must hand each specialist. A specialist told to
+    # diff by ref name reproduces the failure one level down, where the
+    # orchestrator never sees it.
+    environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert pinned in environment
+    assert pinned in fanout
+
+    # And the prohibition is stated, not merely implied by omission.
+    assert "NEVER compute the diff against" in environment
+    assert "never diff against" in fanout.lower()
+
+
+def test_the_prompt_tells_the_session_what_an_empty_context_file_means() -> None:
+    # discussion-context.txt now leads with the PR description, so an empty file
+    # means the fetch FAILED. Read as "no description exists", it would silently
+    # gut the correctness lens's premise audit.
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    assert "EMPTY file means the fetch FAILED" in prompt
+    assert "title and description" in prompt
 
 
 # --- the session is told what the restore did to its checkout ---------------
