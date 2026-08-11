@@ -1,7 +1,10 @@
 # Remote agent sessions as worktrees in the tree
 
 **Date:** 2026-08-10
-**Status:** Approved; not yet implemented.
+**Status:** Approved. The local/remote boundary — `WorktreeLocation`, `LocalWorktree`,
+and the `getLocal`/`listLocal` conversion — ships in PR #613. Everything downstream of it
+(remote rows in the tree, the CLI provider path, default resolution, archive semantics)
+remains unimplemented.
 **Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md) (contract v1),
 [`2026-07-24-remote-agent-backends-design.md`](2026-07-24-remote-agent-backends-design.md) (mirror, RPC family, provider manager),
 [`2026-08-01-provider-desk-read-only-design.md`](2026-08-01-provider-desk-read-only-design.md) (Provider Desk).
